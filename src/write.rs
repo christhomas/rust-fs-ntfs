@@ -10,6 +10,7 @@
 use crate::attr_io::{self, AttrType};
 use crate::bitmap;
 use crate::data_runs::{self, DataRun};
+use crate::idx_block;
 use crate::index_io;
 use crate::mft_io::{read_mft_record, update_mft_record};
 
@@ -682,18 +683,60 @@ pub fn rename_same_length(image: &Path, old_path: &str, new_name: &str) -> Resul
         ));
     }
 
-    // 1) Patch the parent's $INDEX_ROOT entry.
-    update_mft_record(image, parent_rec, |record| {
-        let entry = index_io::find_index_entry(record, &current_basename)?
-            .ok_or_else(|| format!("parent's index has no entry for '{current_basename}'"))?;
-        if entry.file_record_number != file_rec {
+    // 1) Patch the parent's index entry. First check whether it lives
+    //    in the resident $INDEX_ROOT or spills into $INDEX_ALLOCATION;
+    //    dispatch accordingly.
+    let (_, parent_record_bytes) = read_mft_record(image, parent_rec)?;
+    let ir_flags = index_io::index_root_flags(&parent_record_bytes)
+        .ok_or_else(|| "no $INDEX_ROOT on parent".to_string())?;
+
+    let in_root = index_io::find_index_entry(&parent_record_bytes, &current_basename)?;
+    if let Some(entry_found) = in_root {
+        if entry_found.file_record_number != file_rec {
             return Err(format!(
-                "index entry points at record {} but resolved path points at {file_rec}",
-                entry.file_record_number
+                "parent's $INDEX_ROOT entry for '{current_basename}' points at record {} \
+                 but the resolved path points at {file_rec}",
+                entry_found.file_record_number
             ));
         }
-        index_io::rename_index_entry_same_length(record, &entry, new_name)
-    })?;
+        update_mft_record(image, parent_rec, |record| {
+            let entry = index_io::find_index_entry(record, &current_basename)?
+                .ok_or_else(|| "race: $INDEX_ROOT entry vanished during RMW".to_string())?;
+            index_io::rename_index_entry_same_length(record, &entry, new_name)
+        })?;
+    } else if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
+        // Linear scan of allocated INDX blocks.
+        let ia = idx_block::load_for_directory(image, parent_rec)?;
+        let mut patched = false;
+        for vcn in ia.allocated_block_vcns() {
+            let block = idx_block::read_indx_block(image, &ia, vcn)?;
+            if let Some(entry) = index_io::find_entry_in_indx_block(&block, &current_basename)? {
+                if entry.file_record_number != file_rec {
+                    return Err(format!(
+                        "INDX entry at VCN {vcn} points at {} but resolved {file_rec}",
+                        entry.file_record_number
+                    ));
+                }
+                idx_block::update_indx_block(image, &ia, vcn, |block| {
+                    let entry = index_io::find_entry_in_indx_block(block, &current_basename)?
+                        .ok_or_else(|| "race: INDX entry vanished".to_string())?;
+                    index_io::rename_index_entry_same_length(block, &entry, new_name)
+                })?;
+                patched = true;
+                break;
+            }
+        }
+        if !patched {
+            return Err(format!(
+                "no matching index entry for '{current_basename}' in parent record {parent_rec}"
+            ));
+        }
+    } else {
+        return Err(format!(
+            "no entry for '{current_basename}' in parent's resident $INDEX_ROOT \
+             (parent has no $INDEX_ALLOCATION spillover)"
+        ));
+    }
 
     // 2) Patch the file's own $FILE_NAME attributes.
     update_mft_record(image, file_rec, |record| {
