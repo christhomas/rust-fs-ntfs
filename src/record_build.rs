@@ -308,6 +308,52 @@ fn build_record_inner(
     Ok(rec)
 }
 
+/// Build a resident `$EA_INFORMATION` (type 0xD0) attribute blob.
+/// Value is the 8-byte struct from `ea_io::build_ea_information_value`.
+pub fn build_resident_ea_information_attribute(
+    attr_id: u16,
+    value: &[u8],
+) -> Result<Vec<u8>, String> {
+    if value.len() != 8 {
+        return Err(format!(
+            "$EA_INFORMATION value must be 8 bytes, got {}",
+            value.len()
+        ));
+    }
+    build_resident_unnamed_attribute(0xD0, attr_id, value)
+}
+
+/// Build a resident `$EA` (type 0xE0) attribute blob wrapping a packed
+/// EA byte stream.
+pub fn build_resident_ea_attribute(attr_id: u16, packed: &[u8]) -> Result<Vec<u8>, String> {
+    build_resident_unnamed_attribute(0xE0, attr_id, packed)
+}
+
+/// Shared builder for resident unnamed attributes: 24-byte header +
+/// value + padding to 8.
+fn build_resident_unnamed_attribute(
+    attr_type: u32,
+    attr_id: u16,
+    value: &[u8],
+) -> Result<Vec<u8>, String> {
+    let header_size = 24usize;
+    let attr_length = align8(header_size + value.len());
+    let mut buf = vec![0u8; attr_length];
+    buf[0..4].copy_from_slice(&attr_type.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 0; // resident
+    buf[9] = 0; // name_length
+    buf[10..12].copy_from_slice(&(header_size as u16).to_le_bytes());
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+    buf[16..20].copy_from_slice(&(value.len() as u32).to_le_bytes());
+    buf[20..22].copy_from_slice(&(header_size as u16).to_le_bytes());
+    buf[22] = 0;
+    buf[23] = 0;
+    buf[header_size..header_size + value.len()].copy_from_slice(value);
+    Ok(buf)
+}
+
 /// Build a resident `$REPARSE_POINT` attribute with the given tag and
 /// tag-specific data. Returns the attribute bytes (header + reparse
 /// header + data, padded to 8).

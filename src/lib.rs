@@ -19,6 +19,7 @@ pub mod attr_io;
 pub mod attr_resize;
 pub mod bitmap;
 pub mod data_runs;
+pub mod ea_io;
 pub mod fsck;
 pub mod idx_block;
 pub mod index_io;
@@ -840,6 +841,79 @@ pub extern "C" fn fs_ntfs_create_file(
     };
     match write::create_file(std::path::Path::new(img), pp, bn) {
         Ok(rn) => rn as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Upsert a single NTFS Extended Attribute. The EA is stored resident
+/// — large EAs that can't fit in the MFT record are rejected (non-
+/// resident EA support is future work). Returns 0 on success, -1 on
+/// error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_write_ea(
+    image: *const c_char,
+    path: *const c_char,
+    ea_name: *const c_char,
+    value: *const c_void,
+    value_len: u64,
+    flags: u8,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_write_ea: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_write_ea: null or non-UTF-8 path");
+        return -1;
+    };
+    if ea_name.is_null() {
+        set_error("fs_ntfs_write_ea: null ea_name");
+        return -1;
+    }
+    let name_bytes = unsafe { CStr::from_ptr(ea_name) }.to_bytes();
+    let data: &[u8] = if value_len == 0 {
+        &[]
+    } else if value.is_null() {
+        set_error("fs_ntfs_write_ea: null value with non-zero len");
+        return -1;
+    } else {
+        unsafe { slice::from_raw_parts(value as *const u8, value_len as usize) }
+    };
+    match write::write_ea(std::path::Path::new(img), p, name_bytes, data, flags) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Remove a single Extended Attribute by name. Returns 0 on success,
+/// -1 on error (e.g. not found).
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_remove_ea(
+    image: *const c_char,
+    path: *const c_char,
+    ea_name: *const c_char,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_remove_ea: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_remove_ea: null or non-UTF-8 path");
+        return -1;
+    };
+    if ea_name.is_null() {
+        set_error("fs_ntfs_remove_ea: null ea_name");
+        return -1;
+    }
+    let name_bytes = unsafe { CStr::from_ptr(ea_name) }.to_bytes();
+    match write::remove_ea(std::path::Path::new(img), p, name_bytes) {
+        Ok(()) => 0,
         Err(e) => {
             set_error(&e);
             -1
