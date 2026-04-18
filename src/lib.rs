@@ -16,6 +16,7 @@ use ntfs::structured_values::{NtfsFileName, NtfsFileNamespace, NtfsStandardInfor
 use ntfs::{Ntfs, NtfsAttributeType, NtfsFile, NtfsReadSeek};
 
 pub mod attr_io;
+pub mod attr_resize;
 pub mod bitmap;
 pub mod data_runs;
 pub mod fsck;
