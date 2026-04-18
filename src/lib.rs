@@ -205,6 +205,19 @@ fn ntfs_time_to_unix(ntfs_time: ntfs::NtfsTime) -> u32 {
     secs.saturating_sub(EPOCH_DIFF) as u32
 }
 
+/// Build a synthesized dirent (used for "." / "..").
+fn make_dirent(file_record_number: u64, file_type: u8, name: &[u8]) -> FsNtfsDirent {
+    let mut out = FsNtfsDirent {
+        file_record_number,
+        file_type,
+        name_len: std::cmp::min(name.len(), 255) as u16,
+        name: [0u8; 256],
+    };
+    let n = out.name_len as usize;
+    out.name[..n].copy_from_slice(&name[..n]);
+    out
+}
+
 /// Read the parent-directory record number from a file's
 /// `$FILE_NAME` attribute. Used to walk `..` path components.
 fn parent_record_number_of(file: &NtfsFile, reader: &mut ReaderKind) -> Result<u64, String> {
@@ -577,7 +590,18 @@ pub extern "C" fn fs_ntfs_dir_open(
         }
     };
 
-    let _parent_record_number = dir_file.file_record_number();
+    let current_record_number = dir_file.file_record_number();
+    // Synthesize "." and ".." at the head of the listing. NTFS indexes
+    // don't store them; POSIX readdir callers expect them.
+    let parent_record_number =
+        if current_record_number == KnownNtfsFileRecordNumber::RootDirectory as u64 {
+            current_record_number
+        } else {
+            match parent_record_number_of(&dir_file, &mut bridge.reader) {
+                Ok(p) => p,
+                Err(_) => current_record_number, // fall back; better to show self-ref than error out
+            }
+        };
 
     let index = match dir_file.directory_index(&mut bridge.reader) {
         Ok(i) => i,
@@ -588,6 +612,10 @@ pub extern "C" fn fs_ntfs_dir_open(
     };
 
     let mut entries = Vec::new();
+    // Synthesized entries for "." and ".."
+    entries.push(make_dirent(current_record_number, 2, b"."));
+    entries.push(make_dirent(parent_record_number, 2, b".."));
+
     let mut iter = index.entries();
 
     while let Some(entry_result) = iter.next(&mut bridge.reader) {
