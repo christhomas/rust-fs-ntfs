@@ -979,6 +979,96 @@ pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Str
 }
 
 // ---------------------------------------------------------------------------
+// rmdir (W3)
+// ---------------------------------------------------------------------------
+
+/// Delete an empty directory. Fails if the directory has any entries
+/// (other than the implicit LAST sentinel) or if it's overflowed to
+/// `$INDEX_ALLOCATION`. Returns `Ok(())` on success.
+pub fn rmdir(image: &Path, dir_path: &str) -> Result<(), String> {
+    let (parent_rec, dir_rec, basename) = resolve_parent_and_child(image, dir_path)?;
+    let (_, dir_record_bytes) = read_mft_record(image, dir_rec)?;
+    let flags = crate::mft_io::record_flags(&dir_record_bytes);
+    if flags & MFT_FLAG_DIRECTORY == 0 {
+        return Err(format!("rmdir: '{dir_path}' is not a directory"));
+    }
+
+    // Emptiness check: walk $INDEX_ROOT entries, require only the LAST
+    // sentinel is present. Also reject $INDEX_ALLOCATION spillover — a
+    // non-empty overflowed dir is definitely non-empty; a claimed-empty
+    // but overflowed dir is suspicious anyway, refuse for MVP.
+    let ir_flags = index_io::index_root_flags(&dir_record_bytes).ok_or("dir has no $INDEX_ROOT")?;
+    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
+        return Err(format!(
+            "rmdir: '{dir_path}' has $INDEX_ALLOCATION overflow (probably not empty)"
+        ));
+    }
+    if index_io::index_root_has_real_entries(&dir_record_bytes)? {
+        return Err(format!("rmdir: '{dir_path}' is not empty"));
+    }
+
+    // Remove from parent's index. Parent's index may or may not be
+    // overflowed — dispatch like unlink.
+    let (_, parent_record_bytes) = read_mft_record(image, parent_rec)?;
+    let parent_ir_flags =
+        index_io::index_root_flags(&parent_record_bytes).ok_or("parent has no $INDEX_ROOT")?;
+    let in_root = index_io::find_index_entry(&parent_record_bytes, &basename)?;
+    if let Some(entry) = in_root {
+        if entry.file_record_number != dir_rec {
+            return Err(format!(
+                "parent index entry for '{basename}' points at {} but resolved {dir_rec}",
+                entry.file_record_number
+            ));
+        }
+        update_mft_record(image, parent_rec, |record| {
+            let e = index_io::find_index_entry(record, &basename)?
+                .ok_or_else(|| "race: IR entry vanished".to_string())?;
+            index_io::remove_index_entry(record, &e, index_io::BlockKind::IndexRoot)
+        })?;
+    } else if parent_ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
+        let ia = idx_block::load_for_directory(image, parent_rec)?;
+        let mut removed = false;
+        for vcn in ia.allocated_block_vcns() {
+            let block = idx_block::read_indx_block(image, &ia, vcn)?;
+            if let Some(entry) = index_io::find_entry_in_indx_block(&block, &basename)? {
+                if entry.file_record_number != dir_rec {
+                    return Err(format!(
+                        "INDX entry at VCN {vcn} points at {} but resolved {dir_rec}",
+                        entry.file_record_number
+                    ));
+                }
+                idx_block::update_indx_block(image, &ia, vcn, |block| {
+                    let e = index_io::find_entry_in_indx_block(block, &basename)?
+                        .ok_or_else(|| "race: INDX entry vanished".to_string())?;
+                    index_io::remove_index_entry(block, &e, index_io::BlockKind::IndexAllocation)
+                })?;
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            return Err(format!(
+                "no index entry for '{basename}' in parent record {parent_rec}"
+            ));
+        }
+    } else {
+        return Err(format!("no entry for '{basename}' in parent's $INDEX_ROOT"));
+    }
+
+    // Clear IN_USE flag + free MFT bit.
+    update_mft_record(image, dir_rec, |record| {
+        let cur = u16::from_le_bytes([record[0x16], record[0x17]]);
+        let new = cur & !crate::mft_io::MFT_FLAG_IN_USE;
+        record[0x16..0x18].copy_from_slice(&new.to_le_bytes());
+        Ok(())
+    })?;
+    let mbm = crate::mft_bitmap::locate(image)?;
+    crate::mft_bitmap::free(image, &mbm, dir_rec)?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Write resident data (W3 convenience)
 // ---------------------------------------------------------------------------
 

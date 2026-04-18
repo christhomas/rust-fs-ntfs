@@ -206,6 +206,13 @@ int64_t fs_ntfs_create_file(const char *image,
                             const char *basename);
 
 /*
+ * Delete an empty directory. Fails if the directory has any entries
+ * or has overflowed to $INDEX_ALLOCATION (MVP limitation). Returns
+ * 0 on success, -1 on error.
+ */
+int fs_ntfs_rmdir(const char *image, const char *path);
+
+/*
  * Create a new empty directory `basename` inside `parent_path`.
  * Returns the new MFT record number on success, -1 on error.
  * Same MVP limitations as fs_ntfs_create_file re: parent index.
