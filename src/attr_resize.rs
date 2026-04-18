@@ -121,6 +121,84 @@ pub fn resize_resident_value(
     Ok(())
 }
 
+/// Replace the entire attribute at `attr_offset` with the bytes in
+/// `new_attr`. The caller is responsible for providing a correctly-
+/// formed attribute whose `length` field matches `new_attr.len()` (and
+/// that length is 8-byte aligned).
+///
+/// Used for resident↔non-resident promotion, where the new attribute
+/// has a different layout than the old.
+pub fn replace_attribute(
+    record: &mut [u8],
+    attr_offset: usize,
+    new_attr: &[u8],
+) -> Result<(), String> {
+    let new_attr_length = new_attr.len();
+    if new_attr_length == 0 || new_attr_length % 8 != 0 {
+        return Err(format!(
+            "replace_attribute: new_attr length {new_attr_length} not 8-aligned non-zero"
+        ));
+    }
+    // Sanity: the header's own `length` field must match new_attr.len().
+    let header_len =
+        u32::from_le_bytes([new_attr[4], new_attr[5], new_attr[6], new_attr[7]]) as usize;
+    if header_len != new_attr_length {
+        return Err(format!(
+            "replace_attribute: header length {header_len} != buffer length {new_attr_length}"
+        ));
+    }
+
+    let old_attr_length = u32::from_le_bytes([
+        record[attr_offset + attr_off::LENGTH],
+        record[attr_offset + attr_off::LENGTH + 1],
+        record[attr_offset + attr_off::LENGTH + 2],
+        record[attr_offset + attr_off::LENGTH + 3],
+    ]) as usize;
+    let bytes_used = u32::from_le_bytes([
+        record[REC_OFF_BYTES_USED],
+        record[REC_OFF_BYTES_USED + 1],
+        record[REC_OFF_BYTES_USED + 2],
+        record[REC_OFF_BYTES_USED + 3],
+    ]) as usize;
+    let bytes_allocated = u32::from_le_bytes([
+        record[REC_OFF_BYTES_ALLOCATED],
+        record[REC_OFF_BYTES_ALLOCATED + 1],
+        record[REC_OFF_BYTES_ALLOCATED + 2],
+        record[REC_OFF_BYTES_ALLOCATED + 3],
+    ]) as usize;
+
+    if new_attr_length > old_attr_length {
+        let diff = new_attr_length - old_attr_length;
+        if bytes_used + diff > bytes_allocated {
+            return Err(format!(
+                "replace_attribute: growing by {diff} exceeds record capacity \
+                 (bytes_used={bytes_used} bytes_allocated={bytes_allocated})"
+            ));
+        }
+        record.copy_within(
+            attr_offset + old_attr_length..bytes_used,
+            attr_offset + old_attr_length + diff,
+        );
+        let new_bu = (bytes_used + diff) as u32;
+        record[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4].copy_from_slice(&new_bu.to_le_bytes());
+    } else if new_attr_length < old_attr_length {
+        let diff = old_attr_length - new_attr_length;
+        record.copy_within(
+            attr_offset + old_attr_length..bytes_used,
+            attr_offset + old_attr_length - diff,
+        );
+        for byte in &mut record[bytes_used - diff..bytes_used] {
+            *byte = 0;
+        }
+        let new_bu = (bytes_used - diff) as u32;
+        record[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4].copy_from_slice(&new_bu.to_le_bytes());
+    }
+
+    // Overwrite the attribute with the new bytes.
+    record[attr_offset..attr_offset + new_attr_length].copy_from_slice(new_attr);
+    Ok(())
+}
+
 /// Convenience: resize then copy `new_value` into the attribute's value
 /// region. Equivalent to `resize_resident_value(record, off,
 /// new_value.len()) + memcpy`.

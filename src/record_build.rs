@@ -308,8 +308,59 @@ fn build_record_inner(
     Ok(rec)
 }
 
-fn align8(n: usize) -> usize {
+pub fn align8(n: usize) -> usize {
     (n + 7) & !7
+}
+
+/// Build a non-resident unnamed `$DATA` attribute blob. `mapping_pairs`
+/// must already be a terminator-appended mapping-pairs byte sequence
+/// (see `data_runs::encode_runs`).
+///
+/// `last_vcn` is the 0-based index of the last cluster. For a
+/// zero-length value, pass `-1` (will be encoded in the LAST_VCN
+/// field as signed).
+pub fn build_nonresident_data_attribute(
+    attr_id: u16,
+    data_length: u64,
+    allocated_length: u64,
+    initialized_length: u64,
+    last_vcn: i64,
+    mapping_pairs: &[u8],
+) -> Result<Vec<u8>, String> {
+    let common_header = 16usize;
+    // Non-resident specific fields span +0x10..+0x40 (first_vcn/last_vcn
+    // (16) + mapping_pairs_offset/compression_unit (4) + reserved (4) +
+    // allocated/data/initialized lengths (24)) = 48 bytes.
+    let nonres_fields = 48usize;
+    let header_size = common_header + nonres_fields;
+    let mapping_offset = header_size; // name = empty, mapping_pairs immediately after header
+    let value_size = mapping_pairs.len();
+    let attr_length = align8(header_size + value_size);
+
+    let mut buf = vec![0u8; attr_length];
+
+    buf[0..4].copy_from_slice(&ATTR_DATA.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 1; // non_resident
+    buf[9] = 0; // name_length (unnamed stream)
+    buf[10..12].copy_from_slice(&(mapping_offset as u16).to_le_bytes()); // name_offset
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes()); // flags (not compressed/sparse/encrypted)
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+
+    // Non-resident fields:
+    buf[16..24].copy_from_slice(&0u64.to_le_bytes()); // first_vcn
+    buf[24..32].copy_from_slice(&last_vcn.to_le_bytes()); // last_vcn
+    buf[32..34].copy_from_slice(&(mapping_offset as u16).to_le_bytes()); // mapping_pairs_offset
+    buf[34..36].copy_from_slice(&0u16.to_le_bytes()); // compression_unit
+    buf[36..40].copy_from_slice(&0u32.to_le_bytes()); // reserved
+    buf[40..48].copy_from_slice(&allocated_length.to_le_bytes());
+    buf[48..56].copy_from_slice(&data_length.to_le_bytes());
+    buf[56..64].copy_from_slice(&initialized_length.to_le_bytes());
+
+    buf[mapping_offset..mapping_offset + mapping_pairs.len()].copy_from_slice(mapping_pairs);
+    // tail bytes from mapping_offset + mapping_pairs.len() .. attr_length remain 0
+
+    Ok(buf)
 }
 
 fn write_standard_information(
