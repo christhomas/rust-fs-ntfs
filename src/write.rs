@@ -1217,6 +1217,168 @@ pub fn write_resident_contents(
     Ok(new_data.len() as u64)
 }
 
+// ---------------------------------------------------------------------------
+// Rename, variable-length (W3 full)
+// ---------------------------------------------------------------------------
+
+/// Rename a file to a new basename that may differ in length from the
+/// current one. Same parent directory.
+///
+/// For same-length renames this delegates to [`rename_same_length`]
+/// (which handles both `$INDEX_ROOT` and `$INDEX_ALLOCATION` parents).
+/// For length changes, the parent must currently have a
+/// resident-only `$INDEX_ROOT` (same MVP limitation as `create_file`).
+/// Timestamps are refreshed to "now" in the updated index entry and
+/// `$FILE_NAME` attribute(s), matching Windows' observable behavior.
+pub fn rename(image: &Path, old_path: &str, new_basename: &str) -> Result<(), String> {
+    if new_basename.is_empty()
+        || new_basename == "."
+        || new_basename == ".."
+        || new_basename.contains('/')
+    {
+        return Err(format!("invalid basename: '{new_basename}'"));
+    }
+    let (parent_rec, file_rec, old_basename) = resolve_parent_and_child(image, old_path)?;
+    if old_basename == new_basename {
+        return Ok(());
+    }
+
+    let old_u16_len = old_basename.encode_utf16().count();
+    let new_u16_len = new_basename.encode_utf16().count();
+    if old_u16_len == new_u16_len {
+        return rename_same_length(image, old_path, new_basename);
+    }
+
+    let (_, parent_record_bytes) = read_mft_record(image, parent_rec)?;
+    let ir_flags = index_io::index_root_flags(&parent_record_bytes)
+        .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
+    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
+        return Err(
+            "variable-length rename MVP: parent has $INDEX_ALLOCATION overflow — not yet supported"
+                .to_string(),
+        );
+    }
+    if index_io::find_index_entry(&parent_record_bytes, new_basename)?.is_some() {
+        return Err(format!("'{new_basename}' already exists"));
+    }
+
+    let (_, file_record_bytes) = read_mft_record(image, file_rec)?;
+    let file_seq = u16::from_le_bytes([file_record_bytes[0x10], file_record_bytes[0x11]]);
+    let parent_seq = u16::from_le_bytes([parent_record_bytes[0x10], parent_record_bytes[0x11]]);
+    let file_reference = crate::record_build::encode_file_reference(file_rec, file_seq);
+    let parent_reference = crate::record_build::encode_file_reference(parent_rec, parent_seq);
+
+    let nt_time = crate::record_build::nt_time_now();
+    let is_dir = crate::mft_io::record_flags(&file_record_bytes) & MFT_FLAG_DIRECTORY != 0;
+
+    let new_entry_bytes = index_io::build_file_name_index_entry(
+        file_reference,
+        parent_reference,
+        new_basename,
+        nt_time,
+        is_dir,
+    )?;
+
+    // 1) Swap the parent's $INDEX_ROOT entry.
+    update_mft_record(image, parent_rec, |record| {
+        let old_entry = index_io::find_index_entry(record, &old_basename)?
+            .ok_or_else(|| format!("old entry '{old_basename}' not found"))?;
+        index_io::remove_index_entry(record, &old_entry, index_io::BlockKind::IndexRoot)?;
+        index_io::insert_entry_into_index_root(record, &new_entry_bytes, new_basename)
+    })?;
+
+    // 2) Update the file's own $FILE_NAME attribute(s).
+    update_mft_record(image, file_rec, |record| {
+        replace_file_name_with_new_name(
+            record,
+            &old_basename,
+            new_basename,
+            parent_reference,
+            nt_time,
+            is_dir,
+        )
+    })?;
+
+    Ok(())
+}
+
+fn replace_file_name_with_new_name(
+    record: &mut [u8],
+    old_name: &str,
+    new_name: &str,
+    parent_reference: u64,
+    nt_time: u64,
+    is_dir: bool,
+) -> Result<(), String> {
+    let old_utf16: Vec<u16> = old_name.encode_utf16().collect();
+    let new_utf16: Vec<u16> = new_name.encode_utf16().collect();
+    if new_utf16.is_empty() || new_utf16.len() > 255 {
+        return Err("invalid new name length".to_string());
+    }
+
+    loop {
+        let mut target: Option<(usize, u8)> = None;
+        for loc in attr_io::iter_attributes(record) {
+            if loc.type_code != attr_io::AttrType::FileName as u32 {
+                continue;
+            }
+            let val_off = match loc.resident_value_offset {
+                Some(v) => v as usize,
+                None => continue,
+            };
+            let data_start = loc.attr_offset + val_off;
+            let name_length_byte = record[data_start + 0x40] as usize;
+            if name_length_byte != old_utf16.len() {
+                continue;
+            }
+            let name_start = data_start + 0x42;
+            let cur: Vec<u16> = record[name_start..name_start + name_length_byte * 2]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            if cur == old_utf16 {
+                let ns = record[data_start + 0x41];
+                target = Some((loc.attr_offset, ns));
+                break;
+            }
+        }
+        let Some((attr_offset, namespace)) = target else {
+            break;
+        };
+        let value = build_file_name_value(parent_reference, &new_utf16, nt_time, is_dir, namespace);
+        crate::attr_resize::set_resident_value(record, attr_offset, &value)?;
+    }
+    Ok(())
+}
+
+fn build_file_name_value(
+    parent_reference: u64,
+    name_utf16: &[u16],
+    nt_time: u64,
+    is_dir: bool,
+    namespace: u8,
+) -> Vec<u8> {
+    let v_len = 0x42 + name_utf16.len() * 2;
+    let mut v = vec![0u8; v_len];
+    v[0..8].copy_from_slice(&parent_reference.to_le_bytes());
+    v[8..16].copy_from_slice(&nt_time.to_le_bytes());
+    v[16..24].copy_from_slice(&nt_time.to_le_bytes());
+    v[24..32].copy_from_slice(&nt_time.to_le_bytes());
+    v[32..40].copy_from_slice(&nt_time.to_le_bytes());
+    v[40..48].copy_from_slice(&0u64.to_le_bytes());
+    v[48..56].copy_from_slice(&0u64.to_le_bytes());
+    let fa: u32 = if is_dir { 0x10000000 | 0x20 } else { 0x20 };
+    v[56..60].copy_from_slice(&fa.to_le_bytes());
+    v[60..64].copy_from_slice(&0u32.to_le_bytes());
+    v[0x40] = name_utf16.len() as u8;
+    v[0x41] = namespace;
+    for (i, c) in name_utf16.iter().enumerate() {
+        let off = 0x42 + i * 2;
+        v[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    }
+    v
+}
+
 /// Delete a regular file:
 /// 1. Remove the parent dir's index entry for the file.
 /// 2. Free the file's data-run clusters via `truncate` to zero.

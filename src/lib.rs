@@ -1004,6 +1004,37 @@ pub extern "C" fn fs_ntfs_unlink(image: *const c_char, path: *const c_char) -> c
     }
 }
 
+/// Rename a file (variable length). Returns 0 on success, -1 on error.
+/// Handles both same-length (delegates to the fast path, incl.
+/// `$INDEX_ALLOCATION` parents) and length-changing renames
+/// (resident-`$INDEX_ROOT` parents only in this MVP).
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_rename(
+    image: *const c_char,
+    old_path: *const c_char,
+    new_basename: *const c_char,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_rename: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(op) = cstr_to_path(old_path) else {
+        set_error("fs_ntfs_rename: null or non-UTF-8 old_path");
+        return -1;
+    };
+    let Some(nb) = cstr_to_path(new_basename) else {
+        set_error("fs_ntfs_rename: null or non-UTF-8 new_basename");
+        return -1;
+    };
+    match write::rename(std::path::Path::new(img), op, nb) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Rename a file in place. `new_name` is the new basename (no `/`).
 /// Requires the new name have the same UTF-16 length as the current
 /// name. Returns 0 on success, -1 on error.
