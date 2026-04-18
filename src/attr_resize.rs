@@ -199,6 +199,106 @@ pub fn replace_attribute(
     Ok(())
 }
 
+/// Insert a new attribute into the MFT record immediately before the
+/// end-of-attributes sentinel (`0xFFFFFFFF`). The caller supplies a
+/// fully-formed, 8-byte-aligned attribute blob — including its
+/// attribute-header `length` field set to the buffer's length.
+pub fn insert_attribute_before_end(record: &mut [u8], new_attr: &[u8]) -> Result<(), String> {
+    let new_len = new_attr.len();
+    if new_len == 0 || new_len % 8 != 0 {
+        return Err(format!(
+            "insert_attribute: length {new_len} not 8-aligned non-zero"
+        ));
+    }
+    let header_len =
+        u32::from_le_bytes([new_attr[4], new_attr[5], new_attr[6], new_attr[7]]) as usize;
+    if header_len != new_len {
+        return Err(format!(
+            "insert_attribute: header length {header_len} != buffer length {new_len}"
+        ));
+    }
+
+    let bytes_used = u32::from_le_bytes([
+        record[REC_OFF_BYTES_USED],
+        record[REC_OFF_BYTES_USED + 1],
+        record[REC_OFF_BYTES_USED + 2],
+        record[REC_OFF_BYTES_USED + 3],
+    ]) as usize;
+    let bytes_allocated = u32::from_le_bytes([
+        record[REC_OFF_BYTES_ALLOCATED],
+        record[REC_OFF_BYTES_ALLOCATED + 1],
+        record[REC_OFF_BYTES_ALLOCATED + 2],
+        record[REC_OFF_BYTES_ALLOCATED + 3],
+    ]) as usize;
+    if bytes_used + new_len > bytes_allocated {
+        return Err(format!(
+            "no room for new attribute: need {new_len} more, have {}",
+            bytes_allocated - bytes_used
+        ));
+    }
+
+    // Scan for the end-of-attributes marker. It lives at or before
+    // bytes_used — `bytes_used` is 8-byte aligned so there may be 0–7
+    // bytes of trailing zero padding after the 0xFFFFFFFF sentinel.
+    let attrs_offset = u16::from_le_bytes([record[0x14], record[0x15]]) as usize;
+    let mut end_marker_pos: Option<usize> = None;
+    let scan_end = bytes_used.min(record.len().saturating_sub(4));
+    let mut cursor = attrs_offset;
+    while cursor + 4 <= scan_end {
+        let marker = u32::from_le_bytes([
+            record[cursor],
+            record[cursor + 1],
+            record[cursor + 2],
+            record[cursor + 3],
+        ]);
+        if marker == 0xFFFF_FFFF {
+            end_marker_pos = Some(cursor);
+            break;
+        }
+        if marker == 0 {
+            break; // hit zero padding before finding marker
+        }
+        // skip this attribute via its `length` field.
+        let attr_len = u32::from_le_bytes([
+            record[cursor + 4],
+            record[cursor + 5],
+            record[cursor + 6],
+            record[cursor + 7],
+        ]) as usize;
+        if attr_len == 0 || cursor + attr_len > scan_end {
+            break;
+        }
+        cursor += attr_len;
+    }
+    let end_marker_pos = end_marker_pos
+        .ok_or_else(|| format!("no 0xFFFFFFFF end marker found before bytes_used {bytes_used}"))?;
+
+    // Shift the end marker forward by new_len.
+    record.copy_within(end_marker_pos..end_marker_pos + 4, end_marker_pos + new_len);
+    // Zero the area we're about to fill (defensive; overwritten below).
+    for byte in &mut record[end_marker_pos..end_marker_pos + new_len] {
+        *byte = 0;
+    }
+    // Copy the new attribute.
+    record[end_marker_pos..end_marker_pos + new_len].copy_from_slice(new_attr);
+
+    // Update bytes_used += new_len.
+    let new_bu = (bytes_used + new_len) as u32;
+    record[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4].copy_from_slice(&new_bu.to_le_bytes());
+
+    Ok(())
+}
+
+/// Allocate a new attribute_id by bumping the record header's
+/// next_attr_id field (+0x28, u16 LE). Returns the allocated id.
+pub fn allocate_attribute_id(record: &mut [u8]) -> u16 {
+    let off = 0x28;
+    let cur = u16::from_le_bytes([record[off], record[off + 1]]);
+    let next = cur.wrapping_add(1);
+    record[off..off + 2].copy_from_slice(&next.to_le_bytes());
+    cur
+}
+
 /// Convenience: resize then copy `new_value` into the attribute's value
 /// region. Equivalent to `resize_resident_value(record, off,
 /// new_value.len()) + memcpy`.

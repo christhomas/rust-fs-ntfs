@@ -979,6 +979,82 @@ pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Str
 }
 
 // ---------------------------------------------------------------------------
+// W4.1: Alternate Data Streams (named $DATA)
+// ---------------------------------------------------------------------------
+
+/// Create or replace a named `$DATA` stream (an Alternate Data Stream
+/// in NTFS parlance) with resident data. If the stream already exists,
+/// its body is overwritten (resizing the attribute as needed).
+/// Otherwise a new resident named `$DATA` attribute is appended to
+/// the file's MFT record.
+///
+/// MVP scope:
+/// * Resident only — stream content must fit in the file's free MFT
+///   record space. Promotion of named streams to non-resident is a
+///   later step.
+/// * Stream name must be non-empty.
+pub fn write_named_stream_resident(
+    image: &Path,
+    file_path: &str,
+    stream_name: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    if stream_name.is_empty() {
+        return Err("stream_name must be non-empty".to_string());
+    }
+    let rec = resolve_path_to_record_number(image, file_path)?;
+    update_mft_record(image, rec, |record| {
+        // Existing stream?
+        let existing = attr_io::find_attribute(record, AttrType::Data, Some(stream_name));
+        if let Some(loc) = existing {
+            if !loc.is_resident {
+                return Err(format!(
+                    "named stream '{stream_name}' is non-resident; use write_at + grow instead"
+                ));
+            }
+            crate::attr_resize::set_resident_value(record, loc.attr_offset, data)
+        } else {
+            let attr_id = crate::attr_resize::allocate_attribute_id(record);
+            let new_attr = crate::record_build::build_named_resident_data_attribute(
+                attr_id,
+                stream_name,
+                data,
+            )?;
+            crate::attr_resize::insert_attribute_before_end(record, &new_attr)
+        }
+    })
+}
+
+/// Delete a named `$DATA` stream from a file. Fails if the stream
+/// doesn't exist.
+pub fn delete_named_stream(image: &Path, file_path: &str, stream_name: &str) -> Result<(), String> {
+    if stream_name.is_empty() {
+        return Err("stream_name must be non-empty".to_string());
+    }
+    let rec = resolve_path_to_record_number(image, file_path)?;
+    update_mft_record(image, rec, |record| {
+        let loc = attr_io::find_attribute(record, AttrType::Data, Some(stream_name))
+            .ok_or_else(|| format!("named stream '{stream_name}' not found"))?;
+        // Remove the attribute: shrink to a resident-empty shell, then
+        // trim it entirely via replace with the last-plus-1 attribute
+        // shifted back. Simpler: call attr_resize with new_length=0 —
+        // but resize_resident_value keeps the header. Simplest: use
+        // replace_attribute with... actually we want full removal.
+        // Shift following bytes back by loc.attr_length and zero the tail.
+        let old_len = loc.attr_length;
+        let bytes_used =
+            u32::from_le_bytes([record[0x18], record[0x19], record[0x1A], record[0x1B]]) as usize;
+        record.copy_within(loc.attr_offset + old_len..bytes_used, loc.attr_offset);
+        for byte in &mut record[bytes_used - old_len..bytes_used] {
+            *byte = 0;
+        }
+        let new_bu = (bytes_used - old_len) as u32;
+        record[0x18..0x1C].copy_from_slice(&new_bu.to_le_bytes());
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
 // W2.2: promote resident $DATA to non-resident (optionally writing new content)
 // ---------------------------------------------------------------------------
 

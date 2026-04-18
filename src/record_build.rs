@@ -308,6 +308,48 @@ fn build_record_inner(
     Ok(rec)
 }
 
+/// Build a resident named `$DATA` attribute (alternate data stream).
+/// Returns the attribute bytes (header + name + padding + value),
+/// 8-byte aligned and with the header's `length` set correctly.
+pub fn build_named_resident_data_attribute(
+    attr_id: u16,
+    stream_name: &str,
+    data: &[u8],
+) -> Result<Vec<u8>, String> {
+    let name_u16: Vec<u16> = stream_name.encode_utf16().collect();
+    if name_u16.is_empty() || name_u16.len() > 255 {
+        return Err(format!("invalid stream name length {}", name_u16.len()));
+    }
+    let common_header = 16usize;
+    let resident_fields = 8usize;
+    let header_size = common_header + resident_fields;
+    let name_offset = header_size;
+    let name_bytes = name_u16.len() * 2;
+    let value_offset = align8(name_offset + name_bytes);
+    let attr_length = align8(value_offset + data.len());
+
+    let mut buf = vec![0u8; attr_length];
+    buf[0..4].copy_from_slice(&ATTR_DATA.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 0; // resident
+    buf[9] = name_u16.len() as u8;
+    buf[10..12].copy_from_slice(&(name_offset as u16).to_le_bytes());
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+    buf[16..20].copy_from_slice(&(data.len() as u32).to_le_bytes()); // value_length
+    buf[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes()); // value_offset
+    buf[22] = 0; // resident_flags
+    buf[23] = 0; // reserved
+
+    for (i, c) in name_u16.iter().enumerate() {
+        let off = name_offset + i * 2;
+        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    }
+    buf[value_offset..value_offset + data.len()].copy_from_slice(data);
+
+    Ok(buf)
+}
+
 pub fn align8(n: usize) -> usize {
     (n + 7) & !7
 }
