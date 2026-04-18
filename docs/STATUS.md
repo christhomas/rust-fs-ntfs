@@ -178,7 +178,7 @@ next step — `crate-type = ["staticlib", "rlib"]` permits it.
 
 ## Test coverage
 
-138 integration tests across 19 test files. See
+174 integration tests across 28 test files. See
 [Test infrastructure](#test-infrastructure) above for the fixture
 layout; all 138 pass locally and in CI.
 
@@ -212,7 +212,13 @@ layout; all 138 pass locally and in CI.
 | `capi_write_truncate.rs` | ntfs-large-file | 4 | C-ABI `fs_ntfs_truncate` including grow rejection + null-path. |
 | `write_grow.rs` | ntfs-large-file | 5 | Append clusters, new bytes read as zero, bitmap free count drops, shrink rejected, remount. |
 | `attr_resize.rs` | ntfs-basic | 8 | Resident attribute resize via volume-label rename: same-len / shrink / grow / zero-len / round-trip / huge-grow rejection / preserves-subsequent / low-level primitive. |
-| `write_rename.rs` | ntfs-basic | 7 | Same-length rename in subdir, root-limitation negative test, length mismatch rejection, slash rejection, missing source, collateral preservation, post-rename upstream mount. |
+| `write_rename.rs` | ntfs-basic | 8 | Same-length rename in subdir AND root (via `$INDEX_ALLOCATION`), length mismatch rejection, slash rejection, missing source, preservation of other entries. |
+| `write_unlink.rs` | ntfs-basic + ntfs-large-file | 7 | Subdir index removal, root `$INDEX_ALLOCATION` removal, MFT record freed, non-resident clusters freed, directory-target refusal, missing-source rejection, post-unlink mount. |
+| `write_create.rs` | ntfs-basic | 7 | Subdir creation, preservation of siblings, duplicate rejection, invalid-basename rejection, non-directory-parent rejection, root-refused (MVP), upstream round-trip. |
+| `write_mkdir.rs` | ntfs-basic | 5 | mkdir basic, empty-and-listable, duplicate rejection, create-file-inside-new-dir, post-mkdir mount. |
+| `write_rmdir.rs` | ntfs-basic | 5 | Remove empty dir, refuse non-empty, refuse regular file, post-rmdir mount, 5x churn doesn't leak MFT records. |
+| `write_resident_contents.rs` | ntfs-basic + ntfs-large-file | 5 | Create-then-write, replace existing, expand up to capacity, refuse non-resident, post-write mount. |
+| `write_promote.rs` | ntfs-basic + ntfs-large-file | 6 | Small-payload promotion, 10 KiB promotion, refuse already-non-resident, dispatcher resident case, dispatcher auto-promote 2 KiB, post-promote mount. |
 
 No unit tests inside the crate; all coverage is integration-level.
 Coverage gap: see the last paragraph in

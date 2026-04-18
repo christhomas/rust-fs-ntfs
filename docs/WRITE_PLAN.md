@@ -267,17 +267,42 @@ bitmap bit for a record that doesn't yet exist.
 
 ## Phase W3 — create / delete / mkdir / rmdir / rename (partial)
 
-**Shipped:** `write::rename_same_length` (+ `src/index_io.rs`). Walks
-a directory's resident `$INDEX_ROOT:$I30`, finds the entry matching
-an old name, and byte-patches both the index entry's key and the
-file's own `$FILE_NAME` attribute(s). Same UTF-16 length required.
+**Shipped:**
 
-**Known limitation.** `mkntfs` lays out root directories with
-`$INDEX_ALLOCATION` spillover even for small dirs, so root-level
-rename currently returns "no entry for …". Works for subdirectories
-whose index fits in resident `$INDEX_ROOT` (e.g. `/Documents`).
-Promoting the walker to also traverse `$INDEX_ALLOCATION` is a
-separate primitive — see `src/index_io.rs` TODO comment.
+- `rename_same_length` — same-UTF-16-length rename. Patches the parent's
+  index entry AND each `$FILE_NAME` attribute on the file's record.
+  Dispatches between resident `$INDEX_ROOT` and `$INDEX_ALLOCATION`
+  INDX-block scans (incl. root-dir case which mkntfs always overflows).
+- `unlink` — removes a file: parent index entry removal + truncate-to-0
+  + IN_USE clear + `$MFT:$Bitmap` free. Refuses directories.
+- `create_file` — new MFT record built from scratch (FILE header +
+  USA + `$SI` + `$FILE_NAME` + empty `$DATA` + end marker), inserted
+  into parent's resident `$INDEX_ROOT`. Auto-rolls-back on any failure
+  step. Refuses parents whose index has overflowed (waits for B+-tree
+  insert).
+- `mkdir` — parallel of create_file but emits a directory record with
+  an empty `$INDEX_ROOT:$I30` (single LAST sentinel entry) and no
+  `$DATA`.
+- `rmdir` — deletes an empty directory. Verifies emptiness via the
+  `$INDEX_ROOT`'s first-entry LAST bit; refuses non-empty and
+  overflowed dirs.
+- `write_resident_contents` — replaces a file's resident `$DATA`.
+- `promote_resident_data_to_nonresident` — allocates clusters, builds
+  a non-resident `$DATA` attribute, swaps it into the MFT record.
+- `write_file_contents` — high-level dispatcher: tries resident, falls
+  back to promotion on capacity error.
+- `idx_block` module — INDX block read/update with USA fixup; underpins
+  the `$INDEX_ALLOCATION` walks.
+- `mft_bitmap` module — `$MFT:$Bitmap` allocator (resident or
+  non-resident).
+- `record_build` module — synthesizers for fresh FILE records
+  (regular + directory) and non-resident `$DATA` attribute blobs.
+- `attr_resize::replace_attribute` — swap an attribute's entire body
+  (used for resident→non-resident promotion).
+
+C-ABI additions: `fs_ntfs_rename_same_length`, `fs_ntfs_unlink`,
+`fs_ntfs_create_file`, `fs_ntfs_mkdir`, `fs_ntfs_rmdir`,
+`fs_ntfs_write_resident_contents`, `fs_ntfs_write_file_contents`.
 
 **Still to ship in W3:**
 
