@@ -539,6 +539,92 @@ pub fn insert_entry_into_index_root(
     Ok(())
 }
 
+/// Insert a new `$FILE_NAME` index entry into an INDX block at the
+/// correct sorted position. Fails if the block doesn't have room.
+///
+/// The caller is responsible for INDX USA fixup on read + write (use
+/// `idx_block::update_indx_block`).
+pub fn insert_entry_into_indx_block(
+    block: &mut [u8],
+    entry_bytes: &[u8],
+    new_name: &str,
+) -> Result<(), String> {
+    use crate::idx_block::{
+        IH_FIRST_ENTRY_OFFSET, IH_TOTAL_SIZE_OF_ENTRIES, INDX_INDEX_HEADER_OFFSET,
+    };
+    if &block[0..4] != b"INDX" {
+        return Err("not an INDX block".to_string());
+    }
+    let ih_start = INDX_INDEX_HEADER_OFFSET;
+    let first_entry_rel = u32::from_le_bytes([
+        block[ih_start + IH_FIRST_ENTRY_OFFSET],
+        block[ih_start + IH_FIRST_ENTRY_OFFSET + 1],
+        block[ih_start + IH_FIRST_ENTRY_OFFSET + 2],
+        block[ih_start + IH_FIRST_ENTRY_OFFSET + 3],
+    ]) as usize;
+    let total_size = u32::from_le_bytes([
+        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES],
+        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 1],
+        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 2],
+        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 3],
+    ]) as usize;
+    let allocated_size = u32::from_le_bytes([
+        block[ih_start + 8],
+        block[ih_start + 9],
+        block[ih_start + 10],
+        block[ih_start + 11],
+    ]) as usize;
+    let new_len = entry_bytes.len();
+    if total_size + new_len > allocated_size {
+        return Err(format!(
+            "INDX block has no room: total_size={total_size} + new={new_len} > allocated={allocated_size}"
+        ));
+    }
+
+    // Find sorted insertion position.
+    let mut cursor = ih_start + first_entry_rel;
+    let end = ih_start + total_size;
+    let new_utf16: Vec<u16> = new_name.encode_utf16().collect();
+
+    while cursor < end && cursor + IE_KEY_START <= block.len() {
+        let length =
+            u16::from_le_bytes([block[cursor + IE_LENGTH], block[cursor + IE_LENGTH + 1]]) as usize;
+        let flags = u16::from_le_bytes([block[cursor + IE_FLAGS], block[cursor + IE_FLAGS + 1]]);
+        if flags & IE_FLAG_LAST != 0 {
+            break;
+        }
+        if length == 0 || cursor + length > block.len() {
+            return Err("malformed INDX entry during insert".to_string());
+        }
+        let key_start = cursor + IE_KEY_START;
+        let name_len = block[key_start + FN_NAME_LENGTH_OFFSET] as usize;
+        let name_start = key_start + FN_NAME_OFFSET;
+        let existing_utf16: Vec<u16> = block[name_start..name_start + name_len * 2]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        if compare_utf16_case_insensitive(&new_utf16, &existing_utf16)
+            != std::cmp::Ordering::Greater
+        {
+            break;
+        }
+        cursor += length;
+    }
+    let insertion_point = cursor;
+
+    // Shift [insertion_point .. end) forward by new_len; the LAST
+    // sentinel (or end-of-entries) moves with it.
+    block.copy_within(insertion_point..end, insertion_point + new_len);
+    block[insertion_point..insertion_point + new_len].copy_from_slice(entry_bytes);
+
+    // Update total_size.
+    let new_total = (total_size + new_len) as u32;
+    block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES..ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 4]
+        .copy_from_slice(&new_total.to_le_bytes());
+
+    Ok(())
+}
+
 /// Naive case-insensitive UTF-16 comparison. Works well enough for ASCII
 /// filenames; not a full NTFS-upcase-table implementation.
 fn compare_utf16_case_insensitive(a: &[u16], b: &[u16]) -> std::cmp::Ordering {
