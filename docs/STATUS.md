@@ -178,9 +178,9 @@ next step — `crate-type = ["staticlib", "rlib"]` permits it.
 
 ## Test coverage
 
-24 integration tests across 7 per-fixture test files. See
+39 integration tests across 9 test files. See
 [Test infrastructure](#test-infrastructure) above for the fixture
-layout; all 24 pass locally and in CI.
+layout; all 39 pass locally and in CI.
 
 | File | Fixture | Tests | What's covered |
 |---|---|---|---|
@@ -191,6 +191,8 @@ layout; all 24 pass locally and in CI.
 | `ads.rs` | ntfs-ads | 4 | Primary data unchanged, named-stream enumeration, read named-stream content, file-without-streams has none. |
 | `unicode.rs` | ntfs-unicode | 4 | Listing with mixed UTF-16 planes, navigate by unicode name, unicode directory, emoji surrogate-pair roundtrip. |
 | `deep.rs` | ntfs-deep | 2 | Read file 20 levels deep, surface file still reads. |
+| `fsck.rs` | synth from ntfs-basic | 7 | `fsck::clear_dirty` / `reset_logfile` / `fsck` — dirty state patched by test helpers using upstream-only APIs. |
+| `capi_fsck.rs` | synth from ntfs-basic | 8 | Same operations via the `fs_ntfs_*` C ABI; covers null-path, bad-path, return codes, out-params. |
 
 No unit tests inside the crate; all coverage is integration-level.
 Coverage gap: see the last paragraph in
@@ -203,6 +205,31 @@ Revised after the test-infrastructure work and
 [Documentation cross-check](#documentation-cross-check) landed. The
 cross-check surfaced correctness bugs that outrank any new-feature
 work — fix those first.
+
+### Phase W0 — volume recovery (✅ shipped)
+
+First step outside the read-only envelope. Narrow raw-byte writes for
+volumes that lost their mount handle without a clean unmount.
+
+- `fs_ntfs_clear_dirty(path)` — clear `VOLUME_IS_DIRTY` (0x0001) in
+  `$Volume/$VOLUME_INFORMATION`. Returns `1` (cleared), `0` (already
+  clean), `-1` (error).
+- `fs_ntfs_reset_logfile(path)` — overwrite `$LogFile` with `0xFF`, the
+  format-level "no pending transactions" pattern documented at Flatcap.
+  Returns bytes written or `-1`.
+- `fs_ntfs_fsck(path, *logfile_bytes, *dirty_cleared)` — both above,
+  with optional out-params. `NULL` out-params accepted.
+
+Scope is the weakest possible recovery: no `$LogFile` replay, no
+MFT/MFTMirror reconciliation. Uncommitted metadata changes are
+discarded — the volume becomes mountable again, but some state may
+be lost. This matches the recovery posture of `ntfsfix(8)` (and is
+what Windows/ntfs-3g are designed to accept).
+
+**Tests:** `tests/fsck.rs` (7 Rust-layer) + `tests/capi_fsck.rs` (8
+C-ABI) — each exercises a different failure mode (dirty flag set,
+corrupted log-first-page, combined). Dirty state is synthesized in
+the test via upstream-only APIs, independent of the code under test.
 
 ### Phase 1 — correctness fixes (block new features until done)
 
