@@ -142,6 +142,39 @@ int fs_ntfs_readlink(fs_ntfs_fs_t *fs, const char *path,
 
 const char *fs_ntfs_last_error(void);
 
+/* ---- Recovery / fsck ---- */
+
+/*
+ * Clear the VOLUME_IS_DIRTY flag on an NTFS image so Windows / FSKit /
+ * other NTFS drivers will remount it. Must NOT be called on a volume
+ * that is currently mounted.
+ *
+ * Returns:
+ *   1  — flag was set and has been cleared
+ *   0  — volume was already clean, no write performed
+ *  -1  — error (call fs_ntfs_last_error for details)
+ */
+int fs_ntfs_clear_dirty(const char *path);
+
+/*
+ * Overwrite $LogFile with the NTFS "empty log" pattern (all 0xFF bytes).
+ * Causes the NTFS driver on next mount to treat the log as having no
+ * pending transactions and reinitialize it. In-progress transactions
+ * are discarded — any uncommitted metadata changes are lost.
+ *
+ * Returns the number of bytes overwritten on success, -1 on error.
+ */
+int64_t fs_ntfs_reset_logfile(const char *path);
+
+/*
+ * Combined recovery: reset $LogFile and clear the dirty flag, in that
+ * order. If either out-param is non-NULL it is filled on success with
+ * the corresponding sub-result. Returns 0 on success, -1 on error.
+ */
+int fs_ntfs_fsck(const char *path,
+                 uint64_t *out_logfile_bytes,
+                 uint8_t *out_dirty_cleared);
+
 #ifdef __cplusplus
 }
 #endif
