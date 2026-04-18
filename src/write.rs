@@ -12,7 +12,8 @@ use crate::bitmap;
 use crate::data_runs::{self, DataRun};
 use crate::idx_block;
 use crate::index_io;
-use crate::mft_io::{read_mft_record, update_mft_record};
+use crate::mft_bitmap;
+use crate::mft_io::{read_mft_record, update_mft_record, MFT_FLAG_DIRECTORY};
 
 use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::{Ntfs, NtfsFile};
@@ -742,6 +743,110 @@ pub fn rename_same_length(image: &Path, old_path: &str, new_name: &str) -> Resul
     update_mft_record(image, file_rec, |record| {
         index_io::rename_filename_attribute_same_length(record, &current_basename, new_name)
     })?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Unlink (W3)
+// ---------------------------------------------------------------------------
+
+/// Delete a regular file:
+/// 1. Remove the parent dir's index entry for the file.
+/// 2. Free the file's data-run clusters via `truncate` to zero.
+/// 3. Clear the IN_USE flag in the file's MFT record.
+/// 4. Flip the file's bit in `$MFT:$Bitmap` to free.
+///
+/// Refuses directories (use `rmdir` — not implemented yet).
+///
+/// Order matters: step 1 makes the file unreachable by name, then
+/// steps 2-4 free the backing storage. A crash between 1 and 4 leaks
+/// an MFT record + clusters (recoverable by scan); a reversed order
+/// could leave the file name pointing at a freed+reallocated record.
+pub fn unlink(image: &Path, file_path: &str) -> Result<(), String> {
+    let (parent_rec, file_rec, basename) = resolve_parent_and_child(image, file_path)?;
+
+    // Refuse directory targets.
+    let (_, file_record_bytes) = read_mft_record(image, file_rec)?;
+    let flags = crate::mft_io::record_flags(&file_record_bytes);
+    if flags & MFT_FLAG_DIRECTORY != 0 {
+        return Err(format!(
+            "unlink: '{file_path}' is a directory — use rmdir (not implemented)"
+        ));
+    }
+
+    // 1) Remove the parent's index entry. Dispatch on IR flags.
+    let (_, parent_record_bytes) = read_mft_record(image, parent_rec)?;
+    let ir_flags = index_io::index_root_flags(&parent_record_bytes)
+        .ok_or_else(|| "no $INDEX_ROOT on parent".to_string())?;
+
+    let in_root = index_io::find_index_entry(&parent_record_bytes, &basename)?;
+    if let Some(entry) = in_root {
+        if entry.file_record_number != file_rec {
+            return Err(format!(
+                "parent's $INDEX_ROOT entry for '{basename}' points at {} but resolved {file_rec}",
+                entry.file_record_number
+            ));
+        }
+        update_mft_record(image, parent_rec, |record| {
+            let e = index_io::find_index_entry(record, &basename)?
+                .ok_or_else(|| "race: $INDEX_ROOT entry vanished".to_string())?;
+            index_io::remove_index_entry(record, &e, index_io::BlockKind::IndexRoot)
+        })?;
+    } else if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
+        let ia = idx_block::load_for_directory(image, parent_rec)?;
+        let mut removed = false;
+        for vcn in ia.allocated_block_vcns() {
+            let block = idx_block::read_indx_block(image, &ia, vcn)?;
+            if let Some(entry) = index_io::find_entry_in_indx_block(&block, &basename)? {
+                if entry.file_record_number != file_rec {
+                    return Err(format!(
+                        "INDX entry at VCN {vcn} points at {} but resolved {file_rec}",
+                        entry.file_record_number
+                    ));
+                }
+                idx_block::update_indx_block(image, &ia, vcn, |block| {
+                    let e = index_io::find_entry_in_indx_block(block, &basename)?
+                        .ok_or_else(|| "race: INDX entry vanished".to_string())?;
+                    index_io::remove_index_entry(block, &e, index_io::BlockKind::IndexAllocation)
+                })?;
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            return Err(format!(
+                "no index entry for '{basename}' in parent record {parent_rec}"
+            ));
+        }
+    } else {
+        return Err(format!(
+            "no entry for '{basename}' in parent's $INDEX_ROOT (no spillover)"
+        ));
+    }
+
+    // 2) Free data clusters. Only if non-resident — resident $DATA lives
+    //    inside the MFT record and is freed as part of the record itself.
+    //    truncate to 0 is a no-op for resident data anyway.
+    let data_loc = attr_io::find_attribute(&file_record_bytes, AttrType::Data, None);
+    if let Some(loc) = data_loc {
+        if !loc.is_resident && loc.non_resident_value_length.unwrap_or(0) > 0 {
+            truncate_by_record_number(image, file_rec, 0)?;
+        }
+    }
+
+    // 3) Clear IN_USE flag in the file's MFT record.
+    update_mft_record(image, file_rec, |record| {
+        let flags_off = 0x16;
+        let cur = u16::from_le_bytes([record[flags_off], record[flags_off + 1]]);
+        let new = cur & !crate::mft_io::MFT_FLAG_IN_USE;
+        record[flags_off..flags_off + 2].copy_from_slice(&new.to_le_bytes());
+        Ok(())
+    })?;
+
+    // 4) Free the MFT record bit.
+    let mbm = mft_bitmap::locate(image)?;
+    mft_bitmap::free(image, &mbm, file_rec)?;
 
     Ok(())
 }

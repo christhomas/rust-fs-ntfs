@@ -22,6 +22,7 @@ pub mod data_runs;
 pub mod fsck;
 pub mod idx_block;
 pub mod index_io;
+pub mod mft_bitmap;
 pub mod mft_io;
 pub mod write;
 
@@ -807,6 +808,58 @@ pub extern "C" fn fs_ntfs_set_times(
         access: unsafe { access.as_ref() }.map(|v| *v as u64),
     };
     match write::set_times(std::path::Path::new(img), fp, times) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Delete a regular file. Refuses directories. Returns 0 on success,
+/// -1 on error. On success the file's data-run clusters and MFT
+/// record are freed.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_unlink(image: *const c_char, path: *const c_char) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_unlink: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(fp) = cstr_to_path(path) else {
+        set_error("fs_ntfs_unlink: null or non-UTF-8 path");
+        return -1;
+    };
+    match write::unlink(std::path::Path::new(img), fp) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Rename a file in place. `new_name` is the new basename (no `/`).
+/// Requires the new name have the same UTF-16 length as the current
+/// name. Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_rename_same_length(
+    image: *const c_char,
+    old_path: *const c_char,
+    new_name: *const c_char,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_rename_same_length: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(op) = cstr_to_path(old_path) else {
+        set_error("fs_ntfs_rename_same_length: null or non-UTF-8 old_path");
+        return -1;
+    };
+    let Some(nn) = cstr_to_path(new_name) else {
+        set_error("fs_ntfs_rename_same_length: null or non-UTF-8 new_name");
+        return -1;
+    };
+    match write::rename_same_length(std::path::Path::new(img), op, nn) {
         Ok(()) => 0,
         Err(e) => {
             set_error(&e);
