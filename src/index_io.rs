@@ -142,6 +142,42 @@ pub fn find_index_entry(record: &[u8], wanted: &str) -> Result<Option<IndexEntry
     Ok(None)
 }
 
+/// True if the resident `$INDEX_ROOT:$I30` has any non-LAST entries.
+/// Used by `rmdir` to verify a directory is empty.
+pub fn index_root_has_real_entries(record: &[u8]) -> Result<bool, String> {
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some("$I30"))
+        .ok_or_else(|| "$INDEX_ROOT:$I30 not found".to_string())?;
+    if !ir.is_resident {
+        return Err("$INDEX_ROOT unexpectedly non-resident".to_string());
+    }
+    let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
+    let ir_data_start = ir.attr_offset + val_off;
+    let ih_start = ir_data_start + IR_INDEX_HEADER_OFFSET;
+    let first_entry_rel = u32::from_le_bytes([
+        record[ih_start + IH_FIRST_ENTRY_OFFSET],
+        record[ih_start + IH_FIRST_ENTRY_OFFSET + 1],
+        record[ih_start + IH_FIRST_ENTRY_OFFSET + 2],
+        record[ih_start + IH_FIRST_ENTRY_OFFSET + 3],
+    ]) as usize;
+    let total_size = u32::from_le_bytes([
+        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES],
+        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 1],
+        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 2],
+        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 3],
+    ]) as usize;
+    let first_entry = ih_start + first_entry_rel;
+    let end = ih_start + total_size;
+    if first_entry + IE_KEY_START > record.len() || first_entry + 0x10 > end {
+        return Ok(false);
+    }
+    // If the very first entry has the LAST flag, the dir is empty.
+    let flags = u16::from_le_bytes([
+        record[first_entry + IE_FLAGS],
+        record[first_entry + IE_FLAGS + 1],
+    ]);
+    Ok(flags & IE_FLAG_LAST == 0)
+}
+
 /// Read the INDEX_HEADER flags byte from an `$INDEX_ROOT`. Returns
 /// `Some(flags)` if the record contains `$INDEX_ROOT:$I30`,
 /// otherwise `None`.

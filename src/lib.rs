@@ -847,6 +847,28 @@ pub extern "C" fn fs_ntfs_create_file(
     }
 }
 
+/// Delete an empty directory. Returns 0 on success, -1 on error.
+/// Fails if the directory is non-empty or has `$INDEX_ALLOCATION`
+/// overflow (for MVP).
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_rmdir(image: *const c_char, path: *const c_char) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_rmdir: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_rmdir: null or non-UTF-8 path");
+        return -1;
+    };
+    match write::rmdir(std::path::Path::new(img), p) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Create a new empty directory. Returns the new MFT record number on
 /// success, -1 on error.
 #[unsafe(no_mangle)]
