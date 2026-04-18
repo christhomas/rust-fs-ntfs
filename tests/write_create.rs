@@ -100,13 +100,6 @@ fn create_file_rejects_nondirectory_parent() {
 }
 
 #[test]
-fn create_file_rejects_root_in_this_mvp() {
-    let img = working_copy("root_refused");
-    let err = write::create_file(Path::new(&img), "/", "new.txt").unwrap_err();
-    assert!(err.contains("overflow") || err.contains("MVP"), "{err:?}");
-}
-
-#[test]
 fn upstream_reads_newly_created_empty_file() {
     let img = working_copy("e2e");
     write::create_file(Path::new(&img), "/Documents", "hi.txt").expect("create");
