@@ -427,6 +427,173 @@ pub fn truncate_by_record_number(
     Ok(new_size)
 }
 
+/// Grow a non-resident file's `$DATA` to `new_size` bytes. Allocates
+/// enough contiguous free clusters to cover the new end-of-file,
+/// appends them to the run list, rewrites mapping-pairs and lengths.
+///
+/// Bytes in the newly-allocated range read as zero via NTFS's
+/// `initialized_length` mechanism: we leave `initialized_length`
+/// where it was so readers zero-fill the tail.
+///
+/// **Limits in this MVP:**
+/// * One contiguous allocation only. If the volume doesn't have a
+///   contiguous free run large enough, returns an error — the caller
+///   can retry with a smaller `new_size` or `fsck`.
+/// * The new mapping-pairs must fit within the existing attribute
+///   header's reserved space (we don't shift following attributes —
+///   that's W2.1 work). Most grows need 0 or 1 extra encoded bytes.
+pub fn grow_nonresident(image: &Path, file_path: &str, new_size: u64) -> Result<u64, String> {
+    let rec = resolve_path_to_record_number(image, file_path)?;
+    grow_nonresident_by_record_number(image, rec, new_size)
+}
+
+pub fn grow_nonresident_by_record_number(
+    image: &Path,
+    record_number: u64,
+    new_size: u64,
+) -> Result<u64, String> {
+    let (params, record) = read_mft_record(image, record_number)?;
+    let cluster_size = params.cluster_size;
+
+    let loc = attr_io::find_attribute(&record, AttrType::Data, None)
+        .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+    if loc.is_resident {
+        return Err("grow_nonresident: refusing resident $DATA (use W2.2 promotion)".to_string());
+    }
+    let flags = u16::from_le_bytes([
+        record[loc.attr_offset + attr_io::attr_off::FLAGS],
+        record[loc.attr_offset + attr_io::attr_off::FLAGS + 1],
+    ]);
+    if flags & 0x00FF != 0 {
+        return Err(format!(
+            "compressed/sparse/encrypted non-resident $DATA (flags={flags:#06x})"
+        ));
+    }
+
+    let current_len = loc.non_resident_value_length.ok_or("no value_length")?;
+    if new_size <= current_len {
+        return Err(format!(
+            "grow: new_size {new_size} not greater than current {current_len}"
+        ));
+    }
+
+    let mapping_offset = loc
+        .non_resident_mapping_pairs_offset
+        .ok_or("missing mapping_pairs_offset")? as usize;
+    let mapping_start = loc.attr_offset + mapping_offset;
+    let mapping_end = loc.attr_offset + loc.attr_length;
+    let mapping_capacity = mapping_end - mapping_start;
+    let runs = data_runs::decode_runs(&record[mapping_start..mapping_end])?;
+
+    // New allocated end (VCN+1 count) = ceil(new_size / cluster_size).
+    let new_last_vcn = (new_size - 1) / cluster_size;
+    let new_allocated = (new_last_vcn + 1) * cluster_size;
+
+    let current_last_vcn: u64 = runs
+        .iter()
+        .map(|r| r.starting_vcn + r.length)
+        .max()
+        .unwrap_or(0);
+    let need_clusters = (new_last_vcn + 1).saturating_sub(current_last_vcn);
+    if need_clusters == 0 {
+        // Partial-cluster grow — no new clusters, just extend lengths.
+        return apply_grow_lengths(image, record_number, new_size, new_allocated);
+    }
+
+    // Ask bitmap for a contiguous run.
+    let bm = bitmap::locate_bitmap(image)?;
+    let hint = runs
+        .iter()
+        .rev()
+        .find_map(|r| r.lcn.map(|lcn| lcn + r.length))
+        .unwrap_or(params.mft_lcn.saturating_add(32));
+    let new_lcn = bitmap::find_free_run(image, &bm, need_clusters, hint)?
+        .ok_or_else(|| format!("no contiguous free run of {need_clusters} clusters available"))?;
+    bitmap::allocate(image, &bm, new_lcn, need_clusters)?;
+
+    // Build new run list. If the new allocation is contiguous with the
+    // last dense run, extend that run; otherwise append a new run.
+    let mut new_runs = runs.clone();
+    let extend_last = new_runs
+        .last()
+        .and_then(|r| r.lcn.map(|lcn| lcn + r.length == new_lcn))
+        .unwrap_or(false);
+    if extend_last {
+        let last = new_runs.last_mut().unwrap();
+        last.length += need_clusters;
+    } else {
+        new_runs.push(DataRun {
+            starting_vcn: current_last_vcn,
+            length: need_clusters,
+            lcn: Some(new_lcn),
+        });
+    }
+
+    let new_mapping = data_runs::encode_runs(&new_runs)?;
+    if new_mapping.len() > mapping_capacity {
+        // Need attribute resize (W2.1) — undo the bitmap allocation so we
+        // don't leak clusters.
+        bitmap::free(image, &bm, new_lcn, need_clusters)?;
+        return Err(format!(
+            "new mapping_pairs ({} bytes) exceed attr capacity ({}). Attribute resize (W2.1) required.",
+            new_mapping.len(),
+            mapping_capacity
+        ));
+    }
+
+    // Commit: rewrite MFT record with new mapping + lengths.
+    update_mft_record(image, record_number, |record| {
+        let loc = attr_io::find_attribute(record, AttrType::Data, None)
+            .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+        let attr_start = loc.attr_offset;
+        let mapping_offset = loc
+            .non_resident_mapping_pairs_offset
+            .ok_or("missing mapping_pairs_offset")? as usize;
+        let mapping_abs = attr_start + mapping_offset;
+        let mapping_end_abs = attr_start + loc.attr_length;
+
+        record[mapping_abs..mapping_abs + new_mapping.len()].copy_from_slice(&new_mapping);
+        for i in (mapping_abs + new_mapping.len())..mapping_end_abs {
+            record[i] = 0;
+        }
+
+        // Lengths:
+        //   allocated_length = new_allocated
+        //   data_length = new_size
+        //   initialized_length unchanged (new bytes zero-fill via spec)
+        record[attr_start + NONRES_ALLOCATED_LENGTH..attr_start + NONRES_ALLOCATED_LENGTH + 8]
+            .copy_from_slice(&new_allocated.to_le_bytes());
+        record[attr_start + NONRES_DATA_LENGTH..attr_start + NONRES_DATA_LENGTH + 8]
+            .copy_from_slice(&new_size.to_le_bytes());
+        let new_last_vcn_i = new_last_vcn as i64;
+        record[attr_start + NONRES_LAST_VCN..attr_start + NONRES_LAST_VCN + 8]
+            .copy_from_slice(&new_last_vcn_i.to_le_bytes());
+        Ok(())
+    })?;
+
+    Ok(new_size)
+}
+
+/// Used by grow when only lengths change (no new clusters needed).
+fn apply_grow_lengths(
+    image: &Path,
+    record_number: u64,
+    new_size: u64,
+    new_allocated: u64,
+) -> Result<u64, String> {
+    update_mft_record(image, record_number, |record| {
+        let loc = attr_io::find_attribute(record, AttrType::Data, None)
+            .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+        let attr_start = loc.attr_offset;
+        record[attr_start + NONRES_ALLOCATED_LENGTH..attr_start + NONRES_ALLOCATED_LENGTH + 8]
+            .copy_from_slice(&new_allocated.to_le_bytes());
+        record[attr_start + NONRES_DATA_LENGTH..attr_start + NONRES_DATA_LENGTH + 8]
+            .copy_from_slice(&new_size.to_le_bytes());
+        Ok(())
+    })?;
+    Ok(new_size)
+}
+
 /// Split `runs` into (kept, freed) for a shrink to `new_last_vcn`.
 /// `None` ⇒ free everything (truncate to 0).
 fn split_runs_for_shrink(

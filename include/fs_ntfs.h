@@ -195,6 +195,16 @@ int fs_ntfs_set_times(const char *image, const char *path,
                       const int64_t *access);
 
 /*
+ * Grow a non-resident $DATA to `new_size` bytes. Allocates contiguous
+ * free clusters and appends them to the file's run list. Bytes in
+ * the newly-allocated range read as zero per NTFS semantics.
+ *
+ * Returns the new size on success, -1 on error.
+ */
+int64_t fs_ntfs_grow(const char *image, const char *path,
+                     uint64_t new_size);
+
+/*
  * Shrink a file's non-resident $DATA to `new_size` bytes. Frees the
  * clusters past the new end in $Bitmap. Growing is not supported in
  * W2 MVP — calls with new_size > current_size return -1.

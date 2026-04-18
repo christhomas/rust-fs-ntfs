@@ -812,6 +812,32 @@ pub extern "C" fn fs_ntfs_set_times(
     }
 }
 
+/// Grow a non-resident `$DATA` to `new_size` bytes. Allocates the
+/// needed contiguous clusters from `$Bitmap`. Fails if the volume
+/// doesn't have enough contiguous free space, or if the new
+/// mapping-pairs don't fit in the existing attribute header
+/// (attribute resize is separate future work).
+///
+/// Returns the new size on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_grow(image: *const c_char, path: *const c_char, new_size: u64) -> i64 {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_grow: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(fp) = cstr_to_path(path) else {
+        set_error("fs_ntfs_grow: null or non-UTF-8 path");
+        return -1;
+    };
+    match write::grow_nonresident(std::path::Path::new(img), fp, new_size) {
+        Ok(n) => n as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Shrink a file's non-resident `$DATA` to `new_size` bytes. Clusters
 /// past the new end are freed. Growing is not supported in W2; will
 /// return -1 if `new_size > current_size`. Returns the new size on
