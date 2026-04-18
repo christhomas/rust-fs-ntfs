@@ -195,6 +195,15 @@ int fs_ntfs_set_times(const char *image, const char *path,
                       const int64_t *access);
 
 /*
+ * Rewrite `len` bytes of `path`'s non-resident $DATA attribute starting
+ * at `offset`. Size-preserving only (W1 scope); fails with -1 if the
+ * write would extend the file, hit a resident attribute, or cross a
+ * sparse / compressed range. Returns bytes written on success.
+ */
+int64_t fs_ntfs_write_file(const char *image, const char *path,
+                           uint64_t offset, const void *buf, uint64_t len);
+
+/*
  * Modify the file_attributes field in $STANDARD_INFORMATION by adding
  * the bits in `add_flags` and removing the bits in `remove_flags`.
  * Bit values match Windows FILE_ATTRIBUTE_* (MS-FSCC 2.6) —

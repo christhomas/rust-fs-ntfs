@@ -8,12 +8,13 @@
 //! attributes without touching upstream.
 
 use crate::attr_io::{self, AttrType};
-use crate::mft_io::update_mft_record;
+use crate::data_runs::{self, DataRun};
+use crate::mft_io::{read_mft_record, update_mft_record};
 
 use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::{Ntfs, NtfsFile};
-use std::fs::File;
-use std::io::BufReader;
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -149,6 +150,132 @@ pub fn set_file_attributes_by_record_number(
         record[off..off + 4].copy_from_slice(&new.to_le_bytes());
         Ok(())
     })
+}
+
+// ---------------------------------------------------------------------------
+// Content rewrite (non-resident $DATA, size-preserving)
+// ---------------------------------------------------------------------------
+
+/// Rewrite bytes inside the existing logical range of a non-resident
+/// `$DATA` attribute. Does not extend the file; does not touch
+/// compressed or sparse-range bytes (those require W2 machinery).
+///
+/// `offset` is a byte offset within the file's logical data; `data` is
+/// written starting there. Returns the number of bytes written on
+/// success. A zero-length write is a no-op.
+pub fn write_at(image: &Path, file_path: &str, offset: u64, data: &[u8]) -> Result<u64, String> {
+    if data.is_empty() {
+        return Ok(0);
+    }
+    let rec = resolve_path_to_record_number(image, file_path)?;
+    write_at_by_record_number(image, rec, offset, data)
+}
+
+/// See [`write_at`]. Takes a record number instead of a path.
+pub fn write_at_by_record_number(
+    image: &Path,
+    record_number: u64,
+    offset: u64,
+    data: &[u8],
+) -> Result<u64, String> {
+    let (params, record) = read_mft_record(image, record_number)?;
+    let cluster_size = params.cluster_size;
+
+    let loc = attr_io::find_attribute(&record, AttrType::Data, None)
+        .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+    if loc.is_resident {
+        return Err(
+            "write_at only supports non-resident $DATA in W1 (resident grow lands in W2)"
+                .to_string(),
+        );
+    }
+
+    // Reject compressed (has compression_unit != 0). We don't decompress
+    // in W1. Check flags field in the attribute header (+0x0C).
+    let flags = u16::from_le_bytes([
+        record[loc.attr_offset + attr_io::attr_off::FLAGS],
+        record[loc.attr_offset + attr_io::attr_off::FLAGS + 1],
+    ]);
+    if flags & 0x00FF != 0 {
+        // Low byte of flags carries compression_unit encoding + sparse + encrypted.
+        return Err(format!(
+            "non-resident $DATA is compressed/sparse/encrypted (flags={flags:#06x})"
+        ));
+    }
+
+    let value_length = loc
+        .non_resident_value_length
+        .ok_or("missing non-resident value_length")?;
+    let end = offset
+        .checked_add(data.len() as u64)
+        .ok_or("offset + len overflow")?;
+    if end > value_length {
+        return Err(format!(
+            "write past EOF: offset={offset} len={} > value_length={value_length}",
+            data.len()
+        ));
+    }
+
+    let mapping_offset = loc
+        .non_resident_mapping_pairs_offset
+        .ok_or("missing mapping_pairs_offset")? as usize;
+    let mapping_start = loc.attr_offset + mapping_offset;
+    let mapping_end = loc.attr_offset + loc.attr_length;
+    if mapping_end > record.len() || mapping_start >= mapping_end {
+        return Err("mapping_pairs range out of record".to_string());
+    }
+    let runs = data_runs::decode_runs(&record[mapping_start..mapping_end])?;
+
+    let vcn_first = offset / cluster_size;
+    let vcn_last = (end - 1) / cluster_size;
+    let n_clusters = vcn_last - vcn_first + 1;
+    if data_runs::range_has_hole_or_past_end(&runs, vcn_first, n_clusters) {
+        return Err(format!(
+            "write range covers a sparse hole or extends past mapped clusters \
+             (vcn {vcn_first}..{}); W2 will handle allocation",
+            vcn_first + n_clusters
+        ));
+    }
+
+    // Walk the runs for the target range and write each contiguous span.
+    let mut fh = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(image)
+        .map_err(|e| format!("open rw: {e}"))?;
+
+    let mut cursor_in_data = 0usize;
+    let mut file_offset = offset;
+
+    while cursor_in_data < data.len() {
+        let vcn = file_offset / cluster_size;
+        let off_in_cluster = file_offset % cluster_size;
+        let run = find_run_for_vcn(&runs, vcn).ok_or_else(|| format!("no run for VCN {vcn}"))?;
+        let lcn = run.lcn.expect("hole already rejected");
+        // bytes we can write without crossing this run's end:
+        let run_end_vcn = run.starting_vcn + run.length;
+        let run_end_offset = run_end_vcn * cluster_size;
+        let max_in_this_run = run_end_offset - file_offset;
+        let remaining = (data.len() - cursor_in_data) as u64;
+        let chunk = remaining.min(max_in_this_run) as usize;
+
+        let disk_offset = (lcn + (vcn - run.starting_vcn)) * cluster_size + off_in_cluster;
+        fh.seek(SeekFrom::Start(disk_offset))
+            .map_err(|e| format!("seek write: {e}"))?;
+        fh.write_all(&data[cursor_in_data..cursor_in_data + chunk])
+            .map_err(|e| format!("write: {e}"))?;
+
+        cursor_in_data += chunk;
+        file_offset += chunk as u64;
+    }
+
+    fh.sync_all().map_err(|e| format!("fsync: {e}"))?;
+    Ok(data.len() as u64)
+}
+
+fn find_run_for_vcn(runs: &[DataRun], vcn: u64) -> Option<&DataRun> {
+    runs.iter()
+        .find(|r| vcn >= r.starting_vcn && vcn < r.starting_vcn + r.length)
 }
 
 // ---------------------------------------------------------------------------

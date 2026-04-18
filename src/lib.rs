@@ -16,6 +16,7 @@ use ntfs::structured_values::{NtfsFileName, NtfsFileNamespace, NtfsStandardInfor
 use ntfs::{Ntfs, NtfsAttributeType, NtfsFile, NtfsReadSeek};
 
 pub mod attr_io;
+pub mod data_runs;
 pub mod fsck;
 pub mod mft_io;
 pub mod write;
@@ -803,6 +804,42 @@ pub extern "C" fn fs_ntfs_set_times(
     };
     match write::set_times(std::path::Path::new(img), fp, times) {
         Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Rewrite `len` bytes at `offset` within an existing non-resident
+/// `$DATA` attribute. Does not extend the file, does not touch sparse
+/// or compressed ranges. Returns bytes written on success, `-1` on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_write_file(
+    image: *const c_char,
+    path: *const c_char,
+    offset: u64,
+    buf: *const c_void,
+    len: u64,
+) -> i64 {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_write_file: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(fp) = cstr_to_path(path) else {
+        set_error("fs_ntfs_write_file: null or non-UTF-8 path");
+        return -1;
+    };
+    if len == 0 {
+        return 0;
+    }
+    if buf.is_null() {
+        set_error("fs_ntfs_write_file: null buffer with non-zero length");
+        return -1;
+    }
+    let data = unsafe { slice::from_raw_parts(buf as *const u8, len as usize) };
+    match write::write_at(std::path::Path::new(img), fp, offset, data) {
+        Ok(n) => n as i64,
         Err(e) => {
             set_error(&e);
             -1
