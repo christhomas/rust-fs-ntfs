@@ -206,6 +206,24 @@ int64_t fs_ntfs_create_file(const char *image,
                             const char *basename);
 
 /*
+ * Upsert a single NTFS Extended Attribute on `path`. `ea_name` is
+ * NUL-terminated ASCII. `value` + `value_len` is the raw value bytes.
+ * `flags` may have bit 0x80 (FILE_NEED_EA) set. Returns 0 on success,
+ * -1 on error.
+ */
+int fs_ntfs_write_ea(const char *image, const char *path,
+                     const char *ea_name,
+                     const void *value, uint64_t value_len,
+                     uint8_t flags);
+
+/*
+ * Remove a single Extended Attribute by name. Returns 0 on success,
+ * -1 on error (e.g. not found).
+ */
+int fs_ntfs_remove_ea(const char *image, const char *path,
+                      const char *ea_name);
+
+/*
  * Write a resident $REPARSE_POINT attribute with the given tag and
  * tag-specific data. Sets FILE_ATTRIBUTE_REPARSE_POINT on the file.
  * Returns 0 on success, -1 on error.

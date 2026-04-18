@@ -979,6 +979,124 @@ pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Str
 }
 
 // ---------------------------------------------------------------------------
+// W4.3: Extended Attributes ($EA + $EA_INFORMATION)
+// ---------------------------------------------------------------------------
+
+/// Upsert (add or replace by case-insensitive name) a single extended
+/// attribute. EAs are stored resident only in this MVP.
+pub fn write_ea(
+    image: &Path,
+    file_path: &str,
+    ea_name: &[u8],
+    ea_value: &[u8],
+    flags: u8,
+) -> Result<(), String> {
+    if ea_name.is_empty() || ea_name.len() > 254 {
+        return Err(format!("invalid EA name length {}", ea_name.len()));
+    }
+    let rec = resolve_path_to_record_number(image, file_path)?;
+    update_mft_record(image, rec, |record| {
+        let mut eas = crate::ea_io::read_from_record(record)?;
+        crate::ea_io::upsert(
+            &mut eas,
+            crate::ea_io::Ea {
+                flags,
+                name: ea_name.to_vec(),
+                value: ea_value.to_vec(),
+            },
+        );
+        commit_eas(record, &eas)
+    })
+}
+
+/// Remove an EA by name (case-insensitive). Errors if not found.
+pub fn remove_ea(image: &Path, file_path: &str, ea_name: &[u8]) -> Result<(), String> {
+    let rec = resolve_path_to_record_number(image, file_path)?;
+    update_mft_record(image, rec, |record| {
+        let mut eas = crate::ea_io::read_from_record(record)?;
+        if !crate::ea_io::remove_by_name(&mut eas, ea_name) {
+            return Err(format!(
+                "EA '{}' not found",
+                String::from_utf8_lossy(ea_name)
+            ));
+        }
+        commit_eas(record, &eas)
+    })
+}
+
+/// Return all EAs on `file_path` (empty vec if none).
+pub fn list_eas(image: &Path, file_path: &str) -> Result<Vec<crate::ea_io::Ea>, String> {
+    let rec = resolve_path_to_record_number(image, file_path)?;
+    let (_, record) = read_mft_record(image, rec)?;
+    crate::ea_io::read_from_record(&record)
+}
+
+/// Rewrite `$EA` + `$EA_INFORMATION`. Empty list ⇒ both removed.
+fn commit_eas(record: &mut [u8], eas: &[crate::ea_io::Ea]) -> Result<(), String> {
+    let packed = crate::ea_io::encode(eas)?;
+    let need = crate::ea_io::count_need_ea(eas);
+    let ea_info_value = crate::ea_io::build_ea_information_value(packed.len() as u16, need);
+
+    if eas.is_empty() {
+        remove_unnamed_attr(record, AttrType::ExtendedAttribute);
+        remove_unnamed_attr(record, AttrType::ExtendedAttributeInformation);
+        return Ok(());
+    }
+
+    // Upsert $EA_INFORMATION (0xD0) first so resize_attribute shifts
+    // don't invalidate the $EA offset.
+    upsert_unnamed_resident_attr(
+        record,
+        AttrType::ExtendedAttributeInformation,
+        &ea_info_value,
+        &crate::record_build::build_resident_ea_information_attribute,
+    )?;
+    upsert_unnamed_resident_attr(
+        record,
+        AttrType::ExtendedAttribute,
+        &packed,
+        &crate::record_build::build_resident_ea_attribute,
+    )?;
+    Ok(())
+}
+
+fn remove_unnamed_attr(record: &mut [u8], ty: AttrType) {
+    let Some(loc) = attr_io::find_attribute(record, ty, None) else {
+        return;
+    };
+    let old_len = loc.attr_length;
+    let bytes_used =
+        u32::from_le_bytes([record[0x18], record[0x19], record[0x1A], record[0x1B]]) as usize;
+    record.copy_within(loc.attr_offset + old_len..bytes_used, loc.attr_offset);
+    for byte in &mut record[bytes_used - old_len..bytes_used] {
+        *byte = 0;
+    }
+    let new_bu = (bytes_used - old_len) as u32;
+    record[0x18..0x1C].copy_from_slice(&new_bu.to_le_bytes());
+}
+
+fn upsert_unnamed_resident_attr<F>(
+    record: &mut [u8],
+    ty: AttrType,
+    value: &[u8],
+    build: &F,
+) -> Result<(), String>
+where
+    F: Fn(u16, &[u8]) -> Result<Vec<u8>, String>,
+{
+    if let Some(loc) = attr_io::find_attribute(record, ty, None) {
+        let attr_id = loc.attribute_id;
+        let new_attr = build(attr_id, value)?;
+        crate::attr_resize::replace_attribute(record, loc.attr_offset, &new_attr)?;
+    } else {
+        let attr_id = crate::attr_resize::allocate_attribute_id(record);
+        let new_attr = build(attr_id, value)?;
+        crate::attr_resize::insert_attribute_before_end(record, &new_attr)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // W4.2: Reparse points (incl. symlinks)
 // ---------------------------------------------------------------------------
 

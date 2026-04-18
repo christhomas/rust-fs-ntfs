@@ -26,6 +26,8 @@ pub enum AttrType {
     IndexAllocation = 0xA0,
     Bitmap = 0xB0,
     ReparsePoint = 0xC0,
+    ExtendedAttributeInformation = 0xD0,
+    ExtendedAttribute = 0xE0,
 }
 
 impl AttrType {
@@ -43,6 +45,8 @@ impl AttrType {
             0xA0 => Some(Self::IndexAllocation),
             0xB0 => Some(Self::Bitmap),
             0xC0 => Some(Self::ReparsePoint),
+            0xD0 => Some(Self::ExtendedAttributeInformation),
+            0xE0 => Some(Self::ExtendedAttribute),
             _ => None,
         }
     }
