@@ -8,6 +8,7 @@
 //! attributes without touching upstream.
 
 use crate::attr_io::{self, AttrType};
+use crate::bitmap;
 use crate::data_runs::{self, DataRun};
 use crate::mft_io::{read_mft_record, update_mft_record};
 
@@ -276,6 +277,194 @@ pub fn write_at_by_record_number(
 fn find_run_for_vcn(runs: &[DataRun], vcn: u64) -> Option<&DataRun> {
     runs.iter()
         .find(|r| vcn >= r.starting_vcn && vcn < r.starting_vcn + r.length)
+}
+
+// ---------------------------------------------------------------------------
+// Truncate (shrink only — W2.5 MVP)
+// ---------------------------------------------------------------------------
+
+/// Shrink a non-resident file's `$DATA` to `new_size` bytes. Clusters
+/// that fall past the new end are freed in `$Bitmap`; the attribute's
+/// mapping-pairs are rewritten; `value_length` / `allocated_length` /
+/// `initialized_length` are updated.
+///
+/// The MFT record is updated BEFORE the bitmap bits are freed so a
+/// mid-operation crash leaves the volume in the worst case with some
+/// orphaned still-allocated clusters (wasted space, recoverable by
+/// scan) — not with the file pointing at clusters that another
+/// allocation could claim.
+///
+/// Rejects: grow (new_size &gt; current size), resident `$DATA`,
+/// compressed / sparse / encrypted flag set.
+pub fn truncate(image: &Path, file_path: &str, new_size: u64) -> Result<u64, String> {
+    let rec = resolve_path_to_record_number(image, file_path)?;
+    truncate_by_record_number(image, rec, new_size)
+}
+
+/// Attribute-header offsets for non-resident lengths (Flatcap).
+const NONRES_ALLOCATED_LENGTH: usize = 0x28;
+const NONRES_DATA_LENGTH: usize = 0x30;
+const NONRES_INITIALIZED_LENGTH: usize = 0x38;
+const NONRES_LAST_VCN: usize = 0x18;
+
+pub fn truncate_by_record_number(
+    image: &Path,
+    record_number: u64,
+    new_size: u64,
+) -> Result<u64, String> {
+    let (params, record) = read_mft_record(image, record_number)?;
+    let cluster_size = params.cluster_size;
+
+    let loc = attr_io::find_attribute(&record, AttrType::Data, None)
+        .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+    if loc.is_resident {
+        return Err("truncate: resident $DATA unsupported in W2 MVP".to_string());
+    }
+    let flags = u16::from_le_bytes([
+        record[loc.attr_offset + attr_io::attr_off::FLAGS],
+        record[loc.attr_offset + attr_io::attr_off::FLAGS + 1],
+    ]);
+    if flags & 0x00FF != 0 {
+        return Err(format!(
+            "compressed/sparse/encrypted non-resident $DATA (flags={flags:#06x})"
+        ));
+    }
+
+    let current_len = loc.non_resident_value_length.ok_or("no value_length")?;
+    if new_size > current_len {
+        return Err(format!(
+            "truncate: grow not yet implemented ({new_size} > {current_len})"
+        ));
+    }
+    if new_size == current_len {
+        return Ok(new_size);
+    }
+
+    // Decode existing runs.
+    let mapping_offset = loc
+        .non_resident_mapping_pairs_offset
+        .ok_or("missing mapping_pairs_offset")? as usize;
+    let mapping_start = loc.attr_offset + mapping_offset;
+    let mapping_end = loc.attr_offset + loc.attr_length;
+    let runs = data_runs::decode_runs(&record[mapping_start..mapping_end])?;
+
+    // new_last_vcn: None if new_size == 0; else ceil(new_size / cs) - 1.
+    let new_last_vcn: Option<u64> = if new_size == 0 {
+        None
+    } else {
+        Some((new_size - 1) / cluster_size)
+    };
+
+    let (new_runs, clusters_to_free) = split_runs_for_shrink(&runs, new_last_vcn);
+
+    // Encode the trimmed runs.
+    let new_mapping = data_runs::encode_runs(&new_runs)?;
+    let mapping_capacity = mapping_end - mapping_start;
+    if new_mapping.len() > mapping_capacity {
+        return Err(format!(
+            "trimmed mapping_pairs exceed attr header capacity ({} > {})",
+            new_mapping.len(),
+            mapping_capacity
+        ));
+    }
+
+    let new_allocated = new_last_vcn.map(|lv| (lv + 1) * cluster_size).unwrap_or(0);
+    let new_last_vcn_field = new_last_vcn.map(|lv| lv as i64).unwrap_or(-1);
+
+    // Rewrite the MFT record FIRST. Once this sync completes, the file's
+    // logical size + mapping no longer references the clusters we're
+    // about to free. Then free clusters in $Bitmap.
+    update_mft_record(image, record_number, |record| {
+        let loc = attr_io::find_attribute(record, AttrType::Data, None)
+            .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+        let attr_start = loc.attr_offset;
+        let mapping_offset = loc
+            .non_resident_mapping_pairs_offset
+            .ok_or("missing mapping_pairs_offset")? as usize;
+        let mapping_abs = attr_start + mapping_offset;
+        let mapping_end_abs = attr_start + loc.attr_length;
+
+        // Write new mapping; zero-pad the tail of the mapping region so
+        // the attribute length stays the same (we avoid resizing the
+        // attribute here; that's W2.1 work).
+        record[mapping_abs..mapping_abs + new_mapping.len()].copy_from_slice(&new_mapping);
+        for i in (mapping_abs + new_mapping.len())..mapping_end_abs {
+            record[i] = 0;
+        }
+
+        // Patch lengths. `initialized_length` is clamped to the new size
+        // (can't be past EOF).
+        let init_off = attr_start + NONRES_INITIALIZED_LENGTH;
+        let cur_init = u64::from_le_bytes(record[init_off..init_off + 8].try_into().unwrap());
+        let new_init = cur_init.min(new_size);
+
+        record[attr_start + NONRES_ALLOCATED_LENGTH..attr_start + NONRES_ALLOCATED_LENGTH + 8]
+            .copy_from_slice(&new_allocated.to_le_bytes());
+        record[attr_start + NONRES_DATA_LENGTH..attr_start + NONRES_DATA_LENGTH + 8]
+            .copy_from_slice(&new_size.to_le_bytes());
+        record[attr_start + NONRES_INITIALIZED_LENGTH..attr_start + NONRES_INITIALIZED_LENGTH + 8]
+            .copy_from_slice(&new_init.to_le_bytes());
+
+        // last_vcn (i64 LE at +0x18). For empty files, spec uses -1.
+        record[attr_start + NONRES_LAST_VCN..attr_start + NONRES_LAST_VCN + 8]
+            .copy_from_slice(&new_last_vcn_field.to_le_bytes());
+
+        Ok(())
+    })?;
+
+    // Now free the freed clusters.
+    if !clusters_to_free.is_empty() {
+        let bm = bitmap::locate_bitmap(image)?;
+        for (lcn, n) in &clusters_to_free {
+            // Best-effort: if a double-free occurs we report, but don't
+            // undo the earlier record update — the file size change has
+            // committed.
+            bitmap::free(image, &bm, *lcn, *n)
+                .map_err(|e| format!("free clusters [{lcn}..{}]: {e}", lcn + n))?;
+        }
+    }
+
+    Ok(new_size)
+}
+
+/// Split `runs` into (kept, freed) for a shrink to `new_last_vcn`.
+/// `None` ⇒ free everything (truncate to 0).
+fn split_runs_for_shrink(
+    runs: &[DataRun],
+    new_last_vcn: Option<u64>,
+) -> (Vec<DataRun>, Vec<(u64, u64)>) {
+    let mut kept = Vec::new();
+    let mut freed = Vec::new();
+    for r in runs {
+        match new_last_vcn {
+            None => {
+                if let Some(lcn) = r.lcn {
+                    freed.push((lcn, r.length));
+                }
+            }
+            Some(lv) => {
+                if r.starting_vcn > lv {
+                    if let Some(lcn) = r.lcn {
+                        freed.push((lcn, r.length));
+                    }
+                } else if r.starting_vcn + r.length - 1 <= lv {
+                    kept.push(*r);
+                } else {
+                    let keep_len = lv + 1 - r.starting_vcn;
+                    let free_len = r.length - keep_len;
+                    kept.push(DataRun {
+                        starting_vcn: r.starting_vcn,
+                        length: keep_len,
+                        lcn: r.lcn,
+                    });
+                    if let Some(lcn) = r.lcn {
+                        freed.push((lcn + keep_len, free_len));
+                    }
+                }
+            }
+        }
+    }
+    (kept, freed)
 }
 
 // ---------------------------------------------------------------------------

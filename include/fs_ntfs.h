@@ -195,6 +195,16 @@ int fs_ntfs_set_times(const char *image, const char *path,
                       const int64_t *access);
 
 /*
+ * Shrink a file's non-resident $DATA to `new_size` bytes. Frees the
+ * clusters past the new end in $Bitmap. Growing is not supported in
+ * W2 MVP — calls with new_size > current_size return -1.
+ *
+ * Returns the new size on success, -1 on error.
+ */
+int64_t fs_ntfs_truncate(const char *image, const char *path,
+                         uint64_t new_size);
+
+/*
  * Rewrite `len` bytes of `path`'s non-resident $DATA attribute starting
  * at `offset`. Size-preserving only (W1 scope); fails with -1 if the
  * write would extend the file, hit a resident attribute, or cross a
