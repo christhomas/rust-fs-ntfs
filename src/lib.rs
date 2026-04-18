@@ -812,6 +812,33 @@ pub extern "C" fn fs_ntfs_set_times(
     }
 }
 
+/// Shrink a file's non-resident `$DATA` to `new_size` bytes. Clusters
+/// past the new end are freed. Growing is not supported in W2; will
+/// return -1 if `new_size > current_size`. Returns the new size on
+/// success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_truncate(
+    image: *const c_char,
+    path: *const c_char,
+    new_size: u64,
+) -> i64 {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_truncate: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(fp) = cstr_to_path(path) else {
+        set_error("fs_ntfs_truncate: null or non-UTF-8 path");
+        return -1;
+    };
+    match write::truncate(std::path::Path::new(img), fp, new_size) {
+        Ok(n) => n as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Rewrite `len` bytes at `offset` within an existing non-resident
 /// `$DATA` attribute. Does not extend the file, does not touch sparse
 /// or compressed ranges. Returns bytes written on success, `-1` on error.
