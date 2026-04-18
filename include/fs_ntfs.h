@@ -206,6 +206,22 @@ int64_t fs_ntfs_create_file(const char *image,
                             const char *basename);
 
 /*
+ * Create or replace a resident named $DATA stream (Alternate Data
+ * Stream). Stream content must fit in the file's free MFT record
+ * space (non-resident named streams are future work). Returns 0 on
+ * success, -1 on error.
+ */
+int fs_ntfs_write_named_stream(const char *image, const char *path,
+                               const char *stream_name,
+                               const void *buf, uint64_t len);
+
+/*
+ * Delete a named $DATA stream. Returns 0 on success, -1 on error.
+ */
+int fs_ntfs_delete_named_stream(const char *image, const char *path,
+                                const char *stream_name);
+
+/*
  * Write `len` bytes from `buf` as the entire contents of the file at
  * `path`. Transparently dispatches: stays resident if it fits in the
  * MFT record, otherwise allocates clusters and promotes $DATA to

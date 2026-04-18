@@ -847,6 +847,73 @@ pub extern "C" fn fs_ntfs_create_file(
     }
 }
 
+/// Create or replace a resident named `$DATA` stream (Alternate Data
+/// Stream) on the file at `path`. Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_write_named_stream(
+    image: *const c_char,
+    path: *const c_char,
+    stream_name: *const c_char,
+    buf: *const c_void,
+    len: u64,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_write_named_stream: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_write_named_stream: null or non-UTF-8 path");
+        return -1;
+    };
+    let Some(sn) = cstr_to_path(stream_name) else {
+        set_error("fs_ntfs_write_named_stream: null or non-UTF-8 stream_name");
+        return -1;
+    };
+    let data: &[u8] = if len == 0 {
+        &[]
+    } else if buf.is_null() {
+        set_error("fs_ntfs_write_named_stream: null buf with non-zero len");
+        return -1;
+    } else {
+        unsafe { slice::from_raw_parts(buf as *const u8, len as usize) }
+    };
+    match write::write_named_stream_resident(std::path::Path::new(img), p, sn, data) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Delete a named `$DATA` stream. Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_delete_named_stream(
+    image: *const c_char,
+    path: *const c_char,
+    stream_name: *const c_char,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_delete_named_stream: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_delete_named_stream: null or non-UTF-8 path");
+        return -1;
+    };
+    let Some(sn) = cstr_to_path(stream_name) else {
+        set_error("fs_ntfs_delete_named_stream: null or non-UTF-8 stream_name");
+        return -1;
+    };
+    match write::delete_named_stream(std::path::Path::new(img), p, sn) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Write `new_data` as the entire contents of the file at `path`.
 /// Stays resident if it fits; promotes to non-resident (allocating
 /// clusters) if the data exceeds the MFT record's free space.
