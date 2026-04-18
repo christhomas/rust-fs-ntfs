@@ -145,6 +145,15 @@ const char *fs_ntfs_last_error(void);
 /* ---- Recovery / fsck ---- */
 
 /*
+ * Check whether the volume's VOLUME_IS_DIRTY flag is set. Lightweight
+ * probe that doesn't fully mount the volume. Returns:
+ *   1  — dirty
+ *   0  — clean
+ *  -1  — error
+ */
+int fs_ntfs_is_dirty(const char *path);
+
+/*
  * Clear the VOLUME_IS_DIRTY flag on an NTFS image so Windows / FSKit /
  * other NTFS drivers will remount it. Must NOT be called on a volume
  * that is currently mounted.

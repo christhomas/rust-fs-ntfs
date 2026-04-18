@@ -792,6 +792,24 @@ fn cstr_to_path<'a>(path: *const c_char) -> Option<&'a str> {
     unsafe { CStr::from_ptr(path) }.to_str().ok()
 }
 
+/// Check whether the volume's `VOLUME_IS_DIRTY` flag is set.
+/// Returns `1` if dirty, `0` if clean, `-1` on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_is_dirty(path: *const c_char) -> c_int {
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_is_dirty: null or non-UTF-8 path");
+        return -1;
+    };
+    match fsck::is_dirty(p) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Clear the `VOLUME_IS_DIRTY` flag on an NTFS image.
 ///
 /// Returns `1` if the flag was set and has been cleared, `0` if the

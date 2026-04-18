@@ -52,6 +52,15 @@ const RESIDENT_ATTR_VALUE_OFFSET_FIELD: u64 = 0x14;
 /// [Flatcap $LogFile](https://flatcap.github.io/linux-ntfs/ntfs/files/logfile.html).
 const LOGFILE_EMPTY_FILL: u8 = 0xFF;
 
+/// Return `true` if the volume's `VOLUME_IS_DIRTY` flag (0x0001) is
+/// set. Lightweight probe — parses the boot sector + `$Volume` but
+/// doesn't mount the volume or load the upcase table.
+pub fn is_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
+    let path = path.as_ref();
+    let (_, current_flags) = locate_volume_flags(path)?;
+    Ok(NtfsVolumeFlags::from_bits_truncate(current_flags).contains(NtfsVolumeFlags::IS_DIRTY))
+}
+
 /// Clear the `VOLUME_IS_DIRTY` flag on the given NTFS image.
 ///
 /// Returns `Ok(true)` if the flag was set and has been cleared,
