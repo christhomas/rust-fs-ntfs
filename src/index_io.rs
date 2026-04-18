@@ -11,6 +11,11 @@ use crate::attr_io::{self, AttrType};
 /// Offsets inside `$INDEX_ROOT`'s resident value.
 /// Layout: `INDEX_ROOT_HEADER (16 bytes) + INDEX_HEADER (16 bytes) + entries…`.
 const IR_INDEX_HEADER_OFFSET: usize = 16;
+/// Flags byte within INDEX_HEADER.
+const IH_FLAGS_OFFSET: usize = 0x0C;
+/// INDEX_HEADER bit: any of the entries has a subnode pointer (i.e.
+/// the index overflows into `$INDEX_ALLOCATION`).
+pub const IH_FLAG_HAS_SUBNODES: u8 = 0x01;
 /// Offsets inside `INDEX_HEADER`:
 const IH_FIRST_ENTRY_OFFSET: usize = 0;
 const IH_TOTAL_SIZE_OF_ENTRIES: usize = 4;
@@ -133,6 +138,109 @@ pub fn find_index_entry(record: &[u8], wanted: &str) -> Result<Option<IndexEntry
         // Ignore the subnode VCN tail if present — for resident-only walk.
         let _ = flags & IE_FLAG_HAS_SUBNODE;
         cursor += length;
+    }
+    Ok(None)
+}
+
+/// Read the INDEX_HEADER flags byte from an `$INDEX_ROOT`. Returns
+/// `Some(flags)` if the record contains `$INDEX_ROOT:$I30`,
+/// otherwise `None`.
+pub fn index_root_flags(record: &[u8]) -> Option<u8> {
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some("$I30"))?;
+    if !ir.is_resident {
+        return None;
+    }
+    let val_off = ir.resident_value_offset? as usize;
+    let ih_start = ir.attr_offset + val_off + IR_INDEX_HEADER_OFFSET;
+    Some(record[ih_start + IH_FLAGS_OFFSET])
+}
+
+/// Scan a clean (post-fixup) INDX block buffer for the entry whose
+/// filename matches `wanted`. Returns `Some(location)` on hit,
+/// `None` otherwise.
+///
+/// The returned `record_offset` is relative to the start of the INDX
+/// block — callers use it to patch bytes within the same buffer.
+pub fn find_entry_in_indx_block(
+    block: &[u8],
+    wanted: &str,
+) -> Result<Option<IndexEntryLocation>, String> {
+    use crate::idx_block::{
+        IH_FIRST_ENTRY_OFFSET, IH_TOTAL_SIZE_OF_ENTRIES, INDX_INDEX_HEADER_OFFSET,
+    };
+    if &block[0..4] != b"INDX" {
+        return Err("not an INDX block (fixup missing?)".to_string());
+    }
+    let ih_start = INDX_INDEX_HEADER_OFFSET;
+    let first_entry_rel = u32::from_le_bytes([
+        block[ih_start + IH_FIRST_ENTRY_OFFSET],
+        block[ih_start + IH_FIRST_ENTRY_OFFSET + 1],
+        block[ih_start + IH_FIRST_ENTRY_OFFSET + 2],
+        block[ih_start + IH_FIRST_ENTRY_OFFSET + 3],
+    ]) as usize;
+    let total_size = u32::from_le_bytes([
+        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES],
+        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 1],
+        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 2],
+        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 3],
+    ]) as usize;
+    let mut cursor = ih_start + first_entry_rel;
+    let end = ih_start + total_size;
+    scan_entries_for_name(block, &mut cursor, end, wanted)
+}
+
+/// Shared scanner: sweep entries starting at `cursor`, stopping at
+/// `end` or IE_FLAG_LAST, returning the matching entry's location.
+fn scan_entries_for_name(
+    buf: &[u8],
+    cursor: &mut usize,
+    end: usize,
+    wanted: &str,
+) -> Result<Option<IndexEntryLocation>, String> {
+    let wanted_utf16: Vec<u16> = wanted.encode_utf16().collect();
+    while *cursor < end && *cursor + IE_KEY_START <= buf.len() {
+        let length =
+            u16::from_le_bytes([buf[*cursor + IE_LENGTH], buf[*cursor + IE_LENGTH + 1]]) as usize;
+        let key_length = u16::from_le_bytes([
+            buf[*cursor + IE_KEY_LENGTH],
+            buf[*cursor + IE_KEY_LENGTH + 1],
+        ]) as usize;
+        let flags = u16::from_le_bytes([buf[*cursor + IE_FLAGS], buf[*cursor + IE_FLAGS + 1]]);
+
+        if flags & IE_FLAG_LAST != 0 {
+            break;
+        }
+        if length == 0 || *cursor + length > buf.len() {
+            return Err(format!("malformed index entry at {cursor}"));
+        }
+        if key_length >= FN_NAME_OFFSET {
+            let key_start = *cursor + IE_KEY_START;
+            let name_length = buf[key_start + FN_NAME_LENGTH_OFFSET] as usize;
+            let name_start = key_start + FN_NAME_OFFSET;
+            if name_start + name_length * 2 <= buf.len() && name_length == wanted_utf16.len() {
+                let name_u16: Vec<u16> = buf[name_start..name_start + name_length * 2]
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+                if name_u16 == wanted_utf16 {
+                    let file_ref = u64::from_le_bytes(
+                        buf[*cursor + IE_FILE_REFERENCE..*cursor + IE_FILE_REFERENCE + 8]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    let file_record_number = file_ref & 0x0000_FFFF_FFFF_FFFF;
+                    return Ok(Some(IndexEntryLocation {
+                        record_offset: *cursor,
+                        length,
+                        key_length,
+                        file_record_number,
+                        name_length: name_length as u8,
+                    }));
+                }
+            }
+        }
+        let _ = flags & IE_FLAG_HAS_SUBNODE;
+        *cursor += length;
     }
     Ok(None)
 }

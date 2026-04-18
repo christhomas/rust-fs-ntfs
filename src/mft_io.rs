@@ -111,8 +111,23 @@ pub fn record_flags(record: &[u8]) -> u16 {
 /// verifies every sector-end pair matches the USN; returns Err on mismatch
 /// (indicates a torn write or corrupted record).
 pub fn apply_fixup_on_read(record: &mut [u8], bytes_per_sector: u16) -> Result<(), String> {
-    if &record[0..4] != FILE_MAGIC {
-        return Err(format!("not a FILE record: magic = {:02x?}", &record[0..4]));
+    apply_fixup_on_read_magic(record, bytes_per_sector, FILE_MAGIC)
+}
+
+/// Variant of [`apply_fixup_on_read`] parameterized on the expected
+/// 4-byte magic. Use this for INDX blocks (magic `b"INDX"`) and any
+/// other multi-sector record with USA fixup.
+pub fn apply_fixup_on_read_magic(
+    record: &mut [u8],
+    bytes_per_sector: u16,
+    expected_magic: &[u8; 4],
+) -> Result<(), String> {
+    if &record[0..4] != expected_magic {
+        return Err(format!(
+            "magic mismatch: expected {:?}, got {:02x?}",
+            std::str::from_utf8(expected_magic).unwrap_or("?"),
+            &record[0..4]
+        ));
     }
     let (usa_offset, usa_count) = read_usa_header(record)?;
     validate_usa_geometry(record.len(), bytes_per_sector, usa_offset, usa_count)?;
@@ -141,8 +156,22 @@ pub fn apply_fixup_on_read(record: &mut [u8], bytes_per_sector: u16) -> Result<(
 /// with the new USN. Call after mutating the record and immediately
 /// before writing back.
 pub fn apply_fixup_on_write(record: &mut [u8], bytes_per_sector: u16) -> Result<(), String> {
-    if &record[0..4] != FILE_MAGIC {
-        return Err("not a FILE record".to_string());
+    apply_fixup_on_write_magic(record, bytes_per_sector, FILE_MAGIC)
+}
+
+/// Variant of [`apply_fixup_on_write`] parameterized on the expected
+/// 4-byte magic (use `b"INDX"` for `$INDEX_ALLOCATION` blocks).
+pub fn apply_fixup_on_write_magic(
+    record: &mut [u8],
+    bytes_per_sector: u16,
+    expected_magic: &[u8; 4],
+) -> Result<(), String> {
+    if &record[0..4] != expected_magic {
+        return Err(format!(
+            "magic mismatch: expected {:?}, got {:02x?}",
+            std::str::from_utf8(expected_magic).unwrap_or("?"),
+            &record[0..4]
+        ));
     }
     let (usa_offset, usa_count) = read_usa_header(record)?;
     validate_usa_geometry(record.len(), bytes_per_sector, usa_offset, usa_count)?;

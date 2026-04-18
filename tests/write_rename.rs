@@ -80,17 +80,36 @@ fn read_file_contents(img: &str, path: &str) -> Vec<u8> {
 }
 
 #[test]
-fn rename_in_root_currently_fails_with_index_allocation_msg() {
-    // Root dir on mkntfs-produced images has $INDEX_ALLOCATION spillover
-    // even when small — the MVP walker only handles resident $INDEX_ROOT.
-    // Document the limitation via a negative test; once the index_io
-    // walker learns $INDEX_ALLOCATION (W3 follow-up), flip this to a
-    // positive assertion.
-    let img = working_copy("root_allocation_case");
-    let err = write::rename_same_length(Path::new(&img), "/hello.txt", "world.txt").unwrap_err();
+fn rename_in_root_via_index_allocation() {
+    // mkntfs lays the root dir with $INDEX_ALLOCATION even for small
+    // directories — this exercises the walker that scans INDX blocks.
+    let img = working_copy("root_allocation");
+    write::rename_same_length(Path::new(&img), "/hello.txt", "world.txt")
+        .expect("rename via $INDEX_ALLOCATION");
+
+    let names = list_root(&img);
     assert!(
-        err.contains("no entry") || err.contains("index"),
-        "expected index-allocation limitation message; got {err:?}"
+        names.iter().any(|n| n == "world.txt"),
+        "missing world.txt after rename: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "hello.txt"),
+        "old name still present: {names:?}"
+    );
+
+    // Content unchanged.
+    let content = read_file_contents(&img, "/world.txt");
+    assert_eq!(content, b"Hello from NTFS!\n");
+}
+
+#[test]
+fn rename_in_root_preserves_other_entries() {
+    let img = working_copy("root_preserve");
+    write::rename_same_length(Path::new(&img), "/hello.txt", "world.txt").expect("rename");
+    let names = list_root(&img);
+    assert!(
+        names.iter().any(|n| n == "Documents"),
+        "Documents missing: {names:?}"
     );
 }
 
@@ -163,7 +182,7 @@ fn upstream_mounts_after_rename() {
     // Fresh mount still works.
     let f = std::fs::File::open(&img).unwrap();
     let mut r = BufReader::new(f);
-    let mut ntfs = Ntfs::new(&mut r).expect("parse");
+    let ntfs = Ntfs::new(&mut r).expect("parse");
     let vi = ntfs.volume_info(&mut r).expect("volume_info");
     assert!(vi.major_version() >= 3);
 }

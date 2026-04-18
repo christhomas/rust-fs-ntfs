@@ -20,6 +20,7 @@ pub mod attr_resize;
 pub mod bitmap;
 pub mod data_runs;
 pub mod fsck;
+pub mod idx_block;
 pub mod index_io;
 pub mod mft_io;
 pub mod write;
