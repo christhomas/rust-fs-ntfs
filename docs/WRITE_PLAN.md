@@ -265,7 +265,21 @@ bitmap bit for a record that doesn't yet exist.
 
 ---
 
-## Phase W3 — create / delete / mkdir / rmdir / rename (planned)
+## Phase W3 — create / delete / mkdir / rmdir / rename (partial)
+
+**Shipped:** `write::rename_same_length` (+ `src/index_io.rs`). Walks
+a directory's resident `$INDEX_ROOT:$I30`, finds the entry matching
+an old name, and byte-patches both the index entry's key and the
+file's own `$FILE_NAME` attribute(s). Same UTF-16 length required.
+
+**Known limitation.** `mkntfs` lays out root directories with
+`$INDEX_ALLOCATION` spillover even for small dirs, so root-level
+rename currently returns "no entry for …". Works for subdirectories
+whose index fits in resident `$INDEX_ROOT` (e.g. `/Documents`).
+Promoting the walker to also traverse `$INDEX_ALLOCATION` is a
+separate primitive — see `src/index_io.rs` TODO comment.
+
+**Still to ship in W3:**
 
 Built on top of W2 (needs cluster allocator + attribute resize) plus
 the single-hardest piece of NTFS write support: `$INDEX_ROOT` /

@@ -178,9 +178,11 @@ next step — `crate-type = ["staticlib", "rlib"]` permits it.
 
 ## Test coverage
 
-39 integration tests across 9 test files. See
+138 integration tests across 19 test files. See
 [Test infrastructure](#test-infrastructure) above for the fixture
-layout; all 39 pass locally and in CI.
+layout; all 138 pass locally and in CI.
+
+**Read path** (43 tests, unchanged from the initial testsuite work):
 
 | File | Fixture | Tests | What's covered |
 |---|---|---|---|
@@ -193,6 +195,24 @@ layout; all 39 pass locally and in CI.
 | `deep.rs` | ntfs-deep | 2 | Read file 20 levels deep, surface file still reads. |
 | `fsck.rs` | synth from ntfs-basic | 7 | `fsck::clear_dirty` / `reset_logfile` / `fsck` — dirty state patched by test helpers using upstream-only APIs. |
 | `capi_fsck.rs` | synth from ntfs-basic | 8 | Same operations via the `fs_ntfs_*` C ABI; covers null-path, bad-path, return codes, out-params. |
+
+**Write path** (95 tests added across W1/W2/W3):
+
+| File | Fixture | Tests | What's covered |
+|---|---|---|---|
+| `mft_io.rs` | ntfs-basic | 9 | USA fixup round-trip, boot-params parse, RMW identity, torn-write detection, free-record refusal. |
+| `write_times.rs` | ntfs-basic | 6 | `set_times` all-four, partial field writes, nested path, missing-path rejection, remount round-trip, upstream post-write mount. |
+| `write_attrs.rs` | ntfs-basic | 6 | `set_file_attributes` add/remove/multi/overlap/survive-remount/isolation. |
+| `capi_write_w1.rs` | ntfs-basic | 6 | C-ABI `fs_ntfs_set_times` / `fs_ntfs_chattr` including null-path + overlap. |
+| `write_content.rs` | ntfs-large-file | 7 | `write_at` non-resident rewrite: MB boundary, surrounding bytes, past-EOF rejection, resident rejection, zero-len no-op, remount, cluster-boundary spanning. |
+| `capi_write_content.rs` | ntfs-large-file | 4 | C-ABI `fs_ntfs_write_file` happy path + error cases. |
+| `data_runs.rs` | — | 20 | Mapping-pair decoder + encoder round-trips: sparse, negative delta, multi-byte LCN, VCN-gap rejection, edge cases. |
+| `bitmap.rs` | ntfs-basic | 10 | `$Bitmap` allocator: LCN 0/MFT allocated, find-free-run, alloc/free round-trip, double-alloc rejected, double-free rejected, overflow bounds, survives-remount. |
+| `write_truncate.rs` | ntfs-large-file | 7 | Shrink to half/zero/same/partial cluster; bitmap clusters freed; grow rejected; upstream reads truncated file. |
+| `capi_write_truncate.rs` | ntfs-large-file | 4 | C-ABI `fs_ntfs_truncate` including grow rejection + null-path. |
+| `write_grow.rs` | ntfs-large-file | 5 | Append clusters, new bytes read as zero, bitmap free count drops, shrink rejected, remount. |
+| `attr_resize.rs` | ntfs-basic | 8 | Resident attribute resize via volume-label rename: same-len / shrink / grow / zero-len / round-trip / huge-grow rejection / preserves-subsequent / low-level primitive. |
+| `write_rename.rs` | ntfs-basic | 7 | Same-length rename in subdir, root-limitation negative test, length mismatch rejection, slash rejection, missing source, collateral preservation, post-rename upstream mount. |
 
 No unit tests inside the crate; all coverage is integration-level.
 Coverage gap: see the last paragraph in
