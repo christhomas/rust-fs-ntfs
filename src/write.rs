@@ -979,6 +979,115 @@ pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Str
 }
 
 // ---------------------------------------------------------------------------
+// W4.2: Reparse points (incl. symlinks)
+// ---------------------------------------------------------------------------
+
+/// FILE_ATTRIBUTE_REPARSE_POINT bit per MS-FSCC 2.6.
+pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+/// Write a resident `$REPARSE_POINT` attribute on an existing file
+/// with the given tag and tag-specific data. Sets the
+/// `FILE_ATTRIBUTE_REPARSE_POINT` flag on `$STANDARD_INFORMATION`.
+/// If the file already has a `$REPARSE_POINT`, it's replaced.
+pub fn write_reparse_point(
+    image: &Path,
+    file_path: &str,
+    reparse_tag: u32,
+    data: &[u8],
+) -> Result<(), String> {
+    let rec = resolve_path_to_record_number(image, file_path)?;
+    update_mft_record(image, rec, |record| {
+        let existing = attr_io::find_attribute(record, AttrType::ReparsePoint, None);
+        if let Some(loc) = existing {
+            let attr_id = loc.attribute_id;
+            let new_attr = crate::record_build::build_resident_reparse_point_attribute(
+                attr_id,
+                reparse_tag,
+                data,
+            )?;
+            crate::attr_resize::replace_attribute(record, loc.attr_offset, &new_attr)?;
+        } else {
+            let attr_id = crate::attr_resize::allocate_attribute_id(record);
+            let new_attr = crate::record_build::build_resident_reparse_point_attribute(
+                attr_id,
+                reparse_tag,
+                data,
+            )?;
+            crate::attr_resize::insert_attribute_before_end(record, &new_attr)?;
+        }
+        set_si_file_attributes_bit(record, FILE_ATTRIBUTE_REPARSE_POINT, true)?;
+        Ok(())
+    })
+}
+
+/// Remove the `$REPARSE_POINT` attribute and clear the
+/// `FILE_ATTRIBUTE_REPARSE_POINT` flag.
+pub fn remove_reparse_point(image: &Path, file_path: &str) -> Result<(), String> {
+    let rec = resolve_path_to_record_number(image, file_path)?;
+    update_mft_record(image, rec, |record| {
+        let loc = attr_io::find_attribute(record, AttrType::ReparsePoint, None)
+            .ok_or_else(|| "no $REPARSE_POINT to remove".to_string())?;
+        let old_len = loc.attr_length;
+        let bytes_used =
+            u32::from_le_bytes([record[0x18], record[0x19], record[0x1A], record[0x1B]]) as usize;
+        record.copy_within(loc.attr_offset + old_len..bytes_used, loc.attr_offset);
+        for byte in &mut record[bytes_used - old_len..bytes_used] {
+            *byte = 0;
+        }
+        let new_bu = (bytes_used - old_len) as u32;
+        record[0x18..0x1C].copy_from_slice(&new_bu.to_le_bytes());
+
+        set_si_file_attributes_bit(record, FILE_ATTRIBUTE_REPARSE_POINT, false)?;
+        Ok(())
+    })
+}
+
+/// Convenience: create a symbolic link at `parent/basename` pointing
+/// to `target`.
+pub fn create_symlink(
+    image: &Path,
+    parent_path: &str,
+    basename: &str,
+    target: &str,
+    relative: bool,
+) -> Result<u64, String> {
+    let rec = create_file(image, parent_path, basename)?;
+    let data = crate::record_build::build_symlink_reparse_data(target, None, relative);
+    let child_path = if parent_path == "/" {
+        format!("/{basename}")
+    } else {
+        format!("{parent_path}/{basename}")
+    };
+    if let Err(e) = write_reparse_point(
+        image,
+        &child_path,
+        crate::record_build::reparse_tag::SYMLINK,
+        &data,
+    ) {
+        let _ = unlink(image, &child_path);
+        return Err(format!("write_reparse_point: {e}"));
+    }
+    Ok(rec)
+}
+
+fn set_si_file_attributes_bit(record: &mut [u8], bit: u32, set: bool) -> Result<(), String> {
+    let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
+        .ok_or_else(|| "$STANDARD_INFORMATION not found".to_string())?;
+    let data_start = attr_io::resident_value_start(&loc)
+        .ok_or_else(|| "$STANDARD_INFORMATION not resident".to_string())?;
+    let off = data_start + SI_FILE_ATTRIBUTES;
+    let current = u32::from_le_bytes([
+        record[off],
+        record[off + 1],
+        record[off + 2],
+        record[off + 3],
+    ]);
+    let new = if set { current | bit } else { current & !bit };
+    record[off..off + 4].copy_from_slice(&new.to_le_bytes());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // W4.1: Alternate Data Streams (named $DATA)
 // ---------------------------------------------------------------------------
 
