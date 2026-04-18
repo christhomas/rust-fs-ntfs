@@ -873,8 +873,137 @@ pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u6
 }
 
 // ---------------------------------------------------------------------------
-// Unlink (W3)
+// mkdir (W3)
 // ---------------------------------------------------------------------------
+
+/// Create a new empty directory `basename` inside `parent_path`.
+/// Returns the new directory's MFT record number on success.
+///
+/// Shares the limitation set of [`create_file`] — the parent must hold
+/// its index entirely in `$INDEX_ROOT`.
+pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, String> {
+    if basename.is_empty() || basename == "." || basename == ".." || basename.contains('/') {
+        return Err(format!("invalid basename: '{basename}'"));
+    }
+
+    let parent_rec = resolve_path_to_record_number(image, parent_path)?;
+
+    let (params, parent_record_bytes) = read_mft_record(image, parent_rec)?;
+    let parent_flags = crate::mft_io::record_flags(&parent_record_bytes);
+    if parent_flags & crate::mft_io::MFT_FLAG_DIRECTORY == 0 {
+        return Err(format!("parent '{parent_path}' is not a directory"));
+    }
+    let ir_flags = index_io::index_root_flags(&parent_record_bytes)
+        .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
+    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
+        return Err(format!(
+            "mkdir MVP: parent '{parent_path}' has $INDEX_ALLOCATION overflow — not yet supported"
+        ));
+    }
+    if index_io::find_index_entry(&parent_record_bytes, basename)?.is_some() {
+        return Err(format!("'{basename}' already exists in '{parent_path}'"));
+    }
+
+    let mbm = crate::mft_bitmap::locate(image)?;
+    let new_rec = crate::mft_bitmap::find_free_record(image, &mbm, 24)?
+        .ok_or_else(|| "MFT full — would need to grow $MFT (W2.6)".to_string())?;
+
+    let parent_seq = u16::from_le_bytes([parent_record_bytes[0x10], parent_record_bytes[0x11]]);
+    let parent_reference = crate::record_build::encode_file_reference(parent_rec, parent_seq);
+
+    let nt_time = crate::record_build::nt_time_now();
+    let new_seq: u16 = 1;
+    // For a fresh directory, use cluster_size as the index block size —
+    // matches what mkntfs does for small volumes.
+    let index_block_size = params.cluster_size as u32;
+    let mut new_record = crate::record_build::build_directory_record(
+        params.file_record_size as usize,
+        new_rec as u32,
+        new_seq,
+        parent_reference,
+        basename,
+        nt_time,
+        params.bytes_per_sector,
+        index_block_size,
+    )?;
+    crate::mft_io::apply_fixup_on_write(&mut new_record, params.bytes_per_sector)?;
+
+    crate::mft_bitmap::allocate(image, &mbm, new_rec)?;
+
+    let rec_offset = crate::mft_io::mft_record_offset(&params, new_rec);
+    let mut f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(image)
+        .map_err(|e| {
+            let _ = crate::mft_bitmap::free(image, &mbm, new_rec);
+            format!("open rw: {e}")
+        })?;
+    if let Err(e) = f.seek(SeekFrom::Start(rec_offset)) {
+        let _ = crate::mft_bitmap::free(image, &mbm, new_rec);
+        return Err(format!("seek new dir record: {e}"));
+    }
+    if let Err(e) = f.write_all(&new_record) {
+        let _ = crate::mft_bitmap::free(image, &mbm, new_rec);
+        return Err(format!("write new dir record: {e}"));
+    }
+    if let Err(e) = f.sync_all() {
+        let _ = crate::mft_bitmap::free(image, &mbm, new_rec);
+        return Err(format!("fsync new dir record: {e}"));
+    }
+    drop(f);
+
+    let new_file_reference = crate::record_build::encode_file_reference(new_rec, new_seq);
+    let entry_bytes = index_io::build_file_name_index_entry(
+        new_file_reference,
+        parent_reference,
+        basename,
+        nt_time,
+        /* is_dir */ true,
+    )?;
+    let insert_res = update_mft_record(image, parent_rec, |record| {
+        index_io::insert_entry_into_index_root(record, &entry_bytes, basename)
+    });
+    if let Err(e) = insert_res {
+        let _ = update_mft_record(image, new_rec, |record| {
+            let cur = u16::from_le_bytes([record[0x16], record[0x17]]);
+            let new = cur & !crate::mft_io::MFT_FLAG_IN_USE;
+            record[0x16..0x18].copy_from_slice(&new.to_le_bytes());
+            Ok(())
+        });
+        let _ = crate::mft_bitmap::free(image, &mbm, new_rec);
+        return Err(format!("insert dir index entry: {e}"));
+    }
+
+    Ok(new_rec)
+}
+
+// ---------------------------------------------------------------------------
+// Write resident data (W3 convenience)
+// ---------------------------------------------------------------------------
+
+/// Write `new_data` as the entire content of the file's unnamed
+/// `$DATA`. Works only while the data can remain resident (fits in
+/// free MFT record space). Returns bytes written on success.
+///
+/// For growing past the resident ceiling, W2.2 promotion is required;
+/// this primitive returns an error in that case.
+pub fn write_resident_contents(
+    image: &Path,
+    file_path: &str,
+    new_data: &[u8],
+) -> Result<u64, String> {
+    let rec = resolve_path_to_record_number(image, file_path)?;
+    update_mft_record(image, rec, |record| {
+        let loc = attr_io::find_attribute(record, AttrType::Data, None)
+            .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+        if !loc.is_resident {
+            return Err("$DATA is already non-resident; use write_at + grow instead".to_string());
+        }
+        crate::attr_resize::set_resident_value(record, loc.attr_offset, new_data)
+    })?;
+    Ok(new_data.len() as u64)
+}
 
 /// Delete a regular file:
 /// 1. Remove the parent dir's index entry for the file.

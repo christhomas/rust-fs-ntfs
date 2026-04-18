@@ -206,6 +206,28 @@ int64_t fs_ntfs_create_file(const char *image,
                             const char *basename);
 
 /*
+ * Create a new empty directory `basename` inside `parent_path`.
+ * Returns the new MFT record number on success, -1 on error.
+ * Same MVP limitations as fs_ntfs_create_file re: parent index.
+ */
+int64_t fs_ntfs_mkdir(const char *image,
+                      const char *parent_path,
+                      const char *basename);
+
+/*
+ * Replace a file's resident $DATA contents with `len` bytes from
+ * `buf`. Works only while the file's data can remain resident
+ * (fits in free MFT record space). Larger writes require W2.2
+ * promotion to non-resident — not yet implemented.
+ *
+ * Returns bytes written, -1 on error.
+ */
+int64_t fs_ntfs_write_resident_contents(const char *image,
+                                        const char *path,
+                                        const void *buf,
+                                        uint64_t len);
+
+/*
  * Delete a regular file. Removes the parent dir's index entry, frees
  * the data clusters in $Bitmap, clears IN_USE on the MFT record, and
  * frees the MFT record bit in $MFT:$Bitmap.
