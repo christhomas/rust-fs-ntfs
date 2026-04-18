@@ -679,20 +679,13 @@ pub extern "C" fn fs_ntfs_read_file(
         }
     };
 
-    // Seek to offset
+    // Seek to offset via upstream's NtfsReadSeek — O(data-runs), not
+    // O(offset). The previous read-and-discard loop was quadratic on
+    // large pread offsets; this replacement uses the real seek path.
     if offset > 0 {
-        let mut remaining = offset;
-        let mut skip_buf = [0u8; 8192];
-        while remaining > 0 {
-            let to_skip = std::cmp::min(remaining, skip_buf.len() as u64) as usize;
-            match data_value.read(&mut bridge.reader, &mut skip_buf[..to_skip]) {
-                Ok(0) => return 0,
-                Ok(n) => remaining -= n as u64,
-                Err(e) => {
-                    set_error(&format!("seek: {e}"));
-                    return -1;
-                }
-            }
+        if let Err(e) = data_value.seek(&mut bridge.reader, SeekFrom::Start(offset)) {
+            set_error(&format!("seek: {e}"));
+            return -1;
         }
     }
 
