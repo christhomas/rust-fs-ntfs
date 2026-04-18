@@ -13,7 +13,7 @@ use std::slice;
 
 use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::structured_values::{NtfsFileName, NtfsFileNamespace, NtfsStandardInformation};
-use ntfs::{Ntfs, NtfsAttributeType, NtfsFile, NtfsReadSeek};
+use ntfs::{KnownNtfsFileRecordNumber, Ntfs, NtfsAttributeType, NtfsFile, NtfsReadSeek};
 
 pub mod attr_io;
 pub mod attr_resize;
@@ -205,6 +205,24 @@ fn ntfs_time_to_unix(ntfs_time: ntfs::NtfsTime) -> u32 {
     secs.saturating_sub(EPOCH_DIFF) as u32
 }
 
+/// Read the parent-directory record number from a file's
+/// `$FILE_NAME` attribute. Used to walk `..` path components.
+fn parent_record_number_of(file: &NtfsFile, reader: &mut ReaderKind) -> Result<u64, String> {
+    let mut attrs = file.attributes();
+    while let Some(item) = attrs.next(reader) {
+        let item = item.map_err(|e| format!("attr iter: {e}"))?;
+        let attribute = item.to_attribute().map_err(|e| format!("to_attr: {e}"))?;
+        if attribute.ty().ok() != Some(NtfsAttributeType::FileName) {
+            continue;
+        }
+        if let Ok(file_name) = attribute.structured_value::<_, NtfsFileName>(reader) {
+            let parent_ref = file_name.parent_directory_reference();
+            return Ok(parent_ref.file_record_number());
+        }
+    }
+    Err("no $FILE_NAME attribute to find parent via".to_string())
+}
+
 /// Navigate to a file by path from the root directory.
 fn navigate_to_path<'n>(
     ntfs: &'n Ntfs,
@@ -223,7 +241,20 @@ fn navigate_to_path<'n>(
         .map_err(|e| format!("root directory: {e}"))?;
 
     for component in path.split('/') {
-        if component.is_empty() {
+        if component.is_empty() || component == "." {
+            continue;
+        }
+        if component == ".." {
+            // Walk to parent via $FILE_NAME.parent_directory_reference.
+            // At the root, ".." stays at root (standard POSIX behavior).
+            if current.file_record_number() == KnownNtfsFileRecordNumber::RootDirectory as u64 {
+                continue;
+            }
+            let parent_rn = parent_record_number_of(&current, reader)
+                .map_err(|e| format!("parent of record {}: {e}", current.file_record_number()))?;
+            current = ntfs
+                .file(reader, parent_rn)
+                .map_err(|e| format!("open parent record {parent_rn}: {e}"))?;
             continue;
         }
 
