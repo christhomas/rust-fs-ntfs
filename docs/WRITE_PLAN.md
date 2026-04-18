@@ -162,11 +162,36 @@ driving them.
 
 ---
 
-## Phase W2 — attribute mutation (planned)
+## Phase W2 — attribute mutation (in progress)
 
-The hard stuff starts here. Every operation requires either allocating
-clusters (for growing non-resident data) or shifting attributes within
-the MFT record (for resident grow / shrink / promotion).
+**Shipped so far:**
+
+- **W2.3 `$Bitmap` cluster allocator.** `src/bitmap.rs`:
+  `locate_bitmap`, `find_free_run`, `allocate`, `free`, `is_allocated`.
+  10 tests.
+- **W2.4 data-run encoder.** `data_runs::encode_runs` (inverse of
+  `decode_runs`). Round-trip tested for sparse, negative deltas, large
+  LCNs, multi-run lists. 9 additional tests.
+- **W2.5 truncate (shrink).** `write::truncate{,_by_record_number}`
+  and `fs_ntfs_truncate`. Trims runs, frees clusters in `$Bitmap`,
+  updates `allocated_length` / `data_length` / `initialized_length` /
+  `last_vcn`. MFT-first, bitmap-second ordering. 11 tests (7 Rust-
+  layer + 4 C-ABI).
+- **W2.5 grow (non-resident).** `write::grow_nonresident{,_by_record_number}`
+  and `fs_ntfs_grow`. Allocates a single contiguous free run, extends
+  the last data run or appends a new one, updates lengths. Undoes the
+  bitmap allocation if the new mapping-pairs don't fit in the attr
+  header. New bytes read as zero via `initialized_length`. 5 tests.
+
+**W2.1 resident attribute resize (shipped).** `src/attr_resize.rs`:
+`resize_resident_value` / `set_resident_value`. Shifts subsequent
+attributes inside the MFT record, zero-fills the released range,
+updates `bytes_used`. Rejects grows past `bytes_allocated`. 8 tests
+using volume-label rename as the vehicle (same-length / shrink /
+grow / zero-length / round-trip / huge-grow rejection / preserves-
+subsequent-attributes / low-level in-memory primitive).
+
+**Remaining in W2:**
 
 ### W2.1 — Resident grow / replace in-record
 

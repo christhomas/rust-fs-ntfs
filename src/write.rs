@@ -10,6 +10,7 @@
 use crate::attr_io::{self, AttrType};
 use crate::bitmap;
 use crate::data_runs::{self, DataRun};
+use crate::index_io;
 use crate::mft_io::{read_mft_record, update_mft_record};
 
 use ntfs::indexes::NtfsFileNameIndex;
@@ -642,6 +643,80 @@ fn write_u64_at(record: &mut [u8], off: usize, v: Option<u64>) {
     if let Some(v) = v {
         record[off..off + 8].copy_from_slice(&v.to_le_bytes());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Rename (same-length, same-parent) — W3 first primitive
+// ---------------------------------------------------------------------------
+
+/// Rename a file in place. `old_path` is the current absolute path;
+/// `new_name` is the new basename (no `/`). The new name must have the
+/// **same UTF-16 length** as the current name — full-length-change
+/// rename requires index-entry resize (future work).
+///
+/// Patches both:
+///   1. the parent directory's `$INDEX_ROOT` entry for the file (the
+///      name that gets returned from `readdir`)
+///   2. each matching `$FILE_NAME` attribute in the file's own MFT
+///      record
+///
+/// **Limitation (MVP):** the parent directory's index must fit
+/// entirely in resident `$INDEX_ROOT` (no `$INDEX_ALLOCATION`
+/// spillover). For a fresh mkntfs volume this holds for small
+/// subdirectories (e.g. `/Documents`) but NOT for the root directory
+/// — mkntfs lays out `/` with `$INDEX_ALLOCATION` even when small.
+/// Walking + patching `$INDEX_ALLOCATION` blocks is a separate
+/// primitive (index_io::find_in_index_allocation, future work).
+pub fn rename_same_length(image: &Path, old_path: &str, new_name: &str) -> Result<(), String> {
+    if new_name.contains('/') || new_name.is_empty() {
+        return Err("new_name must be a basename (no slashes, non-empty)".to_string());
+    }
+    let (parent_rec, file_rec, current_basename) = resolve_parent_and_child(image, old_path)?;
+
+    // Pre-check lengths (UTF-16 code units).
+    let old_u16_len = current_basename.encode_utf16().count();
+    let new_u16_len = new_name.encode_utf16().count();
+    if old_u16_len != new_u16_len {
+        return Err(format!(
+            "same-length rename required (old {old_u16_len}, new {new_u16_len} UTF-16 units)"
+        ));
+    }
+
+    // 1) Patch the parent's $INDEX_ROOT entry.
+    update_mft_record(image, parent_rec, |record| {
+        let entry = index_io::find_index_entry(record, &current_basename)?
+            .ok_or_else(|| format!("parent's index has no entry for '{current_basename}'"))?;
+        if entry.file_record_number != file_rec {
+            return Err(format!(
+                "index entry points at record {} but resolved path points at {file_rec}",
+                entry.file_record_number
+            ));
+        }
+        index_io::rename_index_entry_same_length(record, &entry, new_name)
+    })?;
+
+    // 2) Patch the file's own $FILE_NAME attributes.
+    update_mft_record(image, file_rec, |record| {
+        index_io::rename_filename_attribute_same_length(record, &current_basename, new_name)
+    })?;
+
+    Ok(())
+}
+
+/// Resolve `old_path` to `(parent_record_number, file_record_number, basename)`.
+fn resolve_parent_and_child(image: &Path, old_path: &str) -> Result<(u64, u64, String), String> {
+    let p = old_path.trim_start_matches('/');
+    if p.is_empty() {
+        return Err("cannot rename root".to_string());
+    }
+    let (parent_path, basename) = match p.rsplit_once('/') {
+        Some((par, base)) => (par, base),
+        None => ("", p),
+    };
+    let parent_full = format!("/{parent_path}");
+    let parent_rec = resolve_path_to_record_number(image, &parent_full)?;
+    let file_rec = resolve_path_to_record_number(image, old_path)?;
+    Ok((parent_rec, file_rec, basename.to_string()))
 }
 
 /// Walk `file_path` via upstream and return the target's MFT record number.
