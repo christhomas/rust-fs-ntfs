@@ -347,6 +347,182 @@ pub enum BlockKind {
     IndexAllocation,
 }
 
+/// Build an index entry for a new `$FILE_NAME` record. Returns an
+/// 8-byte-aligned byte blob ready to insert into `$INDEX_ROOT` or an
+/// INDX block.
+///
+/// Mirrors the `$FILE_NAME` attribute layout but wrapped in an index-
+/// entry header.
+pub fn build_file_name_index_entry(
+    file_reference: u64,
+    parent_reference: u64,
+    name: &str,
+    nt_time: u64,
+    is_dir: bool,
+) -> Result<Vec<u8>, String> {
+    let utf16: Vec<u16> = name.encode_utf16().collect();
+    if utf16.is_empty() || utf16.len() > 255 {
+        return Err(format!("invalid name length {}", utf16.len()));
+    }
+    let key_fixed = 0x42usize;
+    let key_len = key_fixed + utf16.len() * 2;
+    let entry_len = (IE_KEY_START + key_len + 7) & !7; // align to 8
+
+    let mut e = vec![0u8; entry_len];
+    e[IE_FILE_REFERENCE..IE_FILE_REFERENCE + 8].copy_from_slice(&file_reference.to_le_bytes());
+    e[IE_LENGTH..IE_LENGTH + 2].copy_from_slice(&(entry_len as u16).to_le_bytes());
+    e[IE_KEY_LENGTH..IE_KEY_LENGTH + 2].copy_from_slice(&(key_len as u16).to_le_bytes());
+    e[IE_FLAGS..IE_FLAGS + 2].copy_from_slice(&0u16.to_le_bytes());
+
+    let k = IE_KEY_START;
+    e[k..k + 8].copy_from_slice(&parent_reference.to_le_bytes());
+    e[k + 8..k + 16].copy_from_slice(&nt_time.to_le_bytes()); // creation
+    e[k + 16..k + 24].copy_from_slice(&nt_time.to_le_bytes()); // modification
+    e[k + 24..k + 32].copy_from_slice(&nt_time.to_le_bytes()); // mft_mod
+    e[k + 32..k + 40].copy_from_slice(&nt_time.to_le_bytes()); // access
+                                                               // alloc_size + real_size = 0
+    e[k + 40..k + 48].copy_from_slice(&0u64.to_le_bytes());
+    e[k + 48..k + 56].copy_from_slice(&0u64.to_le_bytes());
+    let fa: u32 = if is_dir { 0x10000000 | 0x20 } else { 0x20 };
+    e[k + 56..k + 60].copy_from_slice(&fa.to_le_bytes());
+    e[k + 60..k + 64].copy_from_slice(&0u32.to_le_bytes()); // ea/reparse
+    e[k + FN_NAME_LENGTH_OFFSET] = utf16.len() as u8;
+    e[k + FN_NAMESPACE_OFFSET] = 3; // Win32+DOS
+    for (i, c) in utf16.iter().enumerate() {
+        let off = k + FN_NAME_OFFSET + i * 2;
+        e[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    }
+    Ok(e)
+}
+
+/// Insert a freshly-built index entry into a resident `$INDEX_ROOT:$I30`.
+///
+/// Performs:
+/// 1. Grows the `$INDEX_ROOT` attribute by `entry_bytes.len()` via
+///    [`crate::attr_resize::resize_resident_value`].
+/// 2. Shifts existing entries forward so the new entry lands at the
+///    correct sorted position (byte-order comparison on filename —
+///    adequate for ASCII names, case-insensitive NTFS collation is a
+///    future refinement).
+/// 3. Patches INDEX_HEADER.total_size.
+///
+/// Returns Err if the resulting `$INDEX_ROOT` wouldn't fit in the
+/// record.
+pub fn insert_entry_into_index_root(
+    record: &mut [u8],
+    entry_bytes: &[u8],
+    new_name: &str,
+) -> Result<(), String> {
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some("$I30"))
+        .ok_or_else(|| "$INDEX_ROOT:$I30 missing".to_string())?;
+    let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
+    let old_val_len = ir.resident_value_length.ok_or("no value_length")? as usize;
+    let ih_start = ir.attr_offset + val_off + IR_INDEX_HEADER_OFFSET;
+
+    let first_entry_rel = u32::from_le_bytes([
+        record[ih_start + IH_FIRST_ENTRY_OFFSET],
+        record[ih_start + IH_FIRST_ENTRY_OFFSET + 1],
+        record[ih_start + IH_FIRST_ENTRY_OFFSET + 2],
+        record[ih_start + IH_FIRST_ENTRY_OFFSET + 3],
+    ]) as usize;
+    let total_size = u32::from_le_bytes([
+        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES],
+        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 1],
+        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 2],
+        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 3],
+    ]) as usize;
+
+    // Find sorted insertion position. Walk existing entries until we
+    // find one whose name is >= new_name or hit the LAST sentinel.
+    let mut cursor = ih_start + first_entry_rel;
+    let end = ih_start + total_size;
+    let new_utf16: Vec<u16> = new_name.encode_utf16().collect();
+
+    while cursor < end && cursor + IE_KEY_START <= record.len() {
+        let length =
+            u16::from_le_bytes([record[cursor + IE_LENGTH], record[cursor + IE_LENGTH + 1]])
+                as usize;
+        let flags = u16::from_le_bytes([record[cursor + IE_FLAGS], record[cursor + IE_FLAGS + 1]]);
+        if flags & IE_FLAG_LAST != 0 {
+            break; // insertion point is immediately before LAST
+        }
+        if length == 0 || cursor + length > record.len() {
+            return Err("malformed index during insert".to_string());
+        }
+        let key_start = cursor + IE_KEY_START;
+        let name_len = record[key_start + FN_NAME_LENGTH_OFFSET] as usize;
+        let name_start = key_start + FN_NAME_OFFSET;
+        let existing_utf16: Vec<u16> = record[name_start..name_start + name_len * 2]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        if compare_utf16_case_insensitive(&new_utf16, &existing_utf16)
+            != std::cmp::Ordering::Greater
+        {
+            // new goes before existing
+            break;
+        }
+        cursor += length;
+    }
+    let insertion_point = cursor;
+
+    // Grow $INDEX_ROOT by entry_bytes.len() bytes.
+    let new_val_len = (old_val_len + entry_bytes.len()) as u32;
+    // resize_resident_value may move the attribute's following bytes.
+    // Capture the insertion_point's offset RELATIVE to the attribute's
+    // value start so we can recompute after resize.
+    let attr_val_start_old = ir.attr_offset + val_off;
+    let insertion_in_value = insertion_point - attr_val_start_old;
+
+    crate::attr_resize::resize_resident_value(record, ir.attr_offset, new_val_len)?;
+
+    // Recompute the attribute value start (resize shifted nothing
+    // because we grew by an amount that preserves existing attr offset —
+    // but compute defensively anyway).
+    let ir2 = attr_io::find_attribute(record, AttrType::IndexRoot, Some("$I30"))
+        .ok_or("$INDEX_ROOT vanished")?;
+    let val_off2 = ir2.resident_value_offset.ok_or("no value_offset")? as usize;
+    let attr_val_start = ir2.attr_offset + val_off2;
+    let insertion_point = attr_val_start + insertion_in_value;
+
+    // Shift existing bytes from insertion_point forward by entry_bytes.len().
+    let shift_src_end = attr_val_start + old_val_len;
+    record.copy_within(
+        insertion_point..shift_src_end,
+        insertion_point + entry_bytes.len(),
+    );
+    // Copy the new entry in.
+    record[insertion_point..insertion_point + entry_bytes.len()].copy_from_slice(entry_bytes);
+
+    // Bump total_size in INDEX_HEADER.
+    let ih_start2 = attr_val_start + IR_INDEX_HEADER_OFFSET;
+    let new_total_size = (total_size + entry_bytes.len()) as u32;
+    record[ih_start2 + IH_TOTAL_SIZE_OF_ENTRIES..ih_start2 + IH_TOTAL_SIZE_OF_ENTRIES + 4]
+        .copy_from_slice(&new_total_size.to_le_bytes());
+
+    Ok(())
+}
+
+/// Naive case-insensitive UTF-16 comparison. Works well enough for ASCII
+/// filenames; not a full NTFS-upcase-table implementation.
+fn compare_utf16_case_insensitive(a: &[u16], b: &[u16]) -> std::cmp::Ordering {
+    let map = |c: u16| -> u16 {
+        if (c as u32) < 128 {
+            (c as u8).to_ascii_uppercase() as u16
+        } else {
+            c
+        }
+    };
+    let iter = a.iter().copied().map(map).zip(b.iter().copied().map(map));
+    for (ac, bc) in iter {
+        match ac.cmp(&bc) {
+            std::cmp::Ordering::Equal => continue,
+            ord => return ord,
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
 /// Overwrite the UTF-16 name bytes inside the file's own
 /// `$FILE_NAME` attribute (there may be multiple `$FILE_NAME`s — one
 /// per namespace). Uses the first one whose current name matches

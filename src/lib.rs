@@ -24,6 +24,7 @@ pub mod idx_block;
 pub mod index_io;
 pub mod mft_bitmap;
 pub mod mft_io;
+pub mod record_build;
 pub mod write;
 
 // ---------------------------------------------------------------------------
@@ -809,6 +810,36 @@ pub extern "C" fn fs_ntfs_set_times(
     };
     match write::set_times(std::path::Path::new(img), fp, times) {
         Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Create an empty regular file. `parent_path` is the absolute
+/// directory path; `basename` is the new filename (no slashes).
+/// Returns the new file's MFT record number on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_create_file(
+    image: *const c_char,
+    parent_path: *const c_char,
+    basename: *const c_char,
+) -> i64 {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_create_file: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(pp) = cstr_to_path(parent_path) else {
+        set_error("fs_ntfs_create_file: null or non-UTF-8 parent_path");
+        return -1;
+    };
+    let Some(bn) = cstr_to_path(basename) else {
+        set_error("fs_ntfs_create_file: null or non-UTF-8 basename");
+        return -1;
+    };
+    match write::create_file(std::path::Path::new(img), pp, bn) {
+        Ok(rn) => rn as i64,
         Err(e) => {
             set_error(&e);
             -1

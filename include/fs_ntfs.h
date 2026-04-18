@@ -195,6 +195,17 @@ int fs_ntfs_set_times(const char *image, const char *path,
                       const int64_t *access);
 
 /*
+ * Create an empty regular file inside `parent_path` named `basename`
+ * (no slashes). Returns the new MFT record number on success, -1 on
+ * error. In the W3 MVP, parents with $INDEX_ALLOCATION overflow are
+ * rejected — the parent must hold its index entirely in
+ * $INDEX_ROOT (typically true for small subdirectories).
+ */
+int64_t fs_ntfs_create_file(const char *image,
+                            const char *parent_path,
+                            const char *basename);
+
+/*
  * Delete a regular file. Removes the parent dir's index entry, frees
  * the data clusters in $Bitmap, clears IN_USE on the MFT record, and
  * frees the MFT record bit in $MFT:$Bitmap.
