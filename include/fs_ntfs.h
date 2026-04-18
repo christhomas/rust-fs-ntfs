@@ -255,6 +255,17 @@ int64_t fs_ntfs_write_resident_contents(const char *image,
 int fs_ntfs_unlink(const char *image, const char *path);
 
 /*
+ * Rename a file. `new_basename` may differ in length from the
+ * current name. Delegates to the fast same-length path when the
+ * lengths match; otherwise remove + re-insert in the parent's
+ * $INDEX_ROOT (parent must not have $INDEX_ALLOCATION overflow —
+ * MVP limitation). Returns 0 on success, -1 on error.
+ */
+int fs_ntfs_rename(const char *image,
+                   const char *old_path,
+                   const char *new_basename);
+
+/*
  * Rename a file in place. `new_name` is a basename (no slashes) with
  * the SAME UTF-16 length as the current name. Patches both the parent
  * directory's index entry and each $FILE_NAME attribute on the file's
