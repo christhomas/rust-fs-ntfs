@@ -15,6 +15,8 @@ use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::structured_values::{NtfsFileName, NtfsFileNamespace, NtfsStandardInformation};
 use ntfs::{Ntfs, NtfsAttributeType, NtfsFile, NtfsReadSeek};
 
+pub mod fsck;
+
 // ---------------------------------------------------------------------------
 // Thread-local error string
 // ---------------------------------------------------------------------------
