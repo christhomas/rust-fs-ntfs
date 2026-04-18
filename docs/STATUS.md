@@ -178,7 +178,7 @@ next step — `crate-type = ["staticlib", "rlib"]` permits it.
 
 ## Test coverage
 
-174 integration tests across 28 test files. See
+193 integration tests across 31 test files. See
 [Test infrastructure](#test-infrastructure) above for the fixture
 layout; all 138 pass locally and in CI.
 
@@ -219,6 +219,9 @@ layout; all 138 pass locally and in CI.
 | `write_rmdir.rs` | ntfs-basic | 5 | Remove empty dir, refuse non-empty, refuse regular file, post-rmdir mount, 5x churn doesn't leak MFT records. |
 | `write_resident_contents.rs` | ntfs-basic + ntfs-large-file | 5 | Create-then-write, replace existing, expand up to capacity, refuse non-resident, post-write mount. |
 | `write_promote.rs` | ntfs-basic + ntfs-large-file | 6 | Small-payload promotion, 10 KiB promotion, refuse already-non-resident, dispatcher resident case, dispatcher auto-promote 2 KiB, post-promote mount. |
+| `write_rename_varlen.rs` | ntfs-basic | 7 | Rename to shorter/longer name, delegation-to-same-length, existing-target rejection, invalid-basename rejection, same-name no-op, remount. |
+| `write_ads.rs` | ntfs-basic | 7 | Create ADS, multiple ADS with unnamed preserved, overwrite replaces, delete removes, delete-missing errors, empty-name rejected, churn + remount. |
+| `write_reparse.rs` | ntfs-basic | 5 | Write reparse point sets flag+attr, remove clears both, remove-missing errors, create_symlink sets state, churn + remount. |
 
 No unit tests inside the crate; all coverage is integration-level.
 Coverage gap: see the last paragraph in

@@ -383,28 +383,48 @@ Same as create-file but:
 
 ---
 
-## Phase W4 — ADS / reparse points / xattrs (planned)
+## Phase W4 — ADS / reparse points / xattrs
 
-All layered on W2 machinery:
+### W4.1 — Named `$DATA` streams (✅ shipped)
 
-### W4.1 — Named `$DATA` streams
+- `write::write_named_stream_resident(image, path, stream_name, data)` —
+  upsert a resident named `$DATA`. New streams get a fresh attribute
+  id; existing streams are replaced via `attr_resize::set_resident_value`.
+- `write::delete_named_stream(image, path, stream_name)` — remove a
+  named stream attribute from the record.
+- Helpers: `attr_resize::insert_attribute_before_end` (locates
+  `0xFFFFFFFF` by walking the chain, shifts it forward, inserts a new
+  attribute) and `allocate_attribute_id` (bumps the record's
+  `next_attr_id`).
 
-Creating `file:streamname` is "add a named `$DATA` attribute to an
-existing MFT record". Same resize machinery as W2.1/2.2.
+C-ABI: `fs_ntfs_write_named_stream`, `fs_ntfs_delete_named_stream`.
 
-### W4.2 — Reparse points
+MVP limitation: resident only. Non-resident named streams require
+promotion — future work.
 
-Creating a symlink / junction: add `$REPARSE_POINT` attribute (resident
-for short targets, non-resident for long), set
-`FILE_ATTRIBUTE_REPARSE_POINT` in SI. Tag + target buffer per
-MS-FSCC 2.1.2.4 / 2.1.2.5.
+### W4.2 — Reparse points + symlinks (✅ shipped)
 
-### W4.3 — Extended attributes (`$EA` / `$EA_INFORMATION`)
+- `write::write_reparse_point(image, path, tag, data)` — upsert a
+  resident `$REPARSE_POINT` and set `FILE_ATTRIBUTE_REPARSE_POINT`.
+- `write::remove_reparse_point(image, path)` — reverse.
+- `write::create_symlink(image, parent, basename, target, relative)` —
+  create_file + write_reparse_point with `IO_REPARSE_TAG_SYMLINK`
+  data. Rolls back the file create on failure.
+- Helpers: `record_build::build_resident_reparse_point_attribute`,
+  `build_symlink_reparse_data` (SymbolicLinkReparseBuffer per
+  MS-FSCC 2.1.2.4), `reparse_tag` module with common tag constants
+  (SYMLINK / MOUNT_POINT / WOF / LX_SYMLINK / APPEXECLINK).
 
-Add `$EA_INFORMATION` (resident) + `$EA` attributes. Format documented
-in Flatcap.
+C-ABI: `fs_ntfs_write_reparse_point`, `fs_ntfs_remove_reparse_point`,
+`fs_ntfs_create_symlink`.
 
-**Expected size:** ~500 LOC. 1 week.
+### W4.3 — Extended attributes (planned)
+
+Still open. Would add `$EA_INFORMATION` (resident) + `$EA` attributes
+per [Flatcap $EA](https://flatcap.github.io/linux-ntfs/ntfs/attributes/ea.html).
+Roughly mirrors W4.1's pattern (upsert within the MFT record).
+
+**Remaining W4 size:** ~300 LOC, ~3 days.
 
 ---
 
