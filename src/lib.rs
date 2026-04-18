@@ -66,7 +66,10 @@ impl Read for CallbackReader {
             )
         };
         if rc != 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, "read callback failed"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "read callback failed",
+            ));
         }
         self.position += to_read;
         Ok(to_read as usize)
@@ -229,6 +232,7 @@ fn navigate_to_path<'n>(
 }
 
 /// Get the best display name for a file.
+#[allow(dead_code)]
 fn best_file_name_str(
     file: &NtfsFile,
     reader: &mut ReaderKind,
@@ -303,13 +307,12 @@ fn fill_attr(
                 }
             }
             Ok(NtfsAttributeType::FileName) => {
-                if let Ok(file_name) =
-                    attribute.structured_value::<_, NtfsFileName>(reader)
-                {
+                if let Ok(file_name) = attribute.structured_value::<_, NtfsFileName>(reader) {
                     // Check if it's a reparse point (symlink)
-                    if file_name.file_attributes().contains(
-                        ntfs::structured_values::NtfsFileAttributeFlags::REPARSE_POINT,
-                    ) {
+                    if file_name
+                        .file_attributes()
+                        .contains(ntfs::structured_values::NtfsFileAttributeFlags::REPARSE_POINT)
+                    {
                         attr.file_type = 7; // FS_NTFS_FT_SYMLINK
                         attr.mode = 0o120777;
                     }
@@ -369,9 +372,7 @@ pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_ntfs_mount_with_callbacks(
-    cfg: *const FsNtfsBlockdevCfg,
-) -> *mut FsNtfsHandle {
+pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) -> *mut FsNtfsHandle {
     if cfg.is_null() {
         set_error("null config");
         return std::ptr::null_mut();
@@ -565,9 +566,7 @@ pub extern "C" fn fs_ntfs_dir_open(
         let name_bytes = name_str.as_bytes();
 
         let mut dirent = FsNtfsDirent {
-            file_record_number: entry
-                .file_reference()
-                .file_record_number(),
+            file_record_number: entry.file_reference().file_record_number(),
             file_type: if file_name.is_directory() { 2 } else { 1 },
             name_len: std::cmp::min(name_bytes.len(), 255) as u16,
             name: [0u8; 256],
@@ -584,9 +583,7 @@ pub extern "C" fn fs_ntfs_dir_open(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_ntfs_dir_next(
-    iter: *mut FsNtfsDirIter,
-) -> *const FsNtfsDirent {
+pub extern "C" fn fs_ntfs_dir_next(iter: *mut FsNtfsDirIter) -> *const FsNtfsDirent {
     if iter.is_null() {
         return std::ptr::null();
     }
