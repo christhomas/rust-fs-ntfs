@@ -206,6 +206,31 @@ int64_t fs_ntfs_create_file(const char *image,
                             const char *basename);
 
 /*
+ * Write a resident $REPARSE_POINT attribute with the given tag and
+ * tag-specific data. Sets FILE_ATTRIBUTE_REPARSE_POINT on the file.
+ * Returns 0 on success, -1 on error.
+ */
+int fs_ntfs_write_reparse_point(const char *image, const char *path,
+                                uint32_t reparse_tag,
+                                const void *buf, uint64_t len);
+
+/*
+ * Remove a file's $REPARSE_POINT attribute + clear the reparse flag.
+ */
+int fs_ntfs_remove_reparse_point(const char *image, const char *path);
+
+/*
+ * Create a symlink at `parent_path/basename` pointing at `target`.
+ * `relative` non-zero for a relative target. Returns the new MFT
+ * record number on success, -1 on error.
+ */
+int64_t fs_ntfs_create_symlink(const char *image,
+                               const char *parent_path,
+                               const char *basename,
+                               const char *target,
+                               int relative);
+
+/*
  * Create or replace a resident named $DATA stream (Alternate Data
  * Stream). Stream content must fit in the file's free MFT record
  * space (non-resident named streams are future work). Returns 0 on

@@ -308,6 +308,112 @@ fn build_record_inner(
     Ok(rec)
 }
 
+/// Build a resident `$REPARSE_POINT` attribute with the given tag and
+/// tag-specific data. Returns the attribute bytes (header + reparse
+/// header + data, padded to 8).
+///
+/// Structure per [MS-FSCC 2.1.2](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4):
+///   u32 reparse_tag
+///   u16 reparse_data_length  (= data.len())
+///   u16 reserved
+///   u8[reparse_data_length] data
+pub fn build_resident_reparse_point_attribute(
+    attr_id: u16,
+    reparse_tag: u32,
+    data: &[u8],
+) -> Result<Vec<u8>, String> {
+    if data.len() > u16::MAX as usize {
+        return Err(format!(
+            "reparse data {} bytes exceeds u16 ceiling",
+            data.len()
+        ));
+    }
+    let common_header = 16usize;
+    let resident_fields = 8usize;
+    let header_size = common_header + resident_fields;
+    let value_offset = header_size;
+    let reparse_header = 8usize; // tag(4) + data_len(2) + reserved(2)
+    let value_size = reparse_header + data.len();
+    let attr_length = align8(value_offset + value_size);
+
+    let mut buf = vec![0u8; attr_length];
+    buf[0..4].copy_from_slice(&ATTR_REPARSE_POINT.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 0; // resident
+    buf[9] = 0; // name_length (unnamed)
+    buf[10..12].copy_from_slice(&(value_offset as u16).to_le_bytes());
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+    buf[16..20].copy_from_slice(&(value_size as u32).to_le_bytes());
+    buf[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes());
+    buf[22] = 0;
+    buf[23] = 0;
+
+    // Reparse header.
+    buf[value_offset..value_offset + 4].copy_from_slice(&reparse_tag.to_le_bytes());
+    buf[value_offset + 4..value_offset + 6].copy_from_slice(&(data.len() as u16).to_le_bytes());
+    buf[value_offset + 6..value_offset + 8].copy_from_slice(&0u16.to_le_bytes());
+    // Reparse data.
+    buf[value_offset + 8..value_offset + 8 + data.len()].copy_from_slice(data);
+
+    Ok(buf)
+}
+
+const ATTR_REPARSE_POINT: u32 = 0xC0;
+
+/// Common reparse tags (MS-FSCC 2.1.2).
+pub mod reparse_tag {
+    pub const SYMLINK: u32 = 0xA000_000C;
+    pub const MOUNT_POINT: u32 = 0xA000_0003;
+    pub const WOF: u32 = 0x8000_0017;
+    pub const LX_SYMLINK: u32 = 0xA000_001D;
+    pub const APPEXECLINK: u32 = 0x8000_001B;
+}
+
+/// Build a `SymbolicLinkReparseBuffer` (MS-FSCC 2.1.2.4) for an
+/// `IO_REPARSE_TAG_SYMLINK` reparse point. `target` is the substitute
+/// name (the NT-style path the symlink resolves to). `print_name` is
+/// what Windows Explorer displays — defaults to `target` if `None`.
+/// `relative` should be `true` for relative paths.
+pub fn build_symlink_reparse_data(
+    target: &str,
+    print_name: Option<&str>,
+    relative: bool,
+) -> Vec<u8> {
+    let print_name = print_name.unwrap_or(target);
+    let sub_utf16: Vec<u16> = target.encode_utf16().collect();
+    let print_utf16: Vec<u16> = print_name.encode_utf16().collect();
+    let sub_len = sub_utf16.len() * 2;
+    let print_len = print_utf16.len() * 2;
+
+    // SymbolicLinkReparseBuffer header (12 bytes) + PathBuffer
+    let header = 12usize;
+    let path_buffer_len = sub_len + print_len;
+    let mut out = vec![0u8; header + path_buffer_len];
+    // SubstituteNameOffset (offset from start of PathBuffer)
+    out[0..2].copy_from_slice(&0u16.to_le_bytes());
+    // SubstituteNameLength (bytes)
+    out[2..4].copy_from_slice(&(sub_len as u16).to_le_bytes());
+    // PrintNameOffset
+    out[4..6].copy_from_slice(&(sub_len as u16).to_le_bytes());
+    // PrintNameLength
+    out[6..8].copy_from_slice(&(print_len as u16).to_le_bytes());
+    // Flags: 0x00 = absolute, 0x01 = relative
+    let flags: u32 = if relative { 0x1 } else { 0x0 };
+    out[8..12].copy_from_slice(&flags.to_le_bytes());
+    // PathBuffer: SubstituteName then PrintName.
+    let mut off = header;
+    for c in &sub_utf16 {
+        out[off..off + 2].copy_from_slice(&c.to_le_bytes());
+        off += 2;
+    }
+    for c in &print_utf16 {
+        out[off..off + 2].copy_from_slice(&c.to_le_bytes());
+        off += 2;
+    }
+    out
+}
+
 /// Build a resident named `$DATA` attribute (alternate data stream).
 /// Returns the attribute bytes (header + name + padding + value),
 /// 8-byte aligned and with the header's `length` set correctly.

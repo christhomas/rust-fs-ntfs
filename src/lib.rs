@@ -847,6 +847,100 @@ pub extern "C" fn fs_ntfs_create_file(
     }
 }
 
+/// Write a resident `$REPARSE_POINT` attribute with `reparse_tag` and
+/// `len` bytes of tag-specific data from `buf`. Sets
+/// FILE_ATTRIBUTE_REPARSE_POINT on the file. If the file already has a
+/// reparse point, it's replaced. Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_write_reparse_point(
+    image: *const c_char,
+    path: *const c_char,
+    reparse_tag: u32,
+    buf: *const c_void,
+    len: u64,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_write_reparse_point: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_write_reparse_point: null or non-UTF-8 path");
+        return -1;
+    };
+    let data: &[u8] = if len == 0 {
+        &[]
+    } else if buf.is_null() {
+        set_error("fs_ntfs_write_reparse_point: null buf with non-zero len");
+        return -1;
+    } else {
+        unsafe { slice::from_raw_parts(buf as *const u8, len as usize) }
+    };
+    match write::write_reparse_point(std::path::Path::new(img), p, reparse_tag, data) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Remove a file's `$REPARSE_POINT` attribute and clear the reparse
+/// flag. Returns 0 on success, -1 on error (e.g. no reparse point).
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_remove_reparse_point(image: *const c_char, path: *const c_char) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_remove_reparse_point: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_remove_reparse_point: null or non-UTF-8 path");
+        return -1;
+    };
+    match write::remove_reparse_point(std::path::Path::new(img), p) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Create a symlink at `parent_path/basename` pointing to `target`.
+/// Set `relative` != 0 for relative-style target paths. Returns the
+/// new MFT record number on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_create_symlink(
+    image: *const c_char,
+    parent_path: *const c_char,
+    basename: *const c_char,
+    target: *const c_char,
+    relative: c_int,
+) -> i64 {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_create_symlink: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(pp) = cstr_to_path(parent_path) else {
+        set_error("fs_ntfs_create_symlink: null or non-UTF-8 parent_path");
+        return -1;
+    };
+    let Some(bn) = cstr_to_path(basename) else {
+        set_error("fs_ntfs_create_symlink: null or non-UTF-8 basename");
+        return -1;
+    };
+    let Some(tg) = cstr_to_path(target) else {
+        set_error("fs_ntfs_create_symlink: null or non-UTF-8 target");
+        return -1;
+    };
+    match write::create_symlink(std::path::Path::new(img), pp, bn, tg, relative != 0) {
+        Ok(rn) => rn as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Create or replace a resident named `$DATA` stream (Alternate Data
 /// Stream) on the file at `path`. Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
