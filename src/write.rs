@@ -979,6 +979,128 @@ pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Str
 }
 
 // ---------------------------------------------------------------------------
+// W2.2: promote resident $DATA to non-resident (optionally writing new content)
+// ---------------------------------------------------------------------------
+
+/// Promote a file's resident `$DATA` to non-resident, setting its
+/// content to `new_data`. Allocates clusters, writes data, rewrites
+/// the attribute header as non-resident.
+///
+/// Useful on its own (e.g. as a staging step) but also the building
+/// block for `write_file_contents` that transparently dispatches
+/// between resident + non-resident.
+pub fn promote_resident_data_to_nonresident(
+    image: &Path,
+    file_path: &str,
+    new_data: &[u8],
+) -> Result<(), String> {
+    let rec = resolve_path_to_record_number(image, file_path)?;
+    let (params, record) = read_mft_record(image, rec)?;
+    let cluster_size = params.cluster_size;
+
+    let loc = attr_io::find_attribute(&record, AttrType::Data, None)
+        .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+    if !loc.is_resident {
+        return Err("$DATA is already non-resident".to_string());
+    }
+
+    // Allocate clusters for the new data.
+    let new_size = new_data.len() as u64;
+    let n_clusters = new_size.div_ceil(cluster_size).max(1);
+    let bm = crate::bitmap::locate_bitmap(image)?;
+    let new_lcn = crate::bitmap::find_free_run(image, &bm, n_clusters, params.mft_lcn)?
+        .ok_or_else(|| format!("no contiguous free run of {n_clusters} clusters"))?;
+    crate::bitmap::allocate(image, &bm, new_lcn, n_clusters)?;
+
+    // Write the data (zero-padded to cluster boundary).
+    let allocated_length = n_clusters * cluster_size;
+    {
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(image)
+            .map_err(|e| {
+                let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+                format!("open rw: {e}")
+            })?;
+        let disk_offset = new_lcn * cluster_size;
+        if let Err(e) = f.seek(SeekFrom::Start(disk_offset)) {
+            let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+            return Err(format!("seek new cluster: {e}"));
+        }
+        // Write new_data then zero-pad.
+        if let Err(e) = f.write_all(new_data) {
+            let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+            return Err(format!("write data: {e}"));
+        }
+        let pad = (allocated_length - new_size) as usize;
+        let zeros = vec![0u8; pad];
+        if let Err(e) = f.write_all(&zeros) {
+            let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+            return Err(format!("write zero-pad: {e}"));
+        }
+        if let Err(e) = f.sync_all() {
+            let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+            return Err(format!("fsync data: {e}"));
+        }
+    }
+
+    // Build mapping_pairs (single run).
+    let runs = vec![DataRun {
+        starting_vcn: 0,
+        length: n_clusters,
+        lcn: Some(new_lcn),
+    }];
+    let mapping_pairs = data_runs::encode_runs(&runs)?;
+
+    // Build new non-resident $DATA attribute.
+    let last_vcn = if new_size == 0 {
+        -1i64
+    } else {
+        (n_clusters - 1) as i64
+    };
+    let attr_id = loc.attribute_id;
+    let new_attr_bytes = crate::record_build::build_nonresident_data_attribute(
+        attr_id,
+        new_size,
+        allocated_length,
+        new_size, // initialized_length = data_length for fully-written new data
+        last_vcn,
+        &mapping_pairs,
+    )?;
+
+    // Replace $DATA in the MFT record.
+    let replace_res = update_mft_record(image, rec, |record| {
+        let loc = attr_io::find_attribute(record, AttrType::Data, None)
+            .ok_or_else(|| "$DATA vanished during RMW".to_string())?;
+        crate::attr_resize::replace_attribute(record, loc.attr_offset, &new_attr_bytes)
+    });
+    if let Err(e) = replace_res {
+        let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+        return Err(format!("replace $DATA: {e}"));
+    }
+
+    Ok(())
+}
+
+/// High-level: write `new_data` as the entire content of the file.
+/// Dispatches between resident rewrite and promotion-to-non-resident
+/// based on whether the data still fits inside the MFT record.
+///
+/// The heuristic is: attempt resident write first. If it fails with a
+/// record-capacity error, retry with promotion.
+pub fn write_file_contents(image: &Path, file_path: &str, new_data: &[u8]) -> Result<u64, String> {
+    match write_resident_contents(image, file_path, new_data) {
+        Ok(n) => Ok(n),
+        Err(e) if e.contains("capacity") || e.contains("exceeds") => {
+            promote_resident_data_to_nonresident(image, file_path, new_data)?;
+            Ok(new_data.len() as u64)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // rmdir (W3)
 // ---------------------------------------------------------------------------
 

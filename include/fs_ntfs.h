@@ -206,6 +206,17 @@ int64_t fs_ntfs_create_file(const char *image,
                             const char *basename);
 
 /*
+ * Write `len` bytes from `buf` as the entire contents of the file at
+ * `path`. Transparently dispatches: stays resident if it fits in the
+ * MFT record, otherwise allocates clusters and promotes $DATA to
+ * non-resident. Returns bytes written, -1 on error.
+ */
+int64_t fs_ntfs_write_file_contents(const char *image,
+                                    const char *path,
+                                    const void *buf,
+                                    uint64_t len);
+
+/*
  * Delete an empty directory. Fails if the directory has any entries
  * or has overflowed to $INDEX_ALLOCATION (MVP limitation). Returns
  * 0 on success, -1 on error.

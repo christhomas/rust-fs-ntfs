@@ -847,6 +847,48 @@ pub extern "C" fn fs_ntfs_create_file(
     }
 }
 
+/// Write `new_data` as the entire contents of the file at `path`.
+/// Stays resident if it fits; promotes to non-resident (allocating
+/// clusters) if the data exceeds the MFT record's free space.
+/// Returns bytes written, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_write_file_contents(
+    image: *const c_char,
+    path: *const c_char,
+    buf: *const c_void,
+    len: u64,
+) -> i64 {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_write_file_contents: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_write_file_contents: null or non-UTF-8 path");
+        return -1;
+    };
+    if len == 0 {
+        return match write::write_file_contents(std::path::Path::new(img), p, &[]) {
+            Ok(n) => n as i64,
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
+        };
+    }
+    if buf.is_null() {
+        set_error("fs_ntfs_write_file_contents: null buf with non-zero len");
+        return -1;
+    }
+    let data = unsafe { slice::from_raw_parts(buf as *const u8, len as usize) };
+    match write::write_file_contents(std::path::Path::new(img), p, data) {
+        Ok(n) => n as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Delete an empty directory. Returns 0 on success, -1 on error.
 /// Fails if the directory is non-empty or has `$INDEX_ALLOCATION`
 /// overflow (for MVP).
