@@ -777,16 +777,20 @@ pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u6
     }
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
         .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
-    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
-        return Err(format!(
-            "create_file MVP: parent '{parent_path}' has $INDEX_ALLOCATION overflow — \
-             not yet supported (needs B+ tree insert)"
-        ));
-    }
+    let parent_has_overflow = ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0;
 
-    // Reject if the entry already exists.
+    // Reject if the entry already exists anywhere (resident or INDX block).
     if index_io::find_index_entry(&parent_record_bytes, basename)?.is_some() {
         return Err(format!("'{basename}' already exists in '{parent_path}'"));
+    }
+    if parent_has_overflow {
+        let ia = idx_block::load_for_directory(image, parent_rec)?;
+        for vcn in ia.allocated_block_vcns() {
+            let blk = idx_block::read_indx_block(image, &ia, vcn)?;
+            if index_io::find_entry_in_indx_block(&blk, basename)?.is_some() {
+                return Err(format!("'{basename}' already exists in '{parent_path}'"));
+            }
+        }
     }
 
     // Allocate a free MFT record.
@@ -854,9 +858,13 @@ pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u6
         nt_time,
         /* is_dir */ false,
     )?;
-    let insert_res = update_mft_record(image, parent_rec, |record| {
-        index_io::insert_entry_into_index_root(record, &entry_bytes, basename)
-    });
+    let insert_res = insert_entry_in_parent(
+        image,
+        parent_rec,
+        parent_has_overflow,
+        &entry_bytes,
+        basename,
+    );
     if let Err(e) = insert_res {
         // Roll back: clear IN_USE on the new record + free the bitmap bit.
         let _ = update_mft_record(image, new_rec, |record| {
@@ -870,6 +878,54 @@ pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u6
     }
 
     Ok(new_rec)
+}
+
+/// Insert a new index entry into a parent directory, dispatching
+/// between resident `$INDEX_ROOT` and `$INDEX_ALLOCATION` INDX blocks.
+/// For overflowed parents, scans allocated INDX blocks for one with
+/// room and inserts there.
+fn insert_entry_in_parent(
+    image: &Path,
+    parent_rec: u64,
+    parent_has_overflow: bool,
+    entry_bytes: &[u8],
+    basename: &str,
+) -> Result<(), String> {
+    if !parent_has_overflow {
+        return update_mft_record(image, parent_rec, |record| {
+            index_io::insert_entry_into_index_root(record, entry_bytes, basename)
+        });
+    }
+    // Parent has $INDEX_ALLOCATION: find an INDX block with room.
+    let ia = idx_block::load_for_directory(image, parent_rec)?;
+    for vcn in ia.allocated_block_vcns() {
+        // Peek at free space — avoid unnecessary RMW work for blocks
+        // that can't fit the entry.
+        let block = idx_block::read_indx_block(image, &ia, vcn)?;
+        let ih_start = idx_block::INDX_INDEX_HEADER_OFFSET;
+        let total_size = u32::from_le_bytes([
+            block[ih_start + 4],
+            block[ih_start + 5],
+            block[ih_start + 6],
+            block[ih_start + 7],
+        ]) as usize;
+        let allocated_size = u32::from_le_bytes([
+            block[ih_start + 8],
+            block[ih_start + 9],
+            block[ih_start + 10],
+            block[ih_start + 11],
+        ]) as usize;
+        if total_size + entry_bytes.len() > allocated_size {
+            continue;
+        }
+        // This block has room. RMW + insert.
+        return idx_block::update_indx_block(image, &ia, vcn, |block| {
+            index_io::insert_entry_into_indx_block(block, entry_bytes, basename)
+        });
+    }
+    Err(format!(
+        "no INDX block with room for new entry (would need B+ tree split / new block allocation)"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -895,13 +951,18 @@ pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Str
     }
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
         .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
-    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
-        return Err(format!(
-            "mkdir MVP: parent '{parent_path}' has $INDEX_ALLOCATION overflow — not yet supported"
-        ));
-    }
+    let parent_has_overflow = ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0;
     if index_io::find_index_entry(&parent_record_bytes, basename)?.is_some() {
         return Err(format!("'{basename}' already exists in '{parent_path}'"));
+    }
+    if parent_has_overflow {
+        let ia = idx_block::load_for_directory(image, parent_rec)?;
+        for vcn in ia.allocated_block_vcns() {
+            let blk = idx_block::read_indx_block(image, &ia, vcn)?;
+            if index_io::find_entry_in_indx_block(&blk, basename)?.is_some() {
+                return Err(format!("'{basename}' already exists in '{parent_path}'"));
+            }
+        }
     }
 
     let mbm = crate::mft_bitmap::locate(image)?;
@@ -961,9 +1022,13 @@ pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Str
         nt_time,
         /* is_dir */ true,
     )?;
-    let insert_res = update_mft_record(image, parent_rec, |record| {
-        index_io::insert_entry_into_index_root(record, &entry_bytes, basename)
-    });
+    let insert_res = insert_entry_in_parent(
+        image,
+        parent_rec,
+        parent_has_overflow,
+        &entry_bytes,
+        basename,
+    );
     if let Err(e) = insert_res {
         let _ = update_mft_record(image, new_rec, |record| {
             let cur = u16::from_le_bytes([record[0x16], record[0x17]]);
