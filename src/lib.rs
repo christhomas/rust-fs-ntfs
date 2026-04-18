@@ -717,3 +717,88 @@ pub extern "C" fn fs_ntfs_readlink(
     set_error("readlink not yet implemented");
     -1
 }
+
+// ---------------------------------------------------------------------------
+// Recovery / fsck — write operations. Must NOT be called on a mounted volume.
+// ---------------------------------------------------------------------------
+
+fn cstr_to_path<'a>(path: *const c_char) -> Option<&'a str> {
+    if path.is_null() {
+        return None;
+    }
+    unsafe { CStr::from_ptr(path) }.to_str().ok()
+}
+
+/// Clear the `VOLUME_IS_DIRTY` flag on an NTFS image.
+///
+/// Returns `1` if the flag was set and has been cleared, `0` if the
+/// volume was already clean, `-1` on error. Call
+/// `fs_ntfs_last_error()` for the error message.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_clear_dirty(path: *const c_char) -> c_int {
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_clear_dirty: null or non-UTF-8 path");
+        return -1;
+    };
+    match fsck::clear_dirty(p) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Overwrite `$LogFile` with the NTFS "empty log" pattern (all `0xFF`).
+///
+/// Returns the number of bytes overwritten on success, `-1` on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_reset_logfile(path: *const c_char) -> i64 {
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_reset_logfile: null or non-UTF-8 path");
+        return -1;
+    };
+    match fsck::reset_logfile(p) {
+        Ok(n) => n as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Combined recovery: reset `$LogFile` and clear the dirty flag.
+///
+/// Optional out-params report what the call did:
+/// * `out_logfile_bytes`: bytes of `$LogFile` overwritten (non-null to receive)
+/// * `out_dirty_cleared`: `1` if the dirty flag was found set and cleared,
+///   `0` if the volume was already clean (non-null to receive)
+///
+/// Returns `0` on success, `-1` on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_fsck(
+    path: *const c_char,
+    out_logfile_bytes: *mut u64,
+    out_dirty_cleared: *mut u8,
+) -> c_int {
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_fsck: null or non-UTF-8 path");
+        return -1;
+    };
+    match fsck::fsck(p) {
+        Ok(report) => {
+            if !out_logfile_bytes.is_null() {
+                unsafe { *out_logfile_bytes = report.logfile_bytes };
+            }
+            if !out_dirty_cleared.is_null() {
+                unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };
+            }
+            0
+        }
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
