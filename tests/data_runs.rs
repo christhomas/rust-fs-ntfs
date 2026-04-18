@@ -1,6 +1,8 @@
 //! Unit tests for the mapping-pair decoder.
 
-use fs_ntfs::data_runs::{decode_runs, range_has_hole_or_past_end, vcn_to_lcn, DataRun};
+use fs_ntfs::data_runs::{
+    decode_runs, encode_runs, range_has_hole_or_past_end, vcn_to_lcn, DataRun,
+};
 
 #[test]
 fn decode_empty_terminator() {
@@ -154,4 +156,142 @@ fn decode_rejects_truncated_run() {
     // header says 2-byte length + 2-byte LCN but we only have 1 more byte.
     let bytes = [0x22, 0xFF];
     assert!(decode_runs(&bytes).is_err());
+}
+
+// ---- encoder tests ----
+
+fn assert_roundtrip(runs: Vec<DataRun>) {
+    let encoded = encode_runs(&runs).expect("encode");
+    let decoded = decode_runs(&encoded).expect("decode");
+    assert_eq!(
+        decoded, runs,
+        "round-trip changed runs; bytes = {encoded:02x?}"
+    );
+}
+
+#[test]
+fn encode_decode_single_contiguous() {
+    assert_roundtrip(vec![DataRun {
+        starting_vcn: 0,
+        length: 5,
+        lcn: Some(0x40),
+    }]);
+}
+
+#[test]
+fn encode_decode_two_runs_positive_delta() {
+    assert_roundtrip(vec![
+        DataRun {
+            starting_vcn: 0,
+            length: 3,
+            lcn: Some(10),
+        },
+        DataRun {
+            starting_vcn: 3,
+            length: 2,
+            lcn: Some(17),
+        },
+    ]);
+}
+
+#[test]
+fn encode_decode_runs_with_negative_delta() {
+    assert_roundtrip(vec![
+        DataRun {
+            starting_vcn: 0,
+            length: 4,
+            lcn: Some(100),
+        },
+        DataRun {
+            starting_vcn: 4,
+            length: 2,
+            lcn: Some(90), // delta = -10
+        },
+    ]);
+}
+
+#[test]
+fn encode_decode_sparse_run() {
+    assert_roundtrip(vec![
+        DataRun {
+            starting_vcn: 0,
+            length: 2,
+            lcn: Some(20),
+        },
+        DataRun {
+            starting_vcn: 2,
+            length: 3,
+            lcn: None,
+        },
+        DataRun {
+            starting_vcn: 5,
+            length: 1,
+            lcn: Some(25),
+        },
+    ]);
+}
+
+#[test]
+fn encode_decode_large_lcn_requires_multibyte() {
+    // LCN fits in 3 bytes (needs 24 bits). Round-trip should still work.
+    assert_roundtrip(vec![DataRun {
+        starting_vcn: 0,
+        length: 1000,
+        lcn: Some(0x01_23_45),
+    }]);
+}
+
+#[test]
+fn encode_decode_runs_spanning_very_large_lcn() {
+    // LCN > 2^31, force 5+ byte encoding.
+    assert_roundtrip(vec![
+        DataRun {
+            starting_vcn: 0,
+            length: 1,
+            lcn: Some(0x1_0000_0000),
+        },
+        DataRun {
+            starting_vcn: 1,
+            length: 1,
+            lcn: Some(0x1_0000_0001),
+        },
+    ]);
+}
+
+#[test]
+fn encode_rejects_vcn_gap() {
+    let runs = vec![
+        DataRun {
+            starting_vcn: 0,
+            length: 2,
+            lcn: Some(10),
+        },
+        DataRun {
+            starting_vcn: 5, // gap!
+            length: 1,
+            lcn: Some(20),
+        },
+    ];
+    assert!(encode_runs(&runs).is_err());
+}
+
+#[test]
+fn encode_rejects_zero_length_run() {
+    let runs = vec![DataRun {
+        starting_vcn: 0,
+        length: 0,
+        lcn: Some(1),
+    }];
+    assert!(encode_runs(&runs).is_err());
+}
+
+#[test]
+fn encode_always_ends_with_terminator() {
+    let runs = vec![DataRun {
+        starting_vcn: 0,
+        length: 1,
+        lcn: Some(1),
+    }];
+    let enc = encode_runs(&runs).unwrap();
+    assert_eq!(*enc.last().unwrap(), 0x00);
 }
