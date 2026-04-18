@@ -175,6 +175,37 @@ int fs_ntfs_fsck(const char *path,
                  uint64_t *out_logfile_bytes,
                  uint8_t *out_dirty_cleared);
 
+/* ---- In-place writes (phase W1) ---- */
+
+/*
+ * Set any combination of the four NTFS FILETIMEs (100 ns since
+ * 1601-01-01 UTC) on `path` within the NTFS image at `image`. Pass
+ * NULL for any pointer to leave that field unchanged. Returns 0 on
+ * success, -1 on error.
+ *
+ * NOTE: this writes to the $STANDARD_INFORMATION copy of the times
+ * only. Windows itself doesn't update the duplicate times in the
+ * parent-directory $FILE_NAME index on most operations — same
+ * semantics here.
+ */
+int fs_ntfs_set_times(const char *image, const char *path,
+                      const int64_t *creation,
+                      const int64_t *modification,
+                      const int64_t *mft_record_modification,
+                      const int64_t *access);
+
+/*
+ * Modify the file_attributes field in $STANDARD_INFORMATION by adding
+ * the bits in `add_flags` and removing the bits in `remove_flags`.
+ * Bit values match Windows FILE_ATTRIBUTE_* (MS-FSCC 2.6) —
+ * READONLY=0x01, HIDDEN=0x02, SYSTEM=0x04, ARCHIVE=0x20, etc.
+ *
+ * Overlap between add and remove is rejected. Returns 0 on success,
+ * -1 on error.
+ */
+int fs_ntfs_chattr(const char *image, const char *path,
+                   uint32_t add_flags, uint32_t remove_flags);
+
 #ifdef __cplusplus
 }
 #endif

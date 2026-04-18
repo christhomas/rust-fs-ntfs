@@ -15,8 +15,10 @@ use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::structured_values::{NtfsFileName, NtfsFileNamespace, NtfsStandardInformation};
 use ntfs::{Ntfs, NtfsAttributeType, NtfsFile, NtfsReadSeek};
 
+pub mod attr_io;
 pub mod fsck;
 pub mod mft_io;
+pub mod write;
 
 // ---------------------------------------------------------------------------
 // Thread-local error string
@@ -762,6 +764,79 @@ pub extern "C" fn fs_ntfs_reset_logfile(path: *const c_char) -> i64 {
     };
     match fsck::reset_logfile(p) {
         Ok(n) => n as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Set any combination of the four NTFS timestamps on a file. Each time
+/// is NT FILETIME (100 ns since 1601-01-01 UTC). Pass `NULL` for any
+/// pointer to leave that field unchanged. Non-`NULL` pointers point at
+/// an `int64_t` (cast up to u64 for the on-disk write — NTFS FILETIME
+/// is unsigned, but we take `int64_t` to match POSIX time APIs).
+///
+/// Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_set_times(
+    image: *const c_char,
+    path: *const c_char,
+    creation: *const i64,
+    modification: *const i64,
+    mft_record_modification: *const i64,
+    access: *const i64,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_set_times: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(fp) = cstr_to_path(path) else {
+        set_error("fs_ntfs_set_times: null or non-UTF-8 path");
+        return -1;
+    };
+    let times = write::FileTimes {
+        creation: unsafe { creation.as_ref() }.map(|v| *v as u64),
+        modification: unsafe { modification.as_ref() }.map(|v| *v as u64),
+        mft_record_modification: unsafe { mft_record_modification.as_ref() }.map(|v| *v as u64),
+        access: unsafe { access.as_ref() }.map(|v| *v as u64),
+    };
+    match write::set_times(std::path::Path::new(img), fp, times) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Add / remove bits in `$STANDARD_INFORMATION.file_attributes`. Bits in
+/// `add_flags` are ORed on; bits in `remove_flags` are ANDed off.
+/// Overlap is rejected. Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_chattr(
+    image: *const c_char,
+    path: *const c_char,
+    add_flags: u32,
+    remove_flags: u32,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_chattr: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(fp) = cstr_to_path(path) else {
+        set_error("fs_ntfs_chattr: null or non-UTF-8 path");
+        return -1;
+    };
+    match write::set_file_attributes(
+        std::path::Path::new(img),
+        fp,
+        write::FileAttributesChange {
+            add: add_flags,
+            remove: remove_flags,
+        },
+    ) {
+        Ok(()) => 0,
         Err(e) => {
             set_error(&e);
             -1
