@@ -195,6 +195,28 @@ int fs_ntfs_set_times(const char *image, const char *path,
                       const int64_t *access);
 
 /*
+ * Delete a regular file. Removes the parent dir's index entry, frees
+ * the data clusters in $Bitmap, clears IN_USE on the MFT record, and
+ * frees the MFT record bit in $MFT:$Bitmap.
+ *
+ * Refuses directories. Returns 0 on success, -1 on error.
+ */
+int fs_ntfs_unlink(const char *image, const char *path);
+
+/*
+ * Rename a file in place. `new_name` is a basename (no slashes) with
+ * the SAME UTF-16 length as the current name. Patches both the parent
+ * directory's index entry and each $FILE_NAME attribute on the file's
+ * MFT record. Traverses $INDEX_ALLOCATION if the index has overflowed
+ * out of resident $INDEX_ROOT.
+ *
+ * Returns 0 on success, -1 on error.
+ */
+int fs_ntfs_rename_same_length(const char *image,
+                               const char *old_path,
+                               const char *new_name);
+
+/*
  * Grow a non-resident $DATA to `new_size` bytes. Allocates contiguous
  * free clusters and appends them to the file's run list. Bytes in
  * the newly-allocated range read as zero per NTFS semantics.

@@ -270,6 +270,83 @@ pub fn rename_index_entry_same_length(
     Ok(())
 }
 
+/// Remove an index entry from its containing block (either
+/// `$INDEX_ROOT`'s resident value or an INDX block). Shifts following
+/// entries back by `entry.length` bytes, updates the INDEX_HEADER's
+/// `total_size` field, and zero-fills the tail.
+///
+/// For `$INDEX_ROOT` this also updates the attribute's resident
+/// `value_length` via [`crate::attr_resize::resize_resident_value`]
+/// so the MFT record's `bytes_used` stays consistent.
+///
+/// `block_kind` controls which header layout is expected:
+/// * [`BlockKind::IndexRoot`] — the buffer is the whole MFT record;
+///   entries are inside `$INDEX_ROOT`'s resident value.
+/// * [`BlockKind::IndexAllocation`] — the buffer is a full INDX block.
+pub fn remove_index_entry(
+    buf: &mut [u8],
+    entry: &IndexEntryLocation,
+    block_kind: BlockKind,
+) -> Result<(), String> {
+    let (ih_start, _ir_attr_offset) = match block_kind {
+        BlockKind::IndexRoot => {
+            let ir = attr_io::find_attribute(buf, AttrType::IndexRoot, Some("$I30"))
+                .ok_or_else(|| "$INDEX_ROOT:$I30 missing".to_string())?;
+            let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
+            (
+                ir.attr_offset + val_off + IR_INDEX_HEADER_OFFSET,
+                ir.attr_offset,
+            )
+        }
+        BlockKind::IndexAllocation => (crate::idx_block::INDX_INDEX_HEADER_OFFSET, 0),
+    };
+
+    let total_size_pos = ih_start + IH_TOTAL_SIZE_OF_ENTRIES;
+    let total_size = u32::from_le_bytes([
+        buf[total_size_pos],
+        buf[total_size_pos + 1],
+        buf[total_size_pos + 2],
+        buf[total_size_pos + 3],
+    ]) as usize;
+    let entry_end = entry.record_offset + entry.length;
+    let tail_end = ih_start + total_size;
+    if entry_end > tail_end {
+        return Err("entry extends past total_size".to_string());
+    }
+
+    // Shift following entries back.
+    let tail_len = tail_end - entry_end;
+    buf.copy_within(entry_end..tail_end, entry.record_offset);
+    // Zero-fill vacated range.
+    let new_tail_end = entry.record_offset + tail_len;
+    for byte in &mut buf[new_tail_end..tail_end] {
+        *byte = 0;
+    }
+
+    // Update INDEX_HEADER.total_size.
+    let new_total_size = (total_size - entry.length) as u32;
+    buf[total_size_pos..total_size_pos + 4].copy_from_slice(&new_total_size.to_le_bytes());
+
+    // For $INDEX_ROOT, also shrink the resident attribute so bytes_used
+    // in the MFT record stays in sync.
+    if matches!(block_kind, BlockKind::IndexRoot) {
+        let ir = attr_io::find_attribute(buf, AttrType::IndexRoot, Some("$I30"))
+            .ok_or("$INDEX_ROOT re-find failed")?;
+        let old_val_len = ir.resident_value_length.ok_or("no value_length")?;
+        let new_val_len = old_val_len.saturating_sub(entry.length as u32);
+        crate::attr_resize::resize_resident_value(buf, ir.attr_offset, new_val_len)?;
+    }
+
+    Ok(())
+}
+
+/// Which kind of container holds the index entries being mutated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockKind {
+    IndexRoot,
+    IndexAllocation,
+}
+
 /// Overwrite the UTF-16 name bytes inside the file's own
 /// `$FILE_NAME` attribute (there may be multiple `$FILE_NAME`s — one
 /// per namespace). Uses the first one whose current name matches
