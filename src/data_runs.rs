@@ -120,6 +120,78 @@ pub fn vcn_to_lcn(runs: &[DataRun], vcn: u64) -> Option<u64> {
     None
 }
 
+/// Encode a sequence of runs into NTFS mapping-pairs bytes. Inverse of
+/// [`decode_runs`]. Appends a `0x00` terminator.
+///
+/// Requires `runs` be VCN-contiguous starting at 0 (the usual shape for
+/// a complete attribute value). A gap between runs is rejected — sparse
+/// regions must be expressed as an explicit `DataRun` with `lcn = None`.
+pub fn encode_runs(runs: &[DataRun]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    let mut prev_lcn: i64 = 0;
+    let mut expected_vcn: u64 = 0;
+    for (i, r) in runs.iter().enumerate() {
+        if r.starting_vcn != expected_vcn {
+            return Err(format!(
+                "run {i} starts at VCN {} but previous runs cover up to {}",
+                r.starting_vcn, expected_vcn
+            ));
+        }
+        if r.length == 0 {
+            return Err(format!("run {i} has zero length"));
+        }
+
+        let length_bytes = unsigned_bytes_needed(r.length);
+        let (lcn_bytes, lcn_field) = match r.lcn {
+            None => (0usize, 0i64),
+            Some(abs) => {
+                let abs_i =
+                    i64::try_from(abs).map_err(|_| format!("LCN {abs} exceeds i64 range"))?;
+                let delta = abs_i.checked_sub(prev_lcn).ok_or("LCN delta overflow")?;
+                let nb = signed_bytes_needed(delta);
+                (nb, delta)
+            }
+        };
+
+        out.push(((lcn_bytes as u8) << 4) | (length_bytes as u8));
+        for i in 0..length_bytes {
+            out.push((r.length >> (8 * i)) as u8);
+        }
+        if lcn_bytes > 0 {
+            for i in 0..lcn_bytes {
+                out.push((lcn_field >> (8 * i)) as u8);
+            }
+            prev_lcn = lcn_field + prev_lcn; // lcn_field is delta; accumulate absolute
+        }
+
+        expected_vcn = expected_vcn.checked_add(r.length).ok_or("VCN overflow")?;
+    }
+    out.push(0x00);
+    Ok(out)
+}
+
+fn unsigned_bytes_needed(n: u64) -> usize {
+    if n == 0 {
+        return 1;
+    }
+    let bits = 64 - n.leading_zeros() as usize;
+    (bits + 7) / 8
+}
+
+fn signed_bytes_needed(n: i64) -> usize {
+    // Smallest N (1..=8) such that -2^(8N-1) <= n < 2^(8N-1).
+    if n == 0 {
+        return 1;
+    }
+    for n_bytes in 1usize..=8 {
+        let half_range = 1i64 << (8 * n_bytes - 1);
+        if n >= -half_range && n < half_range {
+            return n_bytes;
+        }
+    }
+    8
+}
+
 /// True if any VCN in `[vcn_start, vcn_start+n)` lies in a sparse hole
 /// or past the end of the run list.
 pub fn range_has_hole_or_past_end(runs: &[DataRun], vcn_start: u64, n_clusters: u64) -> bool {
