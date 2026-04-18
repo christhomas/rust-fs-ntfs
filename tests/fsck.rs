@@ -146,6 +146,17 @@ fn read_logfile_first_page(path: &str) -> Vec<u8> {
 // ---------- tests ----------
 
 #[test]
+fn is_dirty_returns_false_on_clean_fixture() {
+    assert!(!fsck::is_dirty(BASIC_IMG).unwrap());
+}
+
+#[test]
+fn is_dirty_returns_true_after_synth_dirty() {
+    let img = dirty_copy("is_dirty_probe", true, false);
+    assert!(fsck::is_dirty(&img).unwrap());
+}
+
+#[test]
 fn clear_dirty_flips_flag_on_dirty_volume() {
     let img = dirty_copy("clear", true, false);
     assert!(
