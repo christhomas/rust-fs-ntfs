@@ -847,6 +847,77 @@ pub extern "C" fn fs_ntfs_create_file(
     }
 }
 
+/// Create a new empty directory. Returns the new MFT record number on
+/// success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_mkdir(
+    image: *const c_char,
+    parent_path: *const c_char,
+    basename: *const c_char,
+) -> i64 {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_mkdir: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(pp) = cstr_to_path(parent_path) else {
+        set_error("fs_ntfs_mkdir: null or non-UTF-8 parent_path");
+        return -1;
+    };
+    let Some(bn) = cstr_to_path(basename) else {
+        set_error("fs_ntfs_mkdir: null or non-UTF-8 basename");
+        return -1;
+    };
+    match write::mkdir(std::path::Path::new(img), pp, bn) {
+        Ok(rn) => rn as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Write `new_data` as the full content of the file's unnamed `$DATA`
+/// attribute while it remains resident. Works only if the new length
+/// fits in the file's MFT record — larger writes require W2.2
+/// promotion to non-resident. Returns bytes written, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_write_resident_contents(
+    image: *const c_char,
+    path: *const c_char,
+    buf: *const c_void,
+    len: u64,
+) -> i64 {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_write_resident_contents: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_write_resident_contents: null or non-UTF-8 path");
+        return -1;
+    };
+    if len == 0 {
+        return match write::write_resident_contents(std::path::Path::new(img), p, &[]) {
+            Ok(n) => n as i64,
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
+        };
+    }
+    if buf.is_null() {
+        set_error("fs_ntfs_write_resident_contents: null buf with non-zero len");
+        return -1;
+    }
+    let data = unsafe { slice::from_raw_parts(buf as *const u8, len as usize) };
+    match write::write_resident_contents(std::path::Path::new(img), p, data) {
+        Ok(n) => n as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Delete a regular file. Refuses directories. Returns 0 on success,
 /// -1 on error. On success the file's data-run clusters and MFT
 /// record are freed.

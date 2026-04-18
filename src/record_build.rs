@@ -80,7 +80,8 @@ pub fn build_regular_file_record(
     )
 }
 
-/// Build an MFT record for a directory (with empty $INDEX_ROOT:$I30).
+/// Build an MFT record for a directory (with empty
+/// `$INDEX_ROOT:$I30`). Directories have no `$DATA`.
 pub fn build_directory_record(
     record_size: usize,
     record_number: u32,
@@ -91,23 +92,148 @@ pub fn build_directory_record(
     bytes_per_sector: u16,
     index_block_size: u32,
 ) -> Result<Vec<u8>, String> {
-    let mut rec = build_record_inner(
-        record_size,
-        record_number,
-        sequence,
+    if record_size < 512 || record_size % bytes_per_sector as usize != 0 {
+        return Err(format!("invalid record_size {record_size}"));
+    }
+    let utf16: Vec<u16> = name.encode_utf16().collect();
+    if utf16.is_empty() || utf16.len() > 255 {
+        return Err(format!("invalid name length {}", utf16.len()));
+    }
+
+    let mut rec = vec![0u8; record_size];
+    rec[0..4].copy_from_slice(FILE_MAGIC);
+    rec[REC_OFF_USA_OFFSET..REC_OFF_USA_OFFSET + 2]
+        .copy_from_slice(&(USA_OFFSET as u16).to_le_bytes());
+    let sectors = record_size / bytes_per_sector as usize;
+    rec[REC_OFF_USA_COUNT..REC_OFF_USA_COUNT + 2]
+        .copy_from_slice(&((sectors + 1) as u16).to_le_bytes());
+    rec[REC_OFF_LSN..REC_OFF_LSN + 8].copy_from_slice(&0u64.to_le_bytes());
+    rec[REC_OFF_SEQ..REC_OFF_SEQ + 2].copy_from_slice(&sequence.to_le_bytes());
+    rec[REC_OFF_LINK_COUNT..REC_OFF_LINK_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
+    rec[REC_OFF_ATTRS_OFFSET..REC_OFF_ATTRS_OFFSET + 2]
+        .copy_from_slice(&(ATTRS_OFFSET as u16).to_le_bytes());
+    // IN_USE | DIRECTORY
+    rec[REC_OFF_FLAGS..REC_OFF_FLAGS + 2].copy_from_slice(&0x0003u16.to_le_bytes());
+    rec[REC_OFF_BYTES_ALLOCATED..REC_OFF_BYTES_ALLOCATED + 4]
+        .copy_from_slice(&(record_size as u32).to_le_bytes());
+    rec[REC_OFF_BASE_FILE_REF..REC_OFF_BASE_FILE_REF + 8].copy_from_slice(&0u64.to_le_bytes());
+    rec[REC_OFF_NEXT_ATTR_ID..REC_OFF_NEXT_ATTR_ID + 2].copy_from_slice(&3u16.to_le_bytes());
+    rec[REC_OFF_MFT_REC_NUM..REC_OFF_MFT_REC_NUM + 4].copy_from_slice(&record_number.to_le_bytes());
+    // Initial USN = 1.
+    rec[USA_OFFSET..USA_OFFSET + 2].copy_from_slice(&1u16.to_le_bytes());
+
+    let mut cursor = ATTRS_OFFSET;
+    cursor = write_standard_information(&mut rec, cursor, 0, nt_time, /* is_dir */ true);
+    cursor = write_file_name(
+        &mut rec,
+        cursor,
+        1,
         parent_reference,
-        name,
+        &utf16,
         nt_time,
-        bytes_per_sector,
         /* is_dir */ true,
-    )?;
-    // Replace the empty $DATA emitted by build_record_inner with
-    // $INDEX_ROOT($I30) + end marker.
-    let _ = index_block_size;
-    // For MVP, we don't emit $INDEX_ROOT here — mkdir is not yet
-    // implemented, keep this shell.
-    rec.clear();
-    Err("build_directory_record: mkdir not yet implemented".to_string())
+    );
+    cursor = write_empty_index_root(&mut rec, cursor, 2, index_block_size, bytes_per_sector)?;
+
+    rec[cursor..cursor + 4].copy_from_slice(&ATTR_END_MARKER.to_le_bytes());
+    cursor += 4;
+    rec[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4].copy_from_slice(&(cursor as u32).to_le_bytes());
+
+    Ok(rec)
+}
+
+const ATTR_INDEX_ROOT: u32 = 0x90;
+
+/// Emit an `$INDEX_ROOT:$I30` resident attribute containing just the
+/// LAST sentinel entry (empty directory).
+fn write_empty_index_root(
+    rec: &mut [u8],
+    at: usize,
+    attr_id: u16,
+    index_block_size: u32,
+    bytes_per_sector: u16,
+) -> Result<usize, String> {
+    // Name "$I30" in UTF-16 (4 chars × 2 bytes = 8 bytes).
+    let name_u16: [u16; 4] = ['$' as u16, 'I' as u16, '3' as u16, '0' as u16];
+    let name_bytes = 8usize;
+    let header_size = 24usize;
+    let name_offset = header_size; // name comes right after the resident header
+    let value_offset = align8(header_size + name_bytes);
+
+    // INDEX_ROOT value layout:
+    //   IR_HEADER (16) + INDEX_HEADER (16) + LAST sentinel entry (16)
+    let ir_value_size = 16 + 16 + 16;
+    let attr_length = align8(value_offset + ir_value_size);
+
+    if at + attr_length > rec.len() {
+        return Err("$INDEX_ROOT doesn't fit in MFT record".to_string());
+    }
+
+    // Resident attribute header.
+    rec[at..at + 4].copy_from_slice(&ATTR_INDEX_ROOT.to_le_bytes());
+    rec[at + 4..at + 8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    rec[at + 8] = 0; // resident
+    rec[at + 9] = name_u16.len() as u8;
+    rec[at + 10..at + 12].copy_from_slice(&(name_offset as u16).to_le_bytes());
+    rec[at + 12..at + 14].copy_from_slice(&0u16.to_le_bytes());
+    rec[at + 14..at + 16].copy_from_slice(&attr_id.to_le_bytes());
+    rec[at + 16..at + 20].copy_from_slice(&(ir_value_size as u32).to_le_bytes());
+    rec[at + 20..at + 22].copy_from_slice(&(value_offset as u16).to_le_bytes());
+    rec[at + 22] = 0;
+    rec[at + 23] = 0;
+
+    // Name bytes ("$I30" UTF-16 LE).
+    for (i, c) in name_u16.iter().enumerate() {
+        let off = at + name_offset + i * 2;
+        rec[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    }
+
+    // INDEX_ROOT header (16 bytes) at attr_value_start.
+    let v = at + value_offset;
+    // attribute_type = $FILE_NAME (0x30)
+    rec[v..v + 4].copy_from_slice(&0x30u32.to_le_bytes());
+    // collation_rule = COLLATION_FILE_NAME (1)
+    rec[v + 4..v + 8].copy_from_slice(&1u32.to_le_bytes());
+    // index_block_size
+    rec[v + 8..v + 12].copy_from_slice(&index_block_size.to_le_bytes());
+    // clusters_per_index_block: if block_size >= cluster_size use clusters;
+    // if smaller use blocks_per_cluster negative encoding. For our MVP
+    // always set to 1 (assumes block_size == cluster_size).
+    rec[v + 12] = 1;
+    // 3 bytes padding
+    rec[v + 13] = 0;
+    rec[v + 14] = 0;
+    rec[v + 15] = 0;
+
+    // INDEX_HEADER (16 bytes).
+    let ih = v + 16;
+    // first_entry = 16 (immediately after INDEX_HEADER)
+    rec[ih..ih + 4].copy_from_slice(&16u32.to_le_bytes());
+    // total_size = 16 (header) + 16 (LAST entry) = 32? No — total_size is
+    // measured from INDEX_HEADER start and covers the entries. That is,
+    // INDEX_HEADER + entries = 16 + 16 = 32.
+    rec[ih + 4..ih + 8].copy_from_slice(&32u32.to_le_bytes());
+    // allocated_size same as total_size for a fresh IR.
+    rec[ih + 8..ih + 12].copy_from_slice(&32u32.to_le_bytes());
+    // flags = 0 (no subnode)
+    rec[ih + 12] = 0;
+    rec[ih + 13] = 0;
+    rec[ih + 14] = 0;
+    rec[ih + 15] = 0;
+
+    // LAST sentinel entry (16 bytes).
+    let le = ih + 16;
+    rec[le..le + 8].copy_from_slice(&0u64.to_le_bytes()); // file_reference
+    rec[le + 8..le + 10].copy_from_slice(&16u16.to_le_bytes()); // length
+    rec[le + 10..le + 12].copy_from_slice(&0u16.to_le_bytes()); // key_length
+    rec[le + 12..le + 14].copy_from_slice(&0x0002u16.to_le_bytes()); // flags = LAST
+    rec[le + 14..le + 16].copy_from_slice(&0u16.to_le_bytes()); // reserved
+
+    // Bytes-per-sector is not used here but kept in sig for future
+    // INDX-block synthesis when mkdir wants $INDEX_ALLOCATION.
+    let _ = bytes_per_sector;
+
+    Ok(at + attr_length)
 }
 
 fn build_record_inner(
