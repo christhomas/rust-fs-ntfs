@@ -891,9 +891,19 @@ fn insert_entry_in_parent(
     entry_bytes: &[u8],
     basename: &str,
 ) -> Result<(), String> {
+    // Load the upcase table once so sorted insertion matches NTFS
+    // collation (COLLATION_FILE_NAME) on non-ASCII names. Falls back
+    // to the ASCII upcase-fold if $UpCase can't be loaded (shouldn't
+    // happen on a well-formed volume).
+    let upcase = crate::upcase::UpcaseTable::load(image).ok();
     if !parent_has_overflow {
         return update_mft_record(image, parent_rec, |record| {
-            index_io::insert_entry_into_index_root(record, entry_bytes, basename)
+            index_io::insert_entry_into_index_root_with_collation(
+                record,
+                entry_bytes,
+                basename,
+                upcase.as_ref(),
+            )
         });
     }
     // Parent has $INDEX_ALLOCATION: find an INDX block with room.
@@ -920,7 +930,12 @@ fn insert_entry_in_parent(
         }
         // This block has room. RMW + insert.
         return idx_block::update_indx_block(image, &ia, vcn, |block| {
-            index_io::insert_entry_into_indx_block(block, entry_bytes, basename)
+            index_io::insert_entry_into_indx_block_with_collation(
+                block,
+                entry_bytes,
+                basename,
+                upcase.as_ref(),
+            )
         });
     }
     Err(format!(
@@ -1648,11 +1663,17 @@ pub fn rename(image: &Path, old_path: &str, new_basename: &str) -> Result<(), St
     )?;
 
     // 1) Swap the parent's $INDEX_ROOT entry.
+    let upcase = crate::upcase::UpcaseTable::load(image).ok();
     update_mft_record(image, parent_rec, |record| {
         let old_entry = index_io::find_index_entry(record, &old_basename)?
             .ok_or_else(|| format!("old entry '{old_basename}' not found"))?;
         index_io::remove_index_entry(record, &old_entry, index_io::BlockKind::IndexRoot)?;
-        index_io::insert_entry_into_index_root(record, &new_entry_bytes, new_basename)
+        index_io::insert_entry_into_index_root_with_collation(
+            record,
+            &new_entry_bytes,
+            new_basename,
+            upcase.as_ref(),
+        )
     })?;
 
     // 2) Update the file's own $FILE_NAME attribute(s).

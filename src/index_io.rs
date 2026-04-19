@@ -449,6 +449,19 @@ pub fn insert_entry_into_index_root(
     entry_bytes: &[u8],
     new_name: &str,
 ) -> Result<(), String> {
+    insert_entry_into_index_root_with_collation(record, entry_bytes, new_name, None)
+}
+
+/// See [`insert_entry_into_index_root`]. Accepts an optional upcase
+/// table for NTFS-compliant collation on non-ASCII names. Pass `None`
+/// for the ASCII-fallback comparator (sufficient for plain English
+/// filenames but incorrect for non-ASCII).
+pub fn insert_entry_into_index_root_with_collation(
+    record: &mut [u8],
+    entry_bytes: &[u8],
+    new_name: &str,
+    upcase: Option<&crate::upcase::UpcaseTable>,
+) -> Result<(), String> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some("$I30"))
         .ok_or_else(|| "$INDEX_ROOT:$I30 missing".to_string())?;
     let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
@@ -492,9 +505,7 @@ pub fn insert_entry_into_index_root(
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
-        if compare_utf16_case_insensitive(&new_utf16, &existing_utf16)
-            != std::cmp::Ordering::Greater
-        {
+        if compare_names(&new_utf16, &existing_utf16, upcase) != std::cmp::Ordering::Greater {
             // new goes before existing
             break;
         }
@@ -548,6 +559,17 @@ pub fn insert_entry_into_indx_block(
     block: &mut [u8],
     entry_bytes: &[u8],
     new_name: &str,
+) -> Result<(), String> {
+    insert_entry_into_indx_block_with_collation(block, entry_bytes, new_name, None)
+}
+
+/// See [`insert_entry_into_indx_block`]. Accepts an optional upcase
+/// table for correct NTFS collation.
+pub fn insert_entry_into_indx_block_with_collation(
+    block: &mut [u8],
+    entry_bytes: &[u8],
+    new_name: &str,
+    upcase: Option<&crate::upcase::UpcaseTable>,
 ) -> Result<(), String> {
     use crate::idx_block::{
         IH_FIRST_ENTRY_OFFSET, IH_TOTAL_SIZE_OF_ENTRIES, INDX_INDEX_HEADER_OFFSET,
@@ -603,9 +625,7 @@ pub fn insert_entry_into_indx_block(
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
-        if compare_utf16_case_insensitive(&new_utf16, &existing_utf16)
-            != std::cmp::Ordering::Greater
-        {
+        if compare_names(&new_utf16, &existing_utf16, upcase) != std::cmp::Ordering::Greater {
             break;
         }
         cursor += length;
@@ -625,9 +645,18 @@ pub fn insert_entry_into_indx_block(
     Ok(())
 }
 
-/// Naive case-insensitive UTF-16 comparison. Works well enough for ASCII
-/// filenames; not a full NTFS-upcase-table implementation.
-fn compare_utf16_case_insensitive(a: &[u16], b: &[u16]) -> std::cmp::Ordering {
+/// Compare two UTF-16 names under the callers's chosen collation.
+/// `None` falls back to an ASCII-only upcase-fold (works for plain
+/// English names but mis-orders anything with non-ASCII). `Some(table)`
+/// uses the NTFS `$UpCase` table for COLLATION_FILE_NAME correctness.
+pub fn compare_names(
+    a: &[u16],
+    b: &[u16],
+    upcase: Option<&crate::upcase::UpcaseTable>,
+) -> std::cmp::Ordering {
+    if let Some(t) = upcase {
+        return t.cmp_names(a, b);
+    }
     let map = |c: u16| -> u16 {
         if (c as u32) < 128 {
             (c as u8).to_ascii_uppercase() as u16
