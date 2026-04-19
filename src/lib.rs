@@ -1345,7 +1345,7 @@ pub extern "C" fn fs_ntfs_write_named_stream(
     } else {
         unsafe { slice::from_raw_parts(buf as *const u8, len as usize) }
     };
-    match write::write_named_stream_resident(std::path::Path::new(img), p, sn, data) {
+    match write::write_named_stream(std::path::Path::new(img), p, sn, data) {
         Ok(()) => 0,
         Err(e) => {
             set_error(&e);
