@@ -59,7 +59,11 @@ fn capi_create_file_happy_path() {
     let name_c = CString::new("capi_new.txt").unwrap();
 
     let rn = unsafe { fs_ntfs_create_file(img_c.as_ptr(), parent_c.as_ptr(), name_c.as_ptr()) };
-    assert!(rn >= 16, "expected record num >=16, got {rn}, err={}", last_error());
+    assert!(
+        rn >= 16,
+        "expected record num >=16, got {rn}, err={}",
+        last_error()
+    );
     assert!(file_exists(&img, "/", "capi_new.txt"));
 }
 

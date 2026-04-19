@@ -4,8 +4,7 @@
 #![allow(unused_unsafe)]
 
 use fs_ntfs::{
-    fs_ntfs_grow, fs_ntfs_last_error, fs_ntfs_write_file_contents,
-    fs_ntfs_write_resident_contents,
+    fs_ntfs_grow, fs_ntfs_last_error, fs_ntfs_write_file_contents, fs_ntfs_write_resident_contents,
 };
 use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::{Ntfs, NtfsAttributeType, NtfsReadSeek};
@@ -96,9 +95,8 @@ fn capi_write_file_contents_zero_length_truncates() {
     let img = working_copy("fc_zero", BASIC_IMG);
     let img_c = CString::new(img.as_str()).unwrap();
     let p_c = CString::new("/hello.txt").unwrap();
-    let n = unsafe {
-        fs_ntfs_write_file_contents(img_c.as_ptr(), p_c.as_ptr(), std::ptr::null(), 0)
-    };
+    let n =
+        unsafe { fs_ntfs_write_file_contents(img_c.as_ptr(), p_c.as_ptr(), std::ptr::null(), 0) };
     assert_eq!(n, 0, "err={}", last_error());
     assert!(read_all(&img, "/hello.txt").is_empty());
 }
@@ -107,9 +105,8 @@ fn capi_write_file_contents_zero_length_truncates() {
 fn capi_write_file_contents_rejects_null_buf_with_len() {
     let img_c = CString::new(BASIC_IMG).unwrap();
     let p_c = CString::new("/hello.txt").unwrap();
-    let n = unsafe {
-        fs_ntfs_write_file_contents(img_c.as_ptr(), p_c.as_ptr(), std::ptr::null(), 10)
-    };
+    let n =
+        unsafe { fs_ntfs_write_file_contents(img_c.as_ptr(), p_c.as_ptr(), std::ptr::null(), 10) };
     assert_eq!(n, -1);
     assert!(last_error().contains("null"));
 }

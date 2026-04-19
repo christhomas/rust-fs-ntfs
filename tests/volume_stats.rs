@@ -59,5 +59,8 @@ fn free_clusters_decreases_after_allocation() {
     let payload = vec![0xAB; 16384]; // 16 KiB
     fs.write_file_contents("/hello.txt", &payload).unwrap();
     let after = fs.volume_stats().unwrap().free_clusters;
-    assert!(after < before, "free clusters: before={before} after={after}");
+    assert!(
+        after < before,
+        "free clusters: before={before} after={after}"
+    );
 }

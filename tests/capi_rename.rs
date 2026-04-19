@@ -119,9 +119,8 @@ fn capi_rename_rejects_null_path() {
 fn capi_rename_same_length_rejects_null_name() {
     let img_c = CString::new(BASIC_IMG).unwrap();
     let old_c = CString::new("/hello.txt").unwrap();
-    let rc = unsafe {
-        fs_ntfs_rename_same_length(img_c.as_ptr(), old_c.as_ptr(), std::ptr::null())
-    };
+    let rc =
+        unsafe { fs_ntfs_rename_same_length(img_c.as_ptr(), old_c.as_ptr(), std::ptr::null()) };
     assert_eq!(rc, -1);
     assert!(last_error().contains("new_name"));
 }

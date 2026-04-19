@@ -188,7 +188,11 @@ impl Filesystem {
             mtime: 0,
             ctime: 0,
             crtime: 0,
-            mode: if file.is_directory() { 0o40755 } else { 0o100644 },
+            mode: if file.is_directory() {
+                0o40755
+            } else {
+                0o100644
+            },
             link_count: file.hard_link_count(),
             file_type: if file.is_directory() {
                 FileType::Directory
@@ -373,13 +377,7 @@ impl Filesystem {
         write::delete_named_stream(&self.image, path, stream_name).map_err(Error)
     }
 
-    pub fn write_ea(
-        &self,
-        path: &str,
-        name: &[u8],
-        value: &[u8],
-        flags: u8,
-    ) -> Result<(), Error> {
+    pub fn write_ea(&self, path: &str, name: &[u8], value: &[u8], flags: u8) -> Result<(), Error> {
         write::write_ea(&self.image, path, name, value, flags).map_err(Error)
     }
 
@@ -387,12 +385,7 @@ impl Filesystem {
         write::remove_ea(&self.image, path, name).map_err(Error)
     }
 
-    pub fn write_reparse_point(
-        &self,
-        path: &str,
-        tag: u32,
-        data: &[u8],
-    ) -> Result<(), Error> {
+    pub fn write_reparse_point(&self, path: &str, tag: u32, data: &[u8]) -> Result<(), Error> {
         write::write_reparse_point(&self.image, path, tag, data).map_err(Error)
     }
 
@@ -432,10 +425,7 @@ fn ntfs_time_to_unix(t: ntfs::NtfsTime) -> u32 {
     secs.saturating_sub(EPOCH_DIFF) as u32
 }
 
-fn parent_record_of(
-    file: &ntfs::NtfsFile,
-    reader: &mut BufReader<File>,
-) -> Result<u64, String> {
+fn parent_record_of(file: &ntfs::NtfsFile, reader: &mut BufReader<File>) -> Result<u64, String> {
     let mut attrs = file.attributes();
     while let Some(item) = attrs.next(reader) {
         let item = item.map_err(|e| format!("attr iter: {e}"))?;
@@ -443,9 +433,7 @@ fn parent_record_of(
         if a.ty().ok() != Some(NtfsAttributeType::FileName) {
             continue;
         }
-        if let Ok(fname) =
-            a.structured_value::<_, ntfs::structured_values::NtfsFileName>(reader)
-        {
+        if let Ok(fname) = a.structured_value::<_, ntfs::structured_values::NtfsFileName>(reader) {
             return Ok(fname.parent_directory_reference().file_record_number());
         }
     }
