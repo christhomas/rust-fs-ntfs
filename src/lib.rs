@@ -34,17 +34,90 @@ pub mod write;
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::new("").unwrap());
+    static LAST_ERRNO: RefCell<c_int> = const { RefCell::new(0) };
 }
 
 fn set_error(msg: &str) {
+    let errno = infer_errno_from_message(msg);
     LAST_ERROR.with(|cell| {
         *cell.borrow_mut() = CString::new(msg).unwrap_or_else(|_| CString::new("unknown").unwrap());
     });
+    LAST_ERRNO.with(|cell| *cell.borrow_mut() = errno);
+}
+
+/// Heuristic mapping from our error message content to a POSIX errno.
+/// Not exhaustive — falls back to EIO for unmatched cases. Intended
+/// as a convenience companion to `fs_ntfs_last_error` so FFI consumers
+/// can dispatch on a small numeric space.
+fn infer_errno_from_message(msg: &str) -> c_int {
+    // Values picked to match <errno.h> on POSIX (identical across
+    // Linux + macOS + Windows UCRT for these common codes).
+    const EIO: c_int = 5;
+    const ENOENT: c_int = 2;
+    const EEXIST: c_int = 17;
+    const ENOSPC: c_int = 28;
+    const EINVAL: c_int = 22;
+    const ENOTDIR: c_int = 20;
+    const EISDIR: c_int = 21;
+    const ENOTEMPTY: c_int = 66; // macOS; Linux is 39; both non-zero, good enough
+    const EPERM: c_int = 1;
+
+    let m = msg;
+    if m.contains("not found")
+        || m.contains("nonexistent")
+        || m.contains("ENOENT")
+        || m.contains("not mapped")
+    {
+        ENOENT
+    } else if m.contains("already exists") || m.contains("EEXIST") {
+        EEXIST
+    } else if m.contains("no room")
+        || m.contains("full")
+        || m.contains("out of space")
+        || m.contains("exceeds record capacity")
+    {
+        ENOSPC
+    } else if m.contains("invalid")
+        || m.contains("invalid basename")
+        || m.contains("null or non-UTF-8")
+        || m.contains("null ")
+    {
+        EINVAL
+    } else if m.contains("not a directory") {
+        ENOTDIR
+    } else if m.contains("is a directory") {
+        EISDIR
+    } else if m.contains("not empty") {
+        ENOTEMPTY
+    } else if m.contains("refuse") || m.contains("permission") {
+        EPERM
+    } else {
+        EIO
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_last_error() -> *const c_char {
     LAST_ERROR.with(|cell| cell.borrow().as_ptr())
+}
+
+/// Companion to `fs_ntfs_last_error`. Returns a POSIX-style errno
+/// inferred from the most recent error message. `0` means "no error
+/// recorded on this thread." FFI consumers can dispatch on this value
+/// without parsing the error string.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_last_errno() -> c_int {
+    LAST_ERRNO.with(|cell| *cell.borrow())
+}
+
+/// Reset the thread-local error state. Primarily useful in tests /
+/// after a caller has consumed the last error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_clear_last_error() {
+    LAST_ERROR.with(|cell| {
+        *cell.borrow_mut() = CString::new("").unwrap();
+    });
+    LAST_ERRNO.with(|cell| *cell.borrow_mut() = 0);
 }
 
 // ---------------------------------------------------------------------------
