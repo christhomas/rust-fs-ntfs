@@ -142,6 +142,19 @@ int fs_ntfs_readlink(fs_ntfs_fs_t *fs, const char *path,
 
 const char *fs_ntfs_last_error(void);
 
+/*
+ * Companion to fs_ntfs_last_error. Returns a POSIX-style errno code
+ * (ENOENT, EEXIST, ENOSPC, EINVAL, ENOTDIR, EISDIR, ENOTEMPTY, EPERM,
+ * or EIO as a fallback). `0` means no error recorded on this thread.
+ * Inferred heuristically from the error message content.
+ */
+int fs_ntfs_last_errno(void);
+
+/*
+ * Reset the thread-local error state.
+ */
+void fs_ntfs_clear_last_error(void);
+
 /* ---- Recovery / fsck ---- */
 
 /*
