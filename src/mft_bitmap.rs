@@ -107,6 +107,26 @@ pub fn find_free_record(image: &Path, bm: &MftBitmap, hint: u64) -> Result<Optio
     Ok(None)
 }
 
+/// Count free MFT record slots in `$MFT:$Bitmap`.
+pub fn count_free(image: &Path, bm: &MftBitmap) -> Result<u64, String> {
+    match &bm.layout {
+        MftBitmapLayout::Resident {
+            bytes, total_bits, ..
+        } => {
+            let set: u64 = bytes.iter().map(|b| b.count_ones() as u64).sum();
+            Ok(total_bits.saturating_sub(set))
+        }
+        MftBitmapLayout::NonResident { total_bits, .. } => {
+            let total_bytes = total_bits.div_ceil(8);
+            let mut set: u64 = 0;
+            for i in 0..total_bytes {
+                set += read_bitmap_byte(image, bm, i)?.count_ones() as u64;
+            }
+            Ok(total_bits.saturating_sub(set))
+        }
+    }
+}
+
 /// Mark MFT record `n` as allocated (set bit = 1).
 pub fn allocate(image: &Path, bm: &MftBitmap, n: u64) -> Result<(), String> {
     mutate_bit(image, bm, n, true)

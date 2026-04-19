@@ -295,6 +295,16 @@ fn write_bitmap_bytes(
     Ok(())
 }
 
+/// Count free clusters in `$Bitmap`. Scans the whole bitmap once.
+pub fn count_free(image: &Path, bm: &BitmapLocation) -> Result<u64, String> {
+    let total_bytes = bm.value_length;
+    let bytes = read_bitmap_bytes(image, bm, 0, total_bytes)?;
+    let set: u64 = bytes.iter().map(|b| b.count_ones() as u64).sum();
+    // Bits past total_bits (if any, due to padding) are required to be
+    // zero by the spec; count_ones is safe to subtract from total.
+    Ok(bm.total_bits.saturating_sub(set))
+}
+
 /// Is cluster `lcn` marked allocated?
 pub fn is_allocated(image: &Path, bm: &BitmapLocation, lcn: u64) -> Result<bool, String> {
     if lcn >= bm.total_bits {

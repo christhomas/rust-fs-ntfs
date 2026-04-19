@@ -90,6 +90,15 @@ pub struct VolumeInfo {
     pub total_size: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct VolumeStats {
+    pub total_clusters: u64,
+    pub free_clusters: u64,
+    pub mft_total_records: u64,
+    pub mft_free_records: u64,
+    pub dirty: bool,
+}
+
 /// Stateless facade around a disk image. `mount` validates the image
 /// once; all subsequent methods re-open it.
 #[derive(Debug)]
@@ -129,6 +138,28 @@ impl Filesystem {
 
     pub fn clear_dirty(&self) -> Result<bool, Error> {
         fsck::clear_dirty(&self.image).map_err(Error)
+    }
+
+    /// Rich stats: free clusters, MFT free records, dirty flag.
+    /// Two full bitmap scans — not cheap.
+    pub fn volume_stats(&self) -> Result<VolumeStats, Error> {
+        let bm = crate::bitmap::locate_bitmap(&self.image).map_err(Error)?;
+        let free_clusters = crate::bitmap::count_free(&self.image, &bm).map_err(Error)?;
+        let mft_bm = crate::mft_bitmap::locate(&self.image).map_err(Error)?;
+        let mft_total_records = match &mft_bm.layout {
+            crate::mft_bitmap::MftBitmapLayout::Resident { total_bits, .. } => *total_bits,
+            crate::mft_bitmap::MftBitmapLayout::NonResident { total_bits, .. } => *total_bits,
+        };
+        let mft_free_records =
+            crate::mft_bitmap::count_free(&self.image, &mft_bm).map_err(Error)?;
+        let dirty = fsck::is_dirty(&self.image).map_err(Error)?;
+        Ok(VolumeStats {
+            total_clusters: bm.total_bits,
+            free_clusters,
+            mft_total_records,
+            mft_free_records,
+            dirty,
+        })
     }
 
     pub fn volume_info(&self) -> Result<VolumeInfo, Error> {
