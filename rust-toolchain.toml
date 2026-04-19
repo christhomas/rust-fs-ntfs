@@ -1,4 +1,12 @@
+# Pin the Rust toolchain so local dev and CI compile against the same
+# rustc + clippy + rustfmt versions. Without this, a new clippy lint
+# landed in a newer stable release can fail CI on unchanged code that
+# built a week earlier — a real class of failures seen on sibling repos.
+#
+# Bump this deliberately, not incidentally: update locally, verify
+# `cargo test --release` + `cargo clippy --all-targets` + `cargo fmt --check`
+# pass, then update CI's `with: toolchain:` to match.
 [toolchain]
-channel = "stable"
+channel = "1.94.1"
 components = ["rustfmt", "clippy"]
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+profile = "minimal"
