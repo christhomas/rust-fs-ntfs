@@ -1593,6 +1593,40 @@ pub extern "C" fn fs_ntfs_unlink(image: *const c_char, path: *const c_char) -> c
     }
 }
 
+/// Read a file's 16-byte `$OBJECT_ID` into `out_buf[0..16]`. Returns
+/// `1` if the file has an object ID (buffer filled), `0` if it does
+/// not, `-1` on error. `out_buf` must be at least 16 bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_read_object_id(
+    image: *const c_char,
+    path: *const c_char,
+    out_buf: *mut u8,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_read_object_id: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_read_object_id: null or non-UTF-8 path");
+        return -1;
+    };
+    if out_buf.is_null() {
+        set_error("fs_ntfs_read_object_id: null out_buf");
+        return -1;
+    }
+    match write::read_object_id(std::path::Path::new(img), p) {
+        Ok(Some(guid)) => {
+            unsafe { std::ptr::copy_nonoverlapping(guid.as_ptr(), out_buf, 16) };
+            1
+        }
+        Ok(None) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Add a hard link `new_parent_path/new_basename` pointing at the
 /// same file as `existing_path`. Returns 0 on success, -1 on error.
 /// Refuses directories. The target file's hard-link count is

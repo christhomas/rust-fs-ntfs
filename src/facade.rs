@@ -400,6 +400,12 @@ impl Filesystem {
         write::remove_reparse_point(&self.image, path).map_err(Error)
     }
 
+    /// Read the file's 16-byte `$OBJECT_ID` (GUID). Returns `Ok(None)`
+    /// if the file has no object ID.
+    pub fn object_id(&self, path: &str) -> Result<Option<[u8; 16]>, Error> {
+        write::read_object_id(&self.image, path).map_err(Error)
+    }
+
     pub fn link(
         &self,
         existing_path: &str,
