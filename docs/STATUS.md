@@ -155,11 +155,11 @@ next step — `crate-type = ["staticlib", "rlib"]` permits it.
 
 ### Crate-level items that are sloppy and worth cleaning up
 
-- `best_file_name_str` in `src/lib.rs` carries a drive-by
-  `#[allow(dead_code)]` (added so CI's `-D warnings` would pass).
-  Logic for picking the preferred filename namespace
-  (Win32 > DOS+Win32 > DOS > POSIX) is correct; wire it into
-  `fill_attr` / the dir iterator, or delete.
+- ~~`best_file_name_str` in `src/lib.rs` carries a drive-by
+  `#[allow(dead_code)]`.~~ Deleted (§4.5). Dir iterator already
+  skips DOS-namespace entries at the index level, so the function
+  was unused. Files with only a DOS `$FILE_NAME` (exceedingly rare
+  on disks created by modern tools) still show up with that name.
 - **Clippy gate disabled in CI.** [`.github/workflows/ci.yml`] currently
   runs only `cargo fmt --check` + `cargo test --release`. Several FFI
   entry points trigger `clippy::not_unsafe_ptr_arg_deref` because
@@ -323,8 +323,7 @@ against is named in brackets.
 
 ### Phase 4 — polish
 
-15. **Wire up or delete `best_file_name_str`.** Strip the
-    `#[allow(dead_code)]` drive-by.
+15. ~~**Wire up or delete `best_file_name_str`.**~~ Deleted.
 16. **Universal release builds on tag push.** Release workflow was
     cloned from fs-ext4; verify it produces
     `libfs_ntfs-v0.1.0-macos-universal.tar.gz` on a tag.

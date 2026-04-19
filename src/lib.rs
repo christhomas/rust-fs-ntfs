@@ -362,35 +362,6 @@ fn navigate_to_path<'n>(
     Ok(current)
 }
 
-/// Get the best display name for a file.
-#[allow(dead_code)]
-fn best_file_name_str(
-    file: &NtfsFile,
-    reader: &mut ReaderKind,
-    parent_record_number: u64,
-) -> String {
-    let priority = [
-        Some(NtfsFileNamespace::Win32),
-        Some(NtfsFileNamespace::Win32AndDos),
-        None,
-    ];
-
-    for ns in priority {
-        if let Some(Ok(name)) = file.name(reader, ns, Some(parent_record_number)) {
-            return name.name().to_string_lossy();
-        }
-    }
-
-    // Fallback: try without parent constraint
-    for ns in priority {
-        if let Some(Ok(name)) = file.name(reader, ns, None) {
-            return name.name().to_string_lossy();
-        }
-    }
-
-    String::from("???")
-}
-
 /// Fill an FsNtfsAttr from an NtfsFile.
 fn fill_attr(
     file: &NtfsFile,
