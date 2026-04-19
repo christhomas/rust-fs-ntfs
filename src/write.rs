@@ -1288,6 +1288,16 @@ pub fn read_object_id(image: &Path, file_path: &str) -> Result<Option<[u8; 16]>,
     if val_len < 16 {
         return Err(format!("$OBJECT_ID value too short: {val_len} bytes"));
     }
+    // Guard against a corrupt on-disk value_offset that lands 16 bytes
+    // can't be read from — independent of val_len, which is only the
+    // declared size field and could disagree with the attribute's
+    // actual placement in the record.
+    if val_off.checked_add(16).is_none_or(|end| end > record.len()) {
+        return Err(format!(
+            "$OBJECT_ID value range out of record: val_off={val_off}, record_len={}",
+            record.len()
+        ));
+    }
     let mut out = [0u8; 16];
     out.copy_from_slice(&record[val_off..val_off + 16]);
     Ok(Some(out))
