@@ -264,11 +264,21 @@ pub struct FsNtfsVolumeInfo {
     total_size: u64,
 }
 
+/// Write callback matching the `fs_ntfs_write_fn` C typedef. The
+/// trailing `write` field on [`FsNtfsBlockdevCfg`] is an *optional*
+/// `Option<WriteCallback>` so existing read-only callers that
+/// memset/zero-init their config are unaffected — `None` is the
+/// null-function-pointer representation in the C ABI under `#[repr(C)]`.
+type WriteCallback = unsafe extern "C" fn(*mut c_void, *const c_void, u64, u64) -> c_int;
+
 #[repr(C)]
 pub struct FsNtfsBlockdevCfg {
-    read: ReadCallback,
-    context: *mut c_void,
-    size_bytes: u64,
+    pub read: ReadCallback,
+    pub context: *mut c_void,
+    pub size_bytes: u64,
+    /// NEW in v0.1.1. NULL / `None` = read-only. Required by the
+    /// callback-based fsck entry points.
+    pub write: Option<WriteCallback>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1865,6 +1875,191 @@ pub extern "C" fn fs_ntfs_fsck(
         return -1;
     };
     match fsck::fsck(p) {
+        Ok(report) => {
+            if !out_logfile_bytes.is_null() {
+                unsafe { *out_logfile_bytes = report.logfile_bytes };
+            }
+            if !out_dirty_cleared.is_null() {
+                unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };
+            }
+            0
+        }
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Callback-based fsck (v0.1.1)
+// ---------------------------------------------------------------------------
+
+/// `FsckIo` backed by the read/write callback pair on
+/// [`FsNtfsBlockdevCfg`]. `size` is taken from the config's `size_bytes`.
+///
+/// Safety: the context pointer must remain valid for the duration of
+/// any fsck call. That's the same contract FSKit / the Go backend
+/// already honor for `fs_ntfs_mount_with_callbacks`.
+struct CallbackIo {
+    read_fn: ReadCallback,
+    write_fn: WriteCallback,
+    context: *mut c_void,
+    size: u64,
+}
+
+unsafe impl Send for CallbackIo {}
+
+impl fsck::FsckIo for CallbackIo {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        let rc = unsafe {
+            (self.read_fn)(
+                self.context,
+                buf.as_mut_ptr() as *mut c_void,
+                offset,
+                buf.len() as u64,
+            )
+        };
+        if rc != 0 {
+            return Err(format!(
+                "read callback failed: rc={rc} @{offset} len={}",
+                buf.len()
+            ));
+        }
+        Ok(())
+    }
+
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        let rc = unsafe {
+            (self.write_fn)(
+                self.context,
+                buf.as_ptr() as *const c_void,
+                offset,
+                buf.len() as u64,
+            )
+        };
+        if rc != 0 {
+            return Err(format!(
+                "write callback failed: rc={rc} @{offset} len={}",
+                buf.len()
+            ));
+        }
+        Ok(())
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    // `sync` is a no-op: the host (FSKit / Go backend) owns the
+    // underlying file handle and is responsible for barrier semantics.
+}
+
+/// Check the dirty flag over a callback-based block device. Only the
+/// `read` callback is used; `write` may be `NULL`. Returns `1` if dirty,
+/// `0` if clean, `-1` on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_is_dirty_with_callbacks(cfg: *const FsNtfsBlockdevCfg) -> c_int {
+    if cfg.is_null() {
+        set_error("fs_ntfs_is_dirty_with_callbacks: null config");
+        return -1;
+    }
+    let cfg = unsafe { &*cfg };
+
+    // The write callback is never invoked by `is_dirty`; wire up a
+    // never-called stub so the struct stays total. We picked an unsafe
+    // extern "C" fn that returns EIO if somehow invoked — defense in
+    // depth against a future caller accidentally reaching through it.
+    unsafe extern "C" fn write_stub(
+        _ctx: *mut c_void,
+        _buf: *const c_void,
+        _off: u64,
+        _len: u64,
+    ) -> c_int {
+        5 /* EIO */
+    }
+
+    let mut io = CallbackIo {
+        read_fn: cfg.read,
+        write_fn: cfg.write.unwrap_or(write_stub),
+        context: cfg.context,
+        size: cfg.size_bytes,
+    };
+
+    match fsck::is_dirty_io(&mut io) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Progress callback matching the `fs_ntfs_fsck_progress_fn` C typedef.
+type FsckProgressCallback = unsafe extern "C" fn(*mut c_void, *const c_char, u64, u64) -> c_int;
+
+/// Combined recovery via callbacks: reset `$LogFile` + clear the dirty
+/// bit. Requires both `cfg->read` and `cfg->write` to be set. Emits
+/// progress via `progress_cb` when non-NULL. Returns `0` on success,
+/// `-1` on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_fsck_with_callbacks(
+    cfg: *const FsNtfsBlockdevCfg,
+    progress_cb: Option<FsckProgressCallback>,
+    progress_ctx: *mut c_void,
+    out_logfile_bytes: *mut u64,
+    out_dirty_cleared: *mut u8,
+) -> c_int {
+    if cfg.is_null() {
+        set_error("fs_ntfs_fsck_with_callbacks: null config");
+        return -1;
+    }
+    let cfg = unsafe { &*cfg };
+
+    let Some(write_fn) = cfg.write else {
+        set_error("fs_ntfs_fsck_with_callbacks: cfg.write is NULL (fsck requires RW)");
+        return -1;
+    };
+
+    let mut io = CallbackIo {
+        read_fn: cfg.read,
+        write_fn,
+        context: cfg.context,
+        size: cfg.size_bytes,
+    };
+
+    // Adapter: Rust closure → C function pointer. We need a single
+    // CString per phase transition so the `*const c_char` stays valid
+    // for the duration of the callback invocation. Done by allocating
+    // inside the closure (one CString per emission); acceptable
+    // overhead given progress fires at most a few hundred times per
+    // fsck.
+    //
+    // SendCtx: `*mut c_void` isn't Send, but the closure is kept local
+    // to this stack frame and never crosses a thread boundary, so we
+    // don't need Send. The callback fn pointer + ctx are captured by
+    // move into the closure.
+    struct PtrWrap(*mut c_void);
+    let pctx = PtrWrap(progress_ctx);
+    let pcb = progress_cb;
+
+    let mut progress_closure = move |phase: &str, done: u64, total: u64| {
+        if let Some(cb) = pcb {
+            if let Ok(cstr) = CString::new(phase) {
+                let _ = unsafe { cb(pctx.0, cstr.as_ptr(), done, total) };
+            }
+        }
+    };
+
+    #[allow(clippy::type_complexity)]
+    let progress: Option<&mut (dyn FnMut(&str, u64, u64) + '_)> = if pcb.is_some() {
+        Some(&mut progress_closure)
+    } else {
+        None
+    };
+
+    match fsck::fsck_io(&mut io, progress) {
         Ok(report) => {
             if !out_logfile_bytes.is_null() {
                 unsafe { *out_logfile_bytes = report.logfile_bytes };

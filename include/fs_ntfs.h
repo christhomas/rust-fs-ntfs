@@ -75,12 +75,30 @@ typedef int (*fs_ntfs_read_fn)(void *context, void *buf,
                                    uint64_t offset, uint64_t length);
 
 /*
- * Block device parameters for callback-based mounting.
+ * Callback for writing to the device.
+ * Must write exactly `length` bytes from `buf` starting at `offset`.
+ * Returns 0 on success, non-zero on error.
+ *
+ * Optional — set to NULL if the consumer mounts read-only. The write
+ * callback is only required by the recovery entry points
+ * (`fs_ntfs_fsck_with_callbacks`). `fs_ntfs_mount_with_callbacks` and
+ * `fs_ntfs_is_dirty_with_callbacks` ignore this field.
+ */
+typedef int (*fs_ntfs_write_fn)(void *context, const void *buf,
+                                    uint64_t offset, uint64_t length);
+
+/*
+ * Block device parameters for callback-based mounting and recovery.
+ *
+ * NOTE: `write` was added in v0.1.1 at the tail of the struct to keep
+ * backward-compatible binary layout with v0.1.0 consumers. Existing
+ * read-only callers that memset/zero-init their config are unaffected.
  */
 typedef struct {
-    fs_ntfs_read_fn read;
-    void   *context;
-    uint64_t size_bytes;
+    fs_ntfs_read_fn  read;
+    void            *context;
+    uint64_t         size_bytes;
+    fs_ntfs_write_fn write;           /* NEW in v0.1.1; NULL if read-only */
 } fs_ntfs_blockdev_cfg_t;
 
 /* ---- Lifecycle ---- */
@@ -230,6 +248,56 @@ int64_t fs_ntfs_reset_logfile(const char *path);
 int fs_ntfs_fsck(const char *path,
                  uint64_t *out_logfile_bytes,
                  uint8_t *out_dirty_cleared);
+
+/* ---- Recovery / fsck via callback-based I/O ---- */
+
+/*
+ * Check whether the volume's VOLUME_IS_DIRTY flag is set, using the
+ * read callback in `cfg`. `cfg->write` is ignored.
+ *
+ * Returns:
+ *   1  — dirty
+ *   0  — clean
+ *  -1  — error (call fs_ntfs_last_error for details)
+ */
+int fs_ntfs_is_dirty_with_callbacks(const fs_ntfs_blockdev_cfg_t *cfg);
+
+/*
+ * Progress callback for fs_ntfs_fsck_with_callbacks. Fires zero or more
+ * times per phase:
+ *   phase    — short identifier, e.g. "reset_logfile" or "clear_dirty".
+ *   done     — bytes/units completed in this phase.
+ *   total    — total bytes/units for this phase.
+ *   context  — the `progress_ctx` passed to fs_ntfs_fsck_with_callbacks.
+ *
+ * Return value is currently ignored (reserved for future cancellation
+ * semantics — consumers should return 0).
+ */
+typedef int (*fs_ntfs_fsck_progress_fn)(void *context, const char *phase,
+                                        uint64_t done, uint64_t total);
+
+/*
+ * Combined recovery via callbacks: reset $LogFile + clear the dirty bit.
+ *
+ * `cfg->read` and `cfg->write` must both be set (fsck needs to
+ * overwrite `$LogFile` and patch `$Volume`'s flags). `progress_cb` may
+ * be NULL; if non-NULL, it is invoked during the long `reset_logfile`
+ * phase (one tick per 64 KiB chunk plus start + end) and once around
+ * the 2-byte `clear_dirty` write.
+ *
+ * `out_logfile_bytes` / `out_dirty_cleared` mirror the path-based
+ * fs_ntfs_fsck: if non-NULL they are filled on success with the number
+ * of bytes overwritten in $LogFile and `1` if the dirty bit was set
+ * and cleared (`0` if the volume was already clean).
+ *
+ * Returns 0 on success, -1 on error.
+ */
+int fs_ntfs_fsck_with_callbacks(
+    const fs_ntfs_blockdev_cfg_t *cfg,
+    fs_ntfs_fsck_progress_fn progress_cb,
+    void *progress_ctx,
+    uint64_t *out_logfile_bytes,
+    uint8_t  *out_dirty_cleared);
 
 /* ---- In-place writes (phase W1) ---- */
 
