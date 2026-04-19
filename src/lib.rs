@@ -10,6 +10,15 @@
 // until we're ready to bundle that with the other ABI-breaking
 // changes (§1.3 + §1.4 + §4.3 struct growth), suppress the lint.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
+// NTFS record builders take many geometry parameters by necessity
+// (record_size, sequence, parent_ref, name, time, sector geometry,
+// ...). Clippy's "too many arguments" limit flags these but any
+// struct wrapper is purely cosmetic and worsens call-site clarity.
+#![allow(clippy::too_many_arguments)]
+// The mapping-pairs zero-fill loops index `record` by range and
+// conditionally write. Clippy prefers an iterator but the readable
+// loop form matches the NTFS on-disk layout doc.
+#![allow(clippy::needless_range_loop)]
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
@@ -151,7 +160,7 @@ impl Read for CallbackReader {
         if self.position >= self.size {
             return Ok(0);
         }
-        let to_read = std::cmp::min(buf.len() as u64, self.size - self.position) as u64;
+        let to_read = std::cmp::min(buf.len() as u64, self.size - self.position);
         let rc = unsafe {
             (self.read_fn)(
                 self.context,
@@ -161,8 +170,7 @@ impl Read for CallbackReader {
             )
         };
         if rc != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(std::io::Error::other(
                 "read callback failed",
             ));
         }
@@ -1006,7 +1014,7 @@ fn decode_mount_point_print_name(data: &[u8]) -> Option<String> {
 }
 
 fn utf16_le_bytes_to_string(bytes: &[u8]) -> Option<String> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
     let u16s: Vec<u16> = bytes

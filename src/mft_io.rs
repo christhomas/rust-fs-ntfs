@@ -70,7 +70,7 @@ pub fn read_boot_params(path: &Path) -> Result<BootParams, String> {
     } else {
         1u64 << ((-(cpmr as i16)) as u32)
     };
-    if file_record_size < 512 || file_record_size > 16384 {
+    if !(512..=16384).contains(&file_record_size) {
         return Err(format!(
             "file_record_size {file_record_size} out of plausible range"
         ));

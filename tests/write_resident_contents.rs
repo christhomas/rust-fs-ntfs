@@ -95,7 +95,7 @@ fn write_resident_can_expand_up_to_record_capacity() {
 fn write_resident_rejects_nonresident_file() {
     // ntfs-large-file.img has a non-resident /big.bin. Resident write
     // should refuse.
-    let img = format!("test-disks/_write_res_nonres.img");
+    let img = "test-disks/_write_res_nonres.img".to_string();
     std::fs::copy("test-disks/ntfs-large-file.img", &img).unwrap();
     let err = write::write_resident_contents(Path::new(&img), "/big.bin", b"x").unwrap_err();
     assert!(

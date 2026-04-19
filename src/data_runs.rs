@@ -161,7 +161,7 @@ pub fn encode_runs(runs: &[DataRun]) -> Result<Vec<u8>, String> {
             for i in 0..lcn_bytes {
                 out.push((lcn_field >> (8 * i)) as u8);
             }
-            prev_lcn = lcn_field + prev_lcn; // lcn_field is delta; accumulate absolute
+            prev_lcn += lcn_field; // lcn_field is delta; accumulate absolute
         }
 
         expected_vcn = expected_vcn.checked_add(r.length).ok_or("VCN overflow")?;
@@ -175,7 +175,7 @@ fn unsigned_bytes_needed(n: u64) -> usize {
         return 1;
     }
     let bits = 64 - n.leading_zeros() as usize;
-    (bits + 7) / 8
+    bits.div_ceil(8)
 }
 
 fn signed_bytes_needed(n: i64) -> usize {

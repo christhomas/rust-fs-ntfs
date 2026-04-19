@@ -5,7 +5,7 @@
 use fs_ntfs::{
     fs_ntfs_dir_close, fs_ntfs_dir_next, fs_ntfs_dir_open, fs_ntfs_mount, fs_ntfs_umount,
 };
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
@@ -77,7 +77,6 @@ fn dot_in_root_points_at_root_record() {
         fs_ntfs_dir_close(iter);
         fs_ntfs_umount(fs as *mut _);
     }
-    let _ = CStr::from_bytes_with_nul(b"\0"); // silence unused import
 }
 
 #[test]

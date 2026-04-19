@@ -102,7 +102,6 @@ fn set_times_survives_re_mount() {
         modification: Some(t + 1),
         mft_record_modification: Some(t + 2),
         access: Some(t + 3),
-        ..Default::default()
     };
     write::set_times(std::path::Path::new(&img), "/hello.txt", times).expect("set");
 
