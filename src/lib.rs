@@ -20,6 +20,7 @@ pub mod attr_resize;
 pub mod bitmap;
 pub mod data_runs;
 pub mod ea_io;
+pub mod facade;
 pub mod fsck;
 pub mod idx_block;
 pub mod index_io;
