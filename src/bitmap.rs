@@ -20,7 +20,7 @@
 
 use crate::attr_io::{self, AttrType};
 use crate::data_runs::{self, DataRun};
-use crate::mft_io::{read_boot_params, read_mft_record, BootParams};
+use crate::mft_io::{read_mft_record, BootParams};
 
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -55,10 +55,7 @@ pub fn locate_bitmap(image: &Path) -> Result<BitmapLocation, String> {
     }
     let runs = data_runs::decode_runs(&record[mapping_start..mapping_end])?;
     let value_length = loc.non_resident_value_length.ok_or("no value_length")?;
-    let total_clusters = params.file_record_size; // just to silence unused warn; replaced below
-    let _ = total_clusters;
-    // total bits = value_length * 8 BUT real cluster count = value_length * 8
-    // Both Windows and Flatcap define the count as bitsize = value_length * 8.
+    // total bits = value_length * 8; each bit covers one cluster.
     Ok(BitmapLocation {
         params,
         runs,
@@ -317,11 +314,4 @@ pub fn is_allocated(image: &Path, bm: &BitmapLocation, lcn: u64) -> Result<bool,
     let bit = (lcn % 8) as u8;
     let bytes = read_bitmap_bytes(image, bm, byte_idx, 1)?;
     Ok((bytes[0] >> bit) & 1 != 0)
-}
-
-#[allow(dead_code)]
-fn _touch_unused_imports() {
-    // Keep `read_boot_params` import alive for future helpers that may
-    // want to re-parse params without going through locate_bitmap.
-    let _ = read_boot_params;
 }
