@@ -436,17 +436,45 @@ fn fill_attr(
                     attr.size = attribute.value_length();
                 }
             }
-            Ok(NtfsAttributeType::FileName) => {
-                if let Ok(file_name) = attribute.structured_value::<_, NtfsFileName>(reader) {
-                    // Check if it's a reparse point (symlink)
-                    if file_name
-                        .file_attributes()
-                        .contains(ntfs::structured_values::NtfsFileAttributeFlags::REPARSE_POINT)
-                    {
-                        attr.file_type = 7; // FS_NTFS_FT_SYMLINK
-                        attr.mode = 0o120777;
+            Ok(NtfsAttributeType::ReparsePoint) => {
+                // Read the 32-bit reparse tag and dispatch. The
+                // REPARSE_POINT flag on $FILE_NAME is an "SOME reparse
+                // kind" marker; only the tag tells us *which*. See
+                // docs/NEXT_PLAN.md §1.2 / docs/STATUS.md §cross-check.
+                if attr.file_type != 2 {
+                    // Not a directory — default regular. The actual
+                    // type depends on the tag below.
+                    attr.file_type = 1;
+                    attr.mode = 0o100644;
+                }
+                // Read up to 4 bytes of the attribute value for the tag.
+                if let Ok(mut value) = attribute.value(reader) {
+                    let mut tag_buf = [0u8; 4];
+                    if value.read(reader, &mut tag_buf).is_ok() {
+                        let tag = u32::from_le_bytes(tag_buf);
+                        match tag {
+                            0xA000_000C /* SYMLINK */ => {
+                                attr.file_type = 7;
+                                attr.mode = 0o120777;
+                            }
+                            0xA000_0003 /* MOUNT_POINT */ => {
+                                attr.file_type = 8; // FS_NTFS_FT_JUNCTION
+                            }
+                            // WOF / LX_SYMLINK / APPEXECLINK / dedup etc. —
+                            // leave file_type at whatever it was
+                            // (directory or regular) so POSIX callers
+                            // can access the underlying data.
+                            _ => {}
+                        }
                     }
                 }
+            }
+            Ok(NtfsAttributeType::FileName) => {
+                // Historically we used the REPARSE_POINT flag on
+                // $FILE_NAME as a symlink signal. That's wrong — it
+                // marks any reparse type. The real dispatch happens
+                // in the ReparsePoint case above when the actual
+                // attribute is present.
             }
             _ => {}
         }
@@ -845,13 +873,170 @@ pub extern "C" fn fs_ntfs_read_file(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_readlink(
-    _fs: *mut FsNtfsHandle,
-    _path: *const c_char,
-    _buf: *mut c_char,
-    _bufsize: usize,
+    fs: *mut FsNtfsHandle,
+    path: *const c_char,
+    buf: *mut c_char,
+    bufsize: usize,
 ) -> c_int {
-    set_error("readlink not yet implemented");
-    -1
+    if fs.is_null() || path.is_null() || buf.is_null() {
+        set_error("fs_ntfs_readlink: null argument");
+        return -1;
+    }
+    let bridge = unsafe { &mut *fs };
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_error("fs_ntfs_readlink: non-UTF-8 path");
+            return -1;
+        }
+    };
+    let file = match navigate_to_path(&bridge.ntfs, &mut bridge.reader, path_str) {
+        Ok(f) => f,
+        Err(e) => {
+            set_error(&e);
+            return -1;
+        }
+    };
+    // Find the $REPARSE_POINT attribute.
+    let mut reparse_bytes: Option<Vec<u8>> = None;
+    let mut attrs = file.attributes();
+    while let Some(item) = attrs.next(&mut bridge.reader) {
+        let item = match item {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+        let attribute = match item.to_attribute() {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        if attribute.ty().ok() != Some(NtfsAttributeType::ReparsePoint) {
+            continue;
+        }
+        let mut value = match attribute.value(&mut bridge.reader) {
+            Ok(v) => v,
+            Err(e) => {
+                set_error(&format!("$REPARSE_POINT value: {e}"));
+                return -1;
+            }
+        };
+        let total = attribute.value_length() as usize;
+        let mut out = vec![0u8; total];
+        let mut filled = 0;
+        while filled < total {
+            match value.read(&mut bridge.reader, &mut out[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) => {
+                    set_error(&format!("$REPARSE_POINT read: {e}"));
+                    return -1;
+                }
+            }
+        }
+        out.truncate(filled);
+        reparse_bytes = Some(out);
+        break;
+    }
+    let reparse = match reparse_bytes {
+        Some(b) => b,
+        None => {
+            set_error("not a reparse point");
+            return -1;
+        }
+    };
+    // Decode tag + tag-specific path.
+    if reparse.len() < 8 {
+        set_error("reparse data too short");
+        return -1;
+    }
+    let tag = u32::from_le_bytes([reparse[0], reparse[1], reparse[2], reparse[3]]);
+    let data_len = u16::from_le_bytes([reparse[4], reparse[5]]) as usize;
+    let data_start = 8usize;
+    if data_start + data_len > reparse.len() {
+        set_error("reparse data_length runs past attribute value");
+        return -1;
+    }
+    let data = &reparse[data_start..data_start + data_len];
+    let target = match tag {
+        0xA000_000C /* SYMLINK */ => decode_symlink_print_name(data),
+        0xA000_0003 /* MOUNT_POINT */ => decode_mount_point_print_name(data),
+        other => {
+            set_error(&format!("unsupported reparse tag {other:#010x}"));
+            return -1;
+        }
+    };
+    let target = match target {
+        Some(t) => t,
+        None => {
+            set_error("reparse print name is empty");
+            return -1;
+        }
+    };
+    // Strip NT-path prefix "\\??\\" so POSIX callers see a sensible path.
+    let cleaned = target
+        .strip_prefix(r"\??\")
+        .map(String::from)
+        .unwrap_or(target);
+    let bytes = cleaned.as_bytes();
+    if bytes.len() + 1 > bufsize {
+        set_error(&format!(
+            "readlink: buffer too small (need {}, have {bufsize})",
+            bytes.len() + 1
+        ));
+        return -1;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, bytes.len());
+        *(buf.add(bytes.len())) = 0; // NUL terminator
+    }
+    bytes.len() as c_int
+}
+
+/// Decode the PrintName field from a SymbolicLinkReparseBuffer
+/// (MS-FSCC 2.1.2.4). `data` is the tag-specific payload (not including
+/// the 8-byte reparse header).
+fn decode_symlink_print_name(data: &[u8]) -> Option<String> {
+    if data.len() < 12 {
+        return None;
+    }
+    let print_name_offset = u16::from_le_bytes([data[4], data[5]]) as usize;
+    let print_name_length = u16::from_le_bytes([data[6], data[7]]) as usize;
+    let header = 12usize; // to PathBuffer start
+    if header + print_name_offset + print_name_length > data.len() {
+        return None;
+    }
+    let start = header + print_name_offset;
+    utf16_le_bytes_to_string(&data[start..start + print_name_length])
+}
+
+/// Decode the PrintName field from a MountPointReparseBuffer
+/// (MS-FSCC 2.1.2.5). Same layout but no Flags field, so the PathBuffer
+/// starts at header offset 8.
+fn decode_mount_point_print_name(data: &[u8]) -> Option<String> {
+    if data.len() < 8 {
+        return None;
+    }
+    let print_name_offset = u16::from_le_bytes([data[4], data[5]]) as usize;
+    let print_name_length = u16::from_le_bytes([data[6], data[7]]) as usize;
+    let header = 8usize;
+    if header + print_name_offset + print_name_length > data.len() {
+        return None;
+    }
+    let start = header + print_name_offset;
+    utf16_le_bytes_to_string(&data[start..start + print_name_length])
+}
+
+fn utf16_le_bytes_to_string(bytes: &[u8]) -> Option<String> {
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let u16s: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    if u16s.is_empty() {
+        return None;
+    }
+    String::from_utf16(&u16s).ok()
 }
 
 // ---------------------------------------------------------------------------
