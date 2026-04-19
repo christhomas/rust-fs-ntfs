@@ -1266,6 +1266,30 @@ pub fn create_symlink(
     Ok(rec)
 }
 
+/// Read the 16-byte object ID (`$OBJECT_ID` attribute value) for a
+/// file. Returns `Ok(None)` if the file has no `$OBJECT_ID`.
+pub fn read_object_id(image: &Path, file_path: &str) -> Result<Option<[u8; 16]>, String> {
+    let rec = resolve_path_to_record_number(image, file_path)?;
+    let (_, record) = read_mft_record(image, rec)?;
+    let Some(loc) = attr_io::find_attribute(&record, AttrType::ObjectId, None) else {
+        return Ok(None);
+    };
+    if !loc.is_resident {
+        return Err("$OBJECT_ID is non-resident (unexpected)".to_string());
+    }
+    let val_off = loc.attr_offset
+        + loc
+            .resident_value_offset
+            .ok_or("$OBJECT_ID has no value_offset")? as usize;
+    let val_len = loc.resident_value_length.unwrap_or(0) as usize;
+    if val_len < 16 {
+        return Err(format!("$OBJECT_ID value too short: {val_len} bytes"));
+    }
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&record[val_off..val_off + 16]);
+    Ok(Some(out))
+}
+
 /// Add a new hard link to an existing file. The new link lives at
 /// `new_parent_path/new_basename`. The target file's MFT record gains
 /// a new `$FILE_NAME` attribute and its hard-link count is incremented;

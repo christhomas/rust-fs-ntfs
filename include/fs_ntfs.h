@@ -190,6 +190,17 @@ int fs_ntfs_link(const char *image,
                  const char *new_basename);
 
 /*
+ * Copy a file's 16-byte $OBJECT_ID (GUID) into out_buf. Returns:
+ *    1  — file has an object ID, 16 bytes written to out_buf
+ *    0  — file has no $OBJECT_ID attribute, out_buf untouched
+ *   -1  — error
+ * out_buf must be at least 16 bytes.
+ */
+int fs_ntfs_read_object_id(const char *image,
+                           const char *path,
+                           uint8_t *out_buf);
+
+/*
  * Clear the VOLUME_IS_DIRTY flag on an NTFS image so Windows / FSKit /
  * other NTFS drivers will remount it. Must NOT be called on a volume
  * that is currently mounted.
