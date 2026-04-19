@@ -4,6 +4,13 @@
 //
 // MIT License — see LICENSE
 
+// FFI entry points intentionally take *mut/*const pointers and
+// dereference them without marking the function `unsafe`. Marking
+// them `unsafe extern "C"` is an ABI-visible change for consumers;
+// until we're ready to bundle that with the other ABI-breaking
+// changes (§1.3 + §1.4 + §4.3 struct growth), suppress the lint.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::fs::File;

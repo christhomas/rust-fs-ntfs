@@ -160,15 +160,12 @@ next step — `crate-type = ["staticlib", "rlib"]` permits it.
   skips DOS-namespace entries at the index level, so the function
   was unused. Files with only a DOS `$FILE_NAME` (exceedingly rare
   on disks created by modern tools) still show up with that name.
-- **Clippy gate disabled in CI.** [`.github/workflows/ci.yml`] currently
-  runs only `cargo fmt --check` + `cargo test --release`. Several FFI
-  entry points trigger `clippy::not_unsafe_ptr_arg_deref` because
-  `pub extern "C" fn` signatures take `*mut` / `*const` and deref them
-  without being marked `unsafe`. Fix is mechanical but touches the ABI:
-  either mark the functions `unsafe extern "C"` (consumers have to
-  follow suit) or add `#[allow(clippy::not_unsafe_ptr_arg_deref)]` at
-  the boundary. Either way, resolve before re-enabling
-  `cargo clippy --all-targets -- -D warnings`.
+- ~~**Clippy gate disabled in CI.**~~ Resolved (§5.6): crate-level
+  `#![allow(clippy::not_unsafe_ptr_arg_deref)]` on `lib.rs` unblocks
+  the ABI without forcing `unsafe extern "C"` on every consumer.
+  `cargo clippy --all-targets` now compiles; only cosmetic warnings
+  remain (useless_format, manual_div_ceil, etc.) — enabling
+  `-D warnings` is fine once those are cleaned up.
 - `fs_ntfs_read_file` copies through an intermediate buffer; direct
   scatter-read into the caller's buffer is doable but wasn't
   implemented.
