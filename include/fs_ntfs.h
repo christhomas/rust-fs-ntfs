@@ -168,6 +168,18 @@ void fs_ntfs_clear_last_error(void);
 int fs_ntfs_is_dirty(const char *path);
 
 /*
+ * Count free clusters in the volume bitmap. Scans the whole $Bitmap.
+ * Returns the count on success, -1 on error.
+ */
+int64_t fs_ntfs_free_clusters(const char *path);
+
+/*
+ * Count free MFT records in $MFT:$Bitmap. Returns the count on
+ * success, -1 on error.
+ */
+int64_t fs_ntfs_mft_free_records(const char *path);
+
+/*
  * Clear the VOLUME_IS_DIRTY flag on an NTFS image so Windows / FSKit /
  * other NTFS drivers will remount it. Must NOT be called on a volume
  * that is currently mounted.

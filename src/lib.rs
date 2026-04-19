@@ -1023,6 +1023,44 @@ fn cstr_to_path<'a>(path: *const c_char) -> Option<&'a str> {
     unsafe { CStr::from_ptr(path) }.to_str().ok()
 }
 
+/// Count free clusters in the volume bitmap. Returns the count on
+/// success, `-1` on error. Scans the entire `$Bitmap`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_free_clusters(path: *const c_char) -> i64 {
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_free_clusters: null or non-UTF-8 path");
+        return -1;
+    };
+    match crate::bitmap::locate_bitmap(std::path::Path::new(p))
+        .and_then(|bm| crate::bitmap::count_free(std::path::Path::new(p), &bm))
+    {
+        Ok(n) => n as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Count free MFT records in `$MFT:$Bitmap`. Returns the count on
+/// success, `-1` on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_mft_free_records(path: *const c_char) -> i64 {
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_mft_free_records: null or non-UTF-8 path");
+        return -1;
+    };
+    match crate::mft_bitmap::locate(std::path::Path::new(p))
+        .and_then(|bm| crate::mft_bitmap::count_free(std::path::Path::new(p), &bm))
+    {
+        Ok(n) => n as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Check whether the volume's `VOLUME_IS_DIRTY` flag is set.
 /// Returns `1` if dirty, `0` if clean, `-1` on error.
 #[unsafe(no_mangle)]
