@@ -427,3 +427,46 @@ a separate project, easily a person-year.
 
 _Last updated: concurrent with the W-plan wrap-up. Revisit when
 a consumer asks for anything in §6 or §3.8._
+
+---
+
+## Shipped since this plan was written
+
+The following items listed above have since been implemented:
+
+- **§1.1 upcase-table collation** — `src/upcase.rs`, integrated
+  into B+ tree insert paths.
+- **§1.2 reparse-tag dispatch** — `fill_attr` now reads the real
+  tag and maps `IO_REPARSE_TAG_MOUNT_POINT` to
+  `FS_NTFS_FT_JUNCTION`.
+- **§1.5 seek-by-seek** — `data_value.seek(SeekFrom::Start)`
+  replaces the read-and-discard loop.
+- **§1.6+§1.7 dot components** — path traversal + readdir both
+  handle `.` / `..`.
+- **§2.3 non-resident promotion generic** — `promote_attribute_
+  to_nonresident` lifts the $DATA-only limit.
+- **§3.1 hard links** — `fs_ntfs_link`, `write::link`, facade
+  `Filesystem::link`.
+- **§3.6 proper readlink** — decodes both SymbolicLinkReparseBuffer
+  and MountPointReparseBuffer.
+- **§4.1 errno companion** — `fs_ntfs_last_errno` +
+  `fs_ntfs_clear_last_error`.
+- **§4.2 Rust-native facade** — `src/facade.rs`.
+- **§4.3 structured volume statistics** — `fs_ntfs_free_clusters`,
+  `fs_ntfs_mft_free_records`, `VolumeStats`.
+- **§4.4 is_dirty standalone** — `fs_ntfs_is_dirty`.
+- **§4.5 best_file_name_str** — deleted (unused; dir iterator
+  already handles namespace preference).
+- **§5.1 capi_* completion** — dedicated FFI tests for every
+  W3/W4 write entrypoint.
+- **§5.6 clippy gate** — `#![allow(clippy::not_unsafe_ptr_arg_
+  deref)]` at the crate level; `cargo clippy --all-targets` now
+  runs warning-free.
+- **§6.3 volume-scale corruption tests** — `tests/corruption_fuzz.rs`
+  exercises bit-flipped images and asserts no panics.
+
+Remaining high-impact items: **§2.1 MFT self-growth**, **§2.2
+B+ tree split** (both risky), §3.3 punch-hole, §3.8 WOF, §2.5 lazy
+dir iterator, §5.2 cargo-fuzz, §5.3 criterion benchmarks, §5.4 CI
+matrix expansion, and the bundled ABI-break release (§1.3 +
+§1.4 + struct extensions for §4.3).
