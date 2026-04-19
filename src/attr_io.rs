@@ -208,7 +208,7 @@ impl<'a> Iterator for AttrIter<'a> {
             self.record[self.cursor + attr_off::LENGTH + 3],
         ]) as usize;
         // length must be a multiple of 8, >0, and fit within bytes_used.
-        if length == 0 || length % 8 != 0 || self.cursor + length > self.bytes_used {
+        if length == 0 || !length.is_multiple_of(8) || self.cursor + length > self.bytes_used {
             return None;
         }
 

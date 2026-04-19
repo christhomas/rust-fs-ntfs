@@ -134,7 +134,7 @@ pub fn replace_attribute(
     new_attr: &[u8],
 ) -> Result<(), String> {
     let new_attr_length = new_attr.len();
-    if new_attr_length == 0 || new_attr_length % 8 != 0 {
+    if new_attr_length == 0 || !new_attr_length.is_multiple_of(8) {
         return Err(format!(
             "replace_attribute: new_attr length {new_attr_length} not 8-aligned non-zero"
         ));
@@ -205,7 +205,7 @@ pub fn replace_attribute(
 /// attribute-header `length` field set to the buffer's length.
 pub fn insert_attribute_before_end(record: &mut [u8], new_attr: &[u8]) -> Result<(), String> {
     let new_len = new_attr.len();
-    if new_len == 0 || new_len % 8 != 0 {
+    if new_len == 0 || !new_len.is_multiple_of(8) {
         return Err(format!(
             "insert_attribute: length {new_len} not 8-aligned non-zero"
         ));

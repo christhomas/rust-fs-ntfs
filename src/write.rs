@@ -938,9 +938,7 @@ fn insert_entry_in_parent(
             )
         });
     }
-    Err(format!(
-        "no INDX block with room for new entry (would need B+ tree split / new block allocation)"
-    ))
+    Err("no INDX block with room for new entry (would need B+ tree split / new block allocation)".to_string())
 }
 
 // ---------------------------------------------------------------------------

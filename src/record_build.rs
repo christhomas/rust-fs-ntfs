@@ -92,7 +92,7 @@ pub fn build_directory_record(
     bytes_per_sector: u16,
     index_block_size: u32,
 ) -> Result<Vec<u8>, String> {
-    if record_size < 512 || record_size % bytes_per_sector as usize != 0 {
+    if record_size < 512 || !record_size.is_multiple_of(bytes_per_sector as usize) {
         return Err(format!("invalid record_size {record_size}"));
     }
     let utf16: Vec<u16> = name.encode_utf16().collect();
@@ -246,7 +246,7 @@ fn build_record_inner(
     bytes_per_sector: u16,
     is_dir: bool,
 ) -> Result<Vec<u8>, String> {
-    if record_size < 512 || record_size % bytes_per_sector as usize != 0 {
+    if record_size < 512 || !record_size.is_multiple_of(bytes_per_sector as usize) {
         return Err(format!("invalid record_size {record_size}"));
     }
     let utf16: Vec<u16> = name.encode_utf16().collect();
