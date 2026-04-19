@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.1.1] — 2026-04-20
+
+### Added — callback-based fsck
+
+New C ABI so FSKit (and other FFI consumers holding a block device
+via callbacks rather than a filesystem path) can check the dirty
+flag + repair without opening `/dev/diskN` themselves:
+
+- `fs_ntfs_blockdev_cfg_t` gains an optional `write` callback.
+- `fs_ntfs_is_dirty_with_callbacks(cfg)` — callback-based dirty check.
+- `fs_ntfs_fsck_with_callbacks(cfg, progress_cb, progress_ctx,
+  out_logfile_bytes, out_dirty_cleared)` — callback-based repair
+  with optional progress emission. Progress callback signature:
+  `(context, phase, done, total)` where phases are `"reset_logfile"`
+  (per 64 KiB chunk) and `"clear_dirty"` (once at start/end).
+
+Path-based API (`fs_ntfs_fsck`, `fs_ntfs_is_dirty`,
+`fs_ntfs_clear_dirty`, `fs_ntfs_reset_logfile`) unchanged. Internal
+refactor around an `FsckIo` trait — `PathIo` wraps `std::fs::File`;
+`CallbackIo` wraps raw function pointers + context.
+
 ## [0.1.0] — unreleased
 
 First public release.
