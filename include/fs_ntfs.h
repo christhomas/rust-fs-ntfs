@@ -28,6 +28,7 @@ typedef enum {
     FS_NTFS_FT_REG_FILE = 1,
     FS_NTFS_FT_DIR      = 2,
     FS_NTFS_FT_SYMLINK  = 7,
+    FS_NTFS_FT_JUNCTION = 8, /* NTFS mount point / junction (directory) */
 } fs_ntfs_file_type_t;
 
 /* File/directory attributes */
