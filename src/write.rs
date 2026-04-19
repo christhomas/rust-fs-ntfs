@@ -1332,6 +1332,39 @@ pub fn write_named_stream_resident(
     })
 }
 
+/// High-level: write a named `$DATA` stream (alternate data stream).
+/// Stays resident if the new data fits; promotes to non-resident by
+/// allocating clusters and emitting a single-run mapping-pairs blob
+/// otherwise. Replaces the existing stream body if one already exists.
+pub fn write_named_stream(
+    image: &Path,
+    file_path: &str,
+    stream_name: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    match write_named_stream_resident(image, file_path, stream_name, data) {
+        Ok(()) => Ok(()),
+        Err(e)
+            if e.contains("capacity")
+                || e.contains("exceeds")
+                || e.contains("no room")
+                || e.contains("non-resident") =>
+        {
+            // If a resident version exists, remove it first so the
+            // non-resident replacement inserts cleanly.
+            let _ = delete_named_stream(image, file_path, stream_name);
+            promote_attribute_to_nonresident(
+                image,
+                file_path,
+                AttrType::Data,
+                Some(stream_name),
+                data,
+            )
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Delete a named `$DATA` stream from a file. Fails if the stream
 /// doesn't exist.
 pub fn delete_named_stream(image: &Path, file_path: &str, stream_name: &str) -> Result<(), String> {
@@ -1481,6 +1514,107 @@ pub fn write_file_contents(image: &Path, file_path: &str, new_data: &[u8]) -> Re
         }
         Err(e) => Err(e),
     }
+}
+
+/// Generalized non-resident promotion for any attribute type + optional
+/// name. Allocates clusters, writes `new_data` (zero-padded to cluster
+/// boundary), then replaces the existing resident attribute with a
+/// non-resident one. If no existing attribute of that `(type, name)`
+/// exists, a fresh non-resident attribute is inserted.
+///
+/// Used by §2.3 to grow named `$DATA`, `$REPARSE_POINT`, and `$EA`
+/// past resident capacity.
+pub fn promote_attribute_to_nonresident(
+    image: &Path,
+    file_path: &str,
+    attr_type: AttrType,
+    attr_name: Option<&str>,
+    new_data: &[u8],
+) -> Result<(), String> {
+    let rec = resolve_path_to_record_number(image, file_path)?;
+    let (params, _) = read_mft_record(image, rec)?;
+    let cluster_size = params.cluster_size;
+
+    let new_size = new_data.len() as u64;
+    let n_clusters = new_size.div_ceil(cluster_size).max(1);
+    let bm = crate::bitmap::locate_bitmap(image)?;
+    let new_lcn = crate::bitmap::find_free_run(image, &bm, n_clusters, params.mft_lcn)?
+        .ok_or_else(|| format!("no contiguous free run of {n_clusters} clusters"))?;
+    crate::bitmap::allocate(image, &bm, new_lcn, n_clusters)?;
+
+    let allocated_length = n_clusters * cluster_size;
+    {
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(image)
+            .map_err(|e| {
+                let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+                format!("open rw: {e}")
+            })?;
+        let disk_offset = new_lcn * cluster_size;
+        if let Err(e) = f.seek(SeekFrom::Start(disk_offset)) {
+            let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+            return Err(format!("seek new cluster: {e}"));
+        }
+        if let Err(e) = f.write_all(new_data) {
+            let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+            return Err(format!("write data: {e}"));
+        }
+        let pad = (allocated_length - new_size) as usize;
+        if pad > 0 {
+            let zeros = vec![0u8; pad];
+            if let Err(e) = f.write_all(&zeros) {
+                let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+                return Err(format!("write zero-pad: {e}"));
+            }
+        }
+        if let Err(e) = f.sync_all() {
+            let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+            return Err(format!("fsync data: {e}"));
+        }
+    }
+
+    let runs = vec![DataRun {
+        starting_vcn: 0,
+        length: n_clusters,
+        lcn: Some(new_lcn),
+    }];
+    let mapping_pairs = data_runs::encode_runs(&runs)?;
+    let last_vcn = if new_size == 0 {
+        -1i64
+    } else {
+        (n_clusters - 1) as i64
+    };
+
+    let replace_res = update_mft_record(image, rec, |record| {
+        let attr_id = match attr_io::find_attribute(record, attr_type, attr_name) {
+            Some(loc) => loc.attribute_id,
+            None => crate::attr_resize::allocate_attribute_id(record),
+        };
+        let new_attr_bytes = crate::record_build::build_nonresident_attribute(
+            attr_type as u32,
+            attr_name,
+            attr_id,
+            new_size,
+            allocated_length,
+            new_size,
+            last_vcn,
+            &mapping_pairs,
+        )?;
+        if let Some(loc) = attr_io::find_attribute(record, attr_type, attr_name) {
+            crate::attr_resize::replace_attribute(record, loc.attr_offset, &new_attr_bytes)?;
+        } else {
+            crate::attr_resize::insert_attribute_before_end(record, &new_attr_bytes)?;
+        }
+        Ok(())
+    });
+    if let Err(e) = replace_res {
+        let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+        return Err(format!("replace attribute: {e}"));
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

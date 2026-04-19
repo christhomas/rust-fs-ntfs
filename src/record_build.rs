@@ -557,6 +557,64 @@ pub fn build_nonresident_data_attribute(
     Ok(buf)
 }
 
+/// Build a non-resident attribute of arbitrary type and optional name.
+/// Generalizes `build_nonresident_data_attribute`. Caller supplies the
+/// full attribute type code (e.g. `0x80` for `$DATA`, `0xC0` for
+/// `$REPARSE_POINT`, `0xE0` for `$EA`) and an optional UTF-16 name
+/// (used for alternate data streams).
+pub fn build_nonresident_attribute(
+    attr_type: u32,
+    attr_name: Option<&str>,
+    attr_id: u16,
+    data_length: u64,
+    allocated_length: u64,
+    initialized_length: u64,
+    last_vcn: i64,
+    mapping_pairs: &[u8],
+) -> Result<Vec<u8>, String> {
+    let name_u16: Vec<u16> = attr_name
+        .map(|s| s.encode_utf16().collect())
+        .unwrap_or_default();
+    if name_u16.len() > 255 {
+        return Err(format!("attribute name too long: {}", name_u16.len()));
+    }
+    let common_header = 16usize;
+    let nonres_fields = 48usize;
+    let header_size = common_header + nonres_fields;
+    let name_offset = header_size;
+    let name_bytes = name_u16.len() * 2;
+    let mapping_offset = align8(name_offset + name_bytes);
+    let value_size = mapping_pairs.len();
+    let attr_length = align8(mapping_offset + value_size);
+
+    let mut buf = vec![0u8; attr_length];
+
+    buf[0..4].copy_from_slice(&attr_type.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 1; // non_resident
+    buf[9] = name_u16.len() as u8;
+    buf[10..12].copy_from_slice(&(name_offset as u16).to_le_bytes());
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes()); // flags
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+
+    buf[16..24].copy_from_slice(&0u64.to_le_bytes()); // first_vcn
+    buf[24..32].copy_from_slice(&last_vcn.to_le_bytes());
+    buf[32..34].copy_from_slice(&(mapping_offset as u16).to_le_bytes());
+    buf[34..36].copy_from_slice(&0u16.to_le_bytes()); // compression_unit
+    buf[36..40].copy_from_slice(&0u32.to_le_bytes()); // reserved
+    buf[40..48].copy_from_slice(&allocated_length.to_le_bytes());
+    buf[48..56].copy_from_slice(&data_length.to_le_bytes());
+    buf[56..64].copy_from_slice(&initialized_length.to_le_bytes());
+
+    for (i, c) in name_u16.iter().enumerate() {
+        let off = name_offset + i * 2;
+        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    }
+    buf[mapping_offset..mapping_offset + mapping_pairs.len()].copy_from_slice(mapping_pairs);
+
+    Ok(buf)
+}
+
 fn write_standard_information(
     rec: &mut [u8],
     at: usize,
