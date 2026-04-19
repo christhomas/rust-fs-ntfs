@@ -1266,6 +1266,180 @@ pub fn create_symlink(
     Ok(rec)
 }
 
+/// Add a new hard link to an existing file. The new link lives at
+/// `new_parent_path/new_basename`. The target file's MFT record gains
+/// a new `$FILE_NAME` attribute and its hard-link count is incremented;
+/// the parent directory's index gains a matching entry.
+///
+/// Refuses directories (NTFS disallows hardlinked directories).
+/// Refuses if the new basename already exists in the target parent.
+pub fn link(
+    image: &Path,
+    existing_path: &str,
+    new_parent_path: &str,
+    new_basename: &str,
+) -> Result<(), String> {
+    if new_basename.is_empty()
+        || new_basename == "."
+        || new_basename == ".."
+        || new_basename.contains('/')
+    {
+        return Err(format!("invalid basename: '{new_basename}'"));
+    }
+    let target_rec = resolve_path_to_record_number(image, existing_path)?;
+    let (_, target_record_bytes) = read_mft_record(image, target_rec)?;
+    let target_flags = crate::mft_io::record_flags(&target_record_bytes);
+    if target_flags & crate::mft_io::MFT_FLAG_DIRECTORY != 0 {
+        return Err(format!(
+            "link: refusing to hardlink directory '{existing_path}'"
+        ));
+    }
+
+    let new_parent_rec = resolve_path_to_record_number(image, new_parent_path)?;
+    let (_, parent_record_bytes) = read_mft_record(image, new_parent_rec)?;
+    let parent_flags = crate::mft_io::record_flags(&parent_record_bytes);
+    if parent_flags & crate::mft_io::MFT_FLAG_DIRECTORY == 0 {
+        return Err(format!(
+            "link: new parent '{new_parent_path}' is not a directory"
+        ));
+    }
+    let ir_flags = index_io::index_root_flags(&parent_record_bytes)
+        .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
+    let parent_has_overflow = ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0;
+    if index_io::find_index_entry(&parent_record_bytes, new_basename)?.is_some() {
+        return Err(format!(
+            "'{new_basename}' already exists in '{new_parent_path}'"
+        ));
+    }
+    if parent_has_overflow {
+        let ia = idx_block::load_for_directory(image, new_parent_rec)?;
+        for vcn in ia.allocated_block_vcns() {
+            let blk = idx_block::read_indx_block(image, &ia, vcn)?;
+            if index_io::find_entry_in_indx_block(&blk, new_basename)?.is_some() {
+                return Err(format!(
+                    "'{new_basename}' already exists in '{new_parent_path}'"
+                ));
+            }
+        }
+    }
+
+    let parent_seq = u16::from_le_bytes([parent_record_bytes[0x10], parent_record_bytes[0x11]]);
+    let parent_reference =
+        crate::record_build::encode_file_reference(new_parent_rec, parent_seq);
+    let target_seq = u16::from_le_bytes([target_record_bytes[0x10], target_record_bytes[0x11]]);
+    let target_reference = crate::record_build::encode_file_reference(target_rec, target_seq);
+    let nt_time = crate::record_build::nt_time_now();
+
+    // Step 1: append a new $FILE_NAME to the target record + bump
+    // hard_link_count.
+    update_mft_record(image, target_rec, |record| {
+        let attr_id = crate::attr_resize::allocate_attribute_id(record);
+        let fn_attr = crate::record_build::build_file_name_attribute(
+            attr_id,
+            parent_reference,
+            new_basename,
+            nt_time,
+            /* is_dir */ false,
+        )?;
+        crate::attr_resize::insert_attribute_before_end(record, &fn_attr)?;
+        let cur = u16::from_le_bytes([record[0x12], record[0x13]]);
+        record[0x12..0x14].copy_from_slice(&cur.saturating_add(1).to_le_bytes());
+        Ok(())
+    })?;
+
+    // Step 2: insert index entry in new parent.
+    let entry = index_io::build_file_name_index_entry(
+        target_reference,
+        parent_reference,
+        new_basename,
+        nt_time,
+        /* is_dir */ false,
+    )?;
+    let insert_res = insert_entry_in_parent(
+        image,
+        new_parent_rec,
+        parent_has_overflow,
+        &entry,
+        new_basename,
+    );
+    if let Err(e) = insert_res {
+        // Roll back: remove the $FILE_NAME we added and decrement the
+        // link count. Best-effort; mostly for tests since insertion
+        // failures here would indicate a full directory.
+        let _ = update_mft_record(image, target_rec, |record| {
+            // Find the last $FILE_NAME matching new_basename+parent_ref
+            // and strip it.
+            if let Some(loc) = find_file_name_attr(record, parent_reference, new_basename) {
+                let bytes_used = u32::from_le_bytes([
+                    record[0x18],
+                    record[0x19],
+                    record[0x1A],
+                    record[0x1B],
+                ]) as usize;
+                record.copy_within(loc.attr_offset + loc.attr_length..bytes_used, loc.attr_offset);
+                for byte in &mut record[bytes_used - loc.attr_length..bytes_used] {
+                    *byte = 0;
+                }
+                let new_bu = (bytes_used - loc.attr_length) as u32;
+                record[0x18..0x1C].copy_from_slice(&new_bu.to_le_bytes());
+                let cur = u16::from_le_bytes([record[0x12], record[0x13]]);
+                record[0x12..0x14].copy_from_slice(&cur.saturating_sub(1).to_le_bytes());
+            }
+            Ok(())
+        });
+        return Err(format!("link: insert index entry: {e}"));
+    }
+    Ok(())
+}
+
+/// Find the `$FILE_NAME` attribute whose parent_reference + name match
+/// the given pair. Used to unwind a partial `link` or to remove a
+/// specific hardlink. Returns the attribute location or `None`.
+fn find_file_name_attr(
+    record: &[u8],
+    parent_reference: u64,
+    name: &str,
+) -> Option<attr_io::AttrLocation> {
+    let name_utf16: Vec<u16> = name.encode_utf16().collect();
+    let mut iter = attr_io::iter_attributes(record);
+    while let Some(loc) = iter.next() {
+        if loc.type_code != attr_io::AttrType::FileName as u32 {
+            continue;
+        }
+        let val_off = loc.attr_offset + loc.resident_value_offset? as usize;
+        let pr = u64::from_le_bytes([
+            record[val_off],
+            record[val_off + 1],
+            record[val_off + 2],
+            record[val_off + 3],
+            record[val_off + 4],
+            record[val_off + 5],
+            record[val_off + 6],
+            record[val_off + 7],
+        ]);
+        if pr != parent_reference {
+            continue;
+        }
+        let name_len = record[val_off + 64] as usize;
+        if name_len != name_utf16.len() {
+            continue;
+        }
+        let mut ok = true;
+        for (i, expected) in name_utf16.iter().enumerate() {
+            let off = val_off + 66 + i * 2;
+            let got = u16::from_le_bytes([record[off], record[off + 1]]);
+            if got != *expected {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            return Some(loc);
+        }
+    }
+    None
+}
+
 fn set_si_file_attributes_bit(record: &mut [u8], bit: u32, set: bool) -> Result<(), String> {
     let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
         .ok_or_else(|| "$STANDARD_INFORMATION not found".to_string())?;

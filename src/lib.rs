@@ -1593,6 +1593,43 @@ pub extern "C" fn fs_ntfs_unlink(image: *const c_char, path: *const c_char) -> c
     }
 }
 
+/// Add a hard link `new_parent_path/new_basename` pointing at the
+/// same file as `existing_path`. Returns 0 on success, -1 on error.
+/// Refuses directories. The target file's hard-link count is
+/// incremented and a new `$FILE_NAME` attribute is appended to its
+/// MFT record; an index entry is inserted in `new_parent_path`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_link(
+    image: *const c_char,
+    existing_path: *const c_char,
+    new_parent_path: *const c_char,
+    new_basename: *const c_char,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_link: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(ep) = cstr_to_path(existing_path) else {
+        set_error("fs_ntfs_link: null or non-UTF-8 existing_path");
+        return -1;
+    };
+    let Some(npp) = cstr_to_path(new_parent_path) else {
+        set_error("fs_ntfs_link: null or non-UTF-8 new_parent_path");
+        return -1;
+    };
+    let Some(nb) = cstr_to_path(new_basename) else {
+        set_error("fs_ntfs_link: null or non-UTF-8 new_basename");
+        return -1;
+    };
+    match write::link(std::path::Path::new(img), ep, npp, nb) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Rename a file (variable length). Returns 0 on success, -1 on error.
 /// Handles both same-length (delegates to the fast path, incl.
 /// `$INDEX_ALLOCATION` parents) and length-changing renames
