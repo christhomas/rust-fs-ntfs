@@ -2,9 +2,7 @@
 
 #![allow(unused_unsafe)]
 
-use fs_ntfs::{
-    fs_ntfs_delete_named_stream, fs_ntfs_last_error, fs_ntfs_write_named_stream,
-};
+use fs_ntfs::{fs_ntfs_delete_named_stream, fs_ntfs_last_error, fs_ntfs_write_named_stream};
 use std::ffi::{c_void, CStr, CString};
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
@@ -95,9 +93,7 @@ fn capi_delete_named_stream_roundtrip() {
             data.len() as u64,
         )
     };
-    let rc = unsafe {
-        fs_ntfs_delete_named_stream(img_c.as_ptr(), p_c.as_ptr(), sn_c.as_ptr())
-    };
+    let rc = unsafe { fs_ntfs_delete_named_stream(img_c.as_ptr(), p_c.as_ptr(), sn_c.as_ptr()) };
     assert_eq!(rc, 0, "err={}", last_error());
 }
 
@@ -107,9 +103,7 @@ fn capi_delete_named_stream_missing_fails() {
     let img_c = CString::new(img.as_str()).unwrap();
     let p_c = CString::new("/hello.txt").unwrap();
     let sn_c = CString::new("nope").unwrap();
-    let rc = unsafe {
-        fs_ntfs_delete_named_stream(img_c.as_ptr(), p_c.as_ptr(), sn_c.as_ptr())
-    };
+    let rc = unsafe { fs_ntfs_delete_named_stream(img_c.as_ptr(), p_c.as_ptr(), sn_c.as_ptr()) };
     assert_eq!(rc, -1);
     assert!(!last_error().is_empty());
 }

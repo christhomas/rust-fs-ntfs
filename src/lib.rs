@@ -170,9 +170,7 @@ impl Read for CallbackReader {
             )
         };
         if rc != 0 {
-            return Err(std::io::Error::other(
-                "read callback failed",
-            ));
+            return Err(std::io::Error::other("read callback failed"));
         }
         self.position += to_read;
         Ok(to_read as usize)

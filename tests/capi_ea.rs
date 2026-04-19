@@ -2,9 +2,7 @@
 
 #![allow(unused_unsafe)]
 
-use fs_ntfs::{
-    fs_ntfs_last_error, fs_ntfs_remove_ea, fs_ntfs_write_ea,
-};
+use fs_ntfs::{fs_ntfs_last_error, fs_ntfs_remove_ea, fs_ntfs_write_ea};
 use std::ffi::{c_void, CStr, CString};
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
@@ -118,8 +116,7 @@ fn capi_remove_ea_roundtrip() {
             0,
         )
     };
-    let rc =
-        unsafe { fs_ntfs_remove_ea(img_c.as_ptr(), p_c.as_ptr(), name_c.as_ptr()) };
+    let rc = unsafe { fs_ntfs_remove_ea(img_c.as_ptr(), p_c.as_ptr(), name_c.as_ptr()) };
     assert_eq!(rc, 0, "err={}", last_error());
 }
 
@@ -129,8 +126,7 @@ fn capi_remove_ea_missing_fails() {
     let img_c = CString::new(img.as_str()).unwrap();
     let p_c = CString::new("/hello.txt").unwrap();
     let name_c = CString::new("user.never_existed").unwrap();
-    let rc =
-        unsafe { fs_ntfs_remove_ea(img_c.as_ptr(), p_c.as_ptr(), name_c.as_ptr()) };
+    let rc = unsafe { fs_ntfs_remove_ea(img_c.as_ptr(), p_c.as_ptr(), name_c.as_ptr()) };
     assert_eq!(rc, -1);
     assert!(!last_error().is_empty());
 }

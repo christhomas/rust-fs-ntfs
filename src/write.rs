@@ -938,7 +938,10 @@ fn insert_entry_in_parent(
             )
         });
     }
-    Err("no INDX block with room for new entry (would need B+ tree split / new block allocation)".to_string())
+    Err(
+        "no INDX block with room for new entry (would need B+ tree split / new block allocation)"
+            .to_string(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1348,8 +1351,7 @@ pub fn link(
     }
 
     let parent_seq = u16::from_le_bytes([parent_record_bytes[0x10], parent_record_bytes[0x11]]);
-    let parent_reference =
-        crate::record_build::encode_file_reference(new_parent_rec, parent_seq);
+    let parent_reference = crate::record_build::encode_file_reference(new_parent_rec, parent_seq);
     let target_seq = u16::from_le_bytes([target_record_bytes[0x10], target_record_bytes[0x11]]);
     let target_reference = crate::record_build::encode_file_reference(target_rec, target_seq);
     let nt_time = crate::record_build::nt_time_now();
@@ -1394,13 +1396,13 @@ pub fn link(
             // Find the last $FILE_NAME matching new_basename+parent_ref
             // and strip it.
             if let Some(loc) = find_file_name_attr(record, parent_reference, new_basename) {
-                let bytes_used = u32::from_le_bytes([
-                    record[0x18],
-                    record[0x19],
-                    record[0x1A],
-                    record[0x1B],
-                ]) as usize;
-                record.copy_within(loc.attr_offset + loc.attr_length..bytes_used, loc.attr_offset);
+                let bytes_used =
+                    u32::from_le_bytes([record[0x18], record[0x19], record[0x1A], record[0x1B]])
+                        as usize;
+                record.copy_within(
+                    loc.attr_offset + loc.attr_length..bytes_used,
+                    loc.attr_offset,
+                );
                 for byte in &mut record[bytes_used - loc.attr_length..bytes_used] {
                     *byte = 0;
                 }
