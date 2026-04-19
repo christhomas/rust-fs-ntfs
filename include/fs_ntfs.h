@@ -180,6 +180,16 @@ int64_t fs_ntfs_free_clusters(const char *path);
 int64_t fs_ntfs_mft_free_records(const char *path);
 
 /*
+ * Add a hard link `new_parent_path/new_basename` to an existing
+ * regular file `existing_path`. Refuses directories. Returns 0 on
+ * success, -1 on error.
+ */
+int fs_ntfs_link(const char *image,
+                 const char *existing_path,
+                 const char *new_parent_path,
+                 const char *new_basename);
+
+/*
  * Clear the VOLUME_IS_DIRTY flag on an NTFS image so Windows / FSKit /
  * other NTFS drivers will remount it. Must NOT be called on a volume
  * that is currently mounted.

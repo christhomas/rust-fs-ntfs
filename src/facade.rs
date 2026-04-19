@@ -400,6 +400,15 @@ impl Filesystem {
         write::remove_reparse_point(&self.image, path).map_err(Error)
     }
 
+    pub fn link(
+        &self,
+        existing_path: &str,
+        new_parent: &str,
+        new_basename: &str,
+    ) -> Result<(), Error> {
+        write::link(&self.image, existing_path, new_parent, new_basename).map_err(Error)
+    }
+
     pub fn create_symlink(
         &self,
         parent: &str,

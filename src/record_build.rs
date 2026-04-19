@@ -649,6 +649,56 @@ fn write_standard_information(
     at + attr_length
 }
 
+/// Build a standalone `$FILE_NAME` attribute blob (header + value),
+/// 8-byte aligned. Used for adding hard links.
+pub fn build_file_name_attribute(
+    attr_id: u16,
+    parent_reference: u64,
+    name: &str,
+    nt_time: u64,
+    is_dir: bool,
+) -> Result<Vec<u8>, String> {
+    let utf16: Vec<u16> = name.encode_utf16().collect();
+    if utf16.is_empty() || utf16.len() > 255 {
+        return Err(format!("invalid name length {}", utf16.len()));
+    }
+    let header_size = 24usize;
+    let key_fixed = 0x42usize;
+    let value_size = key_fixed + utf16.len() * 2;
+    let attr_length = align8(header_size + value_size);
+    let mut buf = vec![0u8; attr_length];
+    buf[0..4].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 0;
+    buf[9] = 0;
+    buf[10..12].copy_from_slice(&(header_size as u16).to_le_bytes());
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+    buf[16..20].copy_from_slice(&(value_size as u32).to_le_bytes());
+    buf[20..22].copy_from_slice(&(header_size as u16).to_le_bytes());
+    buf[22] = 0;
+    buf[23] = 0;
+
+    let v = header_size;
+    buf[v..v + 8].copy_from_slice(&parent_reference.to_le_bytes());
+    buf[v + 8..v + 16].copy_from_slice(&nt_time.to_le_bytes());
+    buf[v + 16..v + 24].copy_from_slice(&nt_time.to_le_bytes());
+    buf[v + 24..v + 32].copy_from_slice(&nt_time.to_le_bytes());
+    buf[v + 32..v + 40].copy_from_slice(&nt_time.to_le_bytes());
+    buf[v + 40..v + 48].copy_from_slice(&0u64.to_le_bytes());
+    buf[v + 48..v + 56].copy_from_slice(&0u64.to_le_bytes());
+    let fa: u32 = if is_dir { 0x10000000 | 0x20 } else { 0x20 };
+    buf[v + 56..v + 60].copy_from_slice(&fa.to_le_bytes());
+    buf[v + 60..v + 64].copy_from_slice(&0u32.to_le_bytes());
+    buf[v + 64] = utf16.len() as u8;
+    buf[v + 65] = FILE_NAME_NAMESPACE_WIN32_AND_DOS;
+    for (i, c) in utf16.iter().enumerate() {
+        let off = v + 66 + i * 2;
+        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    }
+    Ok(buf)
+}
+
 fn write_file_name(
     rec: &mut [u8],
     at: usize,
