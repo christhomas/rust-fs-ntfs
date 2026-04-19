@@ -1437,8 +1437,7 @@ fn find_file_name_attr(
     name: &str,
 ) -> Option<attr_io::AttrLocation> {
     let name_utf16: Vec<u16> = name.encode_utf16().collect();
-    let mut iter = attr_io::iter_attributes(record);
-    while let Some(loc) = iter.next() {
+    for loc in attr_io::iter_attributes(record) {
         if loc.type_code != attr_io::AttrType::FileName as u32 {
             continue;
         }
