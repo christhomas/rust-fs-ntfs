@@ -310,11 +310,17 @@ pub fn fsck_io<'cb, T: FsckIo>(
 ) -> Result<FsckReport, String> {
     let logfile_bytes = reset_logfile_io(io, progress.as_deref_mut())?;
 
-    if let Some(cb) = progress.as_mut().map(|c| &mut **c as &mut (dyn FnMut(&str, u64, u64) + 'cb)) {
+    if let Some(cb) = progress
+        .as_mut()
+        .map(|c| &mut **c as &mut (dyn FnMut(&str, u64, u64) + 'cb))
+    {
         cb("clear_dirty", 0, 1);
     }
     let dirty_cleared = clear_dirty_io(io)?;
-    if let Some(cb) = progress.as_mut().map(|c| &mut **c as &mut (dyn FnMut(&str, u64, u64) + 'cb)) {
+    if let Some(cb) = progress
+        .as_mut()
+        .map(|c| &mut **c as &mut (dyn FnMut(&str, u64, u64) + 'cb))
+    {
         cb("clear_dirty", 1, 1);
     }
 
