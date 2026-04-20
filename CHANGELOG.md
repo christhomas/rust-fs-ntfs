@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.1.2] — 2026-04-20
+
+### Docs / packaging
+
+- README fully rewritten. New sections: origins, architecture diagram,
+  a concrete capability matrix contrasting fs-ntfs with upstream
+  `ntfs = "0.4"` (justifying this crate's existence as a read/write
+  driver with fsck + stable C ABI), explicit scope / supported vs.
+  not-implemented list, and a plain-English at-your-own-risk
+  disclaimer restating the MIT/Apache-2.0 no-warranty clauses.
+- Framing neutralised: crate is described as a general-purpose FFI
+  NTFS driver. DiskJockey is mentioned once as a production user
+  with an explicit no-coupling note; no more `Swift` / `FSKit`-
+  specific language in the API description.
+- `Cargo.toml` description updated to match (`FFI from C/C++/Go/etc.`
+  instead of `Swift/C/Go/etc.`) and `version` bumped to `0.1.2` to
+  match the new tag (previous releases were tag-only; the manifest
+  still read `0.1.0`).
+- No code or ABI changes. `libfs_ntfs.a` behavior is unchanged vs.
+  0.1.1.
+
 ## [0.1.1] — 2026-04-20
 
 ### Added — callback-based fsck
