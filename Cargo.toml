@@ -1,9 +1,9 @@
 [package]
 name = "fs-ntfs"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Pure-Rust NTFS filesystem driver. Exposes a C ABI (fs_ntfs_*) suitable for FFI from Swift/C/Go/etc."
+description = "Pure-Rust NTFS filesystem driver. Exposes a C ABI (fs_ntfs_*) suitable for FFI from C/C++/Go/etc."
 repository = "https://github.com/christhomas/rust-fs-ntfs"
 readme = "README.md"
 
