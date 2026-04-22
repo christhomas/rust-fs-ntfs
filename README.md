@@ -339,6 +339,18 @@ transports. Tests assemble their own NTFS images at runtime where
 possible; a handful of static images live in `test-disks/` for
 fixtures that are awkward to build programmatically.
 
+## Git hooks
+
+One-time setup per clone, so every commit runs the same `cargo fmt
+--check` + `cargo clippy` checks CI does and CI doesn't have to catch
+what your machine could have:
+
+```sh
+./scripts/install-hooks.sh
+```
+
+Bypass a single commit with `git commit --no-verify`.
+
 ## Versioning
 
 Semver, tracked in [`CHANGELOG.md`](CHANGELOG.md). ABI-visible
