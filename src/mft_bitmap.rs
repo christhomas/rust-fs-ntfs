@@ -12,11 +12,10 @@
 //! [Flatcap $MFT](https://flatcap.github.io/linux-ntfs/ntfs/files/mft.html).
 
 use crate::attr_io::{self, AttrType};
+use crate::block_io::{BlockIo, PathIo};
 use crate::data_runs::{self, DataRun};
-use crate::mft_io::{read_mft_record, update_mft_record, BootParams};
+use crate::mft_io::{read_mft_record_io, update_mft_record_io, BootParams};
 
-use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 /// `$MFT` is always MFT record 0.
@@ -43,7 +42,12 @@ pub enum MftBitmapLayout {
 }
 
 pub fn locate(image: &Path) -> Result<MftBitmap, String> {
-    let (params, record) = read_mft_record(image, MFT_RECORD_NUMBER)?;
+    let mut io = PathIo::open_ro(image)?;
+    locate_io(&mut io)
+}
+
+pub fn locate_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<MftBitmap, String> {
+    let (params, record) = read_mft_record_io(io, MFT_RECORD_NUMBER)?;
 
     // $MFT's unnamed $Bitmap (attribute type 0xB0, name "").
     let bm = attr_io::find_attribute(&record, AttrType::Bitmap, None)
@@ -77,9 +81,18 @@ pub fn locate(image: &Path) -> Result<MftBitmap, String> {
 
 /// Is MFT record `n` marked in-use in `$MFT:$Bitmap`?
 pub fn is_allocated(image: &Path, bm: &MftBitmap, n: u64) -> Result<bool, String> {
+    let mut io = PathIo::open_ro(image)?;
+    is_allocated_io(&mut io, bm, n)
+}
+
+pub fn is_allocated_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    bm: &MftBitmap,
+    n: u64,
+) -> Result<bool, String> {
     let byte_idx = n / 8;
     let bit = (n % 8) as u8;
-    let byte = read_bitmap_byte(image, bm, byte_idx)?;
+    let byte = read_bitmap_byte_io(io, bm, byte_idx)?;
     Ok((byte >> bit) & 1 != 0)
 }
 
@@ -87,6 +100,15 @@ pub fn is_allocated(image: &Path, bm: &MftBitmap, n: u64) -> Result<bool, String
 /// `None` if the bitmap is fully allocated. (Growing `$MFT` itself is
 /// a separate concern — future W2.6 work.)
 pub fn find_free_record(image: &Path, bm: &MftBitmap, hint: u64) -> Result<Option<u64>, String> {
+    let mut io = PathIo::open_ro(image)?;
+    find_free_record_io(&mut io, bm, hint)
+}
+
+pub fn find_free_record_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    bm: &MftBitmap,
+    hint: u64,
+) -> Result<Option<u64>, String> {
     let total = match &bm.layout {
         MftBitmapLayout::Resident { total_bits, .. } => *total_bits,
         MftBitmapLayout::NonResident { total_bits, .. } => *total_bits,
@@ -97,7 +119,7 @@ pub fn find_free_record(image: &Path, bm: &MftBitmap, hint: u64) -> Result<Optio
         while n < finish {
             let byte_idx = n / 8;
             let bit = (n % 8) as u8;
-            let byte = read_bitmap_byte(image, bm, byte_idx)?;
+            let byte = read_bitmap_byte_io(io, bm, byte_idx)?;
             if (byte >> bit) & 1 == 0 {
                 return Ok(Some(n));
             }
@@ -109,6 +131,11 @@ pub fn find_free_record(image: &Path, bm: &MftBitmap, hint: u64) -> Result<Optio
 
 /// Count free MFT record slots in `$MFT:$Bitmap`.
 pub fn count_free(image: &Path, bm: &MftBitmap) -> Result<u64, String> {
+    let mut io = PathIo::open_ro(image)?;
+    count_free_io(&mut io, bm)
+}
+
+pub fn count_free_io<T: BlockIo + ?Sized>(io: &mut T, bm: &MftBitmap) -> Result<u64, String> {
     match &bm.layout {
         MftBitmapLayout::Resident {
             bytes, total_bits, ..
@@ -120,7 +147,7 @@ pub fn count_free(image: &Path, bm: &MftBitmap) -> Result<u64, String> {
             let total_bytes = total_bits.div_ceil(8);
             let mut set: u64 = 0;
             for i in 0..total_bytes {
-                set += read_bitmap_byte(image, bm, i)?.count_ones() as u64;
+                set += read_bitmap_byte_io(io, bm, i)?.count_ones() as u64;
             }
             Ok(total_bits.saturating_sub(set))
         }
@@ -129,18 +156,33 @@ pub fn count_free(image: &Path, bm: &MftBitmap) -> Result<u64, String> {
 
 /// Mark MFT record `n` as allocated (set bit = 1).
 pub fn allocate(image: &Path, bm: &MftBitmap, n: u64) -> Result<(), String> {
-    mutate_bit(image, bm, n, true)
+    let mut io = PathIo::open_rw(image)?;
+    allocate_io(&mut io, bm, n)
+}
+
+pub fn allocate_io<T: BlockIo + ?Sized>(io: &mut T, bm: &MftBitmap, n: u64) -> Result<(), String> {
+    mutate_bit_io(io, bm, n, true)
 }
 
 /// Mark MFT record `n` as free (set bit = 0).
 pub fn free(image: &Path, bm: &MftBitmap, n: u64) -> Result<(), String> {
-    mutate_bit(image, bm, n, false)
+    let mut io = PathIo::open_rw(image)?;
+    free_io(&mut io, bm, n)
 }
 
-fn mutate_bit(image: &Path, bm: &MftBitmap, n: u64, set: bool) -> Result<(), String> {
+pub fn free_io<T: BlockIo + ?Sized>(io: &mut T, bm: &MftBitmap, n: u64) -> Result<(), String> {
+    mutate_bit_io(io, bm, n, false)
+}
+
+fn mutate_bit_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    bm: &MftBitmap,
+    n: u64,
+    set: bool,
+) -> Result<(), String> {
     let byte_idx = n / 8;
     let bit = (n % 8) as u8;
-    let mut byte = read_bitmap_byte(image, bm, byte_idx)?;
+    let mut byte = read_bitmap_byte_io(io, bm, byte_idx)?;
     let cur = (byte >> bit) & 1 != 0;
     if set && cur {
         return Err(format!("MFT record {n} already allocated"));
@@ -153,10 +195,14 @@ fn mutate_bit(image: &Path, bm: &MftBitmap, n: u64, set: bool) -> Result<(), Str
     } else {
         byte &= !(1 << bit);
     }
-    write_bitmap_byte(image, bm, byte_idx, byte)
+    write_bitmap_byte_io(io, bm, byte_idx, byte)
 }
 
-fn read_bitmap_byte(image: &Path, bm: &MftBitmap, byte_idx: u64) -> Result<u8, String> {
+fn read_bitmap_byte_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    bm: &MftBitmap,
+    byte_idx: u64,
+) -> Result<u8, String> {
     match &bm.layout {
         MftBitmapLayout::Resident { bytes, .. } => {
             let i = byte_idx as usize;
@@ -170,18 +216,20 @@ fn read_bitmap_byte(image: &Path, bm: &MftBitmap, byte_idx: u64) -> Result<u8, S
         }
         MftBitmapLayout::NonResident { runs, .. } => {
             let (_, disk_offset) = disk_offset_for_byte(bm, runs, byte_idx)?;
-            let mut f = std::fs::File::open(image).map_err(|e| format!("open ro: {e}"))?;
-            f.seek(SeekFrom::Start(disk_offset))
-                .map_err(|e| format!("seek mftbm read: {e}"))?;
             let mut b = [0u8; 1];
-            f.read_exact(&mut b)
+            io.read_exact_at(disk_offset, &mut b)
                 .map_err(|e| format!("read mftbm: {e}"))?;
             Ok(b[0])
         }
     }
 }
 
-fn write_bitmap_byte(image: &Path, bm: &MftBitmap, byte_idx: u64, v: u8) -> Result<(), String> {
+fn write_bitmap_byte_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    bm: &MftBitmap,
+    byte_idx: u64,
+    v: u8,
+) -> Result<(), String> {
     match &bm.layout {
         MftBitmapLayout::Resident {
             data_offset_in_record,
@@ -189,7 +237,7 @@ fn write_bitmap_byte(image: &Path, bm: &MftBitmap, byte_idx: u64, v: u8) -> Resu
         } => {
             // Resident — patch the bitmap inside $MFT's own record.
             let dor = *data_offset_in_record;
-            update_mft_record(image, MFT_RECORD_NUMBER, |record| {
+            update_mft_record_io(io, MFT_RECORD_NUMBER, |record| {
                 let i = dor + byte_idx as usize;
                 if i >= record.len() {
                     return Err(format!("byte_idx {byte_idx} past record end"));
@@ -200,15 +248,9 @@ fn write_bitmap_byte(image: &Path, bm: &MftBitmap, byte_idx: u64, v: u8) -> Resu
         }
         MftBitmapLayout::NonResident { runs, .. } => {
             let (_, disk_offset) = disk_offset_for_byte(bm, runs, byte_idx)?;
-            let mut f = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(image)
-                .map_err(|e| format!("open rw: {e}"))?;
-            f.seek(SeekFrom::Start(disk_offset))
-                .map_err(|e| format!("seek mftbm write: {e}"))?;
-            f.write_all(&[v]).map_err(|e| format!("write mftbm: {e}"))?;
-            f.sync_all().map_err(|e| format!("fsync: {e}"))
+            io.write_all_at(disk_offset, &[v])
+                .map_err(|e| format!("write mftbm: {e}"))?;
+            io.sync()
         }
     }
 }

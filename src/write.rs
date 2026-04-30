@@ -9,16 +9,15 @@
 
 use crate::attr_io::{self, AttrType};
 use crate::bitmap;
+use crate::block_io::{BlockIo, IoReadSeek, PathIo};
 use crate::data_runs::{self, DataRun};
 use crate::idx_block;
 use crate::index_io;
 use crate::mft_bitmap;
-use crate::mft_io::{read_mft_record, update_mft_record, MFT_FLAG_DIRECTORY};
+use crate::mft_io::{read_mft_record_io, update_mft_record_io, MFT_FLAG_DIRECTORY};
 
 use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::{Ntfs, NtfsFile};
-use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -48,8 +47,17 @@ const SI_FILE_ATTRIBUTES: usize = 0x20;
 /// parent directory's `$FILE_NAME` index (Windows itself only updates
 /// them on rename/create).
 pub fn set_times(path: &Path, file_path: &str, times: FileTimes) -> Result<(), String> {
-    let rec = resolve_path_to_record_number(path, file_path)?;
-    set_times_by_record_number(path, rec, times)
+    let mut io = PathIo::open_rw(path)?;
+    set_times_io(&mut io, file_path, times)
+}
+
+pub fn set_times_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    times: FileTimes,
+) -> Result<(), String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    set_times_by_record_number_io(io, rec, times)
 }
 
 /// Set file times on an MFT record by number (bypasses path resolution).
@@ -58,7 +66,16 @@ pub fn set_times_by_record_number(
     record_number: u64,
     times: FileTimes,
 ) -> Result<(), String> {
-    update_mft_record(path, record_number, |record| {
+    let mut io = PathIo::open_rw(path)?;
+    set_times_by_record_number_io(&mut io, record_number, times)
+}
+
+pub fn set_times_by_record_number_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    times: FileTimes,
+) -> Result<(), String> {
+    update_mft_record_io(io, record_number, |record| {
         let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
             .ok_or_else(|| "$STANDARD_INFORMATION not found".to_string())?;
         let data_start = attr_io::resident_value_start(&loc)
@@ -116,13 +133,31 @@ pub fn set_file_attributes(
     file_path: &str,
     change: FileAttributesChange,
 ) -> Result<(), String> {
-    let rec = resolve_path_to_record_number(path, file_path)?;
-    set_file_attributes_by_record_number(path, rec, change)
+    let mut io = PathIo::open_rw(path)?;
+    set_file_attributes_io(&mut io, file_path, change)
+}
+
+pub fn set_file_attributes_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    change: FileAttributesChange,
+) -> Result<(), String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    set_file_attributes_by_record_number_io(io, rec, change)
 }
 
 /// See [`set_file_attributes`].
 pub fn set_file_attributes_by_record_number(
     path: &Path,
+    record_number: u64,
+    change: FileAttributesChange,
+) -> Result<(), String> {
+    let mut io = PathIo::open_rw(path)?;
+    set_file_attributes_by_record_number_io(&mut io, record_number, change)
+}
+
+pub fn set_file_attributes_by_record_number_io<T: BlockIo + ?Sized>(
+    io: &mut T,
     record_number: u64,
     change: FileAttributesChange,
 ) -> Result<(), String> {
@@ -132,7 +167,7 @@ pub fn set_file_attributes_by_record_number(
             change.add, change.remove
         ));
     }
-    update_mft_record(path, record_number, |record| {
+    update_mft_record_io(io, record_number, |record| {
         let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
             .ok_or_else(|| "$STANDARD_INFORMATION not found".to_string())?;
         let data_start = attr_io::resident_value_start(&loc)
@@ -171,8 +206,21 @@ pub fn write_at(image: &Path, file_path: &str, offset: u64, data: &[u8]) -> Resu
     if data.is_empty() {
         return Ok(0);
     }
-    let rec = resolve_path_to_record_number(image, file_path)?;
-    write_at_by_record_number(image, rec, offset, data)
+    let mut io = PathIo::open_rw(image)?;
+    write_at_io(&mut io, file_path, offset, data)
+}
+
+pub fn write_at_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    offset: u64,
+    data: &[u8],
+) -> Result<u64, String> {
+    if data.is_empty() {
+        return Ok(0);
+    }
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    write_at_by_record_number_io(io, rec, offset, data)
 }
 
 /// See [`write_at`]. Takes a record number instead of a path.
@@ -182,7 +230,17 @@ pub fn write_at_by_record_number(
     offset: u64,
     data: &[u8],
 ) -> Result<u64, String> {
-    let (params, record) = read_mft_record(image, record_number)?;
+    let mut io = PathIo::open_rw(image)?;
+    write_at_by_record_number_io(&mut io, record_number, offset, data)
+}
+
+pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    offset: u64,
+    data: &[u8],
+) -> Result<u64, String> {
+    let (params, record) = read_mft_record_io(io, record_number)?;
     let cluster_size = params.cluster_size;
 
     let loc = attr_io::find_attribute(&record, AttrType::Data, None)
@@ -242,12 +300,6 @@ pub fn write_at_by_record_number(
     }
 
     // Walk the runs for the target range and write each contiguous span.
-    let mut fh = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(image)
-        .map_err(|e| format!("open rw: {e}"))?;
-
     let mut cursor_in_data = 0usize;
     let mut file_offset = offset;
 
@@ -264,16 +316,14 @@ pub fn write_at_by_record_number(
         let chunk = remaining.min(max_in_this_run) as usize;
 
         let disk_offset = (lcn + (vcn - run.starting_vcn)) * cluster_size + off_in_cluster;
-        fh.seek(SeekFrom::Start(disk_offset))
-            .map_err(|e| format!("seek write: {e}"))?;
-        fh.write_all(&data[cursor_in_data..cursor_in_data + chunk])
+        io.write_all_at(disk_offset, &data[cursor_in_data..cursor_in_data + chunk])
             .map_err(|e| format!("write: {e}"))?;
 
         cursor_in_data += chunk;
         file_offset += chunk as u64;
     }
 
-    fh.sync_all().map_err(|e| format!("fsync: {e}"))?;
+    io.sync()?;
     Ok(data.len() as u64)
 }
 
@@ -300,8 +350,17 @@ fn find_run_for_vcn(runs: &[DataRun], vcn: u64) -> Option<&DataRun> {
 /// Rejects: grow (new_size &gt; current size), resident `$DATA`,
 /// compressed / sparse / encrypted flag set.
 pub fn truncate(image: &Path, file_path: &str, new_size: u64) -> Result<u64, String> {
-    let rec = resolve_path_to_record_number(image, file_path)?;
-    truncate_by_record_number(image, rec, new_size)
+    let mut io = PathIo::open_rw(image)?;
+    truncate_io(&mut io, file_path, new_size)
+}
+
+pub fn truncate_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    new_size: u64,
+) -> Result<u64, String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    truncate_by_record_number_io(io, rec, new_size)
 }
 
 /// Attribute-header offsets for non-resident lengths (Flatcap).
@@ -315,7 +374,16 @@ pub fn truncate_by_record_number(
     record_number: u64,
     new_size: u64,
 ) -> Result<u64, String> {
-    let (params, record) = read_mft_record(image, record_number)?;
+    let mut io = PathIo::open_rw(image)?;
+    truncate_by_record_number_io(&mut io, record_number, new_size)
+}
+
+pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    new_size: u64,
+) -> Result<u64, String> {
+    let (params, record) = read_mft_record_io(io, record_number)?;
     let cluster_size = params.cluster_size;
 
     let loc = attr_io::find_attribute(&record, AttrType::Data, None)
@@ -377,7 +445,7 @@ pub fn truncate_by_record_number(
     // Rewrite the MFT record FIRST. Once this sync completes, the file's
     // logical size + mapping no longer references the clusters we're
     // about to free. Then free clusters in $Bitmap.
-    update_mft_record(image, record_number, |record| {
+    update_mft_record_io(io, record_number, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, None)
             .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
         let attr_start = loc.attr_offset;
@@ -417,12 +485,12 @@ pub fn truncate_by_record_number(
 
     // Now free the freed clusters.
     if !clusters_to_free.is_empty() {
-        let bm = bitmap::locate_bitmap(image)?;
+        let bm = bitmap::locate_bitmap_io(io)?;
         for (lcn, n) in &clusters_to_free {
             // Best-effort: if a double-free occurs we report, but don't
             // undo the earlier record update — the file size change has
             // committed.
-            bitmap::free(image, &bm, *lcn, *n)
+            bitmap::free_io(io, &bm, *lcn, *n)
                 .map_err(|e| format!("free clusters [{lcn}..{}]: {e}", lcn + n))?;
         }
     }
@@ -446,8 +514,17 @@ pub fn truncate_by_record_number(
 ///   header's reserved space (we don't shift following attributes —
 ///   that's W2.1 work). Most grows need 0 or 1 extra encoded bytes.
 pub fn grow_nonresident(image: &Path, file_path: &str, new_size: u64) -> Result<u64, String> {
-    let rec = resolve_path_to_record_number(image, file_path)?;
-    grow_nonresident_by_record_number(image, rec, new_size)
+    let mut io = PathIo::open_rw(image)?;
+    grow_nonresident_io(&mut io, file_path, new_size)
+}
+
+pub fn grow_nonresident_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    new_size: u64,
+) -> Result<u64, String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    grow_nonresident_by_record_number_io(io, rec, new_size)
 }
 
 pub fn grow_nonresident_by_record_number(
@@ -455,7 +532,16 @@ pub fn grow_nonresident_by_record_number(
     record_number: u64,
     new_size: u64,
 ) -> Result<u64, String> {
-    let (params, record) = read_mft_record(image, record_number)?;
+    let mut io = PathIo::open_rw(image)?;
+    grow_nonresident_by_record_number_io(&mut io, record_number, new_size)
+}
+
+pub fn grow_nonresident_by_record_number_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    new_size: u64,
+) -> Result<u64, String> {
+    let (params, record) = read_mft_record_io(io, record_number)?;
     let cluster_size = params.cluster_size;
 
     let loc = attr_io::find_attribute(&record, AttrType::Data, None)
@@ -500,19 +586,19 @@ pub fn grow_nonresident_by_record_number(
     let need_clusters = (new_last_vcn + 1).saturating_sub(current_last_vcn);
     if need_clusters == 0 {
         // Partial-cluster grow — no new clusters, just extend lengths.
-        return apply_grow_lengths(image, record_number, new_size, new_allocated);
+        return apply_grow_lengths_io(io, record_number, new_size, new_allocated);
     }
 
     // Ask bitmap for a contiguous run.
-    let bm = bitmap::locate_bitmap(image)?;
+    let bm = bitmap::locate_bitmap_io(io)?;
     let hint = runs
         .iter()
         .rev()
         .find_map(|r| r.lcn.map(|lcn| lcn + r.length))
         .unwrap_or(params.mft_lcn.saturating_add(32));
-    let new_lcn = bitmap::find_free_run(image, &bm, need_clusters, hint)?
+    let new_lcn = bitmap::find_free_run_io(io, &bm, need_clusters, hint)?
         .ok_or_else(|| format!("no contiguous free run of {need_clusters} clusters available"))?;
-    bitmap::allocate(image, &bm, new_lcn, need_clusters)?;
+    bitmap::allocate_io(io, &bm, new_lcn, need_clusters)?;
 
     // Build new run list. If the new allocation is contiguous with the
     // last dense run, extend that run; otherwise append a new run.
@@ -536,7 +622,7 @@ pub fn grow_nonresident_by_record_number(
     if new_mapping.len() > mapping_capacity {
         // Need attribute resize (W2.1) — undo the bitmap allocation so we
         // don't leak clusters.
-        bitmap::free(image, &bm, new_lcn, need_clusters)?;
+        bitmap::free_io(io, &bm, new_lcn, need_clusters)?;
         return Err(format!(
             "new mapping_pairs ({} bytes) exceed attr capacity ({}). Attribute resize (W2.1) required.",
             new_mapping.len(),
@@ -545,7 +631,7 @@ pub fn grow_nonresident_by_record_number(
     }
 
     // Commit: rewrite MFT record with new mapping + lengths.
-    update_mft_record(image, record_number, |record| {
+    update_mft_record_io(io, record_number, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, None)
             .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
         let attr_start = loc.attr_offset;
@@ -578,13 +664,13 @@ pub fn grow_nonresident_by_record_number(
 }
 
 /// Used by grow when only lengths change (no new clusters needed).
-fn apply_grow_lengths(
-    image: &Path,
+fn apply_grow_lengths_io<T: BlockIo + ?Sized>(
+    io: &mut T,
     record_number: u64,
     new_size: u64,
     new_allocated: u64,
 ) -> Result<u64, String> {
-    update_mft_record(image, record_number, |record| {
+    update_mft_record_io(io, record_number, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, None)
             .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
         let attr_start = loc.attr_offset;
@@ -670,10 +756,19 @@ fn write_u64_at(record: &mut [u8], off: usize, v: Option<u64>) {
 /// Walking + patching `$INDEX_ALLOCATION` blocks is a separate
 /// primitive (index_io::find_in_index_allocation, future work).
 pub fn rename_same_length(image: &Path, old_path: &str, new_name: &str) -> Result<(), String> {
+    let mut io = PathIo::open_rw(image)?;
+    rename_same_length_io(&mut io, old_path, new_name)
+}
+
+pub fn rename_same_length_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    old_path: &str,
+    new_name: &str,
+) -> Result<(), String> {
     if new_name.contains('/') || new_name.is_empty() {
         return Err("new_name must be a basename (no slashes, non-empty)".to_string());
     }
-    let (parent_rec, file_rec, current_basename) = resolve_parent_and_child(image, old_path)?;
+    let (parent_rec, file_rec, current_basename) = resolve_parent_and_child_io(io, old_path)?;
 
     // Pre-check lengths (UTF-16 code units).
     let old_u16_len = current_basename.encode_utf16().count();
@@ -687,7 +782,7 @@ pub fn rename_same_length(image: &Path, old_path: &str, new_name: &str) -> Resul
     // 1) Patch the parent's index entry. First check whether it lives
     //    in the resident $INDEX_ROOT or spills into $INDEX_ALLOCATION;
     //    dispatch accordingly.
-    let (_, parent_record_bytes) = read_mft_record(image, parent_rec)?;
+    let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
         .ok_or_else(|| "no $INDEX_ROOT on parent".to_string())?;
 
@@ -700,17 +795,17 @@ pub fn rename_same_length(image: &Path, old_path: &str, new_name: &str) -> Resul
                 entry_found.file_record_number
             ));
         }
-        update_mft_record(image, parent_rec, |record| {
+        update_mft_record_io(io, parent_rec, |record| {
             let entry = index_io::find_index_entry(record, &current_basename)?
                 .ok_or_else(|| "race: $INDEX_ROOT entry vanished during RMW".to_string())?;
             index_io::rename_index_entry_same_length(record, &entry, new_name)
         })?;
     } else if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
         // Linear scan of allocated INDX blocks.
-        let ia = idx_block::load_for_directory(image, parent_rec)?;
+        let ia = idx_block::load_for_directory_io(io, parent_rec)?;
         let mut patched = false;
         for vcn in ia.allocated_block_vcns() {
-            let block = idx_block::read_indx_block(image, &ia, vcn)?;
+            let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
             if let Some(entry) = index_io::find_entry_in_indx_block(&block, &current_basename)? {
                 if entry.file_record_number != file_rec {
                     return Err(format!(
@@ -718,7 +813,7 @@ pub fn rename_same_length(image: &Path, old_path: &str, new_name: &str) -> Resul
                         entry.file_record_number
                     ));
                 }
-                idx_block::update_indx_block(image, &ia, vcn, |block| {
+                idx_block::update_indx_block_io(io, &ia, vcn, |block| {
                     let entry = index_io::find_entry_in_indx_block(block, &current_basename)?
                         .ok_or_else(|| "race: INDX entry vanished".to_string())?;
                     index_io::rename_index_entry_same_length(block, &entry, new_name)
@@ -740,7 +835,7 @@ pub fn rename_same_length(image: &Path, old_path: &str, new_name: &str) -> Resul
     }
 
     // 2) Patch the file's own $FILE_NAME attributes.
-    update_mft_record(image, file_rec, |record| {
+    update_mft_record_io(io, file_rec, |record| {
         index_io::rename_filename_attribute_same_length(record, &current_basename, new_name)
     })?;
 
@@ -763,14 +858,23 @@ pub fn rename_same_length(image: &Path, old_path: &str, new_name: &str) -> Resul
 /// * Filename collation is case-insensitive ASCII-only (proper
 ///   NTFS upcase-table collation is future work).
 pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u64, String> {
+    let mut io = PathIo::open_rw(image)?;
+    create_file_io(&mut io, parent_path, basename)
+}
+
+pub fn create_file_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_path: &str,
+    basename: &str,
+) -> Result<u64, String> {
     if basename.is_empty() || basename == "." || basename == ".." || basename.contains('/') {
         return Err(format!("invalid basename: '{basename}'"));
     }
 
-    let parent_rec = resolve_path_to_record_number(image, parent_path)?;
+    let parent_rec = resolve_path_to_record_number_io(io, parent_path)?;
 
     // Read parent; check it's a directory with a resident-only index.
-    let (params, parent_record_bytes) = read_mft_record(image, parent_rec)?;
+    let (params, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let parent_flags = crate::mft_io::record_flags(&parent_record_bytes);
     if parent_flags & crate::mft_io::MFT_FLAG_DIRECTORY == 0 {
         return Err(format!("parent '{parent_path}' is not a directory"));
@@ -784,9 +888,9 @@ pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u6
         return Err(format!("'{basename}' already exists in '{parent_path}'"));
     }
     if parent_has_overflow {
-        let ia = idx_block::load_for_directory(image, parent_rec)?;
+        let ia = idx_block::load_for_directory_io(io, parent_rec)?;
         for vcn in ia.allocated_block_vcns() {
-            let blk = idx_block::read_indx_block(image, &ia, vcn)?;
+            let blk = idx_block::read_indx_block_io(io, &ia, vcn)?;
             if index_io::find_entry_in_indx_block(&blk, basename)?.is_some() {
                 return Err(format!("'{basename}' already exists in '{parent_path}'"));
             }
@@ -794,8 +898,8 @@ pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u6
     }
 
     // Allocate a free MFT record.
-    let mbm = crate::mft_bitmap::locate(image)?;
-    let new_rec = crate::mft_bitmap::find_free_record(image, &mbm, 24)?
+    let mbm = crate::mft_bitmap::locate_io(io)?;
+    let new_rec = crate::mft_bitmap::find_free_record_io(io, &mbm, 24)?
         .ok_or_else(|| "MFT has no free records (and we don't grow it yet)".to_string())?;
 
     // Get the parent's sequence number for the file-name attribute's
@@ -822,32 +926,18 @@ pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u6
     // another concurrent allocator can't grab the same slot. (For our
     // single-writer model this is belt-and-suspenders; important when
     // we eventually support concurrency.)
-    crate::mft_bitmap::allocate(image, &mbm, new_rec)?;
+    crate::mft_bitmap::allocate_io(io, &mbm, new_rec)?;
 
     // Write the record bytes at the correct disk offset.
     let rec_offset = crate::mft_io::mft_record_offset(&params, new_rec);
-    let mut f = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(image)
-        .map_err(|e| {
-            // Undo the bitmap bit on write failure.
-            let _ = crate::mft_bitmap::free(image, &mbm, new_rec);
-            format!("open rw: {e}")
-        })?;
-    if let Err(e) = f.seek(SeekFrom::Start(rec_offset)) {
-        let _ = crate::mft_bitmap::free(image, &mbm, new_rec);
-        return Err(format!("seek new record: {e}"));
-    }
-    if let Err(e) = f.write_all(&new_record) {
-        let _ = crate::mft_bitmap::free(image, &mbm, new_rec);
+    if let Err(e) = io.write_all_at(rec_offset, &new_record) {
+        let _ = crate::mft_bitmap::free_io(io, &mbm, new_rec);
         return Err(format!("write new record: {e}"));
     }
-    if let Err(e) = f.sync_all() {
-        let _ = crate::mft_bitmap::free(image, &mbm, new_rec);
+    if let Err(e) = io.sync() {
+        let _ = crate::mft_bitmap::free_io(io, &mbm, new_rec);
         return Err(format!("fsync new record: {e}"));
     }
-    drop(f);
 
     // Insert index entry into parent.
     let new_file_reference = crate::record_build::encode_file_reference(new_rec, new_seq);
@@ -858,22 +948,17 @@ pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u6
         nt_time,
         /* is_dir */ false,
     )?;
-    let insert_res = insert_entry_in_parent(
-        image,
-        parent_rec,
-        parent_has_overflow,
-        &entry_bytes,
-        basename,
-    );
+    let insert_res =
+        insert_entry_in_parent_io(io, parent_rec, parent_has_overflow, &entry_bytes, basename);
     if let Err(e) = insert_res {
         // Roll back: clear IN_USE on the new record + free the bitmap bit.
-        let _ = update_mft_record(image, new_rec, |record| {
+        let _ = update_mft_record_io(io, new_rec, |record| {
             let cur = u16::from_le_bytes([record[0x16], record[0x17]]);
             let new = cur & !crate::mft_io::MFT_FLAG_IN_USE;
             record[0x16..0x18].copy_from_slice(&new.to_le_bytes());
             Ok(())
         });
-        let _ = crate::mft_bitmap::free(image, &mbm, new_rec);
+        let _ = crate::mft_bitmap::free_io(io, &mbm, new_rec);
         return Err(format!("insert index entry: {e}"));
     }
 
@@ -884,8 +969,26 @@ pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u6
 /// between resident `$INDEX_ROOT` and `$INDEX_ALLOCATION` INDX blocks.
 /// For overflowed parents, scans allocated INDX blocks for one with
 /// room and inserts there.
+#[allow(dead_code)]
 fn insert_entry_in_parent(
     image: &Path,
+    parent_rec: u64,
+    parent_has_overflow: bool,
+    entry_bytes: &[u8],
+    basename: &str,
+) -> Result<(), String> {
+    let mut io = PathIo::open_rw(image)?;
+    insert_entry_in_parent_io(
+        &mut io,
+        parent_rec,
+        parent_has_overflow,
+        entry_bytes,
+        basename,
+    )
+}
+
+fn insert_entry_in_parent_io<T: BlockIo + ?Sized>(
+    io: &mut T,
     parent_rec: u64,
     parent_has_overflow: bool,
     entry_bytes: &[u8],
@@ -895,9 +998,9 @@ fn insert_entry_in_parent(
     // collation (COLLATION_FILE_NAME) on non-ASCII names. Falls back
     // to the ASCII upcase-fold if $UpCase can't be loaded (shouldn't
     // happen on a well-formed volume).
-    let upcase = crate::upcase::UpcaseTable::load(image).ok();
+    let upcase = crate::upcase::UpcaseTable::load_io(io).ok();
     if !parent_has_overflow {
-        return update_mft_record(image, parent_rec, |record| {
+        return update_mft_record_io(io, parent_rec, |record| {
             index_io::insert_entry_into_index_root_with_collation(
                 record,
                 entry_bytes,
@@ -907,11 +1010,11 @@ fn insert_entry_in_parent(
         });
     }
     // Parent has $INDEX_ALLOCATION: find an INDX block with room.
-    let ia = idx_block::load_for_directory(image, parent_rec)?;
+    let ia = idx_block::load_for_directory_io(io, parent_rec)?;
     for vcn in ia.allocated_block_vcns() {
         // Peek at free space — avoid unnecessary RMW work for blocks
         // that can't fit the entry.
-        let block = idx_block::read_indx_block(image, &ia, vcn)?;
+        let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
         let ih_start = idx_block::INDX_INDEX_HEADER_OFFSET;
         let total_size = u32::from_le_bytes([
             block[ih_start + 4],
@@ -929,7 +1032,7 @@ fn insert_entry_in_parent(
             continue;
         }
         // This block has room. RMW + insert.
-        return idx_block::update_indx_block(image, &ia, vcn, |block| {
+        return idx_block::update_indx_block_io(io, &ia, vcn, |block| {
             index_io::insert_entry_into_indx_block_with_collation(
                 block,
                 entry_bytes,
@@ -954,13 +1057,22 @@ fn insert_entry_in_parent(
 /// Shares the limitation set of [`create_file`] — the parent must hold
 /// its index entirely in `$INDEX_ROOT`.
 pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, String> {
+    let mut io = PathIo::open_rw(image)?;
+    mkdir_io(&mut io, parent_path, basename)
+}
+
+pub fn mkdir_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_path: &str,
+    basename: &str,
+) -> Result<u64, String> {
     if basename.is_empty() || basename == "." || basename == ".." || basename.contains('/') {
         return Err(format!("invalid basename: '{basename}'"));
     }
 
-    let parent_rec = resolve_path_to_record_number(image, parent_path)?;
+    let parent_rec = resolve_path_to_record_number_io(io, parent_path)?;
 
-    let (params, parent_record_bytes) = read_mft_record(image, parent_rec)?;
+    let (params, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let parent_flags = crate::mft_io::record_flags(&parent_record_bytes);
     if parent_flags & crate::mft_io::MFT_FLAG_DIRECTORY == 0 {
         return Err(format!("parent '{parent_path}' is not a directory"));
@@ -972,17 +1084,17 @@ pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Str
         return Err(format!("'{basename}' already exists in '{parent_path}'"));
     }
     if parent_has_overflow {
-        let ia = idx_block::load_for_directory(image, parent_rec)?;
+        let ia = idx_block::load_for_directory_io(io, parent_rec)?;
         for vcn in ia.allocated_block_vcns() {
-            let blk = idx_block::read_indx_block(image, &ia, vcn)?;
+            let blk = idx_block::read_indx_block_io(io, &ia, vcn)?;
             if index_io::find_entry_in_indx_block(&blk, basename)?.is_some() {
                 return Err(format!("'{basename}' already exists in '{parent_path}'"));
             }
         }
     }
 
-    let mbm = crate::mft_bitmap::locate(image)?;
-    let new_rec = crate::mft_bitmap::find_free_record(image, &mbm, 24)?
+    let mbm = crate::mft_bitmap::locate_io(io)?;
+    let new_rec = crate::mft_bitmap::find_free_record_io(io, &mbm, 24)?
         .ok_or_else(|| "MFT full — would need to grow $MFT (W2.6)".to_string())?;
 
     let parent_seq = u16::from_le_bytes([parent_record_bytes[0x10], parent_record_bytes[0x11]]);
@@ -1005,30 +1117,17 @@ pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Str
     )?;
     crate::mft_io::apply_fixup_on_write(&mut new_record, params.bytes_per_sector)?;
 
-    crate::mft_bitmap::allocate(image, &mbm, new_rec)?;
+    crate::mft_bitmap::allocate_io(io, &mbm, new_rec)?;
 
     let rec_offset = crate::mft_io::mft_record_offset(&params, new_rec);
-    let mut f = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(image)
-        .map_err(|e| {
-            let _ = crate::mft_bitmap::free(image, &mbm, new_rec);
-            format!("open rw: {e}")
-        })?;
-    if let Err(e) = f.seek(SeekFrom::Start(rec_offset)) {
-        let _ = crate::mft_bitmap::free(image, &mbm, new_rec);
-        return Err(format!("seek new dir record: {e}"));
-    }
-    if let Err(e) = f.write_all(&new_record) {
-        let _ = crate::mft_bitmap::free(image, &mbm, new_rec);
+    if let Err(e) = io.write_all_at(rec_offset, &new_record) {
+        let _ = crate::mft_bitmap::free_io(io, &mbm, new_rec);
         return Err(format!("write new dir record: {e}"));
     }
-    if let Err(e) = f.sync_all() {
-        let _ = crate::mft_bitmap::free(image, &mbm, new_rec);
+    if let Err(e) = io.sync() {
+        let _ = crate::mft_bitmap::free_io(io, &mbm, new_rec);
         return Err(format!("fsync new dir record: {e}"));
     }
-    drop(f);
 
     let new_file_reference = crate::record_build::encode_file_reference(new_rec, new_seq);
     let entry_bytes = index_io::build_file_name_index_entry(
@@ -1038,21 +1137,16 @@ pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Str
         nt_time,
         /* is_dir */ true,
     )?;
-    let insert_res = insert_entry_in_parent(
-        image,
-        parent_rec,
-        parent_has_overflow,
-        &entry_bytes,
-        basename,
-    );
+    let insert_res =
+        insert_entry_in_parent_io(io, parent_rec, parent_has_overflow, &entry_bytes, basename);
     if let Err(e) = insert_res {
-        let _ = update_mft_record(image, new_rec, |record| {
+        let _ = update_mft_record_io(io, new_rec, |record| {
             let cur = u16::from_le_bytes([record[0x16], record[0x17]]);
             let new = cur & !crate::mft_io::MFT_FLAG_IN_USE;
             record[0x16..0x18].copy_from_slice(&new.to_le_bytes());
             Ok(())
         });
-        let _ = crate::mft_bitmap::free(image, &mbm, new_rec);
+        let _ = crate::mft_bitmap::free_io(io, &mbm, new_rec);
         return Err(format!("insert dir index entry: {e}"));
     }
 
@@ -1072,11 +1166,22 @@ pub fn write_ea(
     ea_value: &[u8],
     flags: u8,
 ) -> Result<(), String> {
+    let mut io = PathIo::open_rw(image)?;
+    write_ea_io(&mut io, file_path, ea_name, ea_value, flags)
+}
+
+pub fn write_ea_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    ea_name: &[u8],
+    ea_value: &[u8],
+    flags: u8,
+) -> Result<(), String> {
     if ea_name.is_empty() || ea_name.len() > 254 {
         return Err(format!("invalid EA name length {}", ea_name.len()));
     }
-    let rec = resolve_path_to_record_number(image, file_path)?;
-    update_mft_record(image, rec, |record| {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    update_mft_record_io(io, rec, |record| {
         let mut eas = crate::ea_io::read_from_record(record)?;
         crate::ea_io::upsert(
             &mut eas,
@@ -1092,8 +1197,17 @@ pub fn write_ea(
 
 /// Remove an EA by name (case-insensitive). Errors if not found.
 pub fn remove_ea(image: &Path, file_path: &str, ea_name: &[u8]) -> Result<(), String> {
-    let rec = resolve_path_to_record_number(image, file_path)?;
-    update_mft_record(image, rec, |record| {
+    let mut io = PathIo::open_rw(image)?;
+    remove_ea_io(&mut io, file_path, ea_name)
+}
+
+pub fn remove_ea_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    ea_name: &[u8],
+) -> Result<(), String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    update_mft_record_io(io, rec, |record| {
         let mut eas = crate::ea_io::read_from_record(record)?;
         if !crate::ea_io::remove_by_name(&mut eas, ea_name) {
             return Err(format!(
@@ -1107,8 +1221,16 @@ pub fn remove_ea(image: &Path, file_path: &str, ea_name: &[u8]) -> Result<(), St
 
 /// Return all EAs on `file_path` (empty vec if none).
 pub fn list_eas(image: &Path, file_path: &str) -> Result<Vec<crate::ea_io::Ea>, String> {
-    let rec = resolve_path_to_record_number(image, file_path)?;
-    let (_, record) = read_mft_record(image, rec)?;
+    let mut io = PathIo::open_ro(image)?;
+    list_eas_io(&mut io, file_path)
+}
+
+pub fn list_eas_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+) -> Result<Vec<crate::ea_io::Ea>, String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let (_, record) = read_mft_record_io(io, rec)?;
     crate::ea_io::read_from_record(&record)
 }
 
@@ -1194,8 +1316,18 @@ pub fn write_reparse_point(
     reparse_tag: u32,
     data: &[u8],
 ) -> Result<(), String> {
-    let rec = resolve_path_to_record_number(image, file_path)?;
-    update_mft_record(image, rec, |record| {
+    let mut io = PathIo::open_rw(image)?;
+    write_reparse_point_io(&mut io, file_path, reparse_tag, data)
+}
+
+pub fn write_reparse_point_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    reparse_tag: u32,
+    data: &[u8],
+) -> Result<(), String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    update_mft_record_io(io, rec, |record| {
         let existing = attr_io::find_attribute(record, AttrType::ReparsePoint, None);
         if let Some(loc) = existing {
             let attr_id = loc.attribute_id;
@@ -1222,8 +1354,16 @@ pub fn write_reparse_point(
 /// Remove the `$REPARSE_POINT` attribute and clear the
 /// `FILE_ATTRIBUTE_REPARSE_POINT` flag.
 pub fn remove_reparse_point(image: &Path, file_path: &str) -> Result<(), String> {
-    let rec = resolve_path_to_record_number(image, file_path)?;
-    update_mft_record(image, rec, |record| {
+    let mut io = PathIo::open_rw(image)?;
+    remove_reparse_point_io(&mut io, file_path)
+}
+
+pub fn remove_reparse_point_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+) -> Result<(), String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    update_mft_record_io(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::ReparsePoint, None)
             .ok_or_else(|| "no $REPARSE_POINT to remove".to_string())?;
         let old_len = loc.attr_length;
@@ -1250,20 +1390,31 @@ pub fn create_symlink(
     target: &str,
     relative: bool,
 ) -> Result<u64, String> {
-    let rec = create_file(image, parent_path, basename)?;
+    let mut io = PathIo::open_rw(image)?;
+    create_symlink_io(&mut io, parent_path, basename, target, relative)
+}
+
+pub fn create_symlink_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_path: &str,
+    basename: &str,
+    target: &str,
+    relative: bool,
+) -> Result<u64, String> {
+    let rec = create_file_io(io, parent_path, basename)?;
     let data = crate::record_build::build_symlink_reparse_data(target, None, relative);
     let child_path = if parent_path == "/" {
         format!("/{basename}")
     } else {
         format!("{parent_path}/{basename}")
     };
-    if let Err(e) = write_reparse_point(
-        image,
+    if let Err(e) = write_reparse_point_io(
+        io,
         &child_path,
         crate::record_build::reparse_tag::SYMLINK,
         &data,
     ) {
-        let _ = unlink(image, &child_path);
+        let _ = unlink_io(io, &child_path);
         return Err(format!("write_reparse_point: {e}"));
     }
     Ok(rec)
@@ -1272,8 +1423,16 @@ pub fn create_symlink(
 /// Read the 16-byte object ID (`$OBJECT_ID` attribute value) for a
 /// file. Returns `Ok(None)` if the file has no `$OBJECT_ID`.
 pub fn read_object_id(image: &Path, file_path: &str) -> Result<Option<[u8; 16]>, String> {
-    let rec = resolve_path_to_record_number(image, file_path)?;
-    let (_, record) = read_mft_record(image, rec)?;
+    let mut io = PathIo::open_ro(image)?;
+    read_object_id_io(&mut io, file_path)
+}
+
+pub fn read_object_id_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+) -> Result<Option<[u8; 16]>, String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let (_, record) = read_mft_record_io(io, rec)?;
     let Some(loc) = attr_io::find_attribute(&record, AttrType::ObjectId, None) else {
         return Ok(None);
     };
@@ -1316,6 +1475,16 @@ pub fn link(
     new_parent_path: &str,
     new_basename: &str,
 ) -> Result<(), String> {
+    let mut io = PathIo::open_rw(image)?;
+    link_io(&mut io, existing_path, new_parent_path, new_basename)
+}
+
+pub fn link_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    existing_path: &str,
+    new_parent_path: &str,
+    new_basename: &str,
+) -> Result<(), String> {
     if new_basename.is_empty()
         || new_basename == "."
         || new_basename == ".."
@@ -1323,8 +1492,8 @@ pub fn link(
     {
         return Err(format!("invalid basename: '{new_basename}'"));
     }
-    let target_rec = resolve_path_to_record_number(image, existing_path)?;
-    let (_, target_record_bytes) = read_mft_record(image, target_rec)?;
+    let target_rec = resolve_path_to_record_number_io(io, existing_path)?;
+    let (_, target_record_bytes) = read_mft_record_io(io, target_rec)?;
     let target_flags = crate::mft_io::record_flags(&target_record_bytes);
     if target_flags & crate::mft_io::MFT_FLAG_DIRECTORY != 0 {
         return Err(format!(
@@ -1332,8 +1501,8 @@ pub fn link(
         ));
     }
 
-    let new_parent_rec = resolve_path_to_record_number(image, new_parent_path)?;
-    let (_, parent_record_bytes) = read_mft_record(image, new_parent_rec)?;
+    let new_parent_rec = resolve_path_to_record_number_io(io, new_parent_path)?;
+    let (_, parent_record_bytes) = read_mft_record_io(io, new_parent_rec)?;
     let parent_flags = crate::mft_io::record_flags(&parent_record_bytes);
     if parent_flags & crate::mft_io::MFT_FLAG_DIRECTORY == 0 {
         return Err(format!(
@@ -1349,9 +1518,9 @@ pub fn link(
         ));
     }
     if parent_has_overflow {
-        let ia = idx_block::load_for_directory(image, new_parent_rec)?;
+        let ia = idx_block::load_for_directory_io(io, new_parent_rec)?;
         for vcn in ia.allocated_block_vcns() {
-            let blk = idx_block::read_indx_block(image, &ia, vcn)?;
+            let blk = idx_block::read_indx_block_io(io, &ia, vcn)?;
             if index_io::find_entry_in_indx_block(&blk, new_basename)?.is_some() {
                 return Err(format!(
                     "'{new_basename}' already exists in '{new_parent_path}'"
@@ -1368,7 +1537,7 @@ pub fn link(
 
     // Step 1: append a new $FILE_NAME to the target record + bump
     // hard_link_count.
-    update_mft_record(image, target_rec, |record| {
+    update_mft_record_io(io, target_rec, |record| {
         let attr_id = crate::attr_resize::allocate_attribute_id(record);
         let fn_attr = crate::record_build::build_file_name_attribute(
             attr_id,
@@ -1391,8 +1560,8 @@ pub fn link(
         nt_time,
         /* is_dir */ false,
     )?;
-    let insert_res = insert_entry_in_parent(
-        image,
+    let insert_res = insert_entry_in_parent_io(
+        io,
         new_parent_rec,
         parent_has_overflow,
         &entry,
@@ -1402,7 +1571,7 @@ pub fn link(
         // Roll back: remove the $FILE_NAME we added and decrement the
         // link count. Best-effort; mostly for tests since insertion
         // failures here would indicate a full directory.
-        let _ = update_mft_record(image, target_rec, |record| {
+        let _ = update_mft_record_io(io, target_rec, |record| {
             // Find the last $FILE_NAME matching new_basename+parent_ref
             // and strip it.
             if let Some(loc) = find_file_name_attr(record, parent_reference, new_basename) {
@@ -1513,11 +1682,21 @@ pub fn write_named_stream_resident(
     stream_name: &str,
     data: &[u8],
 ) -> Result<(), String> {
+    let mut io = PathIo::open_rw(image)?;
+    write_named_stream_resident_io(&mut io, file_path, stream_name, data)
+}
+
+pub fn write_named_stream_resident_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    stream_name: &str,
+    data: &[u8],
+) -> Result<(), String> {
     if stream_name.is_empty() {
         return Err("stream_name must be non-empty".to_string());
     }
-    let rec = resolve_path_to_record_number(image, file_path)?;
-    update_mft_record(image, rec, |record| {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    update_mft_record_io(io, rec, |record| {
         // Existing stream?
         let existing = attr_io::find_attribute(record, AttrType::Data, Some(stream_name));
         if let Some(loc) = existing {
@@ -1549,7 +1728,17 @@ pub fn write_named_stream(
     stream_name: &str,
     data: &[u8],
 ) -> Result<(), String> {
-    match write_named_stream_resident(image, file_path, stream_name, data) {
+    let mut io = PathIo::open_rw(image)?;
+    write_named_stream_io(&mut io, file_path, stream_name, data)
+}
+
+pub fn write_named_stream_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    stream_name: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    match write_named_stream_resident_io(io, file_path, stream_name, data) {
         Ok(()) => Ok(()),
         Err(e)
             if e.contains("capacity")
@@ -1559,9 +1748,9 @@ pub fn write_named_stream(
         {
             // If a resident version exists, remove it first so the
             // non-resident replacement inserts cleanly.
-            let _ = delete_named_stream(image, file_path, stream_name);
-            promote_attribute_to_nonresident(
-                image,
+            let _ = delete_named_stream_io(io, file_path, stream_name);
+            promote_attribute_to_nonresident_io(
+                io,
                 file_path,
                 AttrType::Data,
                 Some(stream_name),
@@ -1575,11 +1764,20 @@ pub fn write_named_stream(
 /// Delete a named `$DATA` stream from a file. Fails if the stream
 /// doesn't exist.
 pub fn delete_named_stream(image: &Path, file_path: &str, stream_name: &str) -> Result<(), String> {
+    let mut io = PathIo::open_rw(image)?;
+    delete_named_stream_io(&mut io, file_path, stream_name)
+}
+
+pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    stream_name: &str,
+) -> Result<(), String> {
     if stream_name.is_empty() {
         return Err("stream_name must be non-empty".to_string());
     }
-    let rec = resolve_path_to_record_number(image, file_path)?;
-    update_mft_record(image, rec, |record| {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    update_mft_record_io(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, Some(stream_name))
             .ok_or_else(|| format!("named stream '{stream_name}' not found"))?;
         // Remove the attribute: shrink to a resident-empty shell, then
@@ -1617,8 +1815,17 @@ pub fn promote_resident_data_to_nonresident(
     file_path: &str,
     new_data: &[u8],
 ) -> Result<(), String> {
-    let rec = resolve_path_to_record_number(image, file_path)?;
-    let (params, record) = read_mft_record(image, rec)?;
+    let mut io = PathIo::open_rw(image)?;
+    promote_resident_data_to_nonresident_io(&mut io, file_path, new_data)
+}
+
+pub fn promote_resident_data_to_nonresident_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    new_data: &[u8],
+) -> Result<(), String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let (params, record) = read_mft_record_io(io, rec)?;
     let cluster_size = params.cluster_size;
 
     let loc = attr_io::find_attribute(&record, AttrType::Data, None)
@@ -1630,40 +1837,29 @@ pub fn promote_resident_data_to_nonresident(
     // Allocate clusters for the new data.
     let new_size = new_data.len() as u64;
     let n_clusters = new_size.div_ceil(cluster_size).max(1);
-    let bm = crate::bitmap::locate_bitmap(image)?;
-    let new_lcn = crate::bitmap::find_free_run(image, &bm, n_clusters, params.mft_lcn)?
+    let bm = crate::bitmap::locate_bitmap_io(io)?;
+    let new_lcn = crate::bitmap::find_free_run_io(io, &bm, n_clusters, params.mft_lcn)?
         .ok_or_else(|| format!("no contiguous free run of {n_clusters} clusters"))?;
-    crate::bitmap::allocate(image, &bm, new_lcn, n_clusters)?;
+    crate::bitmap::allocate_io(io, &bm, new_lcn, n_clusters)?;
 
     // Write the data (zero-padded to cluster boundary).
     let allocated_length = n_clusters * cluster_size;
     {
-        let mut f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(image)
-            .map_err(|e| {
-                let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
-                format!("open rw: {e}")
-            })?;
         let disk_offset = new_lcn * cluster_size;
-        if let Err(e) = f.seek(SeekFrom::Start(disk_offset)) {
-            let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
-            return Err(format!("seek new cluster: {e}"));
-        }
-        // Write new_data then zero-pad.
-        if let Err(e) = f.write_all(new_data) {
-            let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+        if let Err(e) = io.write_all_at(disk_offset, new_data) {
+            let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
             return Err(format!("write data: {e}"));
         }
         let pad = (allocated_length - new_size) as usize;
-        let zeros = vec![0u8; pad];
-        if let Err(e) = f.write_all(&zeros) {
-            let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
-            return Err(format!("write zero-pad: {e}"));
+        if pad > 0 {
+            let zeros = vec![0u8; pad];
+            if let Err(e) = io.write_all_at(disk_offset + new_size, &zeros) {
+                let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
+                return Err(format!("write zero-pad: {e}"));
+            }
         }
-        if let Err(e) = f.sync_all() {
-            let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+        if let Err(e) = io.sync() {
+            let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
             return Err(format!("fsync data: {e}"));
         }
     }
@@ -1693,13 +1889,13 @@ pub fn promote_resident_data_to_nonresident(
     )?;
 
     // Replace $DATA in the MFT record.
-    let replace_res = update_mft_record(image, rec, |record| {
+    let replace_res = update_mft_record_io(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, None)
             .ok_or_else(|| "$DATA vanished during RMW".to_string())?;
         crate::attr_resize::replace_attribute(record, loc.attr_offset, &new_attr_bytes)
     });
     if let Err(e) = replace_res {
-        let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+        let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
         return Err(format!("replace $DATA: {e}"));
     }
 
@@ -1713,10 +1909,19 @@ pub fn promote_resident_data_to_nonresident(
 /// The heuristic is: attempt resident write first. If it fails with a
 /// record-capacity error, retry with promotion.
 pub fn write_file_contents(image: &Path, file_path: &str, new_data: &[u8]) -> Result<u64, String> {
-    match write_resident_contents(image, file_path, new_data) {
+    let mut io = PathIo::open_rw(image)?;
+    write_file_contents_io(&mut io, file_path, new_data)
+}
+
+pub fn write_file_contents_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    new_data: &[u8],
+) -> Result<u64, String> {
+    match write_resident_contents_io(io, file_path, new_data) {
         Ok(n) => Ok(n),
         Err(e) if e.contains("capacity") || e.contains("exceeds") => {
-            promote_resident_data_to_nonresident(image, file_path, new_data)?;
+            promote_resident_data_to_nonresident_io(io, file_path, new_data)?;
             Ok(new_data.len() as u64)
         }
         Err(e) => Err(e),
@@ -1738,46 +1943,45 @@ pub fn promote_attribute_to_nonresident(
     attr_name: Option<&str>,
     new_data: &[u8],
 ) -> Result<(), String> {
-    let rec = resolve_path_to_record_number(image, file_path)?;
-    let (params, _) = read_mft_record(image, rec)?;
+    let mut io = PathIo::open_rw(image)?;
+    promote_attribute_to_nonresident_io(&mut io, file_path, attr_type, attr_name, new_data)
+}
+
+pub fn promote_attribute_to_nonresident_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    attr_type: AttrType,
+    attr_name: Option<&str>,
+    new_data: &[u8],
+) -> Result<(), String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let (params, _) = read_mft_record_io(io, rec)?;
     let cluster_size = params.cluster_size;
 
     let new_size = new_data.len() as u64;
     let n_clusters = new_size.div_ceil(cluster_size).max(1);
-    let bm = crate::bitmap::locate_bitmap(image)?;
-    let new_lcn = crate::bitmap::find_free_run(image, &bm, n_clusters, params.mft_lcn)?
+    let bm = crate::bitmap::locate_bitmap_io(io)?;
+    let new_lcn = crate::bitmap::find_free_run_io(io, &bm, n_clusters, params.mft_lcn)?
         .ok_or_else(|| format!("no contiguous free run of {n_clusters} clusters"))?;
-    crate::bitmap::allocate(image, &bm, new_lcn, n_clusters)?;
+    crate::bitmap::allocate_io(io, &bm, new_lcn, n_clusters)?;
 
     let allocated_length = n_clusters * cluster_size;
     {
-        let mut f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(image)
-            .map_err(|e| {
-                let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
-                format!("open rw: {e}")
-            })?;
         let disk_offset = new_lcn * cluster_size;
-        if let Err(e) = f.seek(SeekFrom::Start(disk_offset)) {
-            let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
-            return Err(format!("seek new cluster: {e}"));
-        }
-        if let Err(e) = f.write_all(new_data) {
-            let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+        if let Err(e) = io.write_all_at(disk_offset, new_data) {
+            let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
             return Err(format!("write data: {e}"));
         }
         let pad = (allocated_length - new_size) as usize;
         if pad > 0 {
             let zeros = vec![0u8; pad];
-            if let Err(e) = f.write_all(&zeros) {
-                let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+            if let Err(e) = io.write_all_at(disk_offset + new_size, &zeros) {
+                let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
                 return Err(format!("write zero-pad: {e}"));
             }
         }
-        if let Err(e) = f.sync_all() {
-            let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+        if let Err(e) = io.sync() {
+            let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
             return Err(format!("fsync data: {e}"));
         }
     }
@@ -1794,7 +1998,7 @@ pub fn promote_attribute_to_nonresident(
         (n_clusters - 1) as i64
     };
 
-    let replace_res = update_mft_record(image, rec, |record| {
+    let replace_res = update_mft_record_io(io, rec, |record| {
         let attr_id = match attr_io::find_attribute(record, attr_type, attr_name) {
             Some(loc) => loc.attribute_id,
             None => crate::attr_resize::allocate_attribute_id(record),
@@ -1817,7 +2021,7 @@ pub fn promote_attribute_to_nonresident(
         Ok(())
     });
     if let Err(e) = replace_res {
-        let _ = crate::bitmap::free(image, &bm, new_lcn, n_clusters);
+        let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
         return Err(format!("replace attribute: {e}"));
     }
 
@@ -1832,8 +2036,13 @@ pub fn promote_attribute_to_nonresident(
 /// (other than the implicit LAST sentinel) or if it's overflowed to
 /// `$INDEX_ALLOCATION`. Returns `Ok(())` on success.
 pub fn rmdir(image: &Path, dir_path: &str) -> Result<(), String> {
-    let (parent_rec, dir_rec, basename) = resolve_parent_and_child(image, dir_path)?;
-    let (_, dir_record_bytes) = read_mft_record(image, dir_rec)?;
+    let mut io = PathIo::open_rw(image)?;
+    rmdir_io(&mut io, dir_path)
+}
+
+pub fn rmdir_io<T: BlockIo + ?Sized>(io: &mut T, dir_path: &str) -> Result<(), String> {
+    let (parent_rec, dir_rec, basename) = resolve_parent_and_child_io(io, dir_path)?;
+    let (_, dir_record_bytes) = read_mft_record_io(io, dir_rec)?;
     let flags = crate::mft_io::record_flags(&dir_record_bytes);
     if flags & MFT_FLAG_DIRECTORY == 0 {
         return Err(format!("rmdir: '{dir_path}' is not a directory"));
@@ -1855,7 +2064,7 @@ pub fn rmdir(image: &Path, dir_path: &str) -> Result<(), String> {
 
     // Remove from parent's index. Parent's index may or may not be
     // overflowed — dispatch like unlink.
-    let (_, parent_record_bytes) = read_mft_record(image, parent_rec)?;
+    let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let parent_ir_flags =
         index_io::index_root_flags(&parent_record_bytes).ok_or("parent has no $INDEX_ROOT")?;
     let in_root = index_io::find_index_entry(&parent_record_bytes, &basename)?;
@@ -1866,16 +2075,16 @@ pub fn rmdir(image: &Path, dir_path: &str) -> Result<(), String> {
                 entry.file_record_number
             ));
         }
-        update_mft_record(image, parent_rec, |record| {
+        update_mft_record_io(io, parent_rec, |record| {
             let e = index_io::find_index_entry(record, &basename)?
                 .ok_or_else(|| "race: IR entry vanished".to_string())?;
             index_io::remove_index_entry(record, &e, index_io::BlockKind::IndexRoot)
         })?;
     } else if parent_ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
-        let ia = idx_block::load_for_directory(image, parent_rec)?;
+        let ia = idx_block::load_for_directory_io(io, parent_rec)?;
         let mut removed = false;
         for vcn in ia.allocated_block_vcns() {
-            let block = idx_block::read_indx_block(image, &ia, vcn)?;
+            let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
             if let Some(entry) = index_io::find_entry_in_indx_block(&block, &basename)? {
                 if entry.file_record_number != dir_rec {
                     return Err(format!(
@@ -1883,7 +2092,7 @@ pub fn rmdir(image: &Path, dir_path: &str) -> Result<(), String> {
                         entry.file_record_number
                     ));
                 }
-                idx_block::update_indx_block(image, &ia, vcn, |block| {
+                idx_block::update_indx_block_io(io, &ia, vcn, |block| {
                     let e = index_io::find_entry_in_indx_block(block, &basename)?
                         .ok_or_else(|| "race: INDX entry vanished".to_string())?;
                     index_io::remove_index_entry(block, &e, index_io::BlockKind::IndexAllocation)
@@ -1902,14 +2111,14 @@ pub fn rmdir(image: &Path, dir_path: &str) -> Result<(), String> {
     }
 
     // Clear IN_USE flag + free MFT bit.
-    update_mft_record(image, dir_rec, |record| {
+    update_mft_record_io(io, dir_rec, |record| {
         let cur = u16::from_le_bytes([record[0x16], record[0x17]]);
         let new = cur & !crate::mft_io::MFT_FLAG_IN_USE;
         record[0x16..0x18].copy_from_slice(&new.to_le_bytes());
         Ok(())
     })?;
-    let mbm = crate::mft_bitmap::locate(image)?;
-    crate::mft_bitmap::free(image, &mbm, dir_rec)?;
+    let mbm = crate::mft_bitmap::locate_io(io)?;
+    crate::mft_bitmap::free_io(io, &mbm, dir_rec)?;
 
     Ok(())
 }
@@ -1929,8 +2138,17 @@ pub fn write_resident_contents(
     file_path: &str,
     new_data: &[u8],
 ) -> Result<u64, String> {
-    let rec = resolve_path_to_record_number(image, file_path)?;
-    update_mft_record(image, rec, |record| {
+    let mut io = PathIo::open_rw(image)?;
+    write_resident_contents_io(&mut io, file_path, new_data)
+}
+
+pub fn write_resident_contents_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    new_data: &[u8],
+) -> Result<u64, String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    update_mft_record_io(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, None)
             .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
         if !loc.is_resident {
@@ -1955,6 +2173,15 @@ pub fn write_resident_contents(
 /// Timestamps are refreshed to "now" in the updated index entry and
 /// `$FILE_NAME` attribute(s), matching Windows' observable behavior.
 pub fn rename(image: &Path, old_path: &str, new_basename: &str) -> Result<(), String> {
+    let mut io = PathIo::open_rw(image)?;
+    rename_io(&mut io, old_path, new_basename)
+}
+
+pub fn rename_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    old_path: &str,
+    new_basename: &str,
+) -> Result<(), String> {
     if new_basename.is_empty()
         || new_basename == "."
         || new_basename == ".."
@@ -1962,7 +2189,7 @@ pub fn rename(image: &Path, old_path: &str, new_basename: &str) -> Result<(), St
     {
         return Err(format!("invalid basename: '{new_basename}'"));
     }
-    let (parent_rec, file_rec, old_basename) = resolve_parent_and_child(image, old_path)?;
+    let (parent_rec, file_rec, old_basename) = resolve_parent_and_child_io(io, old_path)?;
     if old_basename == new_basename {
         return Ok(());
     }
@@ -1970,10 +2197,10 @@ pub fn rename(image: &Path, old_path: &str, new_basename: &str) -> Result<(), St
     let old_u16_len = old_basename.encode_utf16().count();
     let new_u16_len = new_basename.encode_utf16().count();
     if old_u16_len == new_u16_len {
-        return rename_same_length(image, old_path, new_basename);
+        return rename_same_length_io(io, old_path, new_basename);
     }
 
-    let (_, parent_record_bytes) = read_mft_record(image, parent_rec)?;
+    let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
         .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
     if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
@@ -1986,7 +2213,7 @@ pub fn rename(image: &Path, old_path: &str, new_basename: &str) -> Result<(), St
         return Err(format!("'{new_basename}' already exists"));
     }
 
-    let (_, file_record_bytes) = read_mft_record(image, file_rec)?;
+    let (_, file_record_bytes) = read_mft_record_io(io, file_rec)?;
     let file_seq = u16::from_le_bytes([file_record_bytes[0x10], file_record_bytes[0x11]]);
     let parent_seq = u16::from_le_bytes([parent_record_bytes[0x10], parent_record_bytes[0x11]]);
     let file_reference = crate::record_build::encode_file_reference(file_rec, file_seq);
@@ -2004,8 +2231,8 @@ pub fn rename(image: &Path, old_path: &str, new_basename: &str) -> Result<(), St
     )?;
 
     // 1) Swap the parent's $INDEX_ROOT entry.
-    let upcase = crate::upcase::UpcaseTable::load(image).ok();
-    update_mft_record(image, parent_rec, |record| {
+    let upcase = crate::upcase::UpcaseTable::load_io(io).ok();
+    update_mft_record_io(io, parent_rec, |record| {
         let old_entry = index_io::find_index_entry(record, &old_basename)?
             .ok_or_else(|| format!("old entry '{old_basename}' not found"))?;
         index_io::remove_index_entry(record, &old_entry, index_io::BlockKind::IndexRoot)?;
@@ -2018,7 +2245,7 @@ pub fn rename(image: &Path, old_path: &str, new_basename: &str) -> Result<(), St
     })?;
 
     // 2) Update the file's own $FILE_NAME attribute(s).
-    update_mft_record(image, file_rec, |record| {
+    update_mft_record_io(io, file_rec, |record| {
         replace_file_name_with_new_name(
             record,
             &old_basename,
@@ -2122,10 +2349,15 @@ fn build_file_name_value(
 /// an MFT record + clusters (recoverable by scan); a reversed order
 /// could leave the file name pointing at a freed+reallocated record.
 pub fn unlink(image: &Path, file_path: &str) -> Result<(), String> {
-    let (parent_rec, file_rec, basename) = resolve_parent_and_child(image, file_path)?;
+    let mut io = PathIo::open_rw(image)?;
+    unlink_io(&mut io, file_path)
+}
+
+pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(), String> {
+    let (parent_rec, file_rec, basename) = resolve_parent_and_child_io(io, file_path)?;
 
     // Refuse directory targets.
-    let (_, file_record_bytes) = read_mft_record(image, file_rec)?;
+    let (_, file_record_bytes) = read_mft_record_io(io, file_rec)?;
     let flags = crate::mft_io::record_flags(&file_record_bytes);
     if flags & MFT_FLAG_DIRECTORY != 0 {
         return Err(format!(
@@ -2134,7 +2366,7 @@ pub fn unlink(image: &Path, file_path: &str) -> Result<(), String> {
     }
 
     // 1) Remove the parent's index entry. Dispatch on IR flags.
-    let (_, parent_record_bytes) = read_mft_record(image, parent_rec)?;
+    let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
         .ok_or_else(|| "no $INDEX_ROOT on parent".to_string())?;
 
@@ -2146,16 +2378,16 @@ pub fn unlink(image: &Path, file_path: &str) -> Result<(), String> {
                 entry.file_record_number
             ));
         }
-        update_mft_record(image, parent_rec, |record| {
+        update_mft_record_io(io, parent_rec, |record| {
             let e = index_io::find_index_entry(record, &basename)?
                 .ok_or_else(|| "race: $INDEX_ROOT entry vanished".to_string())?;
             index_io::remove_index_entry(record, &e, index_io::BlockKind::IndexRoot)
         })?;
     } else if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
-        let ia = idx_block::load_for_directory(image, parent_rec)?;
+        let ia = idx_block::load_for_directory_io(io, parent_rec)?;
         let mut removed = false;
         for vcn in ia.allocated_block_vcns() {
-            let block = idx_block::read_indx_block(image, &ia, vcn)?;
+            let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
             if let Some(entry) = index_io::find_entry_in_indx_block(&block, &basename)? {
                 if entry.file_record_number != file_rec {
                     return Err(format!(
@@ -2163,7 +2395,7 @@ pub fn unlink(image: &Path, file_path: &str) -> Result<(), String> {
                         entry.file_record_number
                     ));
                 }
-                idx_block::update_indx_block(image, &ia, vcn, |block| {
+                idx_block::update_indx_block_io(io, &ia, vcn, |block| {
                     let e = index_io::find_entry_in_indx_block(block, &basename)?
                         .ok_or_else(|| "race: INDX entry vanished".to_string())?;
                     index_io::remove_index_entry(block, &e, index_io::BlockKind::IndexAllocation)
@@ -2189,12 +2421,12 @@ pub fn unlink(image: &Path, file_path: &str) -> Result<(), String> {
     let data_loc = attr_io::find_attribute(&file_record_bytes, AttrType::Data, None);
     if let Some(loc) = data_loc {
         if !loc.is_resident && loc.non_resident_value_length.unwrap_or(0) > 0 {
-            truncate_by_record_number(image, file_rec, 0)?;
+            truncate_by_record_number_io(io, file_rec, 0)?;
         }
     }
 
     // 3) Clear IN_USE flag in the file's MFT record.
-    update_mft_record(image, file_rec, |record| {
+    update_mft_record_io(io, file_rec, |record| {
         let flags_off = 0x16;
         let cur = u16::from_le_bytes([record[flags_off], record[flags_off + 1]]);
         let new = cur & !crate::mft_io::MFT_FLAG_IN_USE;
@@ -2203,14 +2435,23 @@ pub fn unlink(image: &Path, file_path: &str) -> Result<(), String> {
     })?;
 
     // 4) Free the MFT record bit.
-    let mbm = mft_bitmap::locate(image)?;
-    mft_bitmap::free(image, &mbm, file_rec)?;
+    let mbm = mft_bitmap::locate_io(io)?;
+    mft_bitmap::free_io(io, &mbm, file_rec)?;
 
     Ok(())
 }
 
 /// Resolve `old_path` to `(parent_record_number, file_record_number, basename)`.
+#[allow(dead_code)]
 fn resolve_parent_and_child(image: &Path, old_path: &str) -> Result<(u64, u64, String), String> {
+    let mut io = PathIo::open_ro(image)?;
+    resolve_parent_and_child_io(&mut io, old_path)
+}
+
+fn resolve_parent_and_child_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    old_path: &str,
+) -> Result<(u64, u64, String), String> {
     let p = old_path.trim_start_matches('/');
     if p.is_empty() {
         return Err("cannot rename root".to_string());
@@ -2220,15 +2461,25 @@ fn resolve_parent_and_child(image: &Path, old_path: &str) -> Result<(u64, u64, S
         None => ("", p),
     };
     let parent_full = format!("/{parent_path}");
-    let parent_rec = resolve_path_to_record_number(image, &parent_full)?;
-    let file_rec = resolve_path_to_record_number(image, old_path)?;
+    let parent_rec = resolve_path_to_record_number_io(io, &parent_full)?;
+    let file_rec = resolve_path_to_record_number_io(io, old_path)?;
     Ok((parent_rec, file_rec, basename.to_string()))
 }
 
 /// Walk `file_path` via upstream and return the target's MFT record number.
 pub fn resolve_path_to_record_number(path: &Path, file_path: &str) -> Result<u64, String> {
-    let f = File::open(path).map_err(|e| format!("open ro: {e}"))?;
-    let mut reader = BufReader::new(f);
+    let mut io = PathIo::open_ro(path)?;
+    resolve_path_to_record_number_io(&mut io, file_path)
+}
+
+/// `BlockIo`-based equivalent of [`resolve_path_to_record_number`]. Used
+/// by the handle-based mutator path so a single `BlockIo` services both
+/// the read (via `IoReadSeek`) and any subsequent writes.
+pub fn resolve_path_to_record_number_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+) -> Result<u64, String> {
+    let mut reader = IoReadSeek::new(io);
     let mut ntfs = Ntfs::new(&mut reader).map_err(|e| format!("parse: {e}"))?;
     ntfs.read_upcase_table(&mut reader)
         .map_err(|e| format!("upcase: {e}"))?;

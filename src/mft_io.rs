@@ -15,9 +15,9 @@
 //! write to an MFT record must re-apply this encoding correctly or the
 //! volume becomes unmountable.
 
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+
+use crate::block_io::{BlockIo, PathIo};
 
 /// NTFS boot-sector fields we need for MFT addressing.
 #[derive(Debug, Clone, Copy)]
@@ -33,11 +33,19 @@ pub struct BootParams {
 /// need. Does not validate the NTFS magic ("NTFS    " at +3) or checksum
 /// — upstream `Ntfs::new` already does that during read-side parsing.
 pub fn read_boot_params(path: &Path) -> Result<BootParams, String> {
-    let mut f = File::open(path).map_err(|e| format!("open boot: {e}"))?;
-    let mut boot = [0u8; 512];
-    f.read_exact(&mut boot)
-        .map_err(|e| format!("read boot: {e}"))?;
+    let mut io = PathIo::open_ro(path)?;
+    read_boot_params_io(&mut io)
+}
 
+/// Parse the boot sector via an arbitrary `BlockIo`. Used directly by
+/// the handle-based mutator stack.
+pub fn read_boot_params_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BootParams, String> {
+    let mut boot = [0u8; 512];
+    io.read_exact_at(0, &mut boot)?;
+    parse_boot_params_from_bytes(&boot)
+}
+
+fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> {
     let bytes_per_sector = u16::from_le_bytes([boot[0x0B], boot[0x0C]]);
     if bytes_per_sector == 0 || bytes_per_sector & (bytes_per_sector - 1) != 0 {
         return Err(format!(
@@ -239,14 +247,22 @@ fn validate_usa_geometry(
 
 /// Read an MFT record, apply fixup, and return the clean bytes.
 pub fn read_mft_record(path: &Path, record_number: u64) -> Result<(BootParams, Vec<u8>), String> {
-    let params = read_boot_params(path)?;
+    let mut io = PathIo::open_ro(path)?;
+    read_mft_record_io(&mut io, record_number)
+}
+
+/// Same as [`read_mft_record`] but takes any `BlockIo`. The mutator stack
+/// uses this directly so it can share a single open file (or callback
+/// pair) across multiple record reads.
+pub fn read_mft_record_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+) -> Result<(BootParams, Vec<u8>), String> {
+    let params = read_boot_params_io(io)?;
     let offset = mft_record_offset(&params, record_number);
     let size = params.file_record_size as usize;
-    let mut f = File::open(path).map_err(|e| format!("open ro: {e}"))?;
-    f.seek(SeekFrom::Start(offset))
-        .map_err(|e| format!("seek record {record_number}: {e}"))?;
     let mut buf = vec![0u8; size];
-    f.read_exact(&mut buf)
+    io.read_exact_at(offset, &mut buf)
         .map_err(|e| format!("read record {record_number}: {e}"))?;
     apply_fixup_on_read(&mut buf, params.bytes_per_sector)?;
     Ok((params, buf))
@@ -264,7 +280,18 @@ pub fn update_mft_record<F>(path: &Path, record_number: u64, mutate: F) -> Resul
 where
     F: FnOnce(&mut [u8]) -> Result<(), String>,
 {
-    let (params, mut record) = read_mft_record(path, record_number)?;
+    let mut io = PathIo::open_rw(path)?;
+    update_mft_record_io(&mut io, record_number, mutate)
+}
+
+/// `BlockIo`-based equivalent of [`update_mft_record`]. Shares one
+/// underlying open file / callback pair across the read and the write.
+pub fn update_mft_record_io<T, F>(io: &mut T, record_number: u64, mutate: F) -> Result<(), String>
+where
+    T: BlockIo + ?Sized,
+    F: FnOnce(&mut [u8]) -> Result<(), String>,
+{
+    let (params, mut record) = read_mft_record_io(io, record_number)?;
     if record_flags(&record) & MFT_FLAG_IN_USE == 0 {
         return Err(format!(
             "refusing to write to MFT record {record_number}: IN_USE flag is clear"
@@ -275,15 +302,8 @@ where
     apply_fixup_on_write(&mut record, params.bytes_per_sector)?;
 
     let offset = mft_record_offset(&params, record_number);
-    let mut f = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|e| format!("open rw: {e}"))?;
-    f.seek(SeekFrom::Start(offset))
-        .map_err(|e| format!("seek write record {record_number}: {e}"))?;
-    f.write_all(&record)
+    io.write_all_at(offset, &record)
         .map_err(|e| format!("write record {record_number}: {e}"))?;
-    f.sync_all().map_err(|e| format!("fsync: {e}"))?;
+    io.sync()?;
     Ok(())
 }

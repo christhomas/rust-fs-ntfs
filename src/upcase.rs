@@ -20,6 +20,8 @@ use std::path::Path;
 
 use ntfs::{KnownNtfsFileRecordNumber, Ntfs, NtfsAttributeType, NtfsReadSeek};
 
+use crate::block_io::{BlockIo, IoReadSeek};
+
 const UPCASE_LEN: usize = 65536;
 
 pub struct UpcaseTable {
@@ -33,13 +35,24 @@ impl UpcaseTable {
     pub fn load(image: &Path) -> Result<Self, String> {
         let f = File::open(image).map_err(|e| format!("open image: {e}"))?;
         let mut reader = BufReader::new(f);
-        let ntfs = Ntfs::new(&mut reader).map_err(|e| format!("parse ntfs: {e}"))?;
+        Self::load_from_reader(&mut reader)
+    }
+
+    /// Load `$UpCase` over a [`BlockIo`]. The mutator stack uses this
+    /// when building a sorted index entry over a callback-mounted volume.
+    pub fn load_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<Self, String> {
+        let mut reader = IoReadSeek::new(io);
+        Self::load_from_reader(&mut reader)
+    }
+
+    fn load_from_reader<R: std::io::Read + std::io::Seek>(reader: &mut R) -> Result<Self, String> {
+        let ntfs = Ntfs::new(reader).map_err(|e| format!("parse ntfs: {e}"))?;
         let upcase_file = ntfs
-            .file(&mut reader, KnownNtfsFileRecordNumber::UpCase as u64)
+            .file(reader, KnownNtfsFileRecordNumber::UpCase as u64)
             .map_err(|e| format!("open $UpCase: {e}"))?;
 
         let mut attrs = upcase_file.attributes();
-        while let Some(item) = attrs.next(&mut reader) {
+        while let Some(item) = attrs.next(reader) {
             let item = item.map_err(|e| format!("$UpCase attr iter: {e}"))?;
             let attribute = item
                 .to_attribute()
@@ -51,7 +64,7 @@ impl UpcaseTable {
                 continue;
             }
             let mut value = attribute
-                .value(&mut reader)
+                .value(reader)
                 .map_err(|e| format!("$UpCase value: {e}"))?;
             let total = attribute.value_length() as usize;
             if total < UPCASE_LEN * 2 {
@@ -64,7 +77,7 @@ impl UpcaseTable {
             let mut filled = 0;
             while filled < bytes.len() {
                 let n = value
-                    .read(&mut reader, &mut bytes[filled..])
+                    .read(reader, &mut bytes[filled..])
                     .map_err(|e| format!("$UpCase read: {e}"))?;
                 if n == 0 {
                     break;

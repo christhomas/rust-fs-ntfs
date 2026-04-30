@@ -25,7 +25,10 @@ use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::os::raw::{c_char, c_int, c_void};
+use std::path::PathBuf;
 use std::slice;
+
+use crate::block_io::{BlockIo as BlockIoTrait, CallbackBlockIo, PathIo as RwPathIo};
 
 use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::structured_values::{NtfsFileName, NtfsFileNamespace, NtfsStandardInformation};
@@ -34,6 +37,7 @@ use ntfs::{KnownNtfsFileRecordNumber, Ntfs, NtfsAttributeType, NtfsFile, NtfsRea
 pub mod attr_io;
 pub mod attr_resize;
 pub mod bitmap;
+pub mod block_io;
 pub mod data_runs;
 pub mod ea_io;
 pub mod facade;
@@ -225,7 +229,35 @@ impl Seek for ReaderKind {
 pub struct FsNtfsHandle {
     ntfs: Ntfs,
     reader: ReaderKind,
+    /// Source of the mount, used to build a [`BlockIoTrait`] on demand
+    /// for the handle-based mutator API. `None` for callers that built
+    /// the handle through some path that didn't record this (shouldn't
+    /// happen in practice — both mount entry points fill it in).
+    source: Option<MountSource>,
 }
+
+/// Tracks whether the handle was mounted from a filesystem path
+/// (`Path`) or from a caller-supplied callback pair (`Callbacks`). Used
+/// by the handle-based mutator API to construct a fresh `BlockIo`-impl
+/// for each mutation call without duplicating the open file.
+enum MountSource {
+    Path(PathBuf),
+    Callbacks {
+        read_fn: ReadCallback,
+        /// `None` ⇒ handle was mounted read-only via callbacks (cfg.write
+        /// was NULL). Mutation calls return EINVAL in that case.
+        write_fn: Option<WriteCallback>,
+        context: *mut c_void,
+        size: u64,
+    },
+}
+
+// Safety: the `*mut c_void` context pointer is opaque to us; the
+// caller (FSKit / Go backend) is responsible for keeping it alive
+// for the duration of the handle, just like for `CallbackReader`
+// already (see the comment on `unsafe impl Send for CallbackReader`).
+unsafe impl Send for MountSource {}
+unsafe impl Sync for MountSource {}
 
 // ---------------------------------------------------------------------------
 // C types matching fs_ntfs.h
@@ -521,7 +553,11 @@ pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle
         return std::ptr::null_mut();
     }
 
-    let bridge = Box::new(FsNtfsHandle { ntfs, reader });
+    let bridge = Box::new(FsNtfsHandle {
+        ntfs,
+        reader,
+        source: Some(MountSource::Path(PathBuf::from(path))),
+    });
     Box::into_raw(bridge)
 }
 
@@ -556,8 +592,85 @@ pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) ->
         return std::ptr::null_mut();
     }
 
-    let bridge = Box::new(FsNtfsHandle { ntfs, reader });
+    let bridge = Box::new(FsNtfsHandle {
+        ntfs,
+        reader,
+        source: Some(MountSource::Callbacks {
+            read_fn: cfg.read,
+            write_fn: cfg.write,
+            context: cfg.context,
+            size: cfg.size_bytes,
+        }),
+    });
     Box::into_raw(bridge)
+}
+
+/// Owned `BlockIo` constructed from a [`FsNtfsHandle`] for the
+/// duration of a single mutator call.
+///
+/// Path-mounted handles open the file RW for each mutation; the
+/// kernel page cache amortises the cost so the open isn't observably
+/// slower than threading a long-lived `File` through the call stack.
+/// Callback-mounted handles wrap the existing read/write callback
+/// pair without touching the underlying device.
+enum HandleIo {
+    Path(RwPathIo),
+    Callback(CallbackBlockIo),
+}
+
+impl BlockIoTrait for HandleIo {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        match self {
+            HandleIo::Path(p) => p.read_exact_at(offset, buf),
+            HandleIo::Callback(c) => c.read_exact_at(offset, buf),
+        }
+    }
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        match self {
+            HandleIo::Path(p) => p.write_all_at(offset, buf),
+            HandleIo::Callback(c) => c.write_all_at(offset, buf),
+        }
+    }
+    fn size(&self) -> u64 {
+        match self {
+            HandleIo::Path(p) => p.size(),
+            HandleIo::Callback(c) => c.size(),
+        }
+    }
+    fn sync(&mut self) -> Result<(), String> {
+        match self {
+            HandleIo::Path(p) => p.sync(),
+            HandleIo::Callback(c) => c.sync(),
+        }
+    }
+}
+
+/// Build a `HandleIo` from a `FsNtfsHandle` ready for a mutation call.
+/// Returns `Err(message)` if the handle was mounted read-only via
+/// callbacks (`cfg.write` was NULL) or has no recorded source.
+fn handle_to_rw_io(handle: &FsNtfsHandle) -> Result<HandleIo, String> {
+    match &handle.source {
+        Some(MountSource::Path(p)) => RwPathIo::open_rw(p).map(HandleIo::Path),
+        Some(MountSource::Callbacks {
+            read_fn,
+            write_fn,
+            context,
+            size,
+        }) => {
+            if write_fn.is_none() {
+                return Err(
+                    "handle mounted read-only via callbacks (cfg.write was NULL)".to_string(),
+                );
+            }
+            Ok(HandleIo::Callback(CallbackBlockIo {
+                read_fn: *read_fn,
+                write_fn: *write_fn,
+                context: *context,
+                size: *size,
+            }))
+        }
+        None => Err("handle has no recorded mount source".to_string()),
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1848,6 +1961,244 @@ pub extern "C" fn fs_ntfs_file attribute tools(
             remove: remove_flags,
         },
     ) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handle-based mutation siblings (`_h`)
+//
+// These mirror the path-based mutators above but take an already-mounted
+// `*mut FsNtfsHandle` instead of a `const char *image`. They construct a
+// fresh `BlockIo` impl from the handle's recorded `MountSource` for the
+// duration of one call — for path-mounted handles this means a per-call
+// `OpenOptions::read.write.open` (kernel page-cache amortizes); for
+// callback-mounted handles it wraps the existing `(read_fn, write_fn,
+// context, size)` tuple. Sandboxed FSKit hosts can only use the
+// callback path — the path-based siblings will fail under the FSKit
+// sandbox because they re-open `/dev/diskN`.
+//
+// Callback-mounted handles must have been mounted with a non-NULL
+// `cfg.write`; otherwise `_h` mutators return -1 with EINVAL-flavored
+// error text.
+// ---------------------------------------------------------------------------
+
+/// Convert a handle pointer to a mutable reference and a fresh
+/// `HandleIo`. On any failure sets the thread-local error and returns
+/// `Err(())` — caller returns `-1`.
+fn handle_io_from_ptr(fs: *mut FsNtfsHandle) -> Result<HandleIo, ()> {
+    if fs.is_null() {
+        set_error("null fs handle");
+        return Err(());
+    }
+    let handle = unsafe { &*fs };
+    handle_to_rw_io(handle).map_err(|e| {
+        set_error(&e);
+    })
+}
+
+/// Handle-based [`fs_ntfs_create_file`].
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_create_file_h(
+    fs: *mut FsNtfsHandle,
+    parent_path: *const c_char,
+    basename: *const c_char,
+) -> i64 {
+    let Some(pp) = cstr_to_path(parent_path) else {
+        set_error("fs_ntfs_create_file_h: null or non-UTF-8 parent_path");
+        return -1;
+    };
+    let Some(bn) = cstr_to_path(basename) else {
+        set_error("fs_ntfs_create_file_h: null or non-UTF-8 basename");
+        return -1;
+    };
+    let Ok(mut io) = handle_io_from_ptr(fs) else {
+        return -1;
+    };
+    match write::create_file_io(&mut io, pp, bn) {
+        Ok(rn) => rn as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Handle-based [`fs_ntfs_write_file_contents`].
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_write_file_contents_h(
+    fs: *mut FsNtfsHandle,
+    path: *const c_char,
+    buf: *const c_void,
+    len: u64,
+) -> i64 {
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_write_file_contents_h: null or non-UTF-8 path");
+        return -1;
+    };
+    let data: &[u8] = if len == 0 {
+        &[]
+    } else if buf.is_null() {
+        set_error("fs_ntfs_write_file_contents_h: null buf with non-zero len");
+        return -1;
+    } else {
+        unsafe { slice::from_raw_parts(buf as *const u8, len as usize) }
+    };
+    let Ok(mut io) = handle_io_from_ptr(fs) else {
+        return -1;
+    };
+    match write::write_file_contents_io(&mut io, p, data) {
+        Ok(n) => n as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Handle-based [`fs_ntfs_unlink`].
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_unlink_h(fs: *mut FsNtfsHandle, path: *const c_char) -> c_int {
+    let Some(fp) = cstr_to_path(path) else {
+        set_error("fs_ntfs_unlink_h: null or non-UTF-8 path");
+        return -1;
+    };
+    let Ok(mut io) = handle_io_from_ptr(fs) else {
+        return -1;
+    };
+    match write::unlink_io(&mut io, fp) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Handle-based [`fs_ntfs_rename`].
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_rename_h(
+    fs: *mut FsNtfsHandle,
+    old_path: *const c_char,
+    new_basename: *const c_char,
+) -> c_int {
+    let Some(op) = cstr_to_path(old_path) else {
+        set_error("fs_ntfs_rename_h: null or non-UTF-8 old_path");
+        return -1;
+    };
+    let Some(nb) = cstr_to_path(new_basename) else {
+        set_error("fs_ntfs_rename_h: null or non-UTF-8 new_basename");
+        return -1;
+    };
+    let Ok(mut io) = handle_io_from_ptr(fs) else {
+        return -1;
+    };
+    match write::rename_io(&mut io, op, nb) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Handle-based [`fs_ntfs_mkdir`].
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_mkdir_h(
+    fs: *mut FsNtfsHandle,
+    parent_path: *const c_char,
+    basename: *const c_char,
+) -> i64 {
+    let Some(pp) = cstr_to_path(parent_path) else {
+        set_error("fs_ntfs_mkdir_h: null or non-UTF-8 parent_path");
+        return -1;
+    };
+    let Some(bn) = cstr_to_path(basename) else {
+        set_error("fs_ntfs_mkdir_h: null or non-UTF-8 basename");
+        return -1;
+    };
+    let Ok(mut io) = handle_io_from_ptr(fs) else {
+        return -1;
+    };
+    match write::mkdir_io(&mut io, pp, bn) {
+        Ok(rn) => rn as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Handle-based [`fs_ntfs_rmdir`].
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_rmdir_h(fs: *mut FsNtfsHandle, path: *const c_char) -> c_int {
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_rmdir_h: null or non-UTF-8 path");
+        return -1;
+    };
+    let Ok(mut io) = handle_io_from_ptr(fs) else {
+        return -1;
+    };
+    match write::rmdir_io(&mut io, p) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Handle-based [`fs_ntfs_truncate`].
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_truncate_h(
+    fs: *mut FsNtfsHandle,
+    path: *const c_char,
+    new_size: u64,
+) -> i64 {
+    let Some(fp) = cstr_to_path(path) else {
+        set_error("fs_ntfs_truncate_h: null or non-UTF-8 path");
+        return -1;
+    };
+    let Ok(mut io) = handle_io_from_ptr(fs) else {
+        return -1;
+    };
+    match write::truncate_io(&mut io, fp, new_size) {
+        Ok(n) => n as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Handle-based [`fs_ntfs_set_times`].
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_set_times_h(
+    fs: *mut FsNtfsHandle,
+    path: *const c_char,
+    creation: *const i64,
+    modification: *const i64,
+    mft_record_modification: *const i64,
+    access: *const i64,
+) -> c_int {
+    let Some(fp) = cstr_to_path(path) else {
+        set_error("fs_ntfs_set_times_h: null or non-UTF-8 path");
+        return -1;
+    };
+    let times = write::FileTimes {
+        creation: unsafe { creation.as_ref() }.map(|v| *v as u64),
+        modification: unsafe { modification.as_ref() }.map(|v| *v as u64),
+        mft_record_modification: unsafe { mft_record_modification.as_ref() }.map(|v| *v as u64),
+        access: unsafe { access.as_ref() }.map(|v| *v as u64),
+    };
+    let Ok(mut io) = handle_io_from_ptr(fs) else {
+        return -1;
+    };
+    match write::set_times_io(&mut io, fp, times) {
         Ok(()) => 0,
         Err(e) => {
             set_error(&e);

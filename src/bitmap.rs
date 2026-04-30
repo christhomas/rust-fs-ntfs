@@ -19,11 +19,10 @@
 //! heuristics — first-fit linear scan. Good enough for W2.
 
 use crate::attr_io::{self, AttrType};
+use crate::block_io::{BlockIo, PathIo};
 use crate::data_runs::{self, DataRun};
-use crate::mft_io::{read_mft_record, BootParams};
+use crate::mft_io::{read_mft_record_io, BootParams};
 
-use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const BITMAP_RECORD_NUMBER: u64 = 6;
@@ -39,7 +38,12 @@ pub struct BitmapLocation {
 }
 
 pub fn locate_bitmap(image: &Path) -> Result<BitmapLocation, String> {
-    let (params, record) = read_mft_record(image, BITMAP_RECORD_NUMBER)?;
+    let mut io = PathIo::open_ro(image)?;
+    locate_bitmap_io(&mut io)
+}
+
+pub fn locate_bitmap_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BitmapLocation, String> {
+    let (params, record) = read_mft_record_io(io, BITMAP_RECORD_NUMBER)?;
     let loc = attr_io::find_attribute(&record, AttrType::Data, None)
         .ok_or_else(|| "$Bitmap has no unnamed $DATA".to_string())?;
     if loc.is_resident {
@@ -73,6 +77,16 @@ pub fn read_range(
     start: u64,
     nbits: u64,
 ) -> Result<Vec<u8>, String> {
+    let mut io = PathIo::open_ro(image)?;
+    read_range_io(&mut io, bm, start, nbits)
+}
+
+pub fn read_range_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    bm: &BitmapLocation,
+    start: u64,
+    nbits: u64,
+) -> Result<Vec<u8>, String> {
     if start + nbits > bm.total_bits {
         return Err(format!(
             "range [{start}..{}] exceeds total_bits {}",
@@ -82,8 +96,7 @@ pub fn read_range(
     }
     let start_byte = start / 8;
     let end_byte = (start + nbits).div_ceil(8);
-    let bytes = read_bitmap_bytes(image, bm, start_byte, end_byte - start_byte)?;
-    Ok(bytes)
+    read_bitmap_bytes_io(io, bm, start_byte, end_byte - start_byte)
 }
 
 /// Find the first contiguous run of `n_clusters` free clusters starting
@@ -92,6 +105,16 @@ pub fn read_range(
 /// free clusters.
 pub fn find_free_run(
     image: &Path,
+    bm: &BitmapLocation,
+    n_clusters: u64,
+    hint_lcn: u64,
+) -> Result<Option<u64>, String> {
+    let mut io = PathIo::open_ro(image)?;
+    find_free_run_io(&mut io, bm, n_clusters, hint_lcn)
+}
+
+pub fn find_free_run_io<T: BlockIo + ?Sized>(
+    io: &mut T,
     bm: &BitmapLocation,
     n_clusters: u64,
     hint_lcn: u64,
@@ -119,7 +142,7 @@ pub fn find_free_run(
             let bit_off_in_byte = (lcn % 8) as u8;
             let end_bit = lcn + chunk_bits;
             let last_byte_exclusive = end_bit.div_ceil(8);
-            let bytes = read_bitmap_bytes(image, bm, first_byte, last_byte_exclusive - first_byte)?;
+            let bytes = read_bitmap_bytes_io(io, bm, first_byte, last_byte_exclusive - first_byte)?;
             let mut cursor = lcn;
             let mut byte_idx = 0usize;
             let mut bit_in_byte = bit_off_in_byte;
@@ -155,17 +178,37 @@ pub fn find_free_run(
 /// Flip the bits for `[lcn..lcn+n)` to 1 (allocated). Fails if any bit
 /// in the range is already 1.
 pub fn allocate(image: &Path, bm: &BitmapLocation, lcn: u64, n: u64) -> Result<(), String> {
-    mutate_bits(image, bm, lcn, n, true)
+    let mut io = PathIo::open_rw(image)?;
+    allocate_io(&mut io, bm, lcn, n)
+}
+
+pub fn allocate_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    bm: &BitmapLocation,
+    lcn: u64,
+    n: u64,
+) -> Result<(), String> {
+    mutate_bits_io(io, bm, lcn, n, true)
 }
 
 /// Flip the bits for `[lcn..lcn+n)` to 0 (free). Fails if any bit in
 /// the range is already 0.
 pub fn free(image: &Path, bm: &BitmapLocation, lcn: u64, n: u64) -> Result<(), String> {
-    mutate_bits(image, bm, lcn, n, false)
+    let mut io = PathIo::open_rw(image)?;
+    free_io(&mut io, bm, lcn, n)
 }
 
-fn mutate_bits(
-    image: &Path,
+pub fn free_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    bm: &BitmapLocation,
+    lcn: u64,
+    n: u64,
+) -> Result<(), String> {
+    mutate_bits_io(io, bm, lcn, n, false)
+}
+
+fn mutate_bits_io<T: BlockIo + ?Sized>(
+    io: &mut T,
     bm: &BitmapLocation,
     lcn: u64,
     n: u64,
@@ -183,7 +226,7 @@ fn mutate_bits(
     }
     let first_byte = lcn / 8;
     let end_byte_excl = (lcn + n).div_ceil(8);
-    let mut bytes = read_bitmap_bytes(image, bm, first_byte, end_byte_excl - first_byte)?;
+    let mut bytes = read_bitmap_bytes_io(io, bm, first_byte, end_byte_excl - first_byte)?;
 
     for i in 0..n {
         let bit = lcn + i - first_byte * 8;
@@ -202,14 +245,14 @@ fn mutate_bits(
             bytes[byte_idx] &= !(1 << bit_in_byte);
         }
     }
-    write_bitmap_bytes(image, bm, first_byte, &bytes)?;
+    write_bitmap_bytes_io(io, bm, first_byte, &bytes)?;
     Ok(())
 }
 
 // -- byte-level bitmap I/O -------------------------------------------------
 
-fn read_bitmap_bytes(
-    image: &Path,
+fn read_bitmap_bytes_io<T: BlockIo + ?Sized>(
+    io: &mut T,
     bm: &BitmapLocation,
     start_byte: u64,
     len: u64,
@@ -219,7 +262,6 @@ fn read_bitmap_bytes(
     let mut file_offset = start_byte;
     let end = start_byte + len;
     let cluster_size = bm.params.cluster_size;
-    let mut f = std::fs::File::open(image).map_err(|e| format!("open ro: {e}"))?;
 
     while file_offset < end {
         let vcn = file_offset / cluster_size;
@@ -238,9 +280,7 @@ fn read_bitmap_bytes(
         let chunk = max_this_run.min(end - file_offset) as usize;
 
         let disk_offset = (lcn + (vcn - run.starting_vcn)) * cluster_size + off_in_cluster;
-        f.seek(SeekFrom::Start(disk_offset))
-            .map_err(|e| format!("seek bitmap: {e}"))?;
-        f.read_exact(&mut out[cursor_in_out..cursor_in_out + chunk])
+        io.read_exact_at(disk_offset, &mut out[cursor_in_out..cursor_in_out + chunk])
             .map_err(|e| format!("read bitmap: {e}"))?;
 
         cursor_in_out += chunk;
@@ -249,18 +289,13 @@ fn read_bitmap_bytes(
     Ok(out)
 }
 
-fn write_bitmap_bytes(
-    image: &Path,
+fn write_bitmap_bytes_io<T: BlockIo + ?Sized>(
+    io: &mut T,
     bm: &BitmapLocation,
     start_byte: u64,
     data: &[u8],
 ) -> Result<(), String> {
     let cluster_size = bm.params.cluster_size;
-    let mut f = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(image)
-        .map_err(|e| format!("open rw: {e}"))?;
     let mut cursor = 0usize;
     let mut file_offset = start_byte;
     let end = start_byte + data.len() as u64;
@@ -280,22 +315,25 @@ fn write_bitmap_bytes(
         let chunk = max_this_run.min(end - file_offset) as usize;
 
         let disk_offset = (lcn + (vcn - run.starting_vcn)) * cluster_size + off_in_cluster;
-        f.seek(SeekFrom::Start(disk_offset))
-            .map_err(|e| format!("seek write: {e}"))?;
-        f.write_all(&data[cursor..cursor + chunk])
+        io.write_all_at(disk_offset, &data[cursor..cursor + chunk])
             .map_err(|e| format!("write bitmap: {e}"))?;
 
         cursor += chunk;
         file_offset += chunk as u64;
     }
-    f.sync_all().map_err(|e| format!("fsync: {e}"))?;
+    io.sync()?;
     Ok(())
 }
 
 /// Count free clusters in `$Bitmap`. Scans the whole bitmap once.
 pub fn count_free(image: &Path, bm: &BitmapLocation) -> Result<u64, String> {
+    let mut io = PathIo::open_ro(image)?;
+    count_free_io(&mut io, bm)
+}
+
+pub fn count_free_io<T: BlockIo + ?Sized>(io: &mut T, bm: &BitmapLocation) -> Result<u64, String> {
     let total_bytes = bm.value_length;
-    let bytes = read_bitmap_bytes(image, bm, 0, total_bytes)?;
+    let bytes = read_bitmap_bytes_io(io, bm, 0, total_bytes)?;
     let set: u64 = bytes.iter().map(|b| b.count_ones() as u64).sum();
     // Bits past total_bits (if any, due to padding) are required to be
     // zero by the spec; count_ones is safe to subtract from total.
@@ -304,6 +342,15 @@ pub fn count_free(image: &Path, bm: &BitmapLocation) -> Result<u64, String> {
 
 /// Is cluster `lcn` marked allocated?
 pub fn is_allocated(image: &Path, bm: &BitmapLocation, lcn: u64) -> Result<bool, String> {
+    let mut io = PathIo::open_ro(image)?;
+    is_allocated_io(&mut io, bm, lcn)
+}
+
+pub fn is_allocated_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    bm: &BitmapLocation,
+    lcn: u64,
+) -> Result<bool, String> {
     if lcn >= bm.total_bits {
         return Err(format!(
             "LCN {lcn} out of range (total_bits {})",
@@ -312,6 +359,6 @@ pub fn is_allocated(image: &Path, bm: &BitmapLocation, lcn: u64) -> Result<bool,
     }
     let byte_idx = lcn / 8;
     let bit = (lcn % 8) as u8;
-    let bytes = read_bitmap_bytes(image, bm, byte_idx, 1)?;
+    let bytes = read_bitmap_bytes_io(io, bm, byte_idx, 1)?;
     Ok((bytes[0] >> bit) & 1 != 0)
 }

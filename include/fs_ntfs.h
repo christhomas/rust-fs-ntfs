@@ -80,9 +80,11 @@ typedef int (*fs_ntfs_read_fn)(void *context, void *buf,
  * Returns 0 on success, non-zero on error.
  *
  * Optional — set to NULL if the consumer mounts read-only. The write
- * callback is only required by the recovery entry points
- * (`fs_ntfs_fsck_with_callbacks`). `fs_ntfs_mount_with_callbacks` and
- * `fs_ntfs_is_dirty_with_callbacks` ignore this field.
+ * callback is required by the recovery entry points
+ * (`fs_ntfs_fsck_with_callbacks`) and by the handle-based mutation API
+ * (`fs_ntfs_*_h`) when called against a handle produced by
+ * `fs_ntfs_mount_with_callbacks`. `fs_ntfs_is_dirty_with_callbacks`
+ * ignores this field.
  */
 typedef int (*fs_ntfs_write_fn)(void *context, const void *buf,
                                     uint64_t offset, uint64_t length);
@@ -111,7 +113,12 @@ fs_ntfs_fs_t *fs_ntfs_mount(const char *device_path);
 
 /*
  * Mount an NTFS filesystem using callback-based I/O.
- * Returns NULL on failure. Read-only.
+ * Returns NULL on failure.
+ *
+ * Producing a writable handle: pass a non-NULL `cfg->write`. The
+ * resulting handle is then accepted by the `_h` mutation entry points
+ * (see "Handle-based mutation API" below). Pass NULL to mount
+ * read-only — `_h` mutators will then fail with -1 / EINVAL.
  */
 fs_ntfs_fs_t *fs_ntfs_mount_with_callbacks(
     const fs_ntfs_blockdev_cfg_t *cfg);
@@ -501,6 +508,57 @@ int64_t fs_ntfs_write_file(const char *image, const char *path,
  */
 int fs_ntfs_file attribute tools(const char *image, const char *path,
                    uint32_t add_flags, uint32_t remove_flags);
+
+/* ---- Handle-based mutation API (`_h` siblings) ---- */
+
+/*
+ * Handle-based mutation API for callback-mounted RW handles.
+ *
+ * Each function below mirrors a path-based mutator above but takes an
+ * already-mounted `fs_ntfs_fs_t *` instead of a `const char *image`.
+ * The path-based variants call `mount_rw(image)` internally and so
+ * cannot be used from sandboxed FSKit hosts (which can only see the
+ * device through the `FSBlockDeviceResource` callback bridge).
+ *
+ * For callback-mounted handles the volume must have been mounted via
+ * `fs_ntfs_mount_with_callbacks` with a non-NULL `cfg.write` —
+ * otherwise these calls fail with -1 (EINVAL-flavored error text). For
+ * path-mounted handles the underlying file is re-opened RW per call;
+ * the kernel page cache amortizes the open cost.
+ *
+ * Same return-code conventions as their path-based siblings.
+ */
+
+int64_t fs_ntfs_create_file_h(fs_ntfs_fs_t *fs,
+                              const char *parent_path,
+                              const char *basename);
+
+int64_t fs_ntfs_write_file_contents_h(fs_ntfs_fs_t *fs,
+                                      const char *path,
+                                      const void *buf,
+                                      uint64_t len);
+
+int fs_ntfs_unlink_h(fs_ntfs_fs_t *fs, const char *path);
+
+int fs_ntfs_rename_h(fs_ntfs_fs_t *fs,
+                     const char *old_path,
+                     const char *new_basename);
+
+int64_t fs_ntfs_mkdir_h(fs_ntfs_fs_t *fs,
+                        const char *parent_path,
+                        const char *basename);
+
+int fs_ntfs_rmdir_h(fs_ntfs_fs_t *fs, const char *path);
+
+int64_t fs_ntfs_truncate_h(fs_ntfs_fs_t *fs,
+                           const char *path,
+                           uint64_t new_size);
+
+int fs_ntfs_set_times_h(fs_ntfs_fs_t *fs, const char *path,
+                        const int64_t *creation,
+                        const int64_t *modification,
+                        const int64_t *mft_record_modification,
+                        const int64_t *access);
 
 #ifdef __cplusplus
 }

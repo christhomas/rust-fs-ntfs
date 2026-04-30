@@ -9,13 +9,12 @@
 //! * [Flatcap $INDEX_ALLOCATION](https://flatcap.github.io/linux-ntfs/ntfs/attributes/index_allocation.html)
 
 use crate::attr_io::{self, AttrType};
+use crate::block_io::{BlockIo, PathIo};
 use crate::data_runs::{self, DataRun};
 use crate::mft_io::{
-    apply_fixup_on_read_magic, apply_fixup_on_write_magic, read_mft_record, BootParams,
+    apply_fixup_on_read_magic, apply_fixup_on_write_magic, read_mft_record_io, BootParams,
 };
 
-use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 /// Info required to locate + traverse `$INDEX_ALLOCATION` for a parent
@@ -62,7 +61,15 @@ pub fn load_for_directory(
     image: &Path,
     parent_record_number: u64,
 ) -> Result<IndexAllocation, String> {
-    let (params, record) = read_mft_record(image, parent_record_number)?;
+    let mut io = PathIo::open_ro(image)?;
+    load_for_directory_io(&mut io, parent_record_number)
+}
+
+pub fn load_for_directory_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_record_number: u64,
+) -> Result<IndexAllocation, String> {
+    let (params, record) = read_mft_record_io(io, parent_record_number)?;
 
     // Get block_size from $INDEX_ROOT:$I30.
     let ir = attr_io::find_attribute(&record, AttrType::IndexRoot, Some("$I30"))
@@ -128,12 +135,18 @@ pub fn vcn_to_disk_offset(ia: &IndexAllocation, vcn: u64) -> Result<u64, String>
 /// clean block bytes. The caller must know `block_size` from the
 /// `IndexAllocation` handle.
 pub fn read_indx_block(image: &Path, ia: &IndexAllocation, vcn: u64) -> Result<Vec<u8>, String> {
+    let mut io = PathIo::open_ro(image)?;
+    read_indx_block_io(&mut io, ia, vcn)
+}
+
+pub fn read_indx_block_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    ia: &IndexAllocation,
+    vcn: u64,
+) -> Result<Vec<u8>, String> {
     let disk_offset = vcn_to_disk_offset(ia, vcn)?;
-    let mut f = std::fs::File::open(image).map_err(|e| format!("open ro: {e}"))?;
-    f.seek(SeekFrom::Start(disk_offset))
-        .map_err(|e| format!("seek indx: {e}"))?;
     let mut buf = vec![0u8; ia.block_size as usize];
-    f.read_exact(&mut buf)
+    io.read_exact_at(disk_offset, &mut buf)
         .map_err(|e| format!("read indx: {e}"))?;
     if &buf[0..4] != b"INDX" {
         return Err(format!(
@@ -157,21 +170,28 @@ pub fn update_indx_block<F>(
 where
     F: FnOnce(&mut [u8]) -> Result<(), String>,
 {
-    let mut block = read_indx_block(image, ia, vcn)?;
+    let mut io = PathIo::open_rw(image)?;
+    update_indx_block_io(&mut io, ia, vcn, mutate)
+}
+
+pub fn update_indx_block_io<T, F>(
+    io: &mut T,
+    ia: &IndexAllocation,
+    vcn: u64,
+    mutate: F,
+) -> Result<(), String>
+where
+    T: BlockIo + ?Sized,
+    F: FnOnce(&mut [u8]) -> Result<(), String>,
+{
+    let mut block = read_indx_block_io(io, ia, vcn)?;
     mutate(&mut block)?;
     apply_fixup_on_write_magic(&mut block, ia.params.bytes_per_sector, b"INDX")?;
 
     let disk_offset = vcn_to_disk_offset(ia, vcn)?;
-    let mut f = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(image)
-        .map_err(|e| format!("open rw: {e}"))?;
-    f.seek(SeekFrom::Start(disk_offset))
-        .map_err(|e| format!("seek write indx: {e}"))?;
-    f.write_all(&block)
+    io.write_all_at(disk_offset, &block)
         .map_err(|e| format!("write indx: {e}"))?;
-    f.sync_all().map_err(|e| format!("fsync: {e}"))?;
+    io.sync()?;
     Ok(())
 }
 
