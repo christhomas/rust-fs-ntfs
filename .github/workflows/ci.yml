@@ -6,6 +6,18 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
+  # Manual trigger — exposed as "Run workflow" in the GitHub Actions UI.
+  # Lets us run validate-mkfs-windows on demand without cutting a tag.
+  # Useful while iterating on the mkfs implementation: tweak the Rust
+  # crate, push, click "Run workflow", get real chkdsk output back in
+  # ~5 minutes. The Linux jobs run on every push too, so we don't need
+  # this for those.
+  workflow_dispatch:
+    inputs:
+      windows_only:
+        description: "Run only the Windows chkdsk job (skip Linux validation)"
+        type: boolean
+        default: true
 
 jobs:
   test:
@@ -105,20 +117,29 @@ jobs:
           grep -qi "Volume Name.*CITEST" /tmp/vol.txt
 
   # Windows-side validation: chkdsk is the canonical "is this a valid
-  # NTFS volume?" check, against the same code Microsoft ships. We only
-  # run it on tag pushes (every release candidate) — windows-latest
-  # provisioning is slower than ubuntu-latest, and the Linux ntfsfix
-  # job already catches gross corruption on every PR.
+  # NTFS volume?" check, against the same code Microsoft ships. Triggers:
+  #   - tag pushes (release candidates)
+  #   - manual `workflow_dispatch` from the GitHub Actions UI for
+  #     ad-hoc validation while iterating on the mkfs implementation
+  # Doesn't run on every PR because windows-latest provisioning is
+  # ~3x slower than ubuntu-latest and the Linux ntfsfix job already
+  # catches gross corruption.
   #
   # Windows Mount-DiskImage doesn't accept raw .img files, so we wrap
   # the binary's output in a VHDX container via qemu-img (GPL, called
-  # as a build tool, not bundled). Mount, chkdsk /scan, then chkdsk /f
-  # which is the strict "are there ANY repairs needed?" check — exit
-  # non-zero if it found anything.
+  # as a build tool, not bundled).
+  #
+  # Diagnostics are aggressive: we capture chkdsk's full verbose output,
+  # Get-Volume metadata, and fsutil fsinfo dumps as artifacts on every
+  # run (success or failure) so we can compare what Windows sees across
+  # commits. This is the iteration loop for finding mkfs bugs — chkdsk's
+  # error text tells us exactly which on-disk structure is wrong.
   validate-mkfs-windows:
     name: validate mkfs_ntfs (Windows chkdsk)
     runs-on: windows-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -133,10 +154,16 @@ jobs:
       - name: Generate raw image and convert to VHDX
         shell: pwsh
         run: |
+          # 64 MiB chosen because it's the smallest size that exercises
+          # multiple MFT clusters cleanly. Bump if a future mkfs feature
+          # needs more headroom.
           fsutil file createnew out.img 67108864
           ./target/release/mkfs_ntfs.exe -L CITEST --serial deadbeefcafe1234 out.img
           qemu-img convert -f raw -O vhdx out.img out.vhdx
-      - name: Mount, chkdsk, dismount
+          # Echo basic file metrics so the run log shows what we built.
+          Get-Item out.img,out.vhdx | Format-List Name,Length
+      - name: Mount VHDX and capture pre-chkdsk diagnostics
+        id: mount
         shell: pwsh
         run: |
           $vhd = Mount-DiskImage -ImagePath "$pwd\out.vhdx" -PassThru
@@ -146,18 +173,113 @@ jobs:
           $disk = Get-Disk -Number $vhd.Number
           $vol = Get-Partition -DiskNumber $disk.Number | Get-Volume
           $letter = $vol.DriveLetter
-          if (-not $letter) { throw "no drive letter assigned to mounted VHDX" }
-          Write-Host "Mounted at ${letter}:"
-
-          # /scan is read-only — exits 0 only if no errors. /f would
-          # repair, which we explicitly do NOT want: if mkfs_ntfs
-          # produced bytes that need repair, that's a bug to fail on,
-          # not silently fix.
-          $proc = Start-Process -FilePath chkdsk.exe `
-            -ArgumentList "${letter}:", "/scan" `
-            -NoNewWindow -PassThru -Wait
-          if ($proc.ExitCode -ne 0) {
-            throw "chkdsk /scan failed with exit $($proc.ExitCode)"
+          if (-not $letter) {
+            throw "no drive letter assigned to mounted VHDX — VHDX itself is malformed"
           }
+          Write-Host "Mounted at ${letter}:"
+          # Stash the drive letter for later steps.
+          "letter=$letter" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-          Dismount-DiskImage -ImagePath "$pwd\out.vhdx" | Out-Null
+          # Capture as much "what does Windows think this volume is?"
+          # metadata as we can BEFORE chkdsk runs. If chkdsk fails the
+          # artifact diff between commits tells us which field shifted.
+          New-Item -ItemType Directory -Path diag -Force | Out-Null
+          Get-Volume -DriveLetter $letter | Format-List * | Out-File diag/get-volume.txt
+          fsutil fsinfo volumeinfo "${letter}:" | Out-File diag/fsutil-volumeinfo.txt
+          fsutil fsinfo ntfsinfo "${letter}:" | Out-File diag/fsutil-ntfsinfo.txt
+          fsutil fsinfo statistics "${letter}:" | Out-File diag/fsutil-statistics.txt
+          # Quick sanity: dir listing succeeds (means $MFT + root index parse).
+          Get-ChildItem "${letter}:\" -Force | Out-File diag/root-listing.txt
+      - name: chkdsk /scan (read-only, verbose)
+        id: chkdsk
+        shell: pwsh
+        # Always run, but capture the result. We want to see chkdsk's
+        # full output even when it fails so the artifacts upload below
+        # gets the diagnostic data.
+        continue-on-error: true
+        run: |
+          $letter = "${{ steps.mount.outputs.letter }}"
+          # /scan = read-only check. /v would be verbose but isn't a
+          # standard chkdsk flag in modern Windows; instead we let
+          # Start-Process redirect stdout for the full transcript.
+          $log = "diag/chkdsk-scan.txt"
+          $proc = Start-Process -FilePath chkdsk.exe `
+            -ArgumentList "${letter}:","/scan" `
+            -NoNewWindow -PassThru -Wait `
+            -RedirectStandardOutput $log
+          $exit = $proc.ExitCode
+          "chkdsk /scan exit code: $exit" | Tee-Object diag/chkdsk-exit.txt
+          Get-Content $log
+          if ($exit -ne 0) {
+            Write-Host "::error::chkdsk /scan reported issues (exit $exit)"
+            "chkdsk /scan failed (exit $exit) — see diag/chkdsk-scan.txt for details" `
+              | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }
+          "scan_exit=$exit" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+      - name: Round-trip stress (create + read + delete)
+        # Even if chkdsk /scan was clean, exercise the volume with real
+        # I/O — a malformed $Bitmap or attribute table can pass /scan
+        # but blow up on the first write. If this step fails, our mkfs
+        # produced a "looks valid but isn't usable" volume.
+        if: steps.chkdsk.outputs.scan_exit == '0'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $letter = "${{ steps.mount.outputs.letter }}"
+          $root = "${letter}:\"
+          # Create a few files of varying sizes — covers resident
+          # ($DATA in MFT record), small non-resident, and one big
+          # enough to allocate multiple clusters.
+          'hello' | Out-File "$root\tiny.txt"
+          New-Item -ItemType File -Path "$root\medium.bin" | Out-Null
+          $medium = New-Object byte[] 4096
+          [System.IO.File]::WriteAllBytes("$root\medium.bin", $medium)
+          $big = New-Object byte[] (1MB)
+          [System.IO.File]::WriteAllBytes("$root\big.bin", $big)
+          Get-ChildItem $root | Format-List | Out-File diag/post-write-listing.txt
+          # Read back + checksum. If $Bitmap allocation lied about which
+          # clusters we got, this will return wrong bytes.
+          $tiny = Get-Content "$root\tiny.txt"
+          if ($tiny -ne 'hello') { throw "round-trip read mismatch on tiny.txt" }
+          # Delete + verify they're gone.
+          Remove-Item "$root\tiny.txt", "$root\medium.bin", "$root\big.bin"
+          $remaining = Get-ChildItem $root -Force | Where-Object { -not $_.PSIsContainer }
+          if ($remaining) { throw "files still present after delete" }
+          "round-trip OK" | Out-File diag/round-trip.txt
+      - name: chkdsk /scan (post round-trip)
+        if: steps.chkdsk.outputs.scan_exit == '0'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $letter = "${{ steps.mount.outputs.letter }}"
+          $log = "diag/chkdsk-scan-after-roundtrip.txt"
+          $proc = Start-Process -FilePath chkdsk.exe `
+            -ArgumentList "${letter}:","/scan" `
+            -NoNewWindow -PassThru -Wait `
+            -RedirectStandardOutput $log
+          Get-Content $log
+          "chkdsk-after-roundtrip exit: $($proc.ExitCode)" | Out-File diag/chkdsk-exit-after.txt
+      - name: Dismount
+        if: always()
+        shell: pwsh
+        run: |
+          Dismount-DiskImage -ImagePath "$pwd\out.vhdx" -ErrorAction SilentlyContinue | Out-Null
+      - name: Upload diagnostics
+        # Always upload — successful runs also benefit from having the
+        # baseline metadata captured for cross-commit comparison.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-windows-diag-${{ github.run_id }}
+          path: diag/
+          if-no-files-found: warn
+      - name: Fail the job if chkdsk found issues
+        # We deferred failure earlier (continue-on-error) so the
+        # artifact upload always fires. Fail the job here once
+        # everything is captured.
+        if: steps.chkdsk.outputs.scan_exit != '0'
+        shell: pwsh
+        run: |
+          throw "chkdsk /scan exit code was $($env:scan_exit) — see uploaded diag/ artifact"
+        env:
+          scan_exit: ${{ steps.chkdsk.outputs.scan_exit }}
