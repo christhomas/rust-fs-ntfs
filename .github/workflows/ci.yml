@@ -155,10 +155,14 @@ jobs:
           # Same layout `diskutil eraseDisk` produces — closer to the
           # real shipping scenario too.
 
-          # Create an empty fixed VHDX big enough for partition table
-          # overhead (1 MiB GPT primary + 256 MiB data + 1 MiB GPT
-          # backup + slack) → 288 MiB.
-          qemu-img create -f vhdx -o subformat=fixed wrapper.vhdx 288M
+          # Create an empty fixed VHDX with comfortable headroom over
+          # the data partition. iter4 hit "specified offset is not valid"
+          # when the wrapper was sized too tight against the partition's
+          # request — VHDX adds metadata overhead (log + BAT) on top of
+          # the virtual disk size, and Windows GPT itself reserves 33 LBA
+          # at each end. 384 MiB gives 256 MiB partition + slack with
+          # headroom to spare.
+          qemu-img create -f vhdx -o subformat=fixed wrapper.vhdx 384M
           # Same sparse-attribute cleanup as before (qemu-img sets
           # the NTFS host-FS sparse flag regardless of subformat).
           fsutil sparse setflag wrapper.vhdx 0
@@ -172,6 +176,9 @@ jobs:
           Start-Sleep -Seconds 2
           $disk = Get-Disk -Number $vhd.Number
           Initialize-Disk -Number $disk.Number -PartitionStyle GPT
+          # Capture disk geometry so partition-creation failures have a
+          # data trail in the log.
+          Write-Host "Disk size: $($disk.Size), AllocatedSize: $($disk.AllocatedSize), LargestFreeExtent: $($disk.LargestFreeExtent)"
           $part = New-Partition -DiskNumber $disk.Number `
               -Offset 1MB `
               -Size $rawSize `
