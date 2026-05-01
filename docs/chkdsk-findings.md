@@ -134,15 +134,63 @@ $AttrDef, root dir, $Bitmap, $Boot, $BadClus, $Secure, $UpCase,
 $Extend). The upstream `ntfs` reader was happy to parse them; chkdsk
 was not.
 
-**Status: under investigation.** The chkdsk error message is
-deliberately generic — it says "is corrupt" without identifying
-which field. Several plausible candidates exist (namespace value,
-indexed_flag, allocated_size/real_size = 0 against non-zero $DATA),
-but we will not change code based on plausibility.
+**Status: confirmed via byte-diff in iter8 (run id 25234929879).** The
+CI step that formats a parallel Microsoft NTFS volume with
+`format.com` and dumps each MFT record from both gave us the
+ground truth. Per-record decode of `$FILE_NAME` (attribute type
+0x30) on system records 0, 1, 5, 6, 10:
 
-The next iteration adds the byte-level diff against a Microsoft-
-formatted reference volume so we can identify the actual difference
-empirically. See `mft0-diff.txt` in the next CI artifact.
+| Rec | Name        | namespace (ref/ours) | indexed_flag (ref/ours) | alloc/real (ref) | alloc/real (ours) |
+|-----|-------------|----------------------|-------------------------|------------------|-------------------|
+| 0   | `$MFT`      | 3 / 3 ✓             | **1 / 0 ✗**             | 0x10000 / 0x10000 | **0 / 0 ✗**       |
+| 1   | `$MFTMirr`  | 3 / 3 ✓             | **1 / 0 ✗**             | 0x4000 / 0x4000   | **0 / 0 ✗**       |
+| 5   | `.` (root)  | 3 / 3 ✓             | **1 / 0 ✗**             | 0 / 0 ✓           | 0 / 0 ✓           |
+| 6   | `$Bitmap`   | 3 / 3 ✓             | **1 / 0 ✗**             | 0x3000 / 0x2E00   | **0 / 0 ✗**       |
+| 10  | `$UpCase`   | 3 / 3 ✓             | **1 / 0 ✗**             | 0x20000 / 0x20000 | **0 / 0 ✗**       |
+
+Two confirmed bugs:
+
+1. **`indexed_flag` (attribute header offset 0x16) is 0 on every
+   `$FILE_NAME`; Microsoft sets it to 1 on every one.** Every
+   `$FILE_NAME` is referenced from the parent directory's `$I30`
+   index — the `indexed_flag` byte at attribute-header offset 0x16
+   advertises that fact. NTFS spec from publicly-published
+   Microsoft references describes this byte as "Resident: indexed
+   flag (1 if attribute referenced from index)." chkdsk verifies it
+   against the structural reality.
+
+2. **`$FILE_NAME`'s `allocated_size` and `real_size` (value bytes
+   0x28..0x30 and 0x30..0x38) are 0 on every record; Microsoft
+   populates them with the underlying `$DATA`'s allocated and real
+   sizes.** Directories without `$DATA` (root, `$Volume`, `$Extend`,
+   `$BadClus`'s unnamed `$DATA`) correctly have 0/0 in BOTH the
+   reference and ours — the only difference is on records that have
+   real `$DATA` content. chkdsk catches the inconsistency.
+
+   Worth noting: the namespace byte (value offset 0x41) is `3`
+   (WIN32_DOS) for `$MFT`, `$MFTMirr`, `.`, `$Bitmap`, `$UpCase` in
+   *both* the reference and ours. So the system-files-need-POSIX
+   theory was wrong — Microsoft uses WIN32_DOS for the `$`-prefixed
+   names too. Glad we didn't change this without proof.
+
+**Fix (iter9):**
+- Set `rec[at + 22] = 1` (indexed_flag) in `write_file_name`.
+- Add `data_alloc: u64, data_real: u64` parameters to
+  `write_file_name` and `build_system_record`.
+- Each of the 12 system-record call sites now passes the
+  appropriate sizes:
+  - `$MFT`: `mft_clusters * cluster_size` (= initial MFT data size)
+  - `$MFTMirr`: `mftmirr_clusters * cluster_size`
+  - `$LogFile`: `logfile_clusters * cluster_size`
+  - `$Volume`: 0 / 0 (empty `$DATA`)
+  - `$AttrDef`: `attrdef_clusters * cluster_size` / `attrdef_blob.len()`
+  - root dir: 0 / 0 (no `$DATA`)
+  - `$Bitmap`: `bitmap_clusters * cluster_size` / actual bitmap_bytes
+  - `$Boot`: `boot_clusters * cluster_size` / 8192
+  - `$BadClus`: 0 / 0 (unnamed `$DATA` is empty)
+  - `$Secure`: 0 / 0
+  - `$UpCase`: `upcase_clusters * cluster_size` / 131072
+  - `$Extend`: 0 / 0
 
 #### Bug B: bad on-disk uppercase table (warning, not fatal)
 

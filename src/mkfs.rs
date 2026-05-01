@@ -251,11 +251,17 @@ pub fn format_filesystem(
             ],
         );
         let bitmap_attr = build_resident_unnamed(0xB0, 4, &mft_bitmap_value);
+        // $MFT $FILE_NAME tracks the MFT's $DATA size — the bytes
+        // backing the MFT as a file. mft_clusters * cluster_size is
+        // exactly what build_nonresident_data_attribute uses above.
+        let mft_data_size = mft_clusters * cluster_size as u64;
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::MFT,
             "$MFT",
             false,
+            mft_data_size,
+            mft_data_size,
             &[data_attr, bitmap_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::MFT, rec_bytes)?;
@@ -283,6 +289,8 @@ pub fn format_filesystem(
             rec::MFTMIRR,
             "$MFTMirr",
             false,
+            len_bytes,
+            len_bytes,
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::MFTMIRR, rec_bytes)?;
@@ -310,6 +318,8 @@ pub fn format_filesystem(
             rec::LOGFILE,
             "$LogFile",
             false,
+            len_bytes,
+            len_bytes,
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::LOGFILE, rec_bytes)?;
@@ -337,8 +347,17 @@ pub fn format_filesystem(
         let attrs = vec![build_resident_unnamed(ATTR_DATA, 5, &[])];
         let mut combined = vec![volume_name_attr, volume_info_attr];
         combined.extend(attrs);
-        let rec_bytes =
-            build_system_record(&mft_record_layout, rec::VOLUME, "$Volume", false, &combined)?;
+        // $Volume's $DATA is empty (resident, zero bytes), so $FILE_NAME
+        // sizes are 0/0.
+        let rec_bytes = build_system_record(
+            &mft_record_layout,
+            rec::VOLUME,
+            "$Volume",
+            false,
+            0,
+            0,
+            &combined,
+        )?;
         place_record(&mut mft_buf, rs, rec::VOLUME, rec_bytes)?;
     }
 
@@ -383,6 +402,8 @@ pub fn format_filesystem(
             rec::ATTRDEF,
             "$AttrDef",
             false,
+            attrdef_clusters * cluster_size as u64,
+            attrdef_blob.len() as u64,
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::ATTRDEF, rec_bytes)?;
@@ -392,8 +413,17 @@ pub fn format_filesystem(
     {
         let index_block_size: u32 = 4096;
         let index_root = build_empty_index_root_attr(3, index_block_size, bytes_per_sector);
-        let rec_bytes =
-            build_system_record(&mft_record_layout, rec::ROOT, ".", true, &[index_root])?;
+        // Root directory has no $DATA (only an $INDEX_ROOT), so $FILE_NAME
+        // sizes are 0/0 — matches Microsoft's reference (rec 5).
+        let rec_bytes = build_system_record(
+            &mft_record_layout,
+            rec::ROOT,
+            ".",
+            true,
+            0,
+            0,
+            &[index_root],
+        )?;
         place_record(&mut mft_buf, rs, rec::ROOT, rec_bytes)?;
     }
 
@@ -419,6 +449,8 @@ pub fn format_filesystem(
             rec::BITMAP,
             "$Bitmap",
             false,
+            bitmap_clusters * cluster_size as u64,
+            value_len,
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::BITMAP, rec_bytes)?;
@@ -443,8 +475,15 @@ pub fn format_filesystem(
             (boot_clusters as i64) - 1,
             &mp,
         )?;
-        let rec_bytes =
-            build_system_record(&mft_record_layout, rec::BOOT, "$Boot", false, &[data_attr])?;
+        let rec_bytes = build_system_record(
+            &mft_record_layout,
+            rec::BOOT,
+            "$Boot",
+            false,
+            boot_clusters * cluster_size as u64,
+            boot_value_len,
+            &[data_attr],
+        )?;
         place_record(&mut mft_buf, rs, rec::BOOT, rec_bytes)?;
     }
 
@@ -471,11 +510,17 @@ pub fn format_filesystem(
             (cluster_count as i64) - 1,
             &bad_mp,
         )?;
+        // $BadClus's unnamed $DATA is empty (resident, zero bytes); the
+        // sparse named $Bad attribute is what carries the cluster
+        // bookkeeping. $FILE_NAME tracks the unnamed $DATA, which is
+        // empty — sizes are 0/0. (Microsoft's reference matches this.)
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::BADCLUS,
             "$BadClus",
             false,
+            0,
+            0,
             &[empty_data, bad_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::BADCLUS, rec_bytes)?;
@@ -493,6 +538,8 @@ pub fn format_filesystem(
             rec::SECURE,
             "$Secure",
             false,
+            0,
+            0,
             &[empty_data],
         )?;
         place_record(&mut mft_buf, rs, rec::SECURE, rec_bytes)?;
@@ -519,6 +566,8 @@ pub fn format_filesystem(
             rec::UPCASE,
             "$UpCase",
             false,
+            upcase_clusters * cluster_size as u64,
+            upcase_value_bytes,
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::UPCASE, rec_bytes)?;
@@ -528,11 +577,14 @@ pub fn format_filesystem(
     {
         let index_block_size: u32 = 4096;
         let index_root = build_empty_index_root_attr(3, index_block_size, bytes_per_sector);
+        // $Extend has no $DATA (only $INDEX_ROOT), 0/0 like root dir.
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::EXTEND,
             "$Extend",
             true,
+            0,
+            0,
             &[index_root],
         )?;
         place_record(&mut mft_buf, rs, rec::EXTEND, rec_bytes)?;
@@ -655,6 +707,14 @@ fn build_system_record(
     record_number: u32,
     name: &str,
     is_dir: bool,
+    // $FILE_NAME tracks the underlying $DATA's allocated + real sizes.
+    // Pass 0 for both when the record has no $DATA (directories,
+    // $Volume's empty $DATA). Microsoft's format.com populates these
+    // fields with the canonical $DATA sizes; with them at 0, chkdsk
+    // reports 'Attribute record (30, "") is corrupt'. Corroborated
+    // against format.com reference in CI iter8 (mft-rec*-diff.txt).
+    fn_data_alloc: u64,
+    fn_data_real: u64,
     extra_attrs: &[Vec<u8>],
 ) -> Result<Vec<u8>, String> {
     let rs = layout.record_size;
@@ -709,6 +769,8 @@ fn build_system_record(
         layout.nt_time,
         is_dir,
         true,
+        fn_data_alloc,
+        fn_data_real,
     )?;
 
     for attr in extra_attrs {
@@ -796,6 +858,8 @@ fn write_file_name(
     nt_time: u64,
     is_dir: bool,
     is_system: bool,
+    data_alloc: u64,
+    data_real: u64,
 ) -> Result<usize, String> {
     let utf16: Vec<u16> = name.encode_utf16().collect();
     if utf16.is_empty() || utf16.len() > 255 {
@@ -817,7 +881,11 @@ fn write_file_name(
     rec[at + 14..at + 16].copy_from_slice(&attr_id.to_le_bytes());
     rec[at + 16..at + 20].copy_from_slice(&(value_size as u32).to_le_bytes());
     rec[at + 20..at + 22].copy_from_slice(&(header_size as u16).to_le_bytes());
-    rec[at + 22] = 0;
+    // indexed_flag = 1: corroborated against Microsoft format.com output
+    // in CI iter8 — every $FILE_NAME (system and otherwise) had this byte
+    // set to 1, every one of ours had it 0. chkdsk reports
+    // 'Attribute record (30, "") is corrupt' when this differs.
+    rec[at + 22] = 1;
     rec[at + 23] = 0;
 
     let v = at + header_size;
@@ -826,8 +894,8 @@ fn write_file_name(
     rec[v + 16..v + 24].copy_from_slice(&nt_time.to_le_bytes());
     rec[v + 24..v + 32].copy_from_slice(&nt_time.to_le_bytes());
     rec[v + 32..v + 40].copy_from_slice(&nt_time.to_le_bytes());
-    rec[v + 40..v + 48].copy_from_slice(&0u64.to_le_bytes());
-    rec[v + 48..v + 56].copy_from_slice(&0u64.to_le_bytes());
+    rec[v + 40..v + 48].copy_from_slice(&data_alloc.to_le_bytes());
+    rec[v + 48..v + 56].copy_from_slice(&data_real.to_le_bytes());
     let mut fa: u32 = 0x20;
     if is_dir {
         fa |= 0x10000000;
