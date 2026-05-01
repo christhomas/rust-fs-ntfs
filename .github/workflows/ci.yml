@@ -41,7 +41,23 @@ jobs:
       - run: cargo fmt --check
       # clippy deferred: lib.rs FFI funcs need `unsafe` refactor before
       # `clippy -D warnings` can pass. Re-enable once resolved.
-      - run: cargo test --release
+      #
+      # Test scope is intentionally narrow: only tests that DON'T need
+      # the out-of-tree `test-disks/*.img` fixtures. The fixture-driven
+      # integration tests (tests/ads.rs, tests/file_data.rs, etc.)
+      # require ~3 GB of pre-baked NTFS images that aren't (and won't
+      # be) committed to git. Authoritative NTFS validation runs on
+      # Windows via chkdsk in `validate-mkfs-windows`; the Linux job's
+      # role is just "did the crate compile and do the in-memory tests
+      # pass?"
+      #
+      # `--lib` runs every unit test inside src/ (~hundreds of them).
+      # `--test mkfs_roundtrip --test mkfs_bin_smoke` runs the two
+      # integration-test files that generate their own data instead
+      # of reading fixtures. Anything else is a fixture-test and
+      # stays out of CI.
+      - run: cargo test --release --lib
+      - run: cargo test --release --test mkfs_roundtrip --test mkfs_bin_smoke
 
   # NTFS validation runs ONLY on the Windows side via Microsoft's
   # chkdsk. That is the only authoritative validator for NTFS, full
@@ -115,16 +131,48 @@ jobs:
         id: mount
         shell: pwsh
         run: |
+          # Snapshot existing drive letters BEFORE mount so we can
+          # identify the new one regardless of how Windows mounts the
+          # VHDX. mkfs_ntfs writes a raw NTFS volume at offset 0 with
+          # NO partition table (same as mkntfs / mkfs.* convention).
+          # Windows recognises this layout as a "superfloppy" — it
+          # mounts the whole disk as one volume and assigns a drive
+          # letter, but `Get-Partition` returns NOTHING because
+          # there's no partition table. The old `Get-Partition |
+          # Get-Volume` pipeline broke for that reason. The before/
+          # after diff finds the new drive letter cleanly whether the
+          # VHDX is GPT-partitioned or superfloppy.
+          $lettersBefore = @((Get-Volume |
+              Where-Object { $_.DriveLetter }).DriveLetter)
+
           $vhd = Mount-DiskImage -ImagePath "$pwd\out.vhdx" -PassThru
-          # Wait briefly for the volume to be assigned a drive letter.
-          # On a fresh mount Get-Volume can race the disk subsystem.
-          Start-Sleep -Seconds 2
-          $disk = Get-Disk -Number $vhd.Number
-          $vol = Get-Partition -DiskNumber $disk.Number | Get-Volume
-          $letter = $vol.DriveLetter
-          if (-not $letter) {
-            throw "no drive letter assigned to mounted VHDX — VHDX itself is malformed"
+
+          # Wait up to ~10s for Windows volume manager to assign a
+          # drive letter. Fresh mount can race the storage stack on
+          # cold-start runners.
+          $letter = $null
+          for ($i = 0; $i -lt 10; $i++) {
+            Start-Sleep -Seconds 1
+            $lettersAfter = @((Get-Volume |
+                Where-Object { $_.DriveLetter }).DriveLetter)
+            $new = $lettersAfter | Where-Object { $_ -notin $lettersBefore }
+            if ($new) { $letter = $new | Select-Object -First 1; break }
           }
+
+          if (-not $letter) {
+            # No drive letter appeared. Possible causes: Windows
+            # didn't recognise the FS at offset 0, the volume manager
+            # is broken, or the VHDX itself is malformed. Dump every
+            # storage state we can read so the artifact has enough
+            # for diagnosis.
+            New-Item -ItemType Directory -Path diag -Force | Out-Null
+            Get-Disk | Format-List | Out-File diag/get-disk-on-failure.txt
+            Get-Volume | Format-List | Out-File diag/get-volume-on-failure.txt
+            Get-Partition -ErrorAction SilentlyContinue | Format-List |
+                Out-File diag/get-partition-on-failure.txt
+            throw "VHDX mounted but no drive letter was assigned within 10s — Windows did not recognise the on-disk filesystem. See diag/ for storage state dumps."
+          }
+
           Write-Host "Mounted at ${letter}:"
           # Stash the drive letter for later steps.
           "letter=$letter" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
