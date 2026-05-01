@@ -159,16 +159,34 @@ jobs:
           # Open the disk's raw device path and write our NTFS bytes
           # at the partition's offset. \\.\PhysicalDriveN is the
           # canonical raw access path — bypasses the FS layer.
+          # FileAccess.ReadWrite (not just Write) so we can verify the
+          # write took effect by reading bytes back immediately.
           $rawPath = "\\.\PhysicalDrive$($disk.Number)"
           $bytes = [System.IO.File]::ReadAllBytes("$pwd\nfs.img")
           $fs = [System.IO.File]::Open($rawPath,
               [System.IO.FileMode]::Open,
-              [System.IO.FileAccess]::Write,
+              [System.IO.FileAccess]::ReadWrite,
               [System.IO.FileShare]::ReadWrite)
           try {
               $fs.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
               $fs.Write($bytes, 0, $bytes.Length)
-              $fs.Flush()
+              $fs.Flush($true)  # flush to OS + force disk write-through
+
+              # Read first 512 bytes back at the partition offset to
+              # confirm the write actually landed. NTFS boot sector
+              # magic ("NTFS    " ASCII at offset 3) is unmissable.
+              New-Item -ItemType Directory -Path diag -Force | Out-Null
+              $fs.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $verify = New-Object byte[] 512
+              $null = $fs.Read($verify, 0, 512)
+              $magic = [System.Text.Encoding]::ASCII.GetString($verify, 3, 8)
+              "NTFS magic at partition offset (expected 'NTFS    '): '$magic'" |
+                  Tee-Object diag/post-write-magic.txt
+              if ($magic -ne "NTFS    ") {
+                  Write-Host "::warning::NTFS magic missing at partition offset — raw write may have silently failed"
+                  $hex = ($verify[0..63] | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+                  "first 64 bytes at partition offset:`n$hex" | Out-File diag/post-write-hex.txt
+              }
           } finally {
               $fs.Close()
           }
@@ -202,15 +220,77 @@ jobs:
             if ($new) { $letter = $new | Select-Object -First 1; break }
           }
 
+          # Always capture state — useful in success runs too for
+          # cross-commit baselining.
+          New-Item -ItemType Directory -Path diag -Force | Out-Null
+          Get-Disk | Format-List | Out-File diag/get-disk-on-mount.txt
+          Get-Volume | Format-List | Out-File diag/get-volume-on-mount.txt
+          Get-Partition -ErrorAction SilentlyContinue | Format-List |
+              Out-File diag/get-partition-on-mount.txt
+
+          # Re-read the first 512 bytes at the partition offset post-remount
+          # to verify the bytes actually persisted across dismount/remount.
+          # If this magic differs from pre-dismount, VHDX or Windows ate them.
+          $disk = Get-Disk -Number $vhd.Number
+          $partition = Get-Partition -DiskNumber $disk.Number |
+              Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
+          if ($partition) {
+              $rawPath = "\\.\PhysicalDrive$($disk.Number)"
+              try {
+                  $fs = [System.IO.File]::Open($rawPath,
+                      [System.IO.FileMode]::Open,
+                      [System.IO.FileAccess]::Read,
+                      [System.IO.FileShare]::ReadWrite)
+                  $fs.Seek($partition.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+                  $verify = New-Object byte[] 512
+                  $null = $fs.Read($verify, 0, 512)
+                  $fs.Close()
+                  $magic = [System.Text.Encoding]::ASCII.GetString($verify, 3, 8)
+                  "Post-remount NTFS magic at partition offset $($partition.Offset): '$magic'" |
+                      Tee-Object diag/post-remount-magic.txt
+                  $hex = ($verify[0..63] | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+                  "first 64 bytes of partition post-remount:`n$hex" | Out-File diag/post-remount-hex.txt
+              } catch {
+                  "Failed to read raw partition bytes post-remount: $_" |
+                      Out-File diag/post-remount-magic.txt
+              }
+          }
+
           if (-not $letter) {
-            # Defensive: dump storage state so the artifact has the
-            # full picture if Windows still refuses to assign a letter.
-            New-Item -ItemType Directory -Path diag -Force | Out-Null
+            # No auto-assignment — try forcing one before giving up.
+            # Windows will sometimes leave a recognised volume unmapped
+            # when the disk is non-removable VHDX-backed.
+            $partition = Get-Partition -DiskNumber $disk.Number |
+                Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
+            if ($partition) {
+                # Find an unused letter D..Z.
+                $used = (Get-Volume | ForEach-Object { $_.DriveLetter }) +
+                        (Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Name })
+                foreach ($c in [char[]](68..90)) {
+                    if ($c -notin $used) {
+                        try {
+                            Set-Partition -DiskNumber $disk.Number `
+                                -PartitionNumber $partition.PartitionNumber `
+                                -NewDriveLetter $c -ErrorAction Stop
+                            $letter = "$c"
+                            Write-Host "Forced drive letter $letter via Set-Partition"
+                            break
+                        } catch {
+                            "Set-Partition with letter $c failed: $_" |
+                                Out-File diag/set-partition-attempts.txt -Append
+                        }
+                    }
+                }
+            }
+          }
+
+          if (-not $letter) {
+            # Still no letter — capture state and fall back to volume-guid path.
             Get-Disk | Format-List | Out-File diag/get-disk-on-failure.txt
             Get-Volume | Format-List | Out-File diag/get-volume-on-failure.txt
             Get-Partition -ErrorAction SilentlyContinue | Format-List |
                 Out-File diag/get-partition-on-failure.txt
-            throw "wrapper VHDX mounted but no drive letter was assigned within 10s — Windows did not recognise the NTFS partition we wrote. See diag/ for storage state dumps."
+            throw "wrapper VHDX mounted but no drive letter was assigned and Set-Partition fallback failed — Windows did not recognise the NTFS partition we wrote. See diag/ for storage state dumps."
           }
 
           Write-Host "Mounted at ${letter}:"
