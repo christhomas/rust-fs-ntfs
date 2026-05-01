@@ -24,6 +24,33 @@ use crate::block_io::{BlockIo, IoReadSeek};
 
 const UPCASE_LEN: usize = 65536;
 
+/// Generate the 128 KiB `$UpCase` table at runtime via Rust's stdlib
+/// `char::to_uppercase()`. Surrogate code points (0xD800..=0xDFFF) are
+/// passed through unchanged — they have no Unicode case mapping. NTFS
+/// only requires *a valid uppercase mapping*, not the historical NT
+/// table; both reader and writer in this crate consult `$UpCase` so
+/// any internally consistent mapping suffices for COLLATION_FILE_NAME.
+pub fn generate_upcase_table() -> Vec<u8> {
+    let mut out = vec![0u8; UPCASE_LEN * 2];
+    for cp in 0u32..=0xFFFF {
+        let upper: u16 = if (0xD800..=0xDFFF).contains(&cp) {
+            cp as u16
+        } else if let Some(c) = char::from_u32(cp) {
+            let mapped = c.to_uppercase().next().unwrap_or(c) as u32;
+            if mapped <= 0xFFFF {
+                mapped as u16
+            } else {
+                cp as u16
+            }
+        } else {
+            cp as u16
+        };
+        let off = (cp as usize) * 2;
+        out[off..off + 2].copy_from_slice(&upper.to_le_bytes());
+    }
+    out
+}
+
 pub struct UpcaseTable {
     table: Vec<u16>,
 }

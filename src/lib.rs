@@ -46,6 +46,7 @@ pub mod idx_block;
 pub mod index_io;
 pub mod mft_bitmap;
 pub mod mft_io;
+pub mod mkfs;
 pub mod record_build;
 pub mod upcase;
 pub mod write;
@@ -2420,6 +2421,40 @@ pub extern "C" fn fs_ntfs_fsck_with_callbacks(
             }
             0
         }
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mkfs (volume formatter)
+// ---------------------------------------------------------------------------
+
+/// Format an NTFS filesystem on the device backed by `cfg`. Both
+/// `cfg->read` and `cfg->write` must be set. Picks a default 4 KiB
+/// cluster size and 4096-byte MFT records, no volume label, random
+/// serial. Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_mkfs(cfg: *const FsNtfsBlockdevCfg) -> c_int {
+    if cfg.is_null() {
+        set_error("fs_ntfs_mkfs: null config");
+        return -1;
+    }
+    let cfg = unsafe { &*cfg };
+    let Some(write_fn) = cfg.write else {
+        set_error("fs_ntfs_mkfs: cfg.write is NULL (mkfs requires RW)");
+        return -1;
+    };
+    let mut io = block_io::CallbackBlockIo {
+        read_fn: cfg.read,
+        write_fn: Some(write_fn),
+        context: cfg.context,
+        size: cfg.size_bytes,
+    };
+    match mkfs::format_filesystem(&mut io, cfg.size_bytes, 4096, 4096, None, None) {
+        Ok(()) => 0,
         Err(e) => {
             set_error(&e);
             -1

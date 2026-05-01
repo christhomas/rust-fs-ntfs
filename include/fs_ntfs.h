@@ -256,6 +256,25 @@ int fs_ntfs_fsck(const char *path,
                  uint64_t *out_logfile_bytes,
                  uint8_t *out_dirty_cleared);
 
+/* ---- Filesystem creation ---- */
+
+/*
+ * Format a fresh NTFS filesystem on the device backed by the callbacks
+ * in `cfg`. Both `cfg->read` and `cfg->write` MUST be non-NULL.
+ *
+ * Writes a v3.1 layout: boot sector + backup, $MFT, $MFTMirr, $LogFile
+ * (filled with 0xFF — Windows / chkdsk treat this as "reinit on
+ * mount"), $Bitmap, $UpCase (generated at runtime via Rust stdlib
+ * uppercase mappings), $AttrDef, $Volume (no label by default),
+ * $BadClus, $Secure (default-everyone-allow stub), $Boot, $Extend,
+ * and an empty root directory. Default cluster size 4 KiB, MFT
+ * record size 4 KiB. Random volume serial.
+ *
+ * Returns 0 on success, -1 on error (call fs_ntfs_last_error for
+ * details).
+ */
+int fs_ntfs_mkfs(const fs_ntfs_blockdev_cfg_t *cfg);
+
 /* ---- Recovery / fsck via callback-based I/O ---- */
 
 /*
