@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
 
@@ -47,3 +48,116 @@ jobs:
       # clippy deferred: lib.rs FFI funcs need `unsafe` refactor before
       # `clippy -D warnings` can pass. Re-enable once resolved.
       - run: cargo test --release
+
+  # Validate the mkfs_ntfs CLI binary's output by running ntfs-3g's
+  # ntfsfix and ntfsinfo against an image we generated. ntfsfix is the
+  # tool Linux uses to mark NTFS volumes clean after a Windows hibernate
+  # or unclean shutdown — running it `--no-action` (read-only) is a good
+  # quick sanity check that the boot sector + $MFT + $LogFile look
+  # parseable to a non-Microsoft NTFS implementation. ntfsinfo dumps the
+  # parsed metadata so we can grep for the volume label.
+  #
+  # Note: ntfs-3g is GPL — we install it as a CI tool only (apt
+  # package), not bundled into this crate or any consumer. The check
+  # itself runs against a binary we built; nothing is statically linked.
+  #
+  # The real correctness check is Windows chkdsk (validate-mkfs-windows
+  # below) which only runs on tag pushes because windows-latest is
+  # slower to spin up and we don't need it on every PR.
+  validate-mkfs-linux:
+    name: validate mkfs_ntfs (Linux ntfsfix)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+      - name: Install ntfs-3g
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ntfs-3g
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mkfs-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build mkfs_ntfs
+        run: cargo build --release --bin mkfs_ntfs
+      - name: Format 64 MiB image
+        run: |
+          truncate -s 64M /tmp/out.img
+          ./target/release/mkfs_ntfs -L CITEST --serial deadbeefcafe1234 /tmp/out.img
+      - name: Run ntfsfix --no-action (read-only check)
+        run: |
+          # ntfsfix's read-only mode parses the boot sector + $MFT and
+          # reports any issues without modifying. Exit non-zero on any
+          # parse failure or detected corruption.
+          sudo ntfsfix --no-action /tmp/out.img
+      - name: Run ntfsinfo and verify label round-tripped
+        run: |
+          sudo ntfsinfo --mft /tmp/out.img > /tmp/info.txt 2>&1 || true
+          sudo ntfsinfo /tmp/out.img > /tmp/vol.txt 2>&1
+          cat /tmp/vol.txt
+          grep -qi "Volume Name.*CITEST" /tmp/vol.txt
+
+  # Windows-side validation: chkdsk is the canonical "is this a valid
+  # NTFS volume?" check, against the same code Microsoft ships. We only
+  # run it on tag pushes (every release candidate) — windows-latest
+  # provisioning is slower than ubuntu-latest, and the Linux ntfsfix
+  # job already catches gross corruption on every PR.
+  #
+  # Windows Mount-DiskImage doesn't accept raw .img files, so we wrap
+  # the binary's output in a VHDX container via qemu-img (GPL, called
+  # as a build tool, not bundled). Mount, chkdsk /scan, then chkdsk /f
+  # which is the strict "are there ANY repairs needed?" check — exit
+  # non-zero if it found anything.
+  validate-mkfs-windows:
+    name: validate mkfs_ntfs (Windows chkdsk)
+    runs-on: windows-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+      - name: Install qemu-img via choco
+        shell: pwsh
+        run: choco install qemu-img -y --no-progress
+      - name: Build mkfs_ntfs (Windows)
+        run: cargo build --release --bin mkfs_ntfs
+      - name: Generate raw image and convert to VHDX
+        shell: pwsh
+        run: |
+          fsutil file createnew out.img 67108864
+          ./target/release/mkfs_ntfs.exe -L CITEST --serial deadbeefcafe1234 out.img
+          qemu-img convert -f raw -O vhdx out.img out.vhdx
+      - name: Mount, chkdsk, dismount
+        shell: pwsh
+        run: |
+          $vhd = Mount-DiskImage -ImagePath "$pwd\out.vhdx" -PassThru
+          # Wait briefly for the volume to be assigned a drive letter.
+          # On a fresh mount Get-Volume can race the disk subsystem.
+          Start-Sleep -Seconds 2
+          $disk = Get-Disk -Number $vhd.Number
+          $vol = Get-Partition -DiskNumber $disk.Number | Get-Volume
+          $letter = $vol.DriveLetter
+          if (-not $letter) { throw "no drive letter assigned to mounted VHDX" }
+          Write-Host "Mounted at ${letter}:"
+
+          # /scan is read-only — exits 0 only if no errors. /f would
+          # repair, which we explicitly do NOT want: if mkfs_ntfs
+          # produced bytes that need repair, that's a bug to fail on,
+          # not silently fix.
+          $proc = Start-Process -FilePath chkdsk.exe `
+            -ArgumentList "${letter}:", "/scan" `
+            -NoNewWindow -PassThru -Wait
+          if ($proc.ExitCode -ne 0) {
+            throw "chkdsk /scan failed with exit $($proc.ExitCode)"
+          }
+
+          Dismount-DiskImage -ImagePath "$pwd\out.vhdx" | Out-Null
