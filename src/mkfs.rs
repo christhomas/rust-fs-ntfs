@@ -784,8 +784,16 @@ fn build_system_record(
         cursor += attr.len();
     }
 
+    // The attribute end marker is the type 0xFFFFFFFF + a 4-byte length
+    // field of 0, totalling 8 bytes — not 4. The buffer is zero-init,
+    // so we only need to write the type, but bytes_used MUST include
+    // the trailing 4-byte length=0. Microsoft format.com's reference
+    // shows bytes_used = end_marker_offset + 8 across every system
+    // record (CI iter9 byte-diff: rec0 ref=0x210 vs ours=0x17C, etc.).
+    // chkdsk reports "First free byte offset corrected" when this is
+    // off by 4.
     rec[cursor..cursor + 4].copy_from_slice(&ATTR_END_MARKER.to_le_bytes());
-    cursor += 4;
+    cursor += 8;
     rec[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4].copy_from_slice(&(cursor as u32).to_le_bytes());
 
     apply_fixup_on_write(&mut rec, bps)?;

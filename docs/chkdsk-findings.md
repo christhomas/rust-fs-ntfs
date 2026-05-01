@@ -217,6 +217,56 @@ approach is to derive it from a byte-diff against a Microsoft-
 formatted volume (Bug B will be self-resolving once we have the
 reference dump from iter7+).
 
+### iter9: $FILE_NAME fixes confirmed; new bug surfaced
+
+Output after applying iter9's fixes (`indexed_flag=1` + populated
+`$FILE_NAME` sizes):
+
+```
+Read-only chkdsk found bad on-disk uppercase table - using system table.
+Stage 1: Examining basic file system structure ...
+First free byte offset corrected in file record segment 0.
+First free byte offset corrected in file record segment 1.
+Incorrect information was detected in file record segment 2.
+First free byte offset corrected in file record segment 2.
+[...all 12 system records have "First free byte offset corrected"...]
+Errors found.  CHKDSK cannot continue in read-only mode.
+```
+
+**The "Attribute record (30, '') is corrupt" errors are GONE.** Both
+the indexed_flag and `$FILE_NAME` size fixes were correct.
+
+The new error class — "First free byte offset corrected" — is
+chkdsk fixing the `bytes_used` field in the MFT record header
+(record offset 0x18). Per-record byte-diff:
+
+| Rec | ref bytes_used | ref end_marker_at | ours bytes_used | ours end_marker_at |
+|-----|----------------|-------------------|-----------------|--------------------|
+| 0   | 0x210          | 0x208             | 0x17C           | 0x178              |
+| 1   | 0x1D0          | 0x1C8             | 0x164           | 0x160              |
+| 5   | 0x680          | 0x678             | 0x15C           | 0x158              |
+| 11  | 0x130          | 0x128             | 0x164           | 0x160              |
+
+**Pattern:** Reference always sets `bytes_used = end_marker_offset + 8`.
+Ours always sets `bytes_used = end_marker_offset + 4`.
+
+Reason: the NTFS attribute end marker is **8 bytes** total —
+type=0xFFFFFFFF (4 bytes) followed by a length=0 field (4 bytes) —
+not 4 bytes. The trailing 4 bytes happen to be zero in our
+zero-initialised buffer, so the *content* matches; but our cursor
+advance and `bytes_used` calculation didn't account for them.
+
+**Fix (iter10):** in `build_system_record`, advance cursor by 8
+after writing the end marker (was 4). Comment + cite the iter9
+diff in source so the next reader knows why.
+
+Note: ref's bytes_used values are *larger* than ours independent
+of the +4 — that's because Microsoft writes additional attributes
+(notably `$SECURITY_DESCRIPTOR` on `$MFT`) that we don't. The +4
+fix makes our `bytes_used` self-consistent with our cursor; it
+doesn't make our records identical to Microsoft's. chkdsk's
+complaint is only about self-consistency.
+
 ## What we learned
 
 1. **Microsoft's NTFS implementation is the only authoritative
