@@ -10,10 +10,10 @@
 //!   - resulting bytes parse cleanly via the upstream crate (same library
 //!     Windows + our FSKit extension would use to read the volume)
 //!
-//! The test deliberately mirrors the structure of `mkfs_roundtrip.rs` so
-//! a future "fixture-vs-mkfs comparison" test (run our binary, compare
-//! parsed output against a known-good mkntfs-generated image) can layer
-//! on top without rewiring.
+//! The test deliberately mirrors the structure of `mkfs_roundtrip.rs`.
+//! The authoritative correctness check is Microsoft's chkdsk in the
+//! windows-validation CI job — these crate-internal tests just confirm
+//! the binary is plumbed through to the formatter at all.
 
 use ntfs::Ntfs;
 use std::process::Command;

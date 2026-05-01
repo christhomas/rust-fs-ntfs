@@ -61,38 +61,35 @@ jobs:
       # `clippy -D warnings` can pass. Re-enable once resolved.
       - run: cargo test --release
 
-  # The mkfs_ntfs CLI binary's output is validated only against
-  # Microsoft's chkdsk (validate-mkfs-windows below). We deliberately
-  # do NOT run a Linux-side ntfsfix check: ntfs-3g is a GPL re-impl,
-  # not Microsoft's authority, and being non-Microsoft it can disagree
-  # with chkdsk in either direction (accept invalid bytes / reject
-  # valid ones). Gating the build on a non-authoritative validator
-  # creates noise without adding signal. Our crate's own read-path
-  # round-trip already runs in `cargo test` on every PR; that's
-  # sufficient cheap coverage. The real verdict is chkdsk's.
+  # NTFS validation runs ONLY on the Windows side via Microsoft's
+  # chkdsk. That is the only authoritative validator for NTFS, full
+  # stop. Our own crate's read-path round-trip runs on every PR via
+  # `cargo test` — that's the cheap coverage. The real verdict is
+  # chkdsk's, and chkdsk only runs on Windows.
   #
   # Trigger validate-mkfs-windows manually via "Run workflow" while
   # iterating on the mkfs implementation — see the doc'd path in
   # diskjockey/docs/windows-validation-environment.md.
 
   # Windows-side validation: chkdsk is the canonical "is this a valid
-  # NTFS volume?" check, against the same code Microsoft ships. Triggers:
+  # NTFS volume?" check, against the same code Microsoft ships.
+  # Triggers:
   #   - tag pushes (release candidates)
   #   - manual `workflow_dispatch` from the GitHub Actions UI for
   #     ad-hoc validation while iterating on the mkfs implementation
   # Doesn't run on every PR because windows-latest provisioning is
-  # ~3x slower than ubuntu-latest and the Linux ntfsfix job already
-  # catches gross corruption.
+  # ~3x slower than ubuntu-latest.
   #
   # Windows Mount-DiskImage doesn't accept raw .img files, so we wrap
-  # the binary's output in a VHDX container via qemu-img (GPL, called
-  # as a build tool, not bundled).
+  # the binary's output in a VHDX container via qemu-img (called as a
+  # build-time tool only, never bundled or distributed).
   #
-  # Diagnostics are aggressive: we capture chkdsk's full verbose output,
-  # Get-Volume metadata, and fsutil fsinfo dumps as artifacts on every
-  # run (success or failure) so we can compare what Windows sees across
-  # commits. This is the iteration loop for finding mkfs bugs — chkdsk's
-  # error text tells us exactly which on-disk structure is wrong.
+  # Diagnostics are aggressive: we capture chkdsk's full output,
+  # Get-Volume metadata, and fsutil dumps as artifacts on every run
+  # (success or failure) so we can compare what Windows sees across
+  # commits. This is the iteration loop for finding mkfs bugs —
+  # chkdsk's error text tells us exactly which on-disk structure is
+  # wrong.
   validate-mkfs-windows:
     name: validate mkfs_ntfs (Windows chkdsk)
     runs-on: windows-latest
@@ -145,7 +142,6 @@ jobs:
           New-Item -ItemType Directory -Path diag -Force | Out-Null
           Get-Volume -DriveLetter $letter | Format-List * | Out-File diag/get-volume.txt
           fsutil fsinfo volumeinfo "${letter}:" | Out-File diag/fsutil-volumeinfo.txt
-          fsutil fsinfo ntfsinfo "${letter}:" | Out-File diag/fsutil-ntfsinfo.txt
           fsutil fsinfo statistics "${letter}:" | Out-File diag/fsutil-statistics.txt
           # Quick sanity: dir listing succeeds (means $MFT + root index parse).
           Get-ChildItem "${letter}:\" -Force | Out-File diag/root-listing.txt

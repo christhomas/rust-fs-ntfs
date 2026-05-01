@@ -1,22 +1,20 @@
 //! mkfs.ntfs — standalone CLI for creating fresh NTFS filesystems.
 //!
-//! CLI-compatible subset of ntfs-3g's `mkntfs`. Same flag names and the
-//! same positional `device` argument so existing scripts and CI
-//! pipelines work against this binary unchanged. Note: ntfs-3g's mkntfs
-//! is GPL — we are NOT a derived work; this is an independent
-//! implementation built on top of our pure-Rust crate. Drop-in-compatible
-//! at the CLI surface, separate at the source level.
+//! Independent pure-Rust implementation. Built on top of this crate's
+//! `format_filesystem()` entry point, which the DiskJockey FSKit
+//! extension's `startFormat` also calls — so "format an SD card from
+//! the GUI" and "format a disk image from this CLI" exercise the
+//! exact same code path.
 //!
 //! Cross-platform: pure Rust, std-only I/O. Builds and runs identically
-//! on Linux, macOS, Windows. The same `format_filesystem()` entry point
-//! is also called by the DiskJockey FSKit extension's `startFormat`, so
-//! "format an SD card from the GUI" and "format a disk image from this
-//! CLI" exercise the exact same code path.
+//! on Linux, macOS, Windows.
 //!
-//! Convention follows mkntfs: the device/file MUST already exist at the
-//! target size. Use `truncate -s 256M out.img` (Linux/macOS) or
-//! `fsutil file createnew out.img 268435456` (Windows) to pre-create an
-//! image, then `mkfs.ntfs out.img` formats it.
+//! Convention: the device/file MUST already exist at the target size,
+//! same as every other mkfs.* tool. Use `truncate -s 256M out.img`
+//! (Linux/macOS) or `fsutil file createnew out.img 268435456`
+//! (Windows) to pre-create an image, then `mkfs.ntfs out.img` formats
+//! it. The `--create-size <SIZE>` flag (DiskJockey extension) collapses
+//! that to a single command for image-file workflows.
 //!
 //! Exit codes: 0 success, 1 failure.
 
@@ -36,22 +34,20 @@ Options:
                            Default: 4096.
   --serial <hex>           NTFS volume serial number (16 hex chars). Default:
                            random.
-  -Q, --quick              Quick format. (Accepted; we always do a quick
-                           format — the on-disk layout we write is the
-                           equivalent of mkntfs --quick.)
+  -Q, --quick              Quick format. Accepted; the on-disk layout we
+                           write is always quick-format-equivalent (no
+                           full-volume zero pass).
   -f, --fast               Fast format alias for -Q.
   -F, --force              Format even if device looks in use. (Accepted; we
                            do not currently inspect for active mounts.)
   -n                       Dry-run: parse args + open device but do not write.
   -q, --quiet              Suppress non-error output.
-  --create-size <SIZE>     DiskJockey extension (not in mkntfs): if device
-                           doesn't exist, create it as a regular file of the
-                           given size first. SIZE accepts K/M/G/T suffixes
-                           (1024-based). Refuses to apply to existing block
-                           devices — only valid for image files. Use when
-                           scripting test pipelines so you don't have to chain
-                           truncate + mkfs.ntfs. Without this flag the tool
-                           follows mkntfs convention (file must pre-exist).
+  --create-size <SIZE>     DiskJockey extension: if device doesn't exist,
+                           create it as a regular file of the given size
+                           first. SIZE accepts K/M/G/T suffixes (1024-based).
+                           Refuses to apply to existing block devices — only
+                           valid for image files. Without this flag the tool
+                           expects the device/file to already exist.
   -V, --version            Print version and exit.
   -h, --help               Print this help and exit.
 
@@ -62,8 +58,8 @@ Positional:
                              truncate -s 256M out.img    (Linux/macOS)
                              fsutil file createnew out.img 268435456 (Windows)
 
-Unsupported flags from ntfs-3g's mkntfs (-C compression, -I disable index,
--z mft-zone-multiplier, etc.) are accepted with a warning if they take an
+Advanced flags not yet honored (compression, index-disable,
+mft-zone-multiplier, etc.) are accepted with a warning if they take an
 argument we can ignore safely, and rejected as errors otherwise. The full
 feature set will land incrementally as the underlying crate grows.
 ";
@@ -271,9 +267,9 @@ fn parse_args() -> Result<Opts, String> {
                 })?;
                 opts.create_size = Some(parse_size(&v)?);
             }
-            // Accepted-but-ignored mkntfs flags, each takes one argument.
-            // Warn so users know the value didn't take effect, but don't
-            // fail — keeps existing scripts portable.
+            // Advanced flags we don't yet honor. Accept + warn so
+            // existing scripts that pass them keep working; the value
+            // simply doesn't affect the output.
             "-C"
             | "--compress"
             | "-I"
@@ -282,11 +278,11 @@ fn parse_args() -> Result<Opts, String> {
             | "--mft-zone-multiplier"
             | "-T"
             | "--zero-time" => {
-                // Some of these are flag-only in mkntfs (no arg), but the
-                // safe behaviour is to accept and warn either way. We do
-                // not consume a follow-on arg here because misclassifying
-                // the next positional as an arg-of-this-flag would lose
-                // the device path silently.
+                // Some of these are flag-only (no arg), but accept-
+                // and-warn is safe either way. We do NOT consume a
+                // follow-on arg here because misclassifying the next
+                // positional as an arg-of-this-flag would lose the
+                // device path silently.
                 if !opts.quiet {
                     eprintln!("mkfs.ntfs: warning: {arg} not yet honored, ignoring");
                 }

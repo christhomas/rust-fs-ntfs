@@ -21,7 +21,7 @@ crate-type = ["staticlib", "rlib"]
 # Binary name uses underscore — Cargo's bin name field doesn't accept
 # dots. The Homebrew formula symlinks /usr/local/bin/mkfs.ntfs ->
 # mkfs_ntfs at install time so the user-visible command matches the
-# ntfs-3g / Linux convention.
+# standard mkfs.ntfs CLI naming convention.
 [[bin]]
 name = "mkfs_ntfs"
 path = "src/bin/mkfs_ntfs.rs"
