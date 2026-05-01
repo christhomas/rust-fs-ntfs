@@ -18,3 +18,11 @@ Cargo.lock.bak
 # Test artifacts
 test-disks/*.img
 !test-disks/.gitkeep
+
+# Local Windows-VM test pipeline outputs. The orchestrator
+# (scripts/test-windows-local.sh) writes per-iteration diag dirs to
+# $TMPDIR by default, but if anything ends up in-tree we don't want
+# it committed.
+diag*
+*.vhdx
+nfs.img

@@ -10,7 +10,7 @@ This file records each bug Windows surfaced, the symptom, the
 ## How we corroborate fixes
 
 We don't fix from hypothesis. We fix from **byte-level proof**: the
-CI pipeline formats a second NTFS volume in parallel using
+pipeline formats a second NTFS volume in parallel using
 **Microsoft's own `format.com /FS:NTFS`** as the canonical reference,
 then dumps the same byte ranges (boot sector, first 16 MFT records)
 from both that reference volume and our `mkfs_ntfs` output. Any byte
@@ -18,9 +18,15 @@ that differs between the reference and ours, in a position that
 matters to chkdsk, is **by definition** what we got wrong. The diff
 is the proof.
 
-The CI step that produces the proof is `Build a reference
-Microsoft-formatted NTFS volume + diff against ours` in
-`.github/workflows/ci.yml`. Its outputs land in the artifact:
+Two iteration backends produce the same `diag/` artifact:
+
+- **Local** (preferred during active iteration, ~30-90s per cycle):
+  `scripts/test-windows-local.sh` runs the full pipeline against a
+  Windows ARM64 VM over SSH. See [local-test-pipeline.md](./local-test-pipeline.md).
+- **CI** (used for PR validation, ~2-4 min per cycle):
+  `validate-mkfs-windows` job in `.github/workflows/ci.yml`.
+
+Both produce the same `diag/` outputs:
 
 - `reference-bpb.txt` — Microsoft's BPB decode (sector size, MFT
   location, etc.)
