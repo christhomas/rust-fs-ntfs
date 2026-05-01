@@ -736,7 +736,20 @@ fn build_system_record(
     // For 4096-byte / 512-bps records this lands at 0x48.
     let attrs_offset = align8(USA_OFFSET + 2 + sectors * 2);
     rec[REC_OFF_LSN..REC_OFF_LSN + 8].copy_from_slice(&0u64.to_le_bytes());
-    rec[REC_OFF_SEQ..REC_OFF_SEQ + 2].copy_from_slice(&1u16.to_le_bytes());
+    // Microsoft's format.com sets sequence_number = max(1, rec_number)
+    // for system records (CI iter10 byte-diff: rec 5 has seq=5, rec 11
+    // has seq=11, etc.). Our prior `seq=1` constant created a mismatch
+    // against parent_reference's (rec=5, seq=5) that pointed at the
+    // root: the children claimed parent (5,5) but the root itself had
+    // seq=1, so chkdsk reported "Incorrect information was detected in
+    // file record segment N" on every system record EXCEPT 0 and 1
+    // (whose own seq=1 happened to match the constant).
+    let rec_seq: u16 = if record_number == 0 {
+        1
+    } else {
+        record_number as u16
+    };
+    rec[REC_OFF_SEQ..REC_OFF_SEQ + 2].copy_from_slice(&rec_seq.to_le_bytes());
     rec[REC_OFF_LINK_COUNT..REC_OFF_LINK_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
     rec[REC_OFF_ATTRS_OFFSET..REC_OFF_ATTRS_OFFSET + 2]
         .copy_from_slice(&(attrs_offset as u16).to_le_bytes());

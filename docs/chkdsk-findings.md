@@ -267,6 +267,42 @@ fix makes our `bytes_used` self-consistent with our cursor; it
 doesn't make our records identical to Microsoft's. chkdsk's
 complaint is only about self-consistency.
 
+### iter10: bytes_used fix worked; seq mismatch surfaced
+
+After iter10's `bytes_used += 8` fix, the "First free byte offset
+corrected" errors are gone. Records 0 and 1 are CLEAN. But records
+2..0xB still report "Incorrect information was detected in file
+record segment N".
+
+Asymmetry was the clue: why are 0 and 1 fine but 2-11 broken? Per-
+record dump of `sequence` field (record offset 0x10) and the
+`parent_reference` inside `$FILE_NAME`:
+
+| Rec | ref seq | ours seq | parent_ref (both) |
+|-----|---------|----------|-------------------|
+| 0   | 1       | 1        | (rec=5, seq=5)    |
+| 1   | 1       | 1        | (rec=5, seq=5)    |
+| 2   | 2       | **1**    | (rec=5, seq=5)    |
+| 3   | 3       | **1**    | (rec=5, seq=5)    |
+| 4   | 4       | **1**    | (rec=5, seq=5)    |
+| 5   | 5       | **1**    | (rec=5, seq=5)    |
+| 6   | 6       | **1**    | (rec=5, seq=5)    |
+| ... | ...     | **1**    | (rec=5, seq=5)    |
+| 11  | 11      | **1**    | (rec=5, seq=5)    |
+
+**Microsoft sets sequence_number = max(1, rec_number)** for system
+records. Specifically the root directory at rec 5 has seq=5. All
+system files' `parent_reference` points to (5, 5) — i.e. "root,
+sequence 5". With OUR seq always = 1, the root dir at rec 5 has
+seq=1, which doesn't match the (5, 5) pointer the children
+claim. chkdsk catches this inconsistency.
+
+Records 0 and 1 happen to be clean because their seq=1 matches the
+constant we wrote. Everything else fails the parent-reference
+sanity check.
+
+**Fix (iter11):** in `build_system_record`, `seq = max(1, rec_num)`.
+
 ## What we learned
 
 1. **Microsoft's NTFS implementation is the only authoritative
