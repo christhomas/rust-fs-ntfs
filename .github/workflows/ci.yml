@@ -8,16 +8,9 @@ on:
     branches: [main]
   # Manual trigger — exposed as "Run workflow" in the GitHub Actions UI.
   # Lets us run validate-mkfs-windows on demand without cutting a tag.
-  # Useful while iterating on the mkfs implementation: tweak the Rust
-  # crate, push, click "Run workflow", get real chkdsk output back in
-  # ~5 minutes. The Linux jobs run on every push too, so we don't need
-  # this for those.
+  # Tweak the Rust crate, push, click "Run workflow", get real chkdsk
+  # output back in ~5 minutes. The test job runs on every push too.
   workflow_dispatch:
-    inputs:
-      windows_only:
-        description: "Run only the Windows chkdsk job (skip Linux validation)"
-        type: boolean
-        default: true
 
 jobs:
   test:
@@ -37,10 +30,6 @@ jobs:
         with:
           toolchain: "1.94.1"
           components: rustfmt, clippy
-      - name: Install qemu (for test-disk generator)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 libarchive-tools
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -49,13 +38,6 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Cache alpine VM assets
-        uses: actions/cache@v4
-        with:
-          path: test-disks/.vm-cache
-          key: vm-cache-alpine-3.21.4-ntfs-v1
-      - name: Generate test disks
-        run: bash test-disks/build-ntfs-feature-images.sh
       - run: cargo fmt --check
       # clippy deferred: lib.rs FFI funcs need `unsafe` refactor before
       # `clippy -D warnings` can pass. Re-enable once resolved.
@@ -115,12 +97,16 @@ jobs:
           # needs more headroom.
           fsutil file createnew out.img 67108864
           ./target/release/mkfs_ntfs.exe -L CITEST --serial deadbeefcafe1234 out.img
-          # subformat=fixed produces a non-dynamic VHDX, BUT qemu-img
-          # also sets the NTFS host-level "sparse" attribute on the
-          # output file. Mount-DiskImage rejects that with the same
-          # generic "must not be sparse" error regardless of the VHDX
-          # internal format. fsutil sparse setflag <file> 0 clears
-          # the host-FS attribute. Both flags are required to mount.
+          # Mount-DiskImage rejects sparse VHDXs at TWO independent
+          # levels and the error message is the same generic "must
+          # not be sparse" for both:
+          #   1. VHDX internal format = dynamic (qemu-img default)
+          #      → fixed via `-o subformat=fixed`
+          #   2. NTFS host-filesystem sparse attribute set on the
+          #      output file (qemu-img sets it for efficiency)
+          #      → cleared via `fsutil sparse setflag <file> 0`
+          # Both are required to produce a Mount-DiskImage-acceptable
+          # VHDX. Took two attempts to figure that out.
           qemu-img convert -f raw -O vhdx -o subformat=fixed out.img out.vhdx
           fsutil sparse setflag out.vhdx 0
           # Echo basic file metrics so the run log shows what we built.
@@ -189,22 +175,23 @@ jobs:
         run: |
           $letter = "${{ steps.mount.outputs.letter }}"
           $root = "${letter}:\"
+          $tiny = Join-Path $root "tiny.txt"
+          $medium = Join-Path $root "medium.bin"
+          $big = Join-Path $root "big.bin"
           # Create a few files of varying sizes — covers resident
           # ($DATA in MFT record), small non-resident, and one big
-          # enough to allocate multiple clusters.
-          'hello' | Out-File "$root\tiny.txt"
-          New-Item -ItemType File -Path "$root\medium.bin" | Out-Null
-          $medium = New-Object byte[] 4096
-          [System.IO.File]::WriteAllBytes("$root\medium.bin", $medium)
-          $big = New-Object byte[] (1MB)
-          [System.IO.File]::WriteAllBytes("$root\big.bin", $big)
+          # enough to allocate multiple clusters. Use raw byte
+          # writes (no Out-File encoding nuances) for determinism.
+          [System.IO.File]::WriteAllText($tiny, "hello")
+          [System.IO.File]::WriteAllBytes($medium, (New-Object byte[] 4096))
+          [System.IO.File]::WriteAllBytes($big, (New-Object byte[] (1MB)))
           Get-ChildItem $root | Format-List | Out-File diag/post-write-listing.txt
-          # Read back + checksum. If $Bitmap allocation lied about which
-          # clusters we got, this will return wrong bytes.
-          $tiny = Get-Content "$root\tiny.txt"
-          if ($tiny -ne 'hello') { throw "round-trip read mismatch on tiny.txt" }
+          # Read back. If $Bitmap allocation lied about which clusters
+          # we got, this returns wrong bytes.
+          $readback = [System.IO.File]::ReadAllText($tiny)
+          if ($readback -ne "hello") { throw "round-trip read mismatch on tiny.txt" }
           # Delete + verify they're gone.
-          Remove-Item "$root\tiny.txt", "$root\medium.bin", "$root\big.bin"
+          Remove-Item $tiny, $medium, $big
           $remaining = Get-ChildItem $root -Force | Where-Object { -not $_.PSIsContainer }
           if ($remaining) { throw "files still present after delete" }
           "round-trip OK" | Out-File diag/round-trip.txt
