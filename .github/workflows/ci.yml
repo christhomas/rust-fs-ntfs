@@ -109,9 +109,12 @@ jobs:
         shell: pwsh
         run: |
           # Generate the raw NTFS volume bytes via our binary.
-          # 64 MiB is the smallest size that exercises multiple MFT
-          # clusters cleanly. Bump if a future mkfs feature needs more.
-          $rawSize = 64MB
+          # 256 MiB: chkdsk's `/scan` mode requires shadow-copy storage
+          # space on the volume. On a 64 MiB volume it bails with
+          # "Insufficient storage available to create either the shadow
+          # copy storage file." 256 MiB is the smallest size that gives
+          # /scan headroom and still runs in seconds.
+          $rawSize = 256MB
           fsutil file createnew nfs.img $rawSize
           ./target/release/mkfs_ntfs.exe -L CITEST --serial deadbeefcafe1234 nfs.img
 
@@ -153,9 +156,9 @@ jobs:
           # real shipping scenario too.
 
           # Create an empty fixed VHDX big enough for partition table
-          # overhead (1 MiB GPT primary + 64 MiB data + 1 MiB GPT
-          # backup + slack) → 96 MiB.
-          qemu-img create -f vhdx -o subformat=fixed wrapper.vhdx 96M
+          # overhead (1 MiB GPT primary + 256 MiB data + 1 MiB GPT
+          # backup + slack) → 288 MiB.
+          qemu-img create -f vhdx -o subformat=fixed wrapper.vhdx 288M
           # Same sparse-attribute cleanup as before (qemu-img sets
           # the NTFS host-FS sparse flag regardless of subformat).
           fsutil sparse setflag wrapper.vhdx 0
@@ -384,55 +387,55 @@ jobs:
           } catch {
               "Failed to query event log: $_" | Out-File diag/eventlog-fs.txt
           }
-      - name: chkdsk /scan (read-only, verbose)
+      - name: chkdsk passes
         id: chkdsk
         shell: pwsh
-        # Always run, but capture the result. We want to see chkdsk's
-        # full output even when it fails so the artifacts upload below
-        # gets the diagnostic data.
+        # Always run, capture each result separately. NTFS Event 55 in
+        # iter3 confirmed the kernel detects corruption on access — we
+        # need chkdsk to actually surface what's wrong. /scan failed on
+        # 64 MiB due to shadow-copy storage; with the volume bumped to
+        # 256 MiB it should run.
         continue-on-error: true
         run: |
           $letter = "${{ steps.mount.outputs.letter }}"
-          $volPath = "${{ steps.mount.outputs.vol_path }}"
           New-Item -ItemType Directory -Path diag -Force | Out-Null
-
-          # Try chkdsk on the drive letter first. On a corrupt-marked
-          # volume Windows may refuse — fall back to the \\?\Volume{guid}\
-          # path which bypasses the FS-mounted view.
-          $log = "diag/chkdsk-scan.txt"
-          $exit = -1
-          if ($letter) {
-              $proc = Start-Process -FilePath chkdsk.exe `
-                -ArgumentList "${letter}:","/scan" `
-                -NoNewWindow -PassThru -Wait `
-                -RedirectStandardOutput $log `
-                -RedirectStandardError "diag/chkdsk-scan-stderr.txt"
-              $exit = $proc.ExitCode
-              "chkdsk ${letter}: exit code: $exit" | Tee-Object diag/chkdsk-exit.txt
-              Get-Content $log
+          if (-not $letter) {
+              "no drive letter from mount step — skipping chkdsk" |
+                  Tee-Object diag/chkdsk-skipped.txt
+              "scan_exit=99" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+              exit 0
           }
 
-          # If letter-based chkdsk didn't run or failed early, also try
-          # the volume-guid path (bypasses any pending mount-rejection).
-          if ($exit -ne 0 -and $volPath) {
-              $log2 = "diag/chkdsk-scan-volpath.txt"
-              try {
-                  $proc2 = Start-Process -FilePath chkdsk.exe `
-                    -ArgumentList "$volPath" `
-                    -NoNewWindow -PassThru -Wait `
-                    -RedirectStandardOutput $log2 `
-                    -RedirectStandardError "diag/chkdsk-scan-volpath-stderr.txt"
-                  "chkdsk $volPath exit: $($proc2.ExitCode)" |
-                      Tee-Object diag/chkdsk-exit-volpath.txt
-                  Get-Content $log2
-              } catch {
-                  "chkdsk via volpath threw: $_" | Out-File diag/chkdsk-exit-volpath.txt
-              }
-          }
+          # Pass 1: plain `chkdsk DRIVE:` — read-only, no /scan, no /F.
+          # On a volume already flagged corrupt, this surfaces detailed
+          # MFT/index/attribute errors without needing shadow copy.
+          $proc1 = Start-Process -FilePath chkdsk.exe `
+            -ArgumentList "${letter}:" `
+            -NoNewWindow -PassThru -Wait `
+            -RedirectStandardOutput diag/chkdsk-readonly.txt `
+            -RedirectStandardError diag/chkdsk-readonly-stderr.txt
+          "chkdsk ${letter}: (read-only) exit: $($proc1.ExitCode)" |
+              Tee-Object diag/chkdsk-readonly-exit.txt
+          Get-Content diag/chkdsk-readonly.txt
 
+          # Pass 2: `chkdsk /scan` — needs shadow-copy space which now
+          # fits in our 256 MiB volume. Different code path than
+          # read-only and surfaces additional issues.
+          $proc2 = Start-Process -FilePath chkdsk.exe `
+            -ArgumentList "${letter}:","/scan" `
+            -NoNewWindow -PassThru -Wait `
+            -RedirectStandardOutput diag/chkdsk-scan.txt `
+            -RedirectStandardError diag/chkdsk-scan-stderr.txt
+          "chkdsk ${letter}: /scan exit: $($proc2.ExitCode)" |
+              Tee-Object diag/chkdsk-scan-exit.txt
+          Get-Content diag/chkdsk-scan.txt
+
+          # The job verdict is the /scan exit code (chkdsk's standard).
+          # Read-only + /scan agreement = good signal; disagreement = bug.
+          $exit = $proc2.ExitCode
           if ($exit -ne 0) {
             Write-Host "::error::chkdsk /scan reported issues (exit $exit)"
-            "chkdsk /scan failed (exit $exit) — see diag/chkdsk-scan.txt for details" `
+            "chkdsk /scan failed (exit $exit) — see diag/chkdsk-*.txt" `
               | Out-File $env:GITHUB_STEP_SUMMARY -Append
           }
           "scan_exit=$exit" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
