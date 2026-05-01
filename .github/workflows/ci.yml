@@ -456,11 +456,23 @@ jobs:
                   [System.IO.FileMode]::Open,
                   [System.IO.FileAccess]::Read,
                   [System.IO.FileShare]::ReadWrite)
+              # Read boot sector first to learn where MFT is.
               $fs.Seek($refPart.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
-              $refBytes = New-Object byte[] (64KB)
-              $null = $fs.Read($refBytes, 0, 64KB)
+              $refBoot = New-Object byte[] 512
+              $null = $fs.Read($refBoot, 0, 512)
+              # Parse BPB to locate MFT.
+              $refBps = [System.BitConverter]::ToUInt16($refBoot, 0x0B)
+              $refSpc = $refBoot[0x0D]
+              $refClusterSize = [int]$refBps * [int]$refSpc
+              $refMftLcn = [System.BitConverter]::ToUInt64($refBoot, 0x30)
+              $refMftFileOff = [int64]$refMftLcn * [int64]$refClusterSize
+              # Dump 16 MFT records (16 * 4 KiB = 64 KiB) starting at $MFT.
+              $fs.Seek($refPart.Offset + $refMftFileOff, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $refMft = New-Object byte[] (64KB)
+              $null = $fs.Read($refMft, 0, 64KB)
               $fs.Close()
-              [System.IO.File]::WriteAllBytes("$pwd\diag\reference-first-64k.bin", $refBytes)
+              [System.IO.File]::WriteAllBytes("$pwd\diag\reference-boot.bin", $refBoot)
+              [System.IO.File]::WriteAllBytes("$pwd\diag\reference-mft-16recs.bin", $refMft)
           } catch {
               "Failed to read reference bytes: $_" | Out-File diag/reference-state.txt
           }
@@ -468,49 +480,39 @@ jobs:
 
           # Dump same ranges from our nfs.img (already on disk).
           $ourBytes = [System.IO.File]::ReadAllBytes("$pwd\nfs.img")
-          if ($ourBytes.Length -ge 65536) {
-              [System.IO.File]::WriteAllBytes("$pwd\diag\ours-first-64k.bin",
-                  $ourBytes[0..65535])
-          }
+          $ourBoot = $ourBytes[0..511]
+          [System.IO.File]::WriteAllBytes("$pwd\diag\ours-boot.bin", $ourBoot)
+          # Our MFT lives at LCN 4 = byte offset 16384.
+          $ourMft = $ourBytes[16384..(16384+65535)]
+          [System.IO.File]::WriteAllBytes("$pwd\diag\ours-mft-16recs.bin", $ourMft)
 
-          # Side-by-side hex dump of the boot sector (first 512 bytes)
-          # and MFT record 0 (= $MFT, at offset 16 KiB on our 4 KiB-per-
-          # MFT-record layout). Reference offsets may differ — we'll
-          # compute the reference's $MFT location from its own BPB.
-          if ($refBytes -and $refBytes.Length -ge 512) {
-              # Reference BPB decode.
-              $refBps = [System.BitConverter]::ToUInt16($refBytes, 0x0B)
-              $refSpc = $refBytes[0x0D]
-              $refTotal = [System.BitConverter]::ToUInt64($refBytes, 0x28)
-              $refMftLcn = [System.BitConverter]::ToUInt64($refBytes, 0x30)
-              $refMftRec = [System.BitConverter]::ToInt8($refBytes, 0x40)
-              "Reference NTFS BPB:`n  bytes_per_sector: $refBps`n  sectors_per_cluster: $refSpc`n  total_sectors: $refTotal`n  mft_lcn: $refMftLcn`n  mft_rec_clusters_or_log2: $refMftRec" |
+          # Side-by-side hex dump of boot sectors + MFT records.
+          if ($refBoot -and $refBoot.Length -ge 512) {
+              "Reference NTFS BPB:`n  bytes_per_sector: $refBps`n  sectors_per_cluster: $refSpc`n  cluster_size: $refClusterSize`n  mft_lcn: $refMftLcn`n  mft_file_offset: $refMftFileOff" |
                   Tee-Object diag/reference-bpb.txt
 
-              # Hex dump first 512 bytes of reference vs ours.
-              $refBootHex = ($refBytes[0..511] | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
-              $ourBootHex = ($ourBytes[0..511] | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+              $refBootHex = ($refBoot | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+              $ourBootHex = ($ourBoot | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
               "REFERENCE boot sector (512 bytes):`n$refBootHex`n`nOURS boot sector (512 bytes):`n$ourBootHex" |
                   Out-File diag/boot-sector-diff.txt
 
-              # Dump MFT record 0 from each (4 KiB each on standard layout).
-              # Our MFT is at lcn=4, cluster_size=4096, so byte offset = 16384.
-              # Reference: derive from its BPB.
-              $ourMftOff = $refMftLcn  # placeholder, we'll use ours below
-              # OUR record 0:
-              $ourMft0 = $ourBytes[16384..(16384+4095)]
-              $ourMft0Hex = ($ourMft0 | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
-              # REFERENCE record 0: at refMftLcn * cluster_size.
-              $refClusterSize = [int]$refBps * [int]$refSpc
-              $refMftOff = [int]$refMftLcn * $refClusterSize
-              if (($refMftOff + 4096) -le $refBytes.Length) {
-                  $refMft0 = $refBytes[$refMftOff..($refMftOff+4095)]
-                  $refMft0Hex = ($refMft0 | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
-                  "REFERENCE MFT record 0 (offset $refMftOff, 4096 bytes):`n$refMft0Hex`n`nOURS MFT record 0 (offset 16384, 4096 bytes):`n$ourMft0Hex" |
-                      Out-File diag/mft0-diff.txt
-              } else {
-                  "Reference MFT offset $refMftOff is beyond captured 64 KiB; rerun with bigger dump" |
-                      Tee-Object diag/mft0-diff.txt
+              # Dump each MFT record individually so the diff is per-record.
+              # Records 0..F: $MFT, $MFTMirr, $LogFile, $Volume, $AttrDef,
+              # root, $Bitmap, $Boot, $BadClus, $Secure, $UpCase, $Extend.
+              $names = @('MFT','MFTMirr','LogFile','Volume','AttrDef',
+                         'root','Bitmap','Boot','BadClus','Secure',
+                         'UpCase','Extend','rec12','rec13','rec14','rec15')
+              for ($i = 0; $i -lt 12; $i++) {
+                  $base = $i * 4096
+                  if ($refMft.Length -ge ($base + 4096) -and $ourMft.Length -ge ($base + 4096)) {
+                      $refRec = $refMft[$base..($base+4095)]
+                      $ourRec = $ourMft[$base..($base+4095)]
+                      $refHex = ($refRec | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+                      $ourHex = ($ourRec | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+                      $name = $names[$i]
+                      "REFERENCE MFT record ${i} (`$$name):`n$refHex`n`nOURS MFT record ${i} (`$$name):`n$ourHex" |
+                          Out-File "diag/mft-rec${i}-${name}-diff.txt"
+                  }
               }
           }
       - name: chkdsk passes
