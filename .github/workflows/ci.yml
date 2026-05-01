@@ -174,16 +174,27 @@ jobs:
           # bytes into the partition area, dismount.
           $vhd = Mount-DiskImage -ImagePath "$pwd\wrapper.vhdx" -PassThru
           Start-Sleep -Seconds 2
+          Initialize-Disk -Number $vhd.Number -PartitionStyle GPT
+          # Initialize-Disk completes async-ish: the LargestFreeExtent
+          # property doesn't refresh until we re-fetch the Disk object.
+          # iter5 hit "specified offset is not valid" because we used
+          # the stale $disk handle whose LargestFreeExtent was still 0.
+          Start-Sleep -Seconds 2
           $disk = Get-Disk -Number $vhd.Number
-          Initialize-Disk -Number $disk.Number -PartitionStyle GPT
-          # Capture disk geometry so partition-creation failures have a
-          # data trail in the log.
           Write-Host "Disk size: $($disk.Size), AllocatedSize: $($disk.AllocatedSize), LargestFreeExtent: $($disk.LargestFreeExtent)"
-          $part = New-Partition -DiskNumber $disk.Number `
-              -Offset 1MB `
-              -Size $rawSize `
+
+          # Use -UseMaximumSize so we don't have to predict GPT slack
+          # arithmetic. Windows picks an aligned offset and the largest
+          # contiguous size. We'll write our nfs.img at $part.Offset
+          # into the disk's raw device path, which is what the prior
+          # write logic does anyway.
+          $part = New-Partition -DiskNumber $vhd.Number `
+              -UseMaximumSize `
               -AssignDriveLetter:$false
           Write-Host "Created partition at offset $($part.Offset), size $($part.Size)"
+          if ($part.Size -lt $rawSize) {
+              throw "partition is smaller ($($part.Size)) than raw NTFS image ($rawSize) — bump wrapper"
+          }
 
           # Open the disk's raw device path and write our NTFS bytes
           # at the partition's offset. \\.\PhysicalDriveN is the
