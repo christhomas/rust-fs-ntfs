@@ -1940,18 +1940,18 @@ pub extern "C" fn fs_ntfs_write_file(
 /// `add_flags` are ORed on; bits in `remove_flags` are ANDed off.
 /// Overlap is rejected. Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_ntfs_file attribute tools(
+pub extern "C" fn fs_ntfs_set_file_attributes(
     image: *const c_char,
     path: *const c_char,
     add_flags: u32,
     remove_flags: u32,
 ) -> c_int {
     let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_file attribute tools: null or non-UTF-8 image");
+        set_error("fs_ntfs_set_file_attributes: null or non-UTF-8 image");
         return -1;
     };
     let Some(fp) = cstr_to_path(path) else {
-        set_error("fs_ntfs_file attribute tools: null or non-UTF-8 path");
+        set_error("fs_ntfs_set_file_attributes: null or non-UTF-8 path");
         return -1;
     };
     match write::set_file_attributes(

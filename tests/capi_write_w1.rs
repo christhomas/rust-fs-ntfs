@@ -1,8 +1,8 @@
-//! C-ABI tests for W1 in-place write functions (set_times, file attribute tools).
+//! C-ABI tests for W1 in-place write functions (set_times, set_file_attributes).
 
 #![allow(unused_unsafe)]
 
-use fs_ntfs::{fs_ntfs_file attribute tools, fs_ntfs_last_error, fs_ntfs_set_times};
+use fs_ntfs::{fs_ntfs_last_error, fs_ntfs_set_file_attributes, fs_ntfs_set_times};
 use ntfs::structured_values::NtfsStandardInformation;
 use ntfs::{Ntfs, NtfsAttributeType};
 use std::ffi::{CStr, CString};
@@ -138,28 +138,28 @@ fn capi_set_times_rejects_null_path() {
 }
 
 #[test]
-fn capi_file attribute tools_adds_readonly() {
-    let img = working_copy("file attribute tools_add_ro");
+fn capi_set_file_attributes_adds_readonly() {
+    let img = working_copy("set_file_attributes_add_ro");
     let img_c = CString::new(img.as_str()).unwrap();
     let p_c = CString::new("/hello.txt").unwrap();
-    let rc = unsafe { fs_ntfs_file attribute tools(img_c.as_ptr(), p_c.as_ptr(), 0x01, 0) };
+    let rc = unsafe { fs_ntfs_set_file_attributes(img_c.as_ptr(), p_c.as_ptr(), 0x01, 0) };
     assert_eq!(rc, 0, "last_error={}", last_error());
     let si = read_si(&img, "/hello.txt");
     assert_ne!(si.file_attributes().bits() & 0x01, 0);
 }
 
 #[test]
-fn capi_file attribute tools_removes_bit() {
-    let img = working_copy("file attribute tools_remove");
+fn capi_set_file_attributes_removes_bit() {
+    let img = working_copy("set_file_attributes_remove");
     let img_c = CString::new(img.as_str()).unwrap();
     let p_c = CString::new("/hello.txt").unwrap();
     // Add ARCHIVE, then remove it.
-    unsafe { fs_ntfs_file attribute tools(img_c.as_ptr(), p_c.as_ptr(), 0x20, 0) };
+    unsafe { fs_ntfs_set_file_attributes(img_c.as_ptr(), p_c.as_ptr(), 0x20, 0) };
     assert_ne!(
         read_si(&img, "/hello.txt").file_attributes().bits() & 0x20,
         0
     );
-    unsafe { fs_ntfs_file attribute tools(img_c.as_ptr(), p_c.as_ptr(), 0, 0x20) };
+    unsafe { fs_ntfs_set_file_attributes(img_c.as_ptr(), p_c.as_ptr(), 0, 0x20) };
     assert_eq!(
         read_si(&img, "/hello.txt").file_attributes().bits() & 0x20,
         0
@@ -167,10 +167,10 @@ fn capi_file attribute tools_removes_bit() {
 }
 
 #[test]
-fn capi_file attribute tools_rejects_overlap() {
+fn capi_set_file_attributes_rejects_overlap() {
     let img_c = CString::new(BASIC_IMG).unwrap();
     let p_c = CString::new("/hello.txt").unwrap();
-    let rc = unsafe { fs_ntfs_file attribute tools(img_c.as_ptr(), p_c.as_ptr(), 0x01, 0x01) };
+    let rc = unsafe { fs_ntfs_set_file_attributes(img_c.as_ptr(), p_c.as_ptr(), 0x01, 0x01) };
     assert_eq!(rc, -1);
     let err = last_error();
     assert!(err.contains("overlap"), "{err:?}");
