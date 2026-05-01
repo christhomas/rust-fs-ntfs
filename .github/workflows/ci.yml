@@ -115,7 +115,12 @@ jobs:
           # needs more headroom.
           fsutil file createnew out.img 67108864
           ./target/release/mkfs_ntfs.exe -L CITEST --serial deadbeefcafe1234 out.img
-          qemu-img convert -f raw -O vhdx out.img out.vhdx
+          # subformat=fixed is required: qemu-img defaults VHDX to
+          # dynamic/sparse, which Mount-DiskImage rejects with
+          # "Virtual hard disk files ... must not be sparse."
+          # Fixed VHDX is uncompressed + non-sparse, mountable on
+          # every Windows version.
+          qemu-img convert -f raw -O vhdx -o subformat=fixed out.img out.vhdx
           # Echo basic file metrics so the run log shows what we built.
           Get-Item out.img,out.vhdx | Format-List Name,Length
       - name: Mount VHDX and capture pre-chkdsk diagnostics
