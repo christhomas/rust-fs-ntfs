@@ -44,13 +44,21 @@ Options:
                            do not currently inspect for active mounts.)
   -n                       Dry-run: parse args + open device but do not write.
   -q, --quiet              Suppress non-error output.
+  --create-size <SIZE>     DiskJockey extension (not in mkntfs): if device
+                           doesn't exist, create it as a regular file of the
+                           given size first. SIZE accepts K/M/G/T suffixes
+                           (1024-based). Refuses to apply to existing block
+                           devices — only valid for image files. Use when
+                           scripting test pipelines so you don't have to chain
+                           truncate + mkfs.ntfs. Without this flag the tool
+                           follows mkntfs convention (file must pre-exist).
   -V, --version            Print version and exit.
   -h, --help               Print this help and exit.
 
 Positional:
   device                   Path to a block device or pre-sized regular file.
                            The file/device MUST already exist at the target
-                           size. Pre-create with
+                           size unless --create-size is given. Pre-create with
                              truncate -s 256M out.img    (Linux/macOS)
                              fsutil file createnew out.img 268435456 (Windows)
 
@@ -80,6 +88,11 @@ struct Opts {
     quick: bool,
     dry_run: bool,
     quiet: bool,
+    /// Bytes from `--create-size <SIZE>`. Same semantics as the ext4
+    /// binary's flag: when `Some(n)` and the device path doesn't
+    /// exist, create it as a regular file of `n` bytes before
+    /// formatting. Refuses on real block/char devices.
+    create_size: Option<u64>,
     device: Option<String>,
 }
 
@@ -92,6 +105,48 @@ fn run() -> Result<(), String> {
 
     let cluster_size = opts.cluster_size.unwrap_or(4096);
     let mft_record_size = opts.mft_record_size.unwrap_or(4096);
+
+    // --create-size handling. Mirror of the mkfs_ext4 binary's flag —
+    // see that file for the doc'd contract. Three cases: existing
+    // file (idempotent), block/char device (refuse), missing path
+    // (create + size). Refusing on block devices is the safety net
+    // against typo-like errors (`/dev/diskN` instead of an image
+    // path).
+    if let Some(n) = opts.create_size {
+        match std::fs::metadata(device) {
+            Ok(meta) => {
+                use std::os::unix::fs::FileTypeExt;
+                let ft = meta.file_type();
+                if ft.is_block_device() || ft.is_char_device() {
+                    return Err(format!(
+                        "--create-size refuses to apply to {device}: looks like a real block/char device, \
+                         not a regular file. Did you mean to leave --create-size off?"
+                    ));
+                }
+                if !ft.is_file() {
+                    return Err(format!(
+                        "--create-size: {device} exists but is neither a regular file nor a device"
+                    ));
+                }
+                if !opts.quiet {
+                    eprintln!(
+                        "mkfs.ntfs: --create-size: {device} already exists ({} bytes); leaving as-is",
+                        meta.len()
+                    );
+                }
+            }
+            Err(_) => {
+                let f = std::fs::File::create(device)
+                    .map_err(|e| format!("--create-size: create {device}: {e}"))?;
+                f.set_len(n)
+                    .map_err(|e| format!("--create-size: set_len({n}) on {device}: {e}"))?;
+                drop(f);
+                if !opts.quiet {
+                    eprintln!("mkfs.ntfs: --create-size: created {device} ({n} bytes)");
+                }
+            }
+        }
+    }
 
     // PathIo::open_rw fails fast on missing path / no write permission.
     // We don't separately stat — PathIo caches the size at open time.
@@ -199,6 +254,12 @@ fn parse_args() -> Result<Opts, String> {
             "-F" | "--force" => opts.force = true,
             "-n" => opts.dry_run = true,
             "-q" | "--quiet" => opts.quiet = true,
+            "--create-size" => {
+                let v = args.next().ok_or_else(|| {
+                    "--create-size requires a SIZE argument (e.g. 256M)".to_string()
+                })?;
+                opts.create_size = Some(parse_size(&v)?);
+            }
             // Accepted-but-ignored mkntfs flags, each takes one argument.
             // Warn so users know the value didn't take effect, but don't
             // fail — keeps existing scripts portable.
@@ -237,6 +298,33 @@ fn parse_args() -> Result<Opts, String> {
     }
 
     Ok(opts)
+}
+
+/// Parse a size like "64M" / "1G" / "1024K" / "33554432" into bytes.
+/// 1024-based multipliers (K/M/G/T), case-insensitive, optional 'B'
+/// suffix tolerated. Bare numbers are bytes. Same convention as
+/// `truncate -s` and most disk-image tools. Mirror of the mkfs_ext4
+/// binary's helper — kept duplicated rather than shared because the
+/// crates ship as independent binaries with their own dep trees.
+fn parse_size(s: &str) -> Result<u64, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err("--create-size: empty size argument".to_string());
+    }
+    let s = trimmed.strip_suffix(['B', 'b']).unwrap_or(trimmed);
+    let (num, mult): (&str, u64) = match s.chars().last() {
+        Some('K' | 'k') => (&s[..s.len() - 1], 1024),
+        Some('M' | 'm') => (&s[..s.len() - 1], 1024 * 1024),
+        Some('G' | 'g') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        Some('T' | 't') => (&s[..s.len() - 1], 1024 * 1024 * 1024 * 1024),
+        Some(c) if c.is_ascii_digit() => (s, 1),
+        _ => return Err(format!("--create-size: unrecognised size suffix in {s:?}")),
+    };
+    let n: u64 = num
+        .parse()
+        .map_err(|_| format!("--create-size: not a valid number: {num:?}"))?;
+    n.checked_mul(mult)
+        .ok_or_else(|| format!("--create-size: {s} overflows u64"))
 }
 
 fn parse_hex_u64(s: &str) -> Result<u64, String> {

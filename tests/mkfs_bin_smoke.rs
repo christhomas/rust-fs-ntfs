@@ -81,6 +81,47 @@ fn mkfs_bin_formats_a_pre_sized_file_and_parses_clean() {
 }
 
 #[test]
+fn mkfs_bin_create_size_creates_then_formats() {
+    // --create-size end-to-end: point at a non-existent path with
+    // --create-size 64M, expect the binary to create + size + format.
+    // No prior `truncate` step.
+    let bin = env!("CARGO_BIN_EXE_mkfs_ntfs");
+    let img = unique_tmp_path("createsize");
+    let img_str = img.to_string_lossy().into_owned();
+    let _ = std::fs::remove_file(&img);
+
+    let out = Command::new(bin)
+        .args([
+            "--create-size",
+            "64M",
+            "--serial",
+            TEST_SERIAL_HEX,
+            &img_str,
+        ])
+        .output()
+        .expect("spawn mkfs_ntfs --create-size");
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        panic!("mkfs_ntfs --create-size failed: {stderr}");
+    }
+
+    let meta = std::fs::metadata(&img).expect("formatted file exists");
+    assert_eq!(
+        meta.len(),
+        64 * 1024 * 1024,
+        "--create-size should size the file exactly"
+    );
+
+    // Result must parse as NTFS via the upstream crate.
+    let bytes = std::fs::read(&img).expect("read formatted image");
+    let mut cursor = std::io::Cursor::new(&bytes);
+    let ntfs = Ntfs::new(&mut cursor).expect("Ntfs::new on --create-size output");
+    assert_eq!(ntfs.serial_number(), TEST_SERIAL);
+
+    let _ = std::fs::remove_file(&img);
+}
+
+#[test]
 fn mkfs_bin_dry_run_does_not_modify_file() {
     let bin = env!("CARGO_BIN_EXE_mkfs_ntfs");
     let img = unique_tmp_path("dryrun");
