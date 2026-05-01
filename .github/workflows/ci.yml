@@ -219,6 +219,10 @@ jobs:
       - name: Mount VHDX and capture pre-chkdsk diagnostics
         id: mount
         shell: pwsh
+        # Don't fail the step on individual cmdlet errors — fsutil reports
+        # "disk corrupt" via a non-zero exit, which causes pwsh to throw
+        # under "Stop" mode. We want to gather every diagnostic regardless.
+        continue-on-error: true
         run: |
           # Same drive-letter discovery pattern as before (snapshot,
           # mount, diff). The wrapper VHDX is GPT-partitioned with
@@ -316,15 +320,70 @@ jobs:
           # Stash the drive letter for later steps.
           "letter=$letter" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
+          # Stash the volume guid path too, so chkdsk can fall back to
+          # \\?\Volume{guid}\ if the drive-letter path can't be parsed.
+          $volPath = "\\?\Volume$($partition.Guid)\"
+          "vol_path=$volPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
           # Capture as much "what does Windows think this volume is?"
-          # metadata as we can BEFORE chkdsk runs. If chkdsk fails the
-          # artifact diff between commits tells us which field shifted.
+          # metadata as we can BEFORE chkdsk runs. None of these are
+          # allowed to fail the step — the chkdsk step is the gate.
           New-Item -ItemType Directory -Path diag -Force | Out-Null
-          Get-Volume -DriveLetter $letter | Format-List * | Out-File diag/get-volume.txt
-          fsutil fsinfo volumeinfo "${letter}:" | Out-File diag/fsutil-volumeinfo.txt
-          fsutil fsinfo statistics "${letter}:" | Out-File diag/fsutil-statistics.txt
-          # Quick sanity: dir listing succeeds (means $MFT + root index parse).
-          Get-ChildItem "${letter}:\" -Force | Out-File diag/root-listing.txt
+          Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue |
+              Format-List * | Out-File diag/get-volume.txt
+          # 2>&1 + |out captures stderr from external tools (fsutil writes
+          # 'Error 1393' to stderr on disk-corrupt) into the file.
+          (& fsutil fsinfo volumeinfo "${letter}:" 2>&1) | Out-File diag/fsutil-volumeinfo.txt
+          (& fsutil fsinfo statistics "${letter}:" 2>&1) | Out-File diag/fsutil-statistics.txt
+          (Get-ChildItem "${letter}:\" -Force -ErrorAction SilentlyContinue) |
+              Out-File diag/root-listing.txt
+
+          # Dump the boot signature (0x55AA at 0x1FE-0x1FF) and full
+          # 512-byte boot sector — narrows down whether mkfs_ntfs missed
+          # a Windows-specific field beyond what we already inspected.
+          $img = [System.IO.File]::ReadAllBytes("$pwd\nfs.img")
+          $sig = '{0:X2} {1:X2}' -f $img[0x1FE], $img[0x1FF]
+          "boot signature at 0x1FE-0x1FF (expected '55 AA'): $sig" |
+              Tee-Object diag/boot-signature.txt
+          $allHex = ($img[0..511] | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+          "full boot sector (512 bytes):`n$allHex" | Out-File diag/boot-sector-full.txt
+          # Compare backup-boot location: NTFS backup at last sector of
+          # volume (volume_size - 512). Read the backup sector via the
+          # raw partition path on the wrapper.
+          $rawPath = "\\.\PhysicalDrive$($disk.Number)"
+          try {
+              $fs = [System.IO.File]::Open($rawPath,
+                  [System.IO.FileMode]::Open,
+                  [System.IO.FileAccess]::Read,
+                  [System.IO.FileShare]::ReadWrite)
+              # Last sector of the partition.
+              $backupOff = $partition.Offset + $partition.Size - 512
+              $fs.Seek($backupOff, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $backup = New-Object byte[] 512
+              $null = $fs.Read($backup, 0, 512)
+              $fs.Close()
+              $bMagic = [System.Text.Encoding]::ASCII.GetString($backup, 3, 8)
+              "Backup boot magic at last sector (offset $backupOff): '$bMagic'" |
+                  Tee-Object diag/backup-boot-magic.txt
+              $bHex = ($backup[0..63] | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+              "first 64 bytes of last sector:`n$bHex" | Out-File diag/backup-boot-hex.txt
+          } catch {
+              "Failed to read backup boot: $_" | Out-File diag/backup-boot-magic.txt
+          }
+
+          # Read the Windows Event Log for filesystem events while this
+          # volume was being probed. Captures the kernel's reason for
+          # rejecting the volume (e.g. NTFS event 55 'corrupt MFT').
+          try {
+              Get-WinEvent -LogName 'System' -MaxEvents 100 -ErrorAction SilentlyContinue |
+                  Where-Object {
+                      $_.ProviderName -in 'Ntfs','Microsoft-Windows-Ntfs','Disk','Volsnap','partmgr'
+                  } |
+                  Select-Object TimeCreated, ProviderName, Id, LevelDisplayName, Message |
+                  Format-List | Out-File diag/eventlog-fs.txt
+          } catch {
+              "Failed to query event log: $_" | Out-File diag/eventlog-fs.txt
+          }
       - name: chkdsk /scan (read-only, verbose)
         id: chkdsk
         shell: pwsh
@@ -334,17 +393,43 @@ jobs:
         continue-on-error: true
         run: |
           $letter = "${{ steps.mount.outputs.letter }}"
-          # /scan = read-only check. /v would be verbose but isn't a
-          # standard chkdsk flag in modern Windows; instead we let
-          # Start-Process redirect stdout for the full transcript.
+          $volPath = "${{ steps.mount.outputs.vol_path }}"
+          New-Item -ItemType Directory -Path diag -Force | Out-Null
+
+          # Try chkdsk on the drive letter first. On a corrupt-marked
+          # volume Windows may refuse — fall back to the \\?\Volume{guid}\
+          # path which bypasses the FS-mounted view.
           $log = "diag/chkdsk-scan.txt"
-          $proc = Start-Process -FilePath chkdsk.exe `
-            -ArgumentList "${letter}:","/scan" `
-            -NoNewWindow -PassThru -Wait `
-            -RedirectStandardOutput $log
-          $exit = $proc.ExitCode
-          "chkdsk /scan exit code: $exit" | Tee-Object diag/chkdsk-exit.txt
-          Get-Content $log
+          $exit = -1
+          if ($letter) {
+              $proc = Start-Process -FilePath chkdsk.exe `
+                -ArgumentList "${letter}:","/scan" `
+                -NoNewWindow -PassThru -Wait `
+                -RedirectStandardOutput $log `
+                -RedirectStandardError "diag/chkdsk-scan-stderr.txt"
+              $exit = $proc.ExitCode
+              "chkdsk ${letter}: exit code: $exit" | Tee-Object diag/chkdsk-exit.txt
+              Get-Content $log
+          }
+
+          # If letter-based chkdsk didn't run or failed early, also try
+          # the volume-guid path (bypasses any pending mount-rejection).
+          if ($exit -ne 0 -and $volPath) {
+              $log2 = "diag/chkdsk-scan-volpath.txt"
+              try {
+                  $proc2 = Start-Process -FilePath chkdsk.exe `
+                    -ArgumentList "$volPath" `
+                    -NoNewWindow -PassThru -Wait `
+                    -RedirectStandardOutput $log2 `
+                    -RedirectStandardError "diag/chkdsk-scan-volpath-stderr.txt"
+                  "chkdsk $volPath exit: $($proc2.ExitCode)" |
+                      Tee-Object diag/chkdsk-exit-volpath.txt
+                  Get-Content $log2
+              } catch {
+                  "chkdsk via volpath threw: $_" | Out-File diag/chkdsk-exit-volpath.txt
+              }
+          }
+
           if ($exit -ne 0) {
             Write-Host "::error::chkdsk /scan reported issues (exit $exit)"
             "chkdsk /scan failed (exit $exit) — see diag/chkdsk-scan.txt for details" `
