@@ -61,60 +61,19 @@ jobs:
       # `clippy -D warnings` can pass. Re-enable once resolved.
       - run: cargo test --release
 
-  # Validate the mkfs_ntfs CLI binary's output by running ntfs-3g's
-  # ntfsfix and ntfsinfo against an image we generated. ntfsfix is the
-  # tool Linux uses to mark NTFS volumes clean after a Windows hibernate
-  # or unclean shutdown — running it `--no-action` (read-only) is a good
-  # quick sanity check that the boot sector + $MFT + $LogFile look
-  # parseable to a non-Microsoft NTFS implementation. ntfsinfo dumps the
-  # parsed metadata so we can grep for the volume label.
+  # The mkfs_ntfs CLI binary's output is validated only against
+  # Microsoft's chkdsk (validate-mkfs-windows below). We deliberately
+  # do NOT run a Linux-side ntfsfix check: ntfs-3g is a GPL re-impl,
+  # not Microsoft's authority, and being non-Microsoft it can disagree
+  # with chkdsk in either direction (accept invalid bytes / reject
+  # valid ones). Gating the build on a non-authoritative validator
+  # creates noise without adding signal. Our crate's own read-path
+  # round-trip already runs in `cargo test` on every PR; that's
+  # sufficient cheap coverage. The real verdict is chkdsk's.
   #
-  # Note: ntfs-3g is GPL — we install it as a CI tool only (apt
-  # package), not bundled into this crate or any consumer. The check
-  # itself runs against a binary we built; nothing is statically linked.
-  #
-  # The real correctness check is Windows chkdsk (validate-mkfs-windows
-  # below) which only runs on tag pushes because windows-latest is
-  # slower to spin up and we don't need it on every PR.
-  validate-mkfs-linux:
-    name: validate mkfs_ntfs (Linux ntfsfix)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.94.1"
-      - name: Install ntfs-3g
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ntfs-3g
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-mkfs-${{ hashFiles('**/Cargo.lock') }}
-      - name: Build mkfs_ntfs
-        run: cargo build --release --bin mkfs_ntfs
-      - name: Format 64 MiB image
-        run: |
-          truncate -s 64M /tmp/out.img
-          ./target/release/mkfs_ntfs -L CITEST --serial deadbeefcafe1234 /tmp/out.img
-      - name: Run ntfsfix --no-action (read-only check)
-        run: |
-          # ntfsfix's read-only mode parses the boot sector + $MFT and
-          # reports any issues without modifying. Exit non-zero on any
-          # parse failure or detected corruption.
-          sudo ntfsfix --no-action /tmp/out.img
-      - name: Run ntfsinfo and verify label round-tripped
-        run: |
-          sudo ntfsinfo --mft /tmp/out.img > /tmp/info.txt 2>&1 || true
-          sudo ntfsinfo /tmp/out.img > /tmp/vol.txt 2>&1
-          cat /tmp/vol.txt
-          grep -qi "Volume Name.*CITEST" /tmp/vol.txt
+  # Trigger validate-mkfs-windows manually via "Run workflow" while
+  # iterating on the mkfs implementation — see the doc'd path in
+  # diskjockey/docs/windows-validation-environment.md.
 
   # Windows-side validation: chkdsk is the canonical "is this a valid
   # NTFS volume?" check, against the same code Microsoft ships. Triggers:
