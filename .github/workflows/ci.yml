@@ -115,6 +115,25 @@ jobs:
           fsutil file createnew nfs.img $rawSize
           ./target/release/mkfs_ntfs.exe -L CITEST --serial deadbeefcafe1234 nfs.img
 
+          # Dump the first 64 bytes of nfs.img BEFORE we wrap/write to the
+          # VHDX. This is the ground-truth view of what mkfs_ntfs produced.
+          # If this is correct but the post-remount read is wrong, the bug
+          # is in the VHDX/PhysicalDrive layer, not mkfs_ntfs. If it's
+          # already wrong here, mkfs_ntfs itself produced a bad boot sector.
+          New-Item -ItemType Directory -Path diag -Force | Out-Null
+          $imgBytes = [System.IO.File]::ReadAllBytes("$pwd\nfs.img")
+          $hex = ($imgBytes[0..63] | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+          $magic = [System.Text.Encoding]::ASCII.GetString($imgBytes[3..10])
+          "nfs.img boot sector magic at offset 3: '$magic'" | Tee-Object diag/nfs-img-magic.txt
+          "first 64 bytes of nfs.img:`n$hex" | Out-File diag/nfs-img-hex.txt
+          # Decode the critical fields by hand so the artifact is self-explanatory.
+          $bps = [System.BitConverter]::ToUInt16($imgBytes, 0x0B)
+          $spc = $imgBytes[0x0D]
+          $totalSectors = [System.BitConverter]::ToUInt64($imgBytes, 0x28)
+          $mftLcn = [System.BitConverter]::ToUInt64($imgBytes, 0x30)
+          $bpbReport = "nfs.img BPB decode:`n  bytes_per_sector (0x0B): $bps`n  sectors_per_cluster (0x0D): $spc`n  total_sectors (0x28): $totalSectors`n  mft_lcn (0x30): $mftLcn"
+          $bpbReport | Tee-Object diag/nfs-img-bpb.txt
+
           # Why we DON'T just `qemu-img convert -O vhdx nfs.img out.vhdx`:
           # Windows' VHDX mounting path REQUIRES a partition table. A
           # raw NTFS volume at offset 0 (superfloppy layout) gets
