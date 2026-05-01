@@ -525,7 +525,7 @@ int64_t fs_ntfs_write_file(const char *image, const char *path,
  * Overlap between add and remove is rejected. Returns 0 on success,
  * -1 on error.
  */
-int fs_ntfs_file attribute tools(const char *image, const char *path,
+int fs_ntfs_set_file_attributes(const char *image, const char *path,
                    uint32_t add_flags, uint32_t remove_flags);
 
 /* ---- Handle-based mutation API (`_h` siblings) ---- */
