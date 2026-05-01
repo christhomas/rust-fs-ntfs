@@ -105,51 +105,94 @@ jobs:
         run: choco install qemu-img -y --no-progress
       - name: Build mkfs_ntfs (Windows)
         run: cargo build --release --bin mkfs_ntfs
-      - name: Generate raw image and convert to VHDX
+      - name: Generate raw image and wrap in GPT-partitioned VHDX
         shell: pwsh
         run: |
-          # 64 MiB chosen because it's the smallest size that exercises
-          # multiple MFT clusters cleanly. Bump if a future mkfs feature
-          # needs more headroom.
-          fsutil file createnew out.img 67108864
-          ./target/release/mkfs_ntfs.exe -L CITEST --serial deadbeefcafe1234 out.img
-          # Mount-DiskImage rejects sparse VHDXs at TWO independent
-          # levels and the error message is the same generic "must
-          # not be sparse" for both:
-          #   1. VHDX internal format = dynamic (qemu-img default)
-          #      → fixed via `-o subformat=fixed`
-          #   2. NTFS host-filesystem sparse attribute set on the
-          #      output file (qemu-img sets it for efficiency)
-          #      → cleared via `fsutil sparse setflag <file> 0`
-          # Both are required to produce a Mount-DiskImage-acceptable
-          # VHDX. Took two attempts to figure that out.
-          qemu-img convert -f raw -O vhdx -o subformat=fixed out.img out.vhdx
-          fsutil sparse setflag out.vhdx 0
-          # Echo basic file metrics so the run log shows what we built.
-          Get-Item out.img,out.vhdx | Format-List Name,Length
+          # Generate the raw NTFS volume bytes via our binary.
+          # 64 MiB is the smallest size that exercises multiple MFT
+          # clusters cleanly. Bump if a future mkfs feature needs more.
+          $rawSize = 64MB
+          fsutil file createnew nfs.img $rawSize
+          ./target/release/mkfs_ntfs.exe -L CITEST --serial deadbeefcafe1234 nfs.img
+
+          # Why we DON'T just `qemu-img convert -O vhdx nfs.img out.vhdx`:
+          # Windows' VHDX mounting path REQUIRES a partition table. A
+          # raw NTFS volume at offset 0 (superfloppy layout) gets
+          # picked up correctly on physical media but VHDX-mounted
+          # disks don't go through the superfloppy auto-detection.
+          # Confirmed by run #25230496866's Get-Disk output:
+          #   NumberOfPartitions: 0   PartitionStyle: MBR
+          # Windows saw our VHDX as "MBR disk with zero partitions",
+          # not "NTFS volume". No drive letter, no chkdsk possible.
+          #
+          # So we build a GPT-partitioned wrapper VHDX, mount it,
+          # initialise + add one partition aligned to 1 MiB, then
+          # dd our NTFS bytes into the partition's offset within
+          # the disk. Windows on remount sees a real partitioned
+          # disk with NTFS at the partition offset and mounts cleanly.
+          # Same layout `diskutil eraseDisk` produces — closer to the
+          # real shipping scenario too.
+
+          # Create an empty fixed VHDX big enough for partition table
+          # overhead (1 MiB GPT primary + 64 MiB data + 1 MiB GPT
+          # backup + slack) → 96 MiB.
+          qemu-img create -f vhdx -o subformat=fixed wrapper.vhdx 96M
+          # Same sparse-attribute cleanup as before (qemu-img sets
+          # the NTFS host-FS sparse flag regardless of subformat).
+          fsutil sparse setflag wrapper.vhdx 0
+
+          # Echo file metrics for the log.
+          Get-Item nfs.img,wrapper.vhdx | Format-List Name,Length
+
+          # Mount the empty wrapper, partition it, write our NTFS
+          # bytes into the partition area, dismount.
+          $vhd = Mount-DiskImage -ImagePath "$pwd\wrapper.vhdx" -PassThru
+          Start-Sleep -Seconds 2
+          $disk = Get-Disk -Number $vhd.Number
+          Initialize-Disk -Number $disk.Number -PartitionStyle GPT
+          $part = New-Partition -DiskNumber $disk.Number `
+              -Offset 1MB `
+              -Size $rawSize `
+              -AssignDriveLetter:$false
+          Write-Host "Created partition at offset $($part.Offset), size $($part.Size)"
+
+          # Open the disk's raw device path and write our NTFS bytes
+          # at the partition's offset. \\.\PhysicalDriveN is the
+          # canonical raw access path — bypasses the FS layer.
+          $rawPath = "\\.\PhysicalDrive$($disk.Number)"
+          $bytes = [System.IO.File]::ReadAllBytes("$pwd\nfs.img")
+          $fs = [System.IO.File]::Open($rawPath,
+              [System.IO.FileMode]::Open,
+              [System.IO.FileAccess]::Write,
+              [System.IO.FileShare]::ReadWrite)
+          try {
+              $fs.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $fs.Write($bytes, 0, $bytes.Length)
+              $fs.Flush()
+          } finally {
+              $fs.Close()
+          }
+          Write-Host "Wrote $($bytes.Length) bytes of NTFS at partition offset"
+
+          # Dismount so the next step's mount goes through a fresh
+          # probe — Windows caches the "no partition recognized"
+          # state from the empty mount, and only a remount makes it
+          # re-scan the partition contents.
+          Dismount-DiskImage -ImagePath "$pwd\wrapper.vhdx" | Out-Null
       - name: Mount VHDX and capture pre-chkdsk diagnostics
         id: mount
         shell: pwsh
         run: |
-          # Snapshot existing drive letters BEFORE mount so we can
-          # identify the new one regardless of how Windows mounts the
-          # VHDX. mkfs_ntfs writes a raw NTFS volume at offset 0 with
-          # NO partition table (same as mkntfs / mkfs.* convention).
-          # Windows recognises this layout as a "superfloppy" — it
-          # mounts the whole disk as one volume and assigns a drive
-          # letter, but `Get-Partition` returns NOTHING because
-          # there's no partition table. The old `Get-Partition |
-          # Get-Volume` pipeline broke for that reason. The before/
-          # after diff finds the new drive letter cleanly whether the
-          # VHDX is GPT-partitioned or superfloppy.
+          # Same drive-letter discovery pattern as before (snapshot,
+          # mount, diff). The wrapper VHDX is GPT-partitioned with
+          # one NTFS partition now, so Windows SHOULD assign a letter
+          # promptly — but the snapshot-diff approach is robust to
+          # both the partitioned and superfloppy layouts, so keep it.
           $lettersBefore = @((Get-Volume |
               Where-Object { $_.DriveLetter }).DriveLetter)
 
-          $vhd = Mount-DiskImage -ImagePath "$pwd\out.vhdx" -PassThru
+          $vhd = Mount-DiskImage -ImagePath "$pwd\wrapper.vhdx" -PassThru
 
-          # Wait up to ~10s for Windows volume manager to assign a
-          # drive letter. Fresh mount can race the storage stack on
-          # cold-start runners.
           $letter = $null
           for ($i = 0; $i -lt 10; $i++) {
             Start-Sleep -Seconds 1
@@ -160,17 +203,14 @@ jobs:
           }
 
           if (-not $letter) {
-            # No drive letter appeared. Possible causes: Windows
-            # didn't recognise the FS at offset 0, the volume manager
-            # is broken, or the VHDX itself is malformed. Dump every
-            # storage state we can read so the artifact has enough
-            # for diagnosis.
+            # Defensive: dump storage state so the artifact has the
+            # full picture if Windows still refuses to assign a letter.
             New-Item -ItemType Directory -Path diag -Force | Out-Null
             Get-Disk | Format-List | Out-File diag/get-disk-on-failure.txt
             Get-Volume | Format-List | Out-File diag/get-volume-on-failure.txt
             Get-Partition -ErrorAction SilentlyContinue | Format-List |
                 Out-File diag/get-partition-on-failure.txt
-            throw "VHDX mounted but no drive letter was assigned within 10s — Windows did not recognise the on-disk filesystem. See diag/ for storage state dumps."
+            throw "wrapper VHDX mounted but no drive letter was assigned within 10s — Windows did not recognise the NTFS partition we wrote. See diag/ for storage state dumps."
           }
 
           Write-Host "Mounted at ${letter}:"
@@ -260,7 +300,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          Dismount-DiskImage -ImagePath "$pwd\out.vhdx" -ErrorAction SilentlyContinue | Out-Null
+          Dismount-DiskImage -ImagePath "$pwd\wrapper.vhdx" -ErrorAction SilentlyContinue | Out-Null
       - name: Upload diagnostics
         # Always upload — successful runs also benefit from having the
         # baseline metadata captured for cross-commit comparison.
