@@ -928,6 +928,121 @@ indexes + valid `$LogFile` writers; this should unblock both the
 chkdsk `frs.cxx 60f` ceiling AND the Windows-write resource error
 in one go.
 
+### iter19: file_attributes 0x06 on system `$STANDARD_INFORMATION` (no ARCHIVE)
+
+Session: `agent-8934-2026-05-02`. Originally numbered `iter14b` in
+[agent-8934-2026-05-02.md](agent-8934-2026-05-02.md); renumbered
+to fit main's chronological sequence after merge. Code lives in
+`src/mkfs.rs::write_standard_information`'s `is_system` branch.
+
+#### Symptom
+
+Subtle byte-diff between our `$STANDARD_INFORMATION` and Microsoft
+`format.com`'s reference, even after the 48-byte / 72-byte form
+choice (main commit `7072242`) was correct. Per-record byte-diff
+(agent-8934-2026-05-02 diag dir `iter-20260502-072713`):
+
+| | reference rec 0 $SI | ours pre-iter19 rec 0 $SI |
+|---|---|---|
+| value bytes | 48 ✓ (post-7072242) | 48 ✓ |
+| `file_attributes` (bytes 32..36) | `0x06` (HIDDEN \| SYSTEM) | **`0x26`** (HIDDEN \| SYSTEM \| **ARCHIVE**) |
+
+#### Root cause + fix
+
+`write_standard_information` initialised `let mut fa: u32 = 0x20`
+(ARCHIVE) for ALL records, then OR'd `0x06` for system records →
+`0x26` on systems. Microsoft's reference shows ARCHIVE NOT set on
+any system record. Restructured to start system records from `0x06`
+(no ARCHIVE) and regular files from `0x20`:
+
+```rust
+let fa: u32 = if is_system {
+    0x06 // HIDDEN | SYSTEM (matches Microsoft reference)
+} else {
+    let mut f: u32 = 0x20; // ARCHIVE
+    if is_dir { f |= 0x10000000; }
+    f
+};
+```
+
+Public references: Microsoft MS-FSCC `_STANDARD_INFORMATION.FileAttributes`
+field documentation. NO Linux-NTFS-implementation source consulted.
+
+Linux test contract 7/7 passing post-fix. Doesn't clear `frs.cxx
+60F` on its own (that's the broader ceiling).
+
+### iter19a (DISPROVEN): rec 11 (`$Extend`) as flat file with `$DATA` and no `$FILE_NAME`
+
+Session: `agent-8934-2026-05-02`. Originally `iter14c`.
+
+#### Hypothesis
+
+Make rec 11 match reference's `0x10/0x50/0x80` (flat file, no
+`$FILE_NAME`, flags=0x1, not in root's `$I30`) → maybe clears
+residual `frs.cxx 60F`.
+
+#### Experiment
+
+Skipped `write_file_name` for rec 11; built with empty resident
+`$DATA`; flags=0x1; removed `$Extend` from root's `$I30`.
+
+#### Result: hypothesis FALSE
+
+Diag dir `iter-20260502-075256` (agent-8934). chkdsk reports:
+
+```
+Flags for file record segment B are incorrect.
+The file name in system file record segment B contains errors.
+Repairing invalid system file name $Extend (B) in directory 5.
+Detected orphaned file $Extend (B), should be recovered into directory file 5.
+An unspecified error occurred (6672732e637878 60f).
+```
+
+chkdsk demands rec 11 either be a directory with `$FILE_NAME` and a
+root-index entry, OR be entirely absent (no FILE magic). The
+flat-file-with-FILE-magic-but-no-$FN form is rejected. Reverted; no
+commit landed.
+
+This disproof set up main's iter15 (`54dda31` "iter15: drop $Extend
+at rec 11"): leave the slot entirely empty, don't write FILE magic
+at all. iter19a tested the other option and proved it doesn't work.
+
+### iter19b (DISPROVEN): drop iter12's IS_VIEW_INDEX flag from rec 9 ($Secure)
+
+Session: `agent-8934-2026-05-02`. Originally `iter14d`.
+
+#### Hypothesis
+
+iter12's IS_VIEW_INDEX flag (0x08) on rec 9 might be obsolete
+post-iter19/iter14-v2 and itself causing residual `frs.cxx 60F`.
+
+#### Experiment
+
+Removed the `is_view_index = record_number == rec::SECURE` branch;
+rec 9 flags = 0x1 (just IN_USE).
+
+#### Result: hypothesis FALSE
+
+Diag dir `iter-20260502-081007` (agent-8934). chkdsk reports BOTH
+the old Stage 1 error AND the trailing frs.cxx 60F:
+
+```
+Flags for file record segment 9 are incorrect.
+...
+CHKDSK is scanning unindexed files for reconnect to their original directory.
+An unspecified error occurred (6672732e637878 60f).
+```
+
+iter12's flag is STILL load-bearing (removing it re-introduces
+Stage 1's error). And `frs.cxx 60F` is INDEPENDENT of the
+IS_VIEW_INDEX flag. Reverted; no commit landed.
+
+What this tells us: iter12 stands; the cause of `frs.cxx 60F` is
+elsewhere (likely candidates documented in
+[agent-8934-2026-05-02.md §9](agent-8934-2026-05-02.md): rec 5's
+richer root SD that main's `SD_ROOT_DIR` does cover, or a global
+validator post-Stage-2).
+
 ## What we learned
 
 1. **Microsoft's NTFS implementation is the only authoritative
