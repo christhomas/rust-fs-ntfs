@@ -94,9 +94,32 @@ autonomous for the duration of the run.
    reason), `blocked-<reason>-<session>`, or `timed-out-<session>`
    when you stop.
 
-7. **Commit on your worktree branch**. Never push to `origin/main`.
-   Commit messages: `<scenario>: <one-line>` subject, body cites
-   evidence (byte-diff or spec).
+7. **Commit on your worktree branch frequently.** Never push to
+   `origin/main`. Commit messages: `<scenario>: <one-line>` subject,
+   body cites evidence (byte-diff or spec).
+
+   **Use the `/commit` skill periodically as a checkpoint.** Don't
+   wait until the scenario is "done" -- if you have a focused unit
+   of work that compiles, runs, and passes the Linux tests, commit
+   it. This:
+
+   - Bounds the blast radius of an interrupted session.
+   - Lets the morning review see exactly what each agent did.
+   - Avoids merge conflicts with other agents -- two agents touching
+     the same file each on their own committed branch reconcile
+     cleanly via the rebase rules; two agents with uncommitted
+     working trees cannot.
+   - Lets you cherry-pick your earlier checkpoint if a later change
+     turns out to be wrong.
+
+   Good checkpoint cadence: after every (a) successful diff capture,
+   (b) one minimal code change that keeps `cargo test` green,
+   (c) findings-doc iteration entry, (d) work-list status transition.
+   Each is its own commit; the `/commit` skill groups them
+   appropriately if you've accumulated several.
+
+   Do NOT bundle multiple bugs into one commit. One bug per commit
+   is still the rule (corroborated-debug Phase 5).
 
 8. **Pick the next scenario** if you have time budget remaining
    (cap your run at ~60 min wall clock). When out of time or out of
