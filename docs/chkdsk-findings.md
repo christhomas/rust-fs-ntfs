@@ -1127,3 +1127,113 @@ iter14 confirmed present on disk (per-record byte parse: rec 0-4,6-11 carry 104-
 Linux baseline tests pass (5 tests: `mkfs::tests::run_encode_decode_roundtrip`, `mkfs::tests::upcase_table_size`, `mkfs_bin_*`, `format_and_parse_back`, `capi_mkfs_then_parse`). `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` clean.
 
 **Next iteration's lead** (recorded for continuity, *not yet attempted*): reference's first 16 MFT records ALL carry FILE magic (records 12-15 are minimal 304-byte placeholders with seq=12..15, flags=0x01 IN_USE, attrs_offset=0x48, bytes_used=0x130). Ours pre-allocates 64 MFT slots but only writes FILE magic into slots 0-11 — slots 12-63 are entirely zero bytes. chkdsk reports "64 file records processed" which suggests it iterates the whole MFT $DATA; the all-zero slots may be triggering the frs.cxx assert.
+
+### iter15: FILE-magic placeholders for unused MFT slots
+
+Session: agent-8a29-2026-05-02. Targeted error: same `frs.cxx 60f` assert as iter14.
+
+**Symptom**
+
+> An unspecified error occurred (6672732e637878 60f).
+
+(Same as iter14 — chkdsk Stage 2 completes "68 index entries processed" then the post-Stage-2 unindexed-file scan trips an internal assert at `frs.cxx:1551`.)
+
+**Diagnostic**
+
+Per-record dump of `reference-mft-16recs.bin` showed every slot 0-15 carries FILE magic. Slots 12-15 specifically carry minimal 304-byte placeholders (`seq=N`, `attrs_offset=0x48`, `bytes_used=0x130`, `flags=0x01` IN_USE — reference treats slots 12-15 as "reserved for future system use", bits 12-15 set in `$MFT:$Bitmap`). Ours pre-allocated 64 MFT slots but only 12 had FILE magic — slots 12-63 were entirely raw zeros. chkdsk reports `64 file records processed` which suggests it iterates the whole `$MFT:$DATA`; raw-zero slots may have been the assert source.
+
+**Per-field diff** *(slots 12..15)*
+
+| Field | reference | ours (pre-iter15) |
+|-------|-----------|-------------------|
+| FILE magic | present | absent (raw zeros) |
+| seq | N (slot number) | n/a (zeros) |
+| flags | 0x01 IN_USE | n/a |
+| bytes_used | 0x130 (304) | n/a |
+| `$MFT:$Bitmap` bit | set | clear |
+
+**Fix**
+
+`src/mkfs.rs`: after writing the 12 system records, loop `slot in 12..mft_records_capacity as u32` and write a FILE-magic placeholder into each unused slot. Placeholder is the **unused** form (FILE magic + seq=0 + IN_USE bit CLEAR + just header + end marker), not reference's IN_USE form, because our `$MFT:$Bitmap` keeps bits 12+ clear (those slots are genuinely free for user files; reference happens to reserve them as system-use). Per the publicly documented NTFS layout, FILE magic with IN_USE=0 is a valid "free MFT slot" representation.
+
+**Result**
+
+iter15 placeholders confirmed on disk (per-record byte parse: slots 12-15 carry `FILE seq=0 flags=0x0 used=80 rec_num=N attrs_off=0x48 end=0xffffffff`). chkdsk verdict on basic-256mib post-iter15: **identical to post-iter14 / post-iter13** — `bad on-disk uppercase table` warning, Stage 1 + Stage 2 complete with same 64/68 counts, then `An unspecified error occurred (frs.cxx 60f)`. Hypothesis was wrong — root cause lies elsewhere again.
+
+Linux baseline tests pass. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` clean.
+
+**Where the frs.cxx 60f hunt stands after iter11→iter15**
+
+Five evidence-corroborated layout fixes have landed since iter10 — each addressed a real divergence between our output and Microsoft `format.com`'s reference:
+
+| Iter | Fix | Targeted symptom (gone?) | Side-effect on frs.cxx? |
+|-----:|-----|--------------------------|-------------------------|
+| 11   | `bytes_used` = end_marker_offset + 8 | "First free byte offset corrected" — gone | hidden |
+| 12   | `MFT_RECORD_IS_VIEW_INDEX` on $Secure | "Flags for file record segment 9 are incorrect" — gone | revealed |
+| 13   | root $I30 indexes all 12 system files | "Detected orphaned file" cascade — gone | persists |
+| 14   | $SECURITY_DESCRIPTOR (0x50) on every system record | (none) | persists |
+| 15   | FILE-magic placeholders in unused MFT slots | (none) | persists |
+
+The frs.cxx assert has survived every byte-diff-driven layout fix from iter12 onward. **Strong indication the cause is content-level, not layout-level** — most likely candidates that have **not** been investigated:
+- `$LogFile` content (we fill with 0xFF / no RSTR; format.com initialises with proper LogFile records)
+- `$UpCase` content (our generator emits a non-canonical mapping; chkdsk's standing "bad on-disk uppercase table" warning is the audible symptom, but the assert may also stem from this)
+- `$MFT:$Bitmap` non-resident value (worth a byte-diff vs reference)
+- `$AttrDef` blob — we emit a hand-rolled 2560-byte canonical NTFS 3.1 table; reference's may differ in subtle ways
+- $Volume's `$VOLUME_INFORMATION` flags (we set clean=0; not corroborated)
+
+For the next iteration: capture reference's `$UpCase` clusters off the VM (the existing pipeline doesn't dump them — needs a small `run-windows-test.ps1` patch to copy `clusters[upcase_lcn..upcase_lcn+upcase_clusters]` into `diag/`). Compare byte-for-byte with our `upcase::generate_upcase_table()` output. Bake the canonical bytes in as a const if they differ. That fixes both "bad on-disk uppercase table" and is the most likely candidate for frs.cxx (chkdsk uses upcase for filename collation across the orphan-recovery scan; mismatched table → confused comparison → assert).
+
+### iter16: canonical NT 3.x $UpCase table baked in (replaces char::to_uppercase generator)
+
+Session: agent-8a29-2026-05-02. Targeted: `Read-only chkdsk found bad on-disk uppercase table - using system table` (warning, fires before Stage 1) AND the trailing `frs.cxx 60f` assert (hypothesis: chkdsk uses upcase for filename collation in the orphan-recovery scan; mismatched table → confused compare → assert).
+
+**Symptom**
+
+> Read-only chkdsk found bad on-disk uppercase table - using system table.
+
+(First line of chkdsk output on every run since iter12. Non-fatal — chkdsk falls back to its built-in table — but blocks chkdsk exit 0.)
+
+**Diagnostic — extracting the canonical bytes**
+
+The reference `format.com`-formatted volume's `$UpCase` cluster content is the source of truth (Microsoft's own output, no GPL involvement). Existing pipeline didn't dump it; extracted directly from the VM with this recipe:
+
+1. SSH to VM, mount `reference.vhdx`, assign drive letter to the Basic partition.
+2. `fsutil file queryextents F:\$UpCase` → `VCN: 0x0 Clusters: 0x20 LCN: 0x6` (32 clusters at LCN 6, cluster_size = 4096 → 32 × 4096 = 131072 bytes = 128 KiB).
+3. Open `\\.\F:` as raw `System.IO.File`, seek to `lcn × cluster_size = 24576`, read 131072 bytes.
+4. SHA256: `41c26bc7a12bdaeb26025c93118697c7e3ef81ee048b00fe5cce2a472e0e0742`.
+5. `scp` back to Mac, `cp` into `src/upcase-canonical.bin`.
+
+**Per-field diff** (our generator output vs reference, before iter16):
+
+| Code point | char::to_uppercase() | NT canonical | Notes |
+|------------|----------------------|--------------|-------|
+| U+00B5 (MICRO SIGN) | 0x039C (GREEK CAPITAL MU) | 0x00B5 (unchanged) | NTFS preserves |
+| U+00DF (LATIN SMALL SHARP S "ß") | 0x0053 (S) | 0x00DF (unchanged) | NTFS doesn't case-fold ß |
+| U+0131 (LATIN SMALL DOTLESS I) | 0x0049 (I) | 0x0131 (unchanged) | NTFS preserves |
+| U+0149 (LATIN SMALL N PRECEDED BY APOSTROPHE) | 0x02BC | 0x0149 | NTFS preserves |
+| U+017F (LATIN SMALL LONG S) | 0x0053 (S) | 0x017F | NTFS preserves |
+| ... | | | |
+
+**327 BMP code points differ in total** between modern Unicode case folding and Microsoft's NT 3.x canonical table. Pattern: NT table is far less aggressive — most characters that Unicode now case-folds, NTFS preserves unchanged.
+
+**Fix**
+
+`src/upcase-canonical.bin`: 131072-byte binary dropped into `src/`, byte-for-byte equal to format.com's reference output (SHA256 above). `src/upcase.rs`: replace the runtime generator with `const CANONICAL_UPCASE: &[u8; 131072] = include_bytes!("upcase-canonical.bin");` and have `generate_upcase_table()` return `CANONICAL_UPCASE.to_vec()`. Cargo's `include_bytes!` adds the `.bin` as a build dependency, so future edits trigger rebuild automatically.
+
+Verified post-build that the resulting `nfs.img`'s `$UpCase` cluster content (LCN read via boot-sector parse + MFT rec 10 $DATA mapping pair decode) hashes to the canonical SHA. U+00B5 → 0x00B5 (was 0x039C with the old generator).
+
+**Result**
+
+`$UpCase` is now byte-for-byte identical to reference. Despite this, **chkdsk still prints `Read-only chkdsk found bad on-disk uppercase table - using system table`**. Implication: chkdsk's "bad upcase" check is keying on something other than the table bytes themselves — possibly the `$UpCase` MFT record's `$STANDARD_INFORMATION` size (ref carries the 48-byte NTFS 1.x form; ours emits the 72-byte NTFS 3.x form on every system record), or some attribute we don't yet write. Frs.cxx 60f assert also unchanged.
+
+iter16 is still a valid fix — the table mismatch was real and the bytes ARE now correct. But the "bad upcase table" message is misleading: it does NOT necessarily indicate table-content corruption.
+
+Linux baseline tests pass. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` clean.
+
+**Where the hunt stands after iter16**
+
+The remaining unique systemic divergence we've identified between ours and reference, **not yet attempted as a fix**, is:
+
+- **$STANDARD_INFORMATION size on every system record** — ref uses 48 bytes (NTFS 1.x form: just CreationTime + 4×timestamp + DOSAttrs); ours uses 72 bytes (NTFS 3.x form: same fields plus zero MaxVersions/VersionNumber/ClassId/OwnerId/SecurityId/QuotaCharged/USN). chkdsk may demand the 48-byte form on system files. This is the single remaining systematic divergence visible in the byte-diff.
+
+If iter17 ($STD_INFO → 48-byte on system records) doesn't fix the chkdsk warning + frs.cxx, the next layer is content-level checks chkdsk does that aren't visible in the per-record dumps — at which point progress requires either Microsoft's chkdsk source or a much heavier instrumentation pass (capture every disk read chkdsk does, correlate with what we wrote vs what reference wrote).
