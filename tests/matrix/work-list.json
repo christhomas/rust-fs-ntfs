@@ -3,31 +3,34 @@
   "_doc": "Multi-agent NTFS test work list. See docs/multi-agent-test-protocol.md. Each scenario name is unique. status starts at 'pending'; agents transition via scripts/claim-scenario.sh.",
   "scenarios": {
     "mac-format-basic-256mib": {
-      "status": "pending",
+      "status": "passed-to-frs60f-ceiling-agent-c6a1-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "CITEST"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan) -> win:enumerate(empty)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan) -> win:enumerate(empty)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c6a1-2026-05-02/iter-20260502-062307"
     },
     "mac-format-tiny-32mib": {
-      "status": "pending",
+      "status": "passed-to-frs60f-ceiling-agent-c6a1-2026-05-02",
       "volume_params": {
         "size_mib": 32,
         "cluster_size": 4096,
         "label": "TINY"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c6a1-2026-05-02/iter-20260502-061249"
     },
     "mac-format-small-64mib": {
-      "status": "pending",
+      "status": "passed-to-frs60f-ceiling-agent-c6a1-2026-05-02",
       "volume_params": {
         "size_mib": 64,
         "cluster_size": 4096,
         "label": "SMALL"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c6a1-2026-05-02/iter-20260502-061518"
     },
     "mac-format-large-1gib": {
       "status": "pending",
@@ -93,14 +96,13 @@
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
     },
     "mac-format-label-cjk": {
-      "status": "passed-implicitly-by-agent-5442-2026-05-02-c6a1",
+      "status": "pending",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "日本語ラベル"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c6a1-2026-05-02/iter-20260502-030838"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
     },
     "mac-format-label-latin1": {
       "status": "pending",

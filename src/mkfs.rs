@@ -151,18 +151,15 @@ pub fn format_filesystem(
         serial,
     )?;
     dev.write_all_at(0, &boot)?;
-    // Backup boot must live at the LAST SECTOR of the volume, not the
-    // start of the last cluster. Per the publicly documented NTFS layout,
-    // ntfs.sys reads BPB.NumberSectors and probes byte offset
-    //   number_sectors * bytes_per_sector
-    // (i.e. one sector before the partition end) for the boot signature.
-    // Writing it at start-of-last-cluster (which is what
-    // `backup_boot_lcn * cluster_size` produces) leaves zeros at the
-    // expected location, so ntfs.sys raises Event ID 55 ("corruption
-    // discovered, exact nature unknown") on every mount and refuses to
-    // recognise the volume as NTFS. At >= 256 MiB Microsoft tolerates
-    // the misplacement; at 32 MiB it does not. Surfaced by scenario
-    // mac-format-tiny-32mib (diag iter-20260502-054124, c6a1 session).
+    // Backup boot lives at the LAST 512-byte sector of the volume —
+    // byte offset (cluster_count * cluster_size) - bytes_per_sector
+    // — matching what publicly documented NTFS layout descriptions
+    // say ntfs.sys probes via BPB.NumberSectors. Was previously
+    // written at start-of-last-cluster; that was 7 sectors too early
+    // for the 4 KiB / 512 default and triggered Event ID 55
+    // ("corruption discovered, exact nature unknown") on
+    // mac-format-tiny-32mib (diag iter-20260502-054124). Moving it to
+    // the last sector cleared Event 55 on tiny (iter-20260502-061249).
     let volume_bytes = cluster_count * cluster_size as u64;
     let backup_boot_byte_offset = volume_bytes - bytes_per_sector as u64;
     dev.write_all_at(backup_boot_byte_offset, &boot)?;
