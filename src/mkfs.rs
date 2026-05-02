@@ -42,11 +42,33 @@ const USA_OFFSET: usize = 0x30;
 
 const ATTR_STANDARD_INFORMATION: u32 = 0x10;
 const ATTR_FILE_NAME: u32 = 0x30;
+const ATTR_SECURITY_DESCRIPTOR: u32 = 0x50;
 const ATTR_VOLUME_NAME: u32 = 0x60;
 const ATTR_VOLUME_INFORMATION: u32 = 0x70;
 const ATTR_DATA: u32 = 0x80;
 const ATTR_INDEX_ROOT: u32 = 0x90;
 const ATTR_END_MARKER: u32 = 0xFFFF_FFFF;
+
+/// Minimal self-relative SECURITY_DESCRIPTOR for the root directory.
+/// Layout per MS-DTYP / MS-FSCC:
+///   - 20-byte header: revision=1, control=SE_SELF_RELATIVE|SE_DACL_PRESENT,
+///     OffsetOwner=20, OffsetGroup=32, OffsetSacl=0, OffsetDacl=44
+///   - Owner SID @0x14: S-1-5-18 (NT AUTHORITY\SYSTEM, 12 bytes)
+///   - Group SID @0x20: S-1-5-18 (same)
+///   - DACL @0x2C: 8-byte ACL header + 1 ACE granting Everyone full access
+///     (ACCESS_ALLOWED, mask=0x001F01FF, sid=S-1-1-0)
+///
+/// Reference rec 5 carries an embedded SD whose specific SIDs identify
+/// the formatting machine; we instead ship a generic SD that grants
+/// the canonical "every system file is fully accessible" stance an
+/// NTFS root needs to be mountable. Total length = 72 bytes.
+const ROOT_SECURITY_DESCRIPTOR: [u8; 72] = [
+    0x01, 0x00, 0x04, 0x80, 0x14, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x2C, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x12, 0x00, 0x00, 0x00,
+    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x12, 0x00, 0x00, 0x00, 0x02, 0x00, 0x1C, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0xFF, 0x01, 0x1F, 0x00, 0x01, 0x01, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+];
 
 /// Win32 + DOS namespace value for $FILE_NAME.
 const NAMESPACE_WIN32_DOS: u8 = 3;
@@ -486,7 +508,15 @@ pub fn format_filesystem(
         ];
         let parent_ref = encode_file_reference(rec::ROOT as u64, rec::ROOT as u16);
         let index_root =
-            build_root_index_root_attr(3, index_block_size, now, parent_ref, &children);
+            build_root_index_root_attr(4, index_block_size, now, parent_ref, &children);
+        // Embedded $SECURITY_DESCRIPTOR. Reference rec 5 carries one
+        // (val_len=0xF8 with machine-specific SIDs); without any SD on
+        // root chkdsk's post-Stage-2 reconnect-scan crashes internally
+        // with `An unspecified error occurred (frs.cxx:60f)` (CI iter13
+        // diag dirs). Ours is generic: SYSTEM as owner+group, DACL
+        // grants Everyone full access. See ROOT_SECURITY_DESCRIPTOR.
+        let sd_attr =
+            build_resident_unnamed(ATTR_SECURITY_DESCRIPTOR, 3, &ROOT_SECURITY_DESCRIPTOR);
         // Root directory has no $DATA (only an $INDEX_ROOT), so $FILE_NAME
         // sizes are 0/0 — matches Microsoft's reference (rec 5).
         let rec_bytes = build_system_record(
@@ -496,7 +526,7 @@ pub fn format_filesystem(
             true,
             0,
             0,
-            &[index_root],
+            &[sd_attr, index_root],
         )?;
         place_record(&mut mft_buf, rs, rec::ROOT, rec_bytes)?;
     }
