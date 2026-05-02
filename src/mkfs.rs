@@ -101,6 +101,10 @@ mod rec {
     pub const BADCLUS: u32 = 8;
     pub const SECURE: u32 = 9;
     pub const UPCASE: u32 = 10;
+    /// iter15: rec 11 reservation kept as a documented constant, but
+    /// the slot is intentionally not populated (Microsoft's reference
+    /// rec 11 is a non-indexed system blob, not $Extend).
+    #[allow(dead_code)]
     pub const EXTEND: u32 = 11;
 }
 
@@ -187,7 +191,18 @@ pub fn format_filesystem(
         serial,
     )?;
     dev.write_all_at(0, &boot)?;
-    dev.write_all_at(backup_boot_lcn * cluster_size as u64, &boot)?;
+    // Backup boot lives at the LAST 512-byte sector of the volume —
+    // byte offset (cluster_count * cluster_size) - bytes_per_sector —
+    // matching what publicly documented NTFS layout descriptions say
+    // ntfs.sys probes via BPB.NumberSectors. Was previously written at
+    // start-of-last-cluster; that was 7 sectors too early for the
+    // 4 KiB / 512 default and triggered Event ID 55 on small volumes
+    // (mac-format-tiny-32mib). Moving it to the last sector clears
+    // Event 55. Cross-applied from agent-c6a1-2026-05-02 (commits
+    // 80a3d88 + 2165997).
+    let volume_bytes = cluster_count * cluster_size as u64;
+    let backup_boot_byte_offset = volume_bytes - bytes_per_sector as u64;
+    dev.write_all_at(backup_boot_byte_offset, &boot)?;
 
     // 2. $LogFile — fill with 0xFF (RSTR-less; chkdsk reinits on mount).
     let log_size_bytes = logfile_clusters * cluster_size as u64;
@@ -270,6 +285,14 @@ pub fn format_filesystem(
             &mp,
         )?;
         let bitmap_value_size = mft_records_capacity.div_ceil(8) as usize;
+        // iter15: rec 11 is intentionally LEFT FREE (not marked in-use,
+        // not written below). Microsoft's reference at rec 11 is a
+        // non-indexed system blob ($STANDARD_INFORMATION + $SECURITY_
+        // DESCRIPTOR + $DATA, no $FILE_NAME, no IS_DIRECTORY flag) —
+        // ours used to be a $FILE_NAME-bearing $Extend directory linked
+        // from root. With our $Extend present, chkdsk's post-Stage-2
+        // reconnect-scan crashed internally with `frs.cxx:60f`. Removing
+        // the slot until we know what reference's rec 11 actually is.
         let mft_bitmap_value = make_mft_internal_bitmap(
             bitmap_value_size,
             &[
@@ -284,7 +307,6 @@ pub fn format_filesystem(
                 rec::BADCLUS,
                 rec::SECURE,
                 rec::UPCASE,
-                rec::EXTEND,
             ],
         );
         let bitmap_attr = build_resident_unnamed(0xB0, 4, &mft_bitmap_value);
@@ -515,11 +537,9 @@ pub fn format_filesystem(
                 seq: rec::UPCASE as u16,
                 name: "$UpCase",
             },
-            RootIndexChild {
-                rec_num: rec::EXTEND,
-                seq: rec::EXTEND as u16,
-                name: "$Extend",
-            },
+            // iter15: $Extend (rec 11) intentionally NOT indexed — see
+            // bitmap comment above. Reference root \$I30 has 11 entries
+            // (no $Extend); ours used to have 12. Drops back to 11.
         ];
         let parent_ref = encode_file_reference(rec::ROOT as u64, rec::ROOT as u16);
         let index_root =
@@ -687,26 +707,13 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::UPCASE, rec_bytes)?;
     }
 
-    // record 11: $Extend (empty directory)
-    {
-        let index_block_size: u32 = 4096;
-        let index_root = build_empty_index_root_attr(3, index_block_size, bytes_per_sector);
-        // $Extend has no $DATA (only $INDEX_ROOT), 0/0 like root dir.
-        let rec_bytes = build_system_record(
-            &mft_record_layout,
-            rec::EXTEND,
-            "$Extend",
-            true,
-            0,
-            0,
-            &[index_root],
-        )?;
-        place_record(&mut mft_buf, rs, rec::EXTEND, rec_bytes)?;
-    }
-
-    // 12..15 reserved — leave free in $MFT:$Bitmap (handled above) and
-    // the record bytes zero. NTFS treats records with no FILE magic and
-    // IN_USE clear as available.
+    // record 11..15: intentionally left free. iter15 stopped writing a
+    // $FILE_NAME-bearing $Extend directory at rec 11 because Microsoft's
+    // reference doesn't put $Extend there (its rec 11 is a non-indexed
+    // system blob), and chkdsk's post-Stage-2 reconnect-scan crashes
+    // internally (`frs.cxx:60f`) when it walks our $Extend's $FILE_NAME.
+    // Slot is left zero (no FILE magic, IN_USE bit clear in $MFT:$Bitmap).
+    // NTFS treats records with no FILE magic and IN_USE clear as available.
 
     // 6. Write $MFT to disk + mirror first 4 records ----------------------
     dev.write_all_at(mft_lcn * cluster_size as u64, &mft_buf)?;
@@ -756,10 +763,19 @@ fn build_boot_sector(
                                                           // 0x20..0x24: total large sectors (FAT) = 0
     b[0x24..0x28].copy_from_slice(&0x00800080u32.to_le_bytes()); // signature byte for NTFS
 
-    // Total sectors (volume size in sectors). Includes the very last
-    // sector which contains the backup boot.
-    let total_sectors: u64 = cluster_count * (cluster_size as u64) / bytes_per_sector as u64;
-    b[0x28..0x30].copy_from_slice(&total_sectors.to_le_bytes());
+    // BPB NumberSectors at offset 0x28: count of *data* sectors in the
+    // volume, NOT counting the trailing backup-boot sector. Microsoft
+    // format.com always writes (volume_sectors - 1). Corroborated in
+    // agent-840e-2026-05-02 / agent-c6a1-2026-05-02 iter13: 96 MiB
+    // reference shows NumberSectors=0x0002FEFF for 196352 partition
+    // sectors, i.e. N-1. We previously wrote N (the full sector count);
+    // at >= 256 MiB the off-by-one was tolerated by chkdsk + ntfs.sys,
+    // but at 32 MiB it pushes the kernel's expected backup-boot location
+    // past EOV and ntfs.sys refuses to mount. Cross-applied from
+    // agent-c6a1-2026-05-02 commit 84a83d7.
+    let volume_sectors: u64 = cluster_count * (cluster_size as u64) / bytes_per_sector as u64;
+    let number_sectors: u64 = volume_sectors - 1;
+    b[0x28..0x30].copy_from_slice(&number_sectors.to_le_bytes());
     b[0x30..0x38].copy_from_slice(&mft_lcn.to_le_bytes());
     b[0x38..0x40].copy_from_slice(&mftmirr_lcn.to_le_bytes());
 
@@ -1240,68 +1256,6 @@ fn build_root_index_root_attr(
 
     let eo = ih + 16;
     buf[eo..eo + entries_buf.len()].copy_from_slice(&entries_buf);
-
-    buf
-}
-
-fn build_empty_index_root_attr(
-    attr_id: u16,
-    index_block_size: u32,
-    _bytes_per_sector: u16,
-) -> Vec<u8> {
-    // Attribute layout: 16 (common) + 8 (resident fields) + name "$I30"
-    // (8 bytes UTF-16 LE) + value padded to 8.
-    let common_header = 16usize;
-    let resident_fields = 8usize;
-    let header_size = common_header + resident_fields;
-    let name_offset = header_size;
-    let name_bytes = 8usize;
-    let value_offset = align8(name_offset + name_bytes);
-    let ir_value_size = 16 + 16 + 16; // IR_HEADER + INDEX_HEADER + LAST sentinel
-    let attr_length = align8(value_offset + ir_value_size);
-
-    let mut buf = vec![0u8; attr_length];
-    buf[0..4].copy_from_slice(&ATTR_INDEX_ROOT.to_le_bytes());
-    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
-    buf[8] = 0;
-    buf[9] = 4; // name_length: "$I30" = 4 chars
-    buf[10..12].copy_from_slice(&(name_offset as u16).to_le_bytes());
-    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
-    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
-    buf[16..20].copy_from_slice(&(ir_value_size as u32).to_le_bytes());
-    buf[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes());
-    buf[22] = 0;
-    buf[23] = 0;
-
-    // Name "$I30"
-    let i30: [u16; 4] = ['$' as u16, 'I' as u16, '3' as u16, '0' as u16];
-    for (i, c) in i30.iter().enumerate() {
-        let off = name_offset + i * 2;
-        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
-    }
-
-    // INDEX_ROOT header (16 bytes)
-    let v = value_offset;
-    buf[v..v + 4].copy_from_slice(&0x30u32.to_le_bytes()); // attribute_type = $FILE_NAME
-    buf[v + 4..v + 8].copy_from_slice(&1u32.to_le_bytes()); // collation = COLLATION_FILE_NAME
-    buf[v + 8..v + 12].copy_from_slice(&index_block_size.to_le_bytes());
-    buf[v + 12] = 1;
-    // 3 bytes padding remain zero.
-
-    // INDEX_HEADER (16 bytes)
-    let ih = v + 16;
-    buf[ih..ih + 4].copy_from_slice(&16u32.to_le_bytes());
-    buf[ih + 4..ih + 8].copy_from_slice(&32u32.to_le_bytes());
-    buf[ih + 8..ih + 12].copy_from_slice(&32u32.to_le_bytes());
-    // flags = 0 (no $INDEX_ALLOCATION)
-
-    // LAST sentinel
-    let le = ih + 16;
-    buf[le..le + 8].copy_from_slice(&0u64.to_le_bytes());
-    buf[le + 8..le + 10].copy_from_slice(&16u16.to_le_bytes());
-    buf[le + 10..le + 12].copy_from_slice(&0u16.to_le_bytes());
-    buf[le + 12..le + 14].copy_from_slice(&0x0002u16.to_le_bytes());
-    buf[le + 14..le + 16].copy_from_slice(&0u16.to_le_bytes());
 
     buf
 }
