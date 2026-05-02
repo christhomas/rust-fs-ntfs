@@ -1,0 +1,239 @@
+{
+  "_format": "v1",
+  "_doc": "Multi-agent NTFS test work list. See docs/multi-agent-test-protocol.md. Each scenario name is unique. status starts at 'pending'; agents transition via scripts/claim-scenario.sh.",
+  "scenarios": {
+    "mac-format-basic-256mib": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "CITEST"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan) -> win:enumerate(empty)"
+    },
+    "mac-format-tiny-32mib": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 32,
+        "cluster_size": 4096,
+        "label": "TINY"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+    },
+    "mac-format-small-64mib": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 64,
+        "cluster_size": 4096,
+        "label": "SMALL"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+    },
+    "mac-format-large-1gib": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 1024,
+        "cluster_size": 4096,
+        "label": "ONE_GIB"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+    },
+    "mac-format-cluster-512": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 512,
+        "label": "C512"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+    },
+    "mac-format-cluster-1k": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 1024,
+        "label": "C1K"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+    },
+    "mac-format-cluster-8k": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 8192,
+        "label": "C8K"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+    },
+    "mac-format-cluster-64k": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 1024,
+        "cluster_size": 65536,
+        "label": "C64K"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+    },
+    "mac-format-label-empty": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": ""
+      },
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+    },
+    "mac-format-label-32chars": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+    },
+    "mac-format-label-cjk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "日本語ラベル"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+    },
+    "mac-format-label-latin1": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "Disk éclipse"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+    },
+    "mac-format-win-write-tiny": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "WRTINY"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk -> win:write(tiny.txt='hello world') -> win:chkdsk -> win:enumerate(tiny.txt)",
+      "fixture_files": [
+        {
+          "name": "tiny.txt",
+          "content": "hello world"
+        }
+      ]
+    },
+    "mac-format-win-write-medium": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "WRMED"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk -> win:write(medium.bin=4KB) -> win:chkdsk -> win:enumerate(medium.bin)",
+      "fixture_files": [
+        {
+          "name": "medium.bin",
+          "size_bytes": 4096,
+          "content_pattern": "zeros"
+        }
+      ]
+    },
+    "mac-format-win-write-large": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "WRLARGE"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk -> win:write(big.bin=4MiB) -> win:chkdsk -> win:enumerate(big.bin)",
+      "fixture_files": [
+        {
+          "name": "big.bin",
+          "size_bytes": 4194304,
+          "content_pattern": "incrementing"
+        }
+      ]
+    },
+    "mac-format-win-write-many-small": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "MANY"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk -> win:write(256 files of 16 bytes) -> win:chkdsk -> win:enumerate(all)"
+    },
+    "mac-format-win-write-then-delete": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "WRDEL"
+      },
+      "operation_sequence": "mac:format -> win:write(F1,F2,F3) -> win:delete(F2) -> win:chkdsk -> win:enumerate(F1,F3)"
+    },
+    "mac-format-mac-enumerate-empty": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "MENUM"
+      },
+      "operation_sequence": "mac:format -> mac:enumerate(empty: only '.')",
+      "_note": "depends on Mac-side enumerate CLI; first agent picking this scaffolds tests/matrix/inspect/"
+    },
+    "mac-format-win-write-mac-enumerate": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "RTRIP"
+      },
+      "operation_sequence": "mac:format -> win:write(F1,F2) -> mac:enumerate(F1,F2)",
+      "_note": "depends on Mac-side enumerate CLI"
+    },
+    "mac-format-win-write-win-delete-mac-verify-empty": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "DELRT"
+      },
+      "operation_sequence": "mac:format -> win:write(F1,F2,F3) -> win:delete(all) -> mac:enumerate(empty)",
+      "_note": "depends on Mac-side enumerate CLI"
+    },
+    "win-format-win-write-mac-verify": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "WINREF"
+      },
+      "operation_sequence": "win:format -> win:write(F1,F2) -> mac:enumerate(F1,F2)",
+      "_note": "Microsoft format.com is the canonical reference; this proves our reader handles Microsoft-format output"
+    },
+    "win-format-win-write-mac-write-win-verify": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "INTERMIX"
+      },
+      "operation_sequence": "win:format -> win:write(F1) -> mac:write(F2) -> win:chkdsk -> win:enumerate(F1,F2)",
+      "_note": "depends on Mac-side writer; first agent scaffolds it or marks blocked-on-writer"
+    },
+    "win-format-win-write-mac-delete-win-verify": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "MACDEL"
+      },
+      "operation_sequence": "win:format -> win:write(F1,F2) -> mac:delete(F1) -> win:chkdsk -> win:enumerate(F2)",
+      "_note": "depends on Mac-side deleter"
+    }
+  }
+}
