@@ -16,7 +16,9 @@
 param(
     [int]$VolumeSizeMb = 256,
     [int]$WrapperSizeMb = 384,
-    [string]$Label = "CITEST"
+    [string]$Label = "CITEST",
+    [int]$ClusterSize = 4096,
+    [string]$WinFixtures = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,7 +54,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "[2/6] Generating nfs.img and wrapping in VHDX ..."
 $rawSize = $VolumeSizeMb * 1MB
 fsutil file createnew nfs.img $rawSize | Out-Null
-./target/release/mkfs_ntfs.exe -L $Label --serial deadbeefcafe1234 nfs.img |
+./target/release/mkfs_ntfs.exe -L $Label -c $ClusterSize --serial deadbeefcafe1234 nfs.img |
     Tee-Object diag/mkfs-output.txt
 
 # Pre-wrap BPB dump (ground-truth view of mkfs_ntfs output).
