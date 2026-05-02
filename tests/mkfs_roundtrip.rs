@@ -97,8 +97,16 @@ fn format_and_parse_back() {
         .expect("read $VOLUME_NAME");
     assert_eq!(name.name().to_string_lossy(), "TESTVOL");
 
-    // Root directory exists, is a directory, and is empty (no children
-    // beyond the synthesized "." / ".." that mount layers add).
+    // Root directory's $I30 must contain entries for every system file
+    // (records 0..10 — main's layout leaves rec 11 unwritten per
+    // agent-5442's iter14-v2 finding) plus a self-entry for ".". This
+    // matches Microsoft format.com's output and the publicly documented
+    // NTFS layout. See iter13 in docs/chkdsk-findings.md: prior builds
+    // left the root index empty, which made chkdsk treat every system
+    // file as orphaned ("Detected orphaned file $X (N), should be
+    // recovered into directory file 5"). Entry order is COLLATION_FILE_NAME
+    // (case-insensitive UTF-16 with shorter-prefix-loses), which on
+    // pure-ASCII names reduces to ASCII-uppercase code-unit comparison.
     let root = ntfs.root_directory(&mut cursor).expect("root directory");
     let index = root
         .directory_index(&mut cursor)
@@ -116,9 +124,13 @@ fn format_and_parse_back() {
         }
         names.push(key.name().to_string_lossy());
     }
-    assert!(
-        names.is_empty(),
-        "expected empty root directory, got: {names:?}"
+    assert_eq!(
+        names,
+        vec![
+            "$AttrDef", "$BadClus", "$Bitmap", "$Boot", "$LogFile", "$MFT", "$MFTMirr", "$Secure",
+            "$UpCase", "$Volume", ".",
+        ],
+        "root $I30 must list every system file in COLLATION_FILE_NAME order"
     );
 
     // $UpCase should be readable as the file at record 10 with a

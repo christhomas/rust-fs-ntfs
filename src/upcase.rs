@@ -5,14 +5,27 @@
 //! code point `c`. NTFS uses this table for case-insensitive compare
 //! in B+ tree indexes (COLLATION_FILE_NAME).
 //!
-//! Historically `index_io` used an ASCII-only case-folder for
-//! insertion sort. That was wrong for non-ASCII filenames — our sort
-//! order and Windows' upcase order diverged, so Windows' binary search
-//! missed entries we inserted. This module restores correct collation.
+//! The on-disk table must match Microsoft's canonical NT 3.x mapping
+//! byte-for-byte. Earlier versions of this module synthesised the
+//! table from `char::to_uppercase()` (modern Unicode), which differed
+//! from Microsoft's table at 327 BMP code points (e.g. U+00B5
+//! MICRO SIGN — modern Unicode uppercases to U+039C GREEK CAPITAL
+//! LETTER MU; NTFS preserves it as U+00B5). chkdsk reports
+//! `Read-only chkdsk found bad on-disk uppercase table — using
+//! system table` when our table doesn't match its own — and uses its
+//! built-in table for the rest of the run, which causes filename
+//! collation to disagree with what we wrote on disk.
 //!
-//! References (no GPL code consulted):
-//! * [Flatcap $UpCase](https://flatcap.github.io/linux-ntfs/ntfs/files/upcase.html)
-//! * MS-FSCC (collation rules)
+//! The canonical 128 KiB is captured byte-for-byte from a Microsoft
+//! `format.com /FS:NTFS` reference volume — see
+//! `src/upcase-canonical.bin` (SHA256
+//! 41c26bc7a12bdaeb26025c93118697c7e3ef81ee048b00fe5cce2a472e0e0742)
+//! and the iter16 entry in `docs/chkdsk-findings.md` for the
+//! extraction recipe.
+//!
+//! No GPL/LGPL code or NTFS-on-Linux table was consulted — the bytes
+//! are Microsoft's own output, captured via `fsutil file queryextents`
+//! + raw volume read on a clean format.com-formatted VHDX.
 
 use std::fs::File;
 use std::io::BufReader;
@@ -23,32 +36,20 @@ use ntfs::{KnownNtfsFileRecordNumber, Ntfs, NtfsAttributeType, NtfsReadSeek};
 use crate::block_io::{BlockIo, IoReadSeek};
 
 const UPCASE_LEN: usize = 65536;
+const UPCASE_BYTES: usize = UPCASE_LEN * 2; // 131072
 
-/// Generate the 128 KiB `$UpCase` table at runtime via Rust's stdlib
-/// `char::to_uppercase()`. Surrogate code points (0xD800..=0xDFFF) are
-/// passed through unchanged — they have no Unicode case mapping. NTFS
-/// only requires *a valid uppercase mapping*, not the historical NT
-/// table; both reader and writer in this crate consult `$UpCase` so
-/// any internally consistent mapping suffices for COLLATION_FILE_NAME.
+/// Microsoft-canonical NT 3.x `$UpCase` table (128 KiB, 65536 LE u16).
+const CANONICAL_UPCASE: &[u8; UPCASE_BYTES] = include_bytes!("upcase-canonical.bin");
+
+/// Return the on-disk `$UpCase` table that `mkfs_ntfs` writes into
+/// MFT record 10's `$DATA`. Microsoft's canonical NT 3.x table,
+/// captured verbatim from `format.com` reference output and embedded
+/// at compile time. chkdsk verifies the table's bytes against its
+/// built-in copy; mismatches surface as
+/// `Read-only chkdsk found bad on-disk uppercase table - using
+/// system table`.
 pub fn generate_upcase_table() -> Vec<u8> {
-    let mut out = vec![0u8; UPCASE_LEN * 2];
-    for cp in 0u32..=0xFFFF {
-        let upper: u16 = if (0xD800..=0xDFFF).contains(&cp) {
-            cp as u16
-        } else if let Some(c) = char::from_u32(cp) {
-            let mapped = c.to_uppercase().next().unwrap_or(c) as u32;
-            if mapped <= 0xFFFF {
-                mapped as u16
-            } else {
-                cp as u16
-            }
-        } else {
-            cp as u16
-        };
-        let off = (cp as usize) * 2;
-        out[off..off + 2].copy_from_slice(&upper.to_le_bytes());
-    }
-    out
+    CANONICAL_UPCASE.to_vec()
 }
 
 pub struct UpcaseTable {
