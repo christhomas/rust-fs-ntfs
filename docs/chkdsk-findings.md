@@ -1079,6 +1079,27 @@ validator post-Stage-2).
    bug. Reading the public NTFS layout spec (MS-FSCC) tells you
    what each byte means; the diff tells you which one we got wrong.
 
+7. **chkdsk identifies system records by NAME, not by slot.**
+   Modern `format.com` does not use the historic NTFS-3.0 system-file
+   slot order: e.g. on a freshly formatted 256 MiB volume, slot 9
+   holds `$Quota` rather than `$Secure`. So when byte-diffing rec N
+   against the reference, **compare by `$FILE_NAME`, not by slot
+   index.** A flag-bit comparison at the same slot may be
+   uninformative simply because the reference's rec 9 is a different
+   system file than ours. (Surfaced by agent-ab9e2872's iter12 work
+   on the `$Secure` view-index flag.) When the byte-diff is
+   uninformative, fall back to the public Microsoft spec rather than
+   to plausibility, and document the spec citation in the commit
+   message.
+
+8. **Stage 1 chkdsk errors hide Stage 2+ bugs.** If chkdsk reports
+   even a single "Flags for file record segment N are incorrect" on
+   Stage 1, its orphan-recovery list in Stage 2 truncates around
+   record N. Bugs in records past that point remain invisible until
+   the earlier error is fixed and chkdsk is re-run. Plan iterations
+   accordingly: shipping a fix that eliminates a Stage 1 error often
+   uncovers a wave of new errors in higher records.
+
 ### iter13: orphan-system-files in root $I30
 
 Session: agent-8a29-2026-05-02. Scenario: mac-format-basic-256mib.
