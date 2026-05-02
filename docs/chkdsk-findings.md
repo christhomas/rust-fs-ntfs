@@ -709,7 +709,87 @@ allowed it; the next iteration of this task should:
    the right control flags).
 3. Re-run the pipeline before claiming any fix.
 
-**iter14-v2 (this session): SD with reference layout order — mounts cleanly, chkdsk verdict unchanged**
+**iter15: drop `$Extend` at rec 11 + cross-apply c6a1's BPB fixes**
+
+Three changes bundled (committed `54dda31`):
+
+- Stop writing `$Extend` at rec 11. Microsoft's reference rec 11 has
+  no `$FILE_NAME`, no `$INDEX_ROOT` — just `$STANDARD_INFORMATION` +
+  `$SECURITY_DESCRIPTOR` + `$DATA`. Rec 11 is now zeroed in the MFT
+  buffer and not marked in `$MFT:$Bitmap`.
+- Backup boot sector at the LAST 512-byte sector of the volume
+  (cross-applied from agent-c6a1-2026-05-02 commits 80a3d88 +
+  2165997). Was at start of last cluster; that's 7 sectors too early
+  and triggered Event ID 55 on small volumes.
+- BPB NumberSectors = volume_sectors - 1 (cross-applied from c6a1
+  commit 84a83d7). Was N (full count); spec says N-1.
+
+Result on default 256 MiB and 32 MiB tiny (diag dirs
+`iter-20260502-072332` / `iter-20260502-072454`): both volumes
+mount cleanly as NTFS, Stage 1 + Stage 2 verify clean, post-Stage-2
+reconnect-scan still errors `frs.cxx:60f` (same ceiling). Tiny was
+previously failing at MOUNT (Event 55, FAT32 misdetection); now
+reaches the same ceiling 256 MiB has been hitting since iter13.
+
+**iter16-attempt: 104-byte SD on every system record — REVERTED, broke mount**
+
+Hypothesis from agent-8a29's notes in the shared work-list: every
+system record needs an embedded `$SECURITY_DESCRIPTOR` attribute.
+Reference dump confirmed: every system record (0..10) has SD:0x80
+(value=104 bytes), and on records 0/1/2/4/5/6/7/8/10 the bytes are
+**byte-for-byte identical** — a single canonical SD shared across
+system records. Records 3/9/11 differ at offsets 32–33 / 52–53 (the
+two ACE access masks: `0x0001009F` instead of `0x00120089`, i.e.
+write+delete instead of read-mostly).
+
+Implementation: extracted `SYSTEM_SECURITY_DESCRIPTOR` from the
+reference, wired `build_system_record` to emit it on every system
+record, removed the per-rec-5 SD path.
+
+Result on default 256 MiB (diag dir `iter-20260502-073152`):
+
+> chkdsk readonly: "Cannot open volume for direct access."
+> Get-Volume: FileSystemType: Unknown
+> Event Log: 99 NTFS Event ID 55 (corruption discovered, exact nature unknown)
+
+Verified the SD bytes on rec 0/1/5 byte-by-byte: **identical to
+reference**. Yet Windows rejected the volume at mount. Some
+structural interaction we don't yet understand — likely involves
+$STANDARD_INFORMATION's `security_id` field (we always set it to 0;
+maybe Windows rejects per-rec SD when security_id=0 + $Secure stub
+empty), or attribute-cursor placement when SD pushes the next attr
+to a different alignment.
+
+Reverted (this commit): `build_system_record` no longer emits SD.
+The two const definitions (`ATTR_SECURITY_DESCRIPTOR`,
+`SYSTEM_SECURITY_DESCRIPTOR`) are kept under `#[allow(dead_code)]`
+for the iter17 redo to reuse without re-deriving them. Falls back
+to iter15's verified state.
+
+**iter17 ladder (next agent's task)**
+
+The post-Stage-2 `frs.cxx:60f` ceiling has survived: iter13 (root
+$I30), iter14-v2 (root SD), iter15 ($Extend drop + BPB fixes),
+iter16-attempt (SD on every system rec). Open hypotheses:
+
+1. **`$Secure` view-index attributes ($SDS / $SDH / $SII)**.
+   Reference rec 9's $Secure has these populated; ours has only an
+   empty `$DATA` stub. chkdsk's reconnect-scan may dereference them.
+2. **`$STANDARD_INFORMATION.security_id`**. We write 0 everywhere.
+   With per-record SD missing, this might be tolerated (iter15
+   state); when SD is added but security_id stays 0, the kernel may
+   detect the inconsistency (iter16 state). Test: add SD on every
+   record AND set security_id to 1 (or some non-zero) and see
+   whether mount survives.
+3. **`$LogFile` RSTR records**. We fill with 0xFF and trust ntfs.sys
+   to re-init. Modern ntfs.sys may demand at least one valid RSTR
+   record header at the start.
+4. **`$UpCase` canonical bytes**. chkdsk says "bad on-disk uppercase
+   table" since iter6; falls back to system table. Possibly the
+   reconnect-scan keys on something the system table reports
+   differently from the on-disk one.
+
+## What we learned
 
 Restructured `ROOT_SECURITY_DESCRIPTOR` to put DACL right after the
 20-byte header (offset 0x14) with owner/group at the tail (offsets

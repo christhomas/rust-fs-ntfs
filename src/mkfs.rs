@@ -42,6 +42,9 @@ const USA_OFFSET: usize = 0x30;
 
 const ATTR_STANDARD_INFORMATION: u32 = 0x10;
 const ATTR_FILE_NAME: u32 = 0x30;
+/// iter16 reservation. Kept for the future iter17 SD redo even though
+/// the current writer does not emit a `$SECURITY_DESCRIPTOR` attribute.
+#[allow(dead_code)]
 const ATTR_SECURITY_DESCRIPTOR: u32 = 0x50;
 const ATTR_VOLUME_NAME: u32 = 0x60;
 const ATTR_VOLUME_INFORMATION: u32 = 0x70;
@@ -49,40 +52,57 @@ const ATTR_DATA: u32 = 0x80;
 const ATTR_INDEX_ROOT: u32 = 0x90;
 const ATTR_END_MARKER: u32 = 0xFFFF_FFFF;
 
-/// Self-relative SECURITY_DESCRIPTOR for the root directory, layout
-/// order matching Microsoft's reference (DACL right after the 20-byte
-/// header; owner/group at the tail). MS-DTYP §2.4.6 / §2.4.5.1.
+/// Canonical NTFS-system-record SECURITY_DESCRIPTOR. 104 bytes, byte-
+/// for-byte identical to Microsoft format.com's $SECURITY_DESCRIPTOR
+/// attribute on records 0, 1, 2, 4, 5 (root), 6, 7, 8, 10 (rec 3
+/// `$Volume`, rec 9, rec 11 differ in 4 bytes — see iter16). Layout
+/// matches MS-DTYP §2.4.6 (self-relative SD) / §2.4.4.4 (ACL/ACE) /
+/// §2.4.2.2 (SID).
 ///
-/// Total: 72 bytes
-///   header 20 + DACL 28 (8 hdr + 20 ACE) + Owner 12 + Group 12.
-///
+/// Decoded:
 ///   header (20):
 ///     01 00          rev=1, Sbz1=0
 ///     04 80          control = SE_SELF_RELATIVE | SE_DACL_PRESENT
-///     30 00 00 00    OffsetOwner = 48
-///     3C 00 00 00    OffsetGroup = 60
-///     00 00 00 00    OffsetSacl  = 0   (no SACL)
+///     48 00 00 00    OffsetOwner = 72
+///     58 00 00 00    OffsetGroup = 88
+///     00 00 00 00    OffsetSacl  = 0   (none)
 ///     14 00 00 00    OffsetDacl  = 20
-///   DACL @20 (28): 8-byte ACL header + 1 ACCESS_ALLOWED ACE granting
-///                  Everyone (S-1-1-0) full access (0x001F01FF).
-///   Owner @48 (12): S-1-5-18 (NT AUTHORITY\SYSTEM).
-///   Group @60 (12): S-1-5-18 (same).
+///   DACL @20 (52):
+///     02 00 34 00    AclRev=2, Sbz1=0, AclSize=52
+///     02 00 00 00    AceCount=2, Sbz2=0
+///     ACE 1 (ACCESS_ALLOWED, 20B): SYSTEM (S-1-5-18), mask=0x00120089
+///     ACE 2 (ACCESS_ALLOWED, 24B): BUILTIN\Administrators (S-1-5-32-544),
+///                                  mask=0x00120089
+///   Owner @72  (16): S-1-5-32-544 (BUILTIN\Administrators)
+///   Group @88  (16): S-1-5-32-544 (BUILTIN\Administrators)
 ///
-/// Reference rec 5's SD has 8 ACEs (SYSTEM full, Administrators full,
-/// Users read+exec, plus inherited variants) and ~248 bytes total.
-/// We ship a one-ACE Everyone-full-access DACL — minimal but per
-/// MS-DTYP §2.4.4.4 a structurally valid ACE list.
-const ROOT_SECURITY_DESCRIPTOR: [u8; 72] = [
-    // header
-    0x01, 0x00, 0x04, 0x80, 0x30, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x14, 0x00, 0x00, 0x00, // DACL header
-    0x02, 0x00, 0x1C, 0x00, 0x01, 0x00, 0x00, 0x00,
-    // ACE: ACCESS_ALLOWED, mask=0x001F01FF, sid=S-1-1-0 Everyone
-    0x00, 0x00, 0x14, 0x00, 0xFF, 0x01, 0x1F, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
-    0x00, 0x00, 0x00, 0x00, // Owner SID: S-1-5-18 (NT AUTHORITY\SYSTEM)
-    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x12, 0x00, 0x00, 0x00,
-    // Group SID: S-1-5-18
-    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x12, 0x00, 0x00, 0x00,
+/// Without an SD on every system record, chkdsk's post-Stage-2
+/// reconnect-scan crashes internally with `An unspecified error
+/// occurred (frs.cxx:60f)`. Confirmed via byte-diff against
+/// format.com reference (agent-8a29-2026-05-02 + agent-c5fe-2026-05-02
+/// iter16 byte-diff: every system record in the reference carries an
+/// SD attribute of length 0x80 with this exact 104-byte value, except
+/// rec 5/9/11 which add minor variations). iter16 attempted but
+/// reverted — see iter16-attempt findings.
+#[allow(dead_code)]
+const SYSTEM_SECURITY_DESCRIPTOR: [u8; 104] = [
+    // header (20)
+    0x01, 0x00, 0x04, 0x80, 0x48, 0x00, 0x00, 0x00, 0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x14, 0x00, 0x00, 0x00, //
+    // DACL header (8)
+    0x02, 0x00, 0x34, 0x00, 0x02, 0x00, 0x00, 0x00, //
+    // ACE 1: ACCESS_ALLOWED, type=0 flags=0 size=20, mask=0x00120089 (SYSTEM)
+    0x00, 0x00, 0x14, 0x00, 0x89, 0x00, 0x12, 0x00, //
+    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x12, 0x00, 0x00, 0x00, //
+    // ACE 2: ACCESS_ALLOWED, size=24, mask=0x00120089 (BUILTIN\Administrators)
+    0x00, 0x00, 0x18, 0x00, 0x89, 0x00, 0x12, 0x00, //
+    0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00,
+    0x00, //
+    // Owner SID (16): S-1-5-32-544 = BUILTIN\Administrators
+    0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00,
+    0x00, //
+    // Group SID (16): S-1-5-32-544 = BUILTIN\Administrators
+    0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00,
 ];
 
 /// Win32 + DOS namespace value for $FILE_NAME.
@@ -543,12 +563,10 @@ pub fn format_filesystem(
         ];
         let parent_ref = encode_file_reference(rec::ROOT as u64, rec::ROOT as u16);
         let index_root =
-            build_root_index_root_attr(4, index_block_size, now, parent_ref, &children);
-        // iter14-v2: SD with reference layout order (DACL @0x14, owner/
-        // group at tail). v1 (DACL after owner/group) caused Windows to
-        // reject the volume at mount with Event ID 55 corruption.
-        let sd_attr =
-            build_resident_unnamed(ATTR_SECURITY_DESCRIPTOR, 3, &ROOT_SECURITY_DESCRIPTOR);
+            build_root_index_root_attr(3, index_block_size, now, parent_ref, &children);
+        // SD on rec 5 is now emitted by build_system_record alongside
+        // every other system record (iter16). $INDEX_ROOT goes back to
+        // attr_id=3 (STD_INFO=0, FILE_NAME=1, SD=2, INDEX_ROOT=3).
         // Root directory has no $DATA (only an $INDEX_ROOT), so $FILE_NAME
         // sizes are 0/0 — matches Microsoft's reference (rec 5).
         let rec_bytes = build_system_record(
@@ -558,7 +576,7 @@ pub fn format_filesystem(
             true,
             0,
             0,
-            &[sd_attr, index_root],
+            &[index_root],
         )?;
         place_record(&mut mft_buf, rs, rec::ROOT, rec_bytes)?;
     }
@@ -937,6 +955,17 @@ fn build_system_record(
         fn_data_alloc,
         fn_data_real,
     )?;
+
+    // iter16 attempted: emit a $SECURITY_DESCRIPTOR attribute on every
+    // system record (matching reference byte-for-byte). Reverted —
+    // although the SD bytes were verified identical to format.com's
+    // output (SYSTEM_SECURITY_DESCRIPTOR), adding it on every record
+    // caused Windows to reject the volume at mount with Event 55
+    // corruption (`Cannot open volume for direct access`). Some
+    // structural interaction with our $STANDARD_INFORMATION
+    // security_id=0 / $Secure stub or attribute-cursor placement is
+    // not yet understood. iter17+ task: investigate why the SD
+    // addition triggers mount refusal even though bytes match ref.
 
     for attr in extra_attrs {
         if cursor + attr.len() + 8 > rs {
