@@ -65,7 +65,10 @@ mod rec {
     pub const BADCLUS: u32 = 8;
     pub const SECURE: u32 = 9;
     pub const UPCASE: u32 = 10;
-    pub const EXTEND: u32 = 11;
+    // Records 11..15 are reserved (no $FILE_NAME, not in root $I30).
+    // Microsoft format.com leaves these as in-use placeholder records;
+    // we leave them zero-bytes — see the iter14-v2 block in
+    // format_filesystem.
 }
 
 /// Format an NTFS volume in place over a [`BlockIo`].
@@ -268,7 +271,8 @@ pub fn format_filesystem(
                 rec::BADCLUS,
                 rec::SECURE,
                 rec::UPCASE,
-                rec::EXTEND,
+                // rec::EXTEND (11) deliberately omitted — see iter14-v2
+                // block at the rec 11 slot.
             ],
         );
         let bitmap_attr = build_resident_unnamed(0xB0, 4, &mft_bitmap_value);
@@ -614,23 +618,16 @@ pub fn format_filesystem(
         ));
     }
 
-    // record 11: $Extend (empty directory)
-    {
-        let index_block_size: u32 = 4096;
-        let index_root = build_empty_index_root_attr(3, index_block_size, bytes_per_sector);
-        // $Extend has no $DATA (only $INDEX_ROOT), 0/0 like root dir.
-        let rec_bytes = build_system_record(
-            &mft_record_layout,
-            rec::EXTEND,
-            "$Extend",
-            true,
-            0,
-            0,
-            &[index_root],
-        )?;
-        place_record(&mut mft_buf, rs, rec::EXTEND, rec_bytes)?;
-        sys_entries.push((rec::EXTEND, "$Extend", true, 0, 0));
-    }
+    // record 11: NOT WRITTEN. Microsoft's reference rec 11 has no
+    // $FILE_NAME (link_count=0) and is not present in root's $I30.
+    // chkdsk's "scanning unindexed files for reconnect" stage hits an
+    // internal `frs.cxx 0x60f` error when our rec 11 is `$Extend` with
+    // a $FILE_NAME pointing to root and an entry in root's $I30. Per
+    // iter14-v2 byte-diff (`rust-fs-ntfs-diag/iter-20260502-025958/`,
+    // ref rec 11: STD_INFO+0x50+DATA, link_count=0, no $FILE_NAME).
+    //
+    // We leave the slot zero-bytes (not even FILE-magic). The MFT
+    // bitmap will not mark rec 11 as in use.
 
     // record 5: root directory "." — built AFTER rec 0..4 and rec 6..11
     // so we have every system file's name + $DATA size to emit as
@@ -1213,68 +1210,6 @@ fn ascii_upcase16(c: u16) -> u16 {
     } else {
         c
     }
-}
-
-fn build_empty_index_root_attr(
-    attr_id: u16,
-    index_block_size: u32,
-    _bytes_per_sector: u16,
-) -> Vec<u8> {
-    // Attribute layout: 16 (common) + 8 (resident fields) + name "$I30"
-    // (8 bytes UTF-16 LE) + value padded to 8.
-    let common_header = 16usize;
-    let resident_fields = 8usize;
-    let header_size = common_header + resident_fields;
-    let name_offset = header_size;
-    let name_bytes = 8usize;
-    let value_offset = align8(name_offset + name_bytes);
-    let ir_value_size = 16 + 16 + 16; // IR_HEADER + INDEX_HEADER + LAST sentinel
-    let attr_length = align8(value_offset + ir_value_size);
-
-    let mut buf = vec![0u8; attr_length];
-    buf[0..4].copy_from_slice(&ATTR_INDEX_ROOT.to_le_bytes());
-    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
-    buf[8] = 0;
-    buf[9] = 4; // name_length: "$I30" = 4 chars
-    buf[10..12].copy_from_slice(&(name_offset as u16).to_le_bytes());
-    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
-    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
-    buf[16..20].copy_from_slice(&(ir_value_size as u32).to_le_bytes());
-    buf[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes());
-    buf[22] = 0;
-    buf[23] = 0;
-
-    // Name "$I30"
-    let i30: [u16; 4] = ['$' as u16, 'I' as u16, '3' as u16, '0' as u16];
-    for (i, c) in i30.iter().enumerate() {
-        let off = name_offset + i * 2;
-        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
-    }
-
-    // INDEX_ROOT header (16 bytes)
-    let v = value_offset;
-    buf[v..v + 4].copy_from_slice(&0x30u32.to_le_bytes()); // attribute_type = $FILE_NAME
-    buf[v + 4..v + 8].copy_from_slice(&1u32.to_le_bytes()); // collation = COLLATION_FILE_NAME
-    buf[v + 8..v + 12].copy_from_slice(&index_block_size.to_le_bytes());
-    buf[v + 12] = 1;
-    // 3 bytes padding remain zero.
-
-    // INDEX_HEADER (16 bytes)
-    let ih = v + 16;
-    buf[ih..ih + 4].copy_from_slice(&16u32.to_le_bytes());
-    buf[ih + 4..ih + 8].copy_from_slice(&32u32.to_le_bytes());
-    buf[ih + 8..ih + 12].copy_from_slice(&32u32.to_le_bytes());
-    // flags = 0 (no $INDEX_ALLOCATION)
-
-    // LAST sentinel
-    let le = ih + 16;
-    buf[le..le + 8].copy_from_slice(&0u64.to_le_bytes());
-    buf[le + 8..le + 10].copy_from_slice(&16u16.to_le_bytes());
-    buf[le + 10..le + 12].copy_from_slice(&0u16.to_le_bytes());
-    buf[le + 12..le + 14].copy_from_slice(&0x0002u16.to_le_bytes());
-    buf[le + 14..le + 16].copy_from_slice(&0u16.to_le_bytes());
-
-    buf
 }
 
 // ---------------------------------------------------------------------------
