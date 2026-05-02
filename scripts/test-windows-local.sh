@@ -49,9 +49,13 @@ tar --exclude='./target' --exclude='./.git' --exclude='./diag' --exclude='./diag
     ssh "${VM_HOST}" "tar -xf - -C '${VM_WORKDIR}'"
 
 # ─── 2. Run test on VM ───────────────────────────────────────────────
-echo "[run]  scripts/run-windows-test.ps1 on ${VM_HOST}"
+# Scenario parameters; defaults match the original 256 MiB / CITEST scenario.
+VOLUME_SIZE_MB="${VOLUME_SIZE_MB:-256}"
+WRAPPER_SIZE_MB="${WRAPPER_SIZE_MB:-$(( VOLUME_SIZE_MB + 128 ))}"
+LABEL="${LABEL:-CITEST}"
+echo "[run]  scripts/run-windows-test.ps1 -VolumeSizeMb ${VOLUME_SIZE_MB} -WrapperSizeMb ${WRAPPER_SIZE_MB} -Label '${LABEL}' on ${VM_HOST}"
 set +e
-ssh "${VM_HOST}" "Set-Location '${VM_WORKDIR_PS}'; powershell -ExecutionPolicy Bypass -File '.\\scripts\\run-windows-test.ps1'"
+ssh "${VM_HOST}" "Set-Location '${VM_WORKDIR_PS}'; powershell -ExecutionPolicy Bypass -File '.\\scripts\\run-windows-test.ps1' -VolumeSizeMb ${VOLUME_SIZE_MB} -WrapperSizeMb ${WRAPPER_SIZE_MB} -Label '${LABEL}'"
 RUN_EXIT=$?
 set -e
 
