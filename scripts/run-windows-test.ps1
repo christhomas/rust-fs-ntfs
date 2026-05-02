@@ -253,7 +253,11 @@ $refPart = New-Partition -DiskNumber $refVhd.Number -UseMaximumSize -AssignDrive
 Start-Sleep -Seconds 3
 $refPart = Get-Partition -DiskNumber $refVhd.Number |
     Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
-$fmtArgs = @("$($refPart.DriveLetter):", "/FS:NTFS", "/Q", "/A:4096", "/L", "/V:CITESTREF", "/Y")
+# /A:$ClusterSize so the reference VHDX uses the same cluster size as
+# ours — otherwise the byte-diff between our nfs.img and the reference
+# VHDX is meaningless at non-default cluster sizes (we'd be diffing
+# 4096-cluster reference against e.g. 8192-cluster ours). agent-8934.
+$fmtArgs = @("$($refPart.DriveLetter):", "/FS:NTFS", "/Q", "/A:$ClusterSize", "/L", "/V:CITESTREF", "/Y")
 $fp = Start-Process -FilePath "format.com" -ArgumentList $fmtArgs `
     -NoNewWindow -PassThru -Wait `
     -RedirectStandardOutput diag/reference-format.txt
