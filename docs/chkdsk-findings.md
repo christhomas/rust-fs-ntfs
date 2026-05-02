@@ -573,6 +573,132 @@ points). Two findings:
 Per the work-list, `mac-format-label-cjk` is therefore
 `passed-implicitly-by-agent-5442-2026-05-02-c6a1` — same residual
 state as the basic scenario, no label-specific bug introduced.
+### iter14: small-volume mount refusal — NumberSectors off-by-one is real but not the proximate cause
+
+Session: `agent-840e-2026-05-02`. Diag dirs:
+`$TMPDIR/rust-fs-ntfs-diag/agent-840e-2026-05-02/iter1-tiny-32mib/` (pre-fix)
+and `.../iter2-tiny-32mib-fix-numbersectors/` (post-fix).
+
+**Symptom**
+
+Scenario `mac-format-tiny-32mib` (32 MiB / 4096 cluster / label `TINY`)
+fails on Windows. `chkdsk DRIVE:` and `chkdsk DRIVE: /scan` both exit 3
+with stdout:
+
+```
+Cannot open volume for direct access.
+```
+
+`Get-Volume` for the assigned drive letter shows:
+
+```
+FileSystem           :
+FileSystemType       : Unknown
+HealthStatus         : Healthy
+OperationalStatus    : Unknown
+Size                 : 0
+SizeRemaining        : 0
+```
+
+I.e. the partition is exposed but ntfs.sys refuses to recognise it as
+NTFS, so chkdsk has nothing to lock. The Windows Event Log produced
+no NTFS provider entries against this drive letter (in contrast to
+iter3, where Event ID 55 fired repeatedly). Different failure mode —
+the kernel rejected the BPB outright before any per-record validator
+ran.
+
+**Diagnostic**
+
+Ran `scripts/run-windows-test.ps1 -VolumeSizeMb 32 -WrapperSizeMb 96
+-Label TINY` against `agent-840e-2026-05-02`'s isolated VM workdir.
+Pulled `diag/` back; compared `ours-boot.bin` (512 B) vs
+`reference-boot.bin` (Microsoft `format.com` on a 96 MiB VHDX). The
+reference is wider than our 32 MiB volume, so size-relative fields
+will always differ; the question is *which differences are
+spec-violations* on our side, not just layout choices.
+
+**Per-field diff** *(NTFS BPB, fields where ours and reference differ in form rather than just magnitude)*
+
+| Offset | Field            | reference (96 MiB)     | ours (32 MiB pre-fix) | spec citation |
+|--------|------------------|------------------------|-----------------------|---------------|
+| 0x1C   | HiddenSectors    | 0x80 (= partition LBA) | 0                     | NTFS BPB carries the partition's start LBA so legacy boot loaders can self-locate. format.com sets it; mkfs is partition-agnostic so leaves it 0. Modern ntfs.sys does not appear to use it for mount. **Layout choice, not a bug.** |
+| 0x28   | NumberSectors    | 0x2FEFF (= 196351 = N-1) | 0x10000 (= 65536 = N) | Microsoft's convention is `NumberSectors = volume_sectors - 1`; the trailing sector hosts the backup boot copy and is *not* counted as a data sector. Our value counted the backup-boot sector. **Provably wrong on our side.** |
+| 0x30   | MftLcn           | 0x1FF5 (~middle of vol) | 0x4 (start of vol)    | Both within-spec; modern format.com places MFT mid-volume, mkfs places it early. **Layout choice, not a bug.** |
+| 0x38   | Mft2Lcn          | 0x2 (early)            | cluster_count/2       | Both within-spec. **Layout choice, not a bug.** |
+
+The only category-2 (provably wrong) difference is at offset 0x28. mkfs
+still places the backup-boot copy at the *start* of the last cluster
+(LCN cluster_count - 1), not at the very last sector — that's a
+separate latent issue but no spec-cited evidence forces a change yet.
+
+**Root cause (of the spec violation that was fixable in this iteration)**
+
+`src/mkfs.rs:647` was computing
+`total_sectors = cluster_count * cluster_size / bytes_per_sector` and
+writing that whole figure to BPB.NumberSectors. The comment in the
+source (`"Includes the very last sector which contains the backup
+boot."`) shows the author was aware of the question but resolved it
+the wrong way. Microsoft's published NTFS BPB convention, observable
+in every `format.com` reference dump we have produced, treats
+NumberSectors as the count of *data* sectors only — i.e. one less
+than the partition's sector count.
+
+**Fix**
+
+`src/mkfs.rs:646-657`: rename the local from `total_sectors` to
+`volume_sectors`, then write `number_sectors = volume_sectors - 1` to
+BPB offset 0x28. Multi-line comment in source cites this iteration's
+diag dir and the spec convention so the next reader knows why the
+field is N-1 and not N.
+
+Linux tests stay green:
+
+```
+cargo test --release --lib --test mkfs_roundtrip --test mkfs_bin_smoke
+# 7 passed; 0 failed
+cargo fmt --check  # clean
+cargo clippy --all-targets -- -D warnings  # clean
+```
+
+**Result**
+
+Pipeline re-run after the fix shows the BPB now correctly reads
+`total_sectors=65535` (was 65536). However:
+
+- `chkdsk DRIVE:` still exits 3 with `Cannot open volume for direct
+  access.`
+- `Get-Volume` still shows `FileSystemType: Unknown, Size: 0` on the
+  newly-assigned drive letter.
+
+So the NumberSectors off-by-one was a real spec violation worth
+fixing, but it is **not** the proximate cause of Windows refusing to
+mount a 32 MiB volume produced by mkfs. There is at least one further
+small-volume-specific issue. The next iteration's evidence-gathering
+should focus on:
+
+1. **Backup boot sector placement.** mkfs writes it at byte
+   `(cluster_count - 1) * cluster_size` (i.e. the *start* of the last
+   cluster, sector 65528 in the 32 MiB case). Microsoft format.com is
+   documented to place it at `volume_sectors - 1` (the very last
+   sector, 65535). At 256 MiB the proportional misalignment was
+   tolerated by ntfs.sys; at 32 MiB it may not be. To corroborate,
+   read the reference's last 512 bytes (sector 196351 of the 96 MiB
+   ref) and compare against our last cluster.
+2. **MFT placement at LCN 4 on a 32 MiB volume.** Reference places
+   MFT mid-volume; we place it at LCN 4 unconditionally. ntfs.sys
+   may consult a heuristic at small volumes that rejects an
+   early-MFT placement. Lower priority — needs evidence before
+   action.
+3. **`$LogFile` fixed at 64 KiB.** Microsoft's format.com scales
+   `$LogFile` up to 1–4 MiB even on small volumes. A 64 KiB log may
+   be below ntfs.sys's accepted minimum. Worth diffing the reference's
+   `$LogFile` allocation against ours.
+
+Status: scenario `mac-format-tiny-32mib` marked
+`blocked-needs-evidence-32mib-mount-refusal-agent-840e-2026-05-02`.
+NumberSectors fix retained on worktree branch
+`agent/agent-840e-2026-05-02` for downstream agents to consume; not
+pushed to main.
 
 ## What we learned
 

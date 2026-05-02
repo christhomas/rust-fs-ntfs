@@ -723,10 +723,19 @@ fn build_boot_sector(
                                                           // 0x20..0x24: total large sectors (FAT) = 0
     b[0x24..0x28].copy_from_slice(&0x00800080u32.to_le_bytes()); // signature byte for NTFS
 
-    // Total sectors (volume size in sectors). Includes the very last
-    // sector which contains the backup boot.
-    let total_sectors: u64 = cluster_count * (cluster_size as u64) / bytes_per_sector as u64;
-    b[0x28..0x30].copy_from_slice(&total_sectors.to_le_bytes());
+    // BPB NumberSectors at offset 0x28: count of *data* sectors in the
+    // volume, NOT counting the trailing backup-boot sector. Microsoft
+    // format.com always writes (volume_sectors - 1). Corroborated in
+    // iter13 (agent-840e-2026-05-02): a 96 MiB reference volume showed
+    // NumberSectors=0x0002FEFF for 196352 partition sectors, i.e. N-1.
+    // We previously wrote N (the full sector count); at >= 256 MiB the
+    // off-by-one was tolerated by chkdsk + ntfs.sys, but at 32 MiB it
+    // pushes the kernel's expected backup-boot location past EOV and
+    // ntfs.sys refuses to mount the volume (Get-Volume reports
+    // FileSystemType=Unknown, Size=0).
+    let volume_sectors: u64 = cluster_count * (cluster_size as u64) / bytes_per_sector as u64;
+    let number_sectors: u64 = volume_sectors - 1;
+    b[0x28..0x30].copy_from_slice(&number_sectors.to_le_bytes());
     b[0x30..0x38].copy_from_slice(&mft_lcn.to_le_bytes());
     b[0x38..0x40].copy_from_slice(&mftmirr_lcn.to_le_bytes());
 
