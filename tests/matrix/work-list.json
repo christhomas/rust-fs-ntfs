@@ -3,139 +3,139 @@
   "_doc": "Multi-agent NTFS test work list. See docs/multi-agent-test-protocol.md. Each scenario name is unique. status starts at 'pending'; agents transition via scripts/claim-scenario.sh.",
   "scenarios": {
     "mac-format-basic-256mib": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "CITEST"
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan) -> win:enumerate(empty)",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-tiny-32mib": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 32,
         "cluster_size": 4096,
         "label": "TINY"
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-small-64mib": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 64,
         "cluster_size": 4096,
         "label": "SMALL"
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-large-1gib": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 1024,
         "cluster_size": 4096,
         "label": "ONE_GIB"
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-cluster-512": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 512,
         "label": "C512"
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-cluster-1k": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 1024,
         "label": "C1K"
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-cluster-8k": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 8192,
         "label": "C8K"
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-cluster-64k": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 1024,
         "cluster_size": 65536,
         "label": "C64K"
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-label-empty": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": ""
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-label-32chars": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-label-cjk": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "日本語ラベル"
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-label-latin1": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "Disk éclipse"
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-win-write-tiny": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -148,11 +148,11 @@
           "content": "hello world"
         }
       ],
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-win-write-medium": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -166,11 +166,11 @@
           "content_pattern": "zeros"
         }
       ],
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-win-write-large": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -184,30 +184,30 @@
           "content_pattern": "incrementing"
         }
       ],
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-win-write-many-small": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "MANY"
       },
       "operation_sequence": "mac:format -> win:chkdsk -> win:write(256 files of 16 bytes) -> win:chkdsk -> win:enumerate(all)",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-win-write-then-delete": {
-      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
+      "status": "failed-needs-iter15-extend-or-secure-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "WRDEL"
       },
       "operation_sequence": "mac:format -> win:write(F1,F2,F3) -> win:delete(F2) -> win:chkdsk -> win:enumerate(F1,F3)",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213",
-      "note": "Pass 2 — same post-Stage-2 frs.cxx:60f as pass 1. iter13 baseline reproduced after iter14 revert. See findings iter14 'REVERTED' section."
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
+      "note": "Pass 3 — same post-Stage-2 frs.cxx:60f under iter14-v2 (SD now correct, mounts clean, but chkdsk verdict unchanged). Cause is NOT the missing SD; deeper structural issue (most likely $Extend or $Secure view-index attrs)."
     },
     "mac-format-mac-enumerate-empty": {
       "status": "passed-agent-c5fe-2026-05-02",
@@ -218,11 +218,11 @@
       },
       "operation_sequence": "mac:format -> mac:enumerate(empty: only '.')",
       "_note": "depends on Mac-side enumerate CLI; first agent picking this scaffolds tests/matrix/inspect/",
-      "note": "Pass 2 — re-run under iter13 reverted baseline. Pure-Mac flow; 11 system entries, zero non-system; root user-visible empty.",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/mac-only-pass2"
+      "note": "Pass 3 — re-run under iter14-v2 (SD added in v2 layout); enumerate shows 11 system entries, 0 user-visible.",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/mac-only-pass3"
     },
     "mac-format-win-write-mac-enumerate": {
-      "status": "blocked-on-vm-iter14-or-mac-enum-cli-agent-c5fe-2026-05-02",
+      "status": "blocked-on-iter15-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -230,11 +230,11 @@
       },
       "operation_sequence": "mac:format -> win:write(F1,F2) -> mac:enumerate(F1,F2)",
       "_note": "depends on Mac-side enumerate CLI",
-      "note": "Operation sequence requires mac:enumerate (now plumbed via inspect_ntfs CLI), but also requires the chkdsk-clean state that iter14 hasn't delivered yet.",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213"
+      "note": "Operation sequence needs the chkdsk-clean state iter15+ has to deliver.",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925"
     },
     "mac-format-win-write-win-delete-mac-verify-empty": {
-      "status": "blocked-on-vm-iter14-or-mac-enum-cli-agent-c5fe-2026-05-02",
+      "status": "blocked-on-iter15-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -242,11 +242,11 @@
       },
       "operation_sequence": "mac:format -> win:write(F1,F2,F3) -> win:delete(all) -> mac:enumerate(empty)",
       "_note": "depends on Mac-side enumerate CLI",
-      "note": "Operation sequence requires mac:enumerate (now plumbed via inspect_ntfs CLI), but also requires the chkdsk-clean state that iter14 hasn't delivered yet.",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213"
+      "note": "Operation sequence needs the chkdsk-clean state iter15+ has to deliver.",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925"
     },
     "win-format-win-write-mac-verify": {
-      "status": "blocked-on-vm-iter14-or-mac-enum-cli-agent-c5fe-2026-05-02",
+      "status": "blocked-on-iter15-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -254,11 +254,11 @@
       },
       "operation_sequence": "win:format -> win:write(F1,F2) -> mac:enumerate(F1,F2)",
       "_note": "Microsoft format.com is the canonical reference; this proves our reader handles Microsoft-format output",
-      "note": "Operation sequence requires mac:enumerate (now plumbed via inspect_ntfs CLI), but also requires the chkdsk-clean state that iter14 hasn't delivered yet.",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213"
+      "note": "Operation sequence needs the chkdsk-clean state iter15+ has to deliver.",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925"
     },
     "win-format-win-write-mac-write-win-verify": {
-      "status": "blocked-on-mac-writer-agent-c5fe-2026-05-02",
+      "status": "blocked-on-mac-writer-runner-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -266,11 +266,11 @@
       },
       "operation_sequence": "win:format -> win:write(F1) -> mac:write(F2) -> win:chkdsk -> win:enumerate(F1,F2)",
       "_note": "depends on Mac-side writer; first agent scaffolds it or marks blocked-on-writer",
-      "note": "Operation sequence requires mac:write. Filesystem::create_file is plumbed; matrix runner glue not yet.",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213"
+      "note": "Filesystem::create_file plumbed via inspect_ntfs CLI; matrix runner glue (Mac-side touch invocation) not yet wired.",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925"
     },
     "win-format-win-write-mac-delete-win-verify": {
-      "status": "blocked-on-mac-deleter-agent-c5fe-2026-05-02",
+      "status": "blocked-on-mac-deleter-runner-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -278,8 +278,8 @@
       },
       "operation_sequence": "win:format -> win:write(F1,F2) -> mac:delete(F1) -> win:chkdsk -> win:enumerate(F2)",
       "_note": "depends on Mac-side deleter",
-      "note": "Operation sequence requires mac:delete. Filesystem::unlink is plumbed; matrix runner glue not yet.",
-      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054213"
+      "note": "Filesystem::unlink plumbed via inspect_ntfs CLI; matrix runner glue not yet wired.",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925"
     }
   }
 }
