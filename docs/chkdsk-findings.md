@@ -963,3 +963,167 @@ in one go.
    bytes that differ in chkdsk-relevant positions are the actual
    bug. Reading the public NTFS layout spec (MS-FSCC) tells you
    what each byte means; the diff tells you which one we got wrong.
+
+### iter13: orphan-system-files in root $I30
+
+Session: agent-8a29-2026-05-02. Scenario: mac-format-basic-256mib.
+
+**Symptom**
+
+> Stage 2: Examining file name linkage ...
+> 68 index entries processed.
+> Index verification completed.
+> CHKDSK is scanning unindexed files for reconnect to their original directory.
+> Detected orphaned file $MFT (0), should be recovered into directory file 5.
+> Detected orphaned file $MFTMirr (1), should be recovered into directory file 5.
+> Detected orphaned file $LogFile (2), should be recovered into directory file 5.
+> Detected orphaned file $Volume (3), should be recovered into directory file 5.
+> Detected orphaned file $AttrDef (4), should be recovered into directory file 5.
+> Detected orphaned file . (5), should be recovered into directory file 5.
+> Detected orphaned file $Bitmap (6), should be recovered into directory file 5.
+> Detected orphaned file $Boot (7), should be recovered into directory file 5.
+> Detected orphaned file $BadClus (8), should be recovered into directory file 5.
+> Detected orphaned file $Secure (9), should be recovered into directory file 5.
+> Skipping further messages about recovering orphans.
+> An unspecified error occurred (6672732e637878 60f).
+
+(Verbatim from local-pipeline diag dir
+`$TMPDIR/rust-fs-ntfs-diag/agent-8a29-2026-05-02/iter-20260502-024137/chkdsk-readonly.txt`,
+captured pre-fix on this iteration.)
+
+**Diagnostic**
+
+Ran `bash scripts/test-windows-local.sh` against worktree
+`agent-8a29-2026-05-02` with `VM_WORKDIR=…rust-fs-ntfs-agent-8a29-2026-05-02`
+to isolate the VM-side workdir. The pipeline:
+
+1. Built `mkfs_ntfs.exe` on the Windows ARM64 VM.
+2. Formatted `nfs.img` (256 MiB / cluster 4096 / label CITEST).
+3. Formatted a parallel reference VHDX with `format.com /FS:NTFS`.
+4. Dumped the first 16 MFT records from each into `*-mft-16recs.bin`.
+5. Wrapped ours in a GPT VHDX, mounted, ran `chkdsk` read-only.
+
+Parsed the reference's root `$INDEX_ROOT` ($I30) attribute with
+`python3 struct.unpack`. The reference root index is 1128 bytes and
+contains 11 leaf entries plus the LAST sentinel:
+
+| e_off | entry_len | mft_rec | seq | name      |
+|------:|----------:|--------:|----:|-----------|
+| 32    | 104       | 4       | 4   | `$AttrDef`  |
+| 136   | 104       | 8       | 8   | `$BadClus`  |
+| 240   | 96        | 6       | 6   | `$Bitmap`   |
+| 336   | 96        | 7       | 7   | `$Boot`     |
+| 432   | 104       | 2       | 2   | `$LogFile`  |
+| 536   | 96        | 0       | 1   | `$MFT`      |
+| 632   | 104       | 1       | 1   | `$MFTMirr`  |
+| 736   | 96        | 9       | 9   | `$Quota`    |
+| 832   | 96        | 10      | 10  | `$UpCase`   |
+| 928   | 96        | 3       | 3   | `$Volume`   |
+| 1024  | 88        | 5       | 5   | `.`         |
+| 1112  | 16        | (LAST)  | -   | sentinel  |
+
+Ours (pre-fix) had only the LAST sentinel (48-byte $I30 attribute).
+Every system MFT record was built with a `$FILE_NAME` whose
+`parent_reference` is `(rec=5, seq=5)` (the root); chkdsk follows
+each `$FN` back to root and looks for the name in root's $I30.
+With root's index empty, *every* system file came up missing → the
+"orphaned ... should be recovered into directory file 5" cascade.
+
+**Per-field diff** *(rec 5 root, $INDEX_ROOT @ $I30)*
+
+| Field                       | reference | ours (pre)  | spec citation |
+|-----------------------------|----------:|------------:|---------------|
+| $I30 attr content_size      | 1128      | 48          | MS-FSCC INDEX_ROOT |
+| INDEX_HEADER.entries_offset | 16        | 16          | MS-FSCC INDEX_HEADER |
+| INDEX_HEADER.index_length   | 1112      | 32          | MS-FSCC INDEX_HEADER (entries_offset + Σ entry_lengths) |
+| Number of leaf entries      | 11        | 0           | observed |
+| First entry file_ref        | (4,4)     | n/a         | $AttrDef per sort |
+| Sort order                  | COLLATION_FILE_NAME | n/a | MS-FSCC §2.4 |
+
+**Root cause**
+
+Per the publicly documented NTFS layout (MS-FSCC INDEX_ROOT/
+INDEX_HEADER/INDEX_ENTRY definitions), every entry in a directory's
+$I30 is a `(file_reference, $FILE_NAME content)` pair sorted by
+COLLATION_FILE_NAME. chkdsk's Stage 2 "scanning unindexed files for
+reconnect" phase iterates all in-use MFT records and verifies each
+record's $FN parent_reference can be resolved to an entry in the
+parent directory's $I30. Records present in the MFT but absent from
+the parent's $I30 are reported orphaned.
+
+Our `mkfs_ntfs` populated each system record's $FN with
+`parent_reference = (5, 5)` correctly but built root's $I30 as an
+empty index. The mismatch was visible directly in the byte-diff:
+reference root carried 1128 bytes of $I30 content; ours carried 48.
+
+**Fix**
+
+`src/mkfs.rs`: add a `SysIndexEntry` collector and a new
+`build_index_root_attr_with_entries` that packs `(rec, seq, name,
+is_dir, alloc, real)` tuples into a populated INDEX_ROOT. Move root
+construction (rec 5) to after every other system record so all
+data sizes are known. Sort the 12 entries (records 0..11 plus root
+self) per COLLATION_FILE_NAME (case-insensitive UTF-16; ASCII
+uppercase suffices for the pure-ASCII system file names). Each
+index entry's $FN content mirrors the corresponding inline $FN
+(parent_ref, timestamps, data sizes, file_attrs, namespace).
+
+`tests/mkfs_roundtrip.rs::format_and_parse_back` updated: previous
+`assert!(names.is_empty())` was asserting the buggy empty-root
+behaviour; new assertion verifies the 12-entry sorted order
+matches the publicly documented NTFS layout.
+
+**Result**
+
+Targeted error class — *all 10 "Detected orphaned file $X (N)"
+messages* — eliminated. Post-fix chkdsk diag:
+`$TMPDIR/rust-fs-ntfs-diag/agent-8a29-2026-05-02/iter-20260502-030328/chkdsk-readonly.txt`
+shows Stage 1 + Stage 2 complete with 64 file records / 68 index
+entries processed, no orphan messages, then chkdsk hits its
+internal `frs.cxx` line 1551 assert (`An unspecified error
+occurred (6672732e637878 60f)` — the hex decodes to `frs.cxx`).
+That assert was already present in iter12; it is now the next
+opaque error to investigate. The `Read-only chkdsk found bad
+on-disk uppercase table - using system table` warning persists
+and is also pre-existing — separate issue, separate iteration.
+
+Linux baseline tests pass:
+`cargo test --release --lib --test mkfs_roundtrip --test mkfs_bin_smoke`
+all green (`mkfs::tests::run_encode_decode_roundtrip`,
+`mkfs::tests::upcase_table_size`, `mkfs_bin_*`,
+`format_and_parse_back`, `capi_mkfs_then_parse`). `cargo fmt
+--check` clean. `cargo clippy --all-targets -- -D warnings` clean.
+
+### iter14: $SECURITY_DESCRIPTOR (0x50) on every system MFT record
+
+Session: agent-8a29-2026-05-02. Scenario: mac-format-basic-256mib (post-iter13).
+
+**Symptom**
+
+> An unspecified error occurred (6672732e637878 60f).
+
+(Stage 2 error after orphan recovery, post-iter13. `6672732e637878` = ASCII "frs.cxx", followed by line 0x60f = 1551.)
+
+**Diagnostic**
+
+Parsed reference's first 16 MFT records (`reference-mft-16recs.bin` from iter13's diag dir) and found a **104-byte $SECURITY_DESCRIPTOR (attr type 0x50) on every system record** that ours did not have at all. Three unique SD blobs:
+
+| Blob | Used by | Size | Distinguishing byte |
+|------|---------|-----:|---------------------|
+| RO  | $MFT, $MFTMirr, $LogFile, $AttrDef, $Bitmap, $Boot, $BadClus, $UpCase | 104 | DACL access mask `0x00120089` (FILE_GENERIC_READ \| FILE_GENERIC_EXECUTE) |
+| RW  | $Volume, $Quota/$Secure, $Extend | 104 | DACL access mask `0x0012009F` (RW + EXECUTE) |
+| ROOT | root (".") | 248 | wider DACL with INHERIT_ONLY ACEs that propagate to children |
+
+All three are standard SECURITY_DESCRIPTOR_RELATIVE per MS-DTYP §2.4.6: Revision=1, Control=`0x8004` (SE_DACL_PRESENT | SE_SELF_RELATIVE), Owner=BUILTIN\Administrators (S-1-5-32-544), Group=Administrators, no SACL, self-relative DACL.
+
+**Fix**
+
+`src/mkfs.rs`: bake the three reference SD blobs as `SD_SYSFILE_RO`, `SD_SYSFILE_RW`, `SD_ROOT_DIR` byte constants. Add `sd_for_system_record(rec_num)` selector. `build_system_record` now writes the SD attribute (type 0x50) between $FILE_NAME (0x30) and the caller's `extra_attrs` (which start at type 0x60+), preserving the canonical NTFS attribute-type ordering. Attribute id = 2 (sits between $FN id=1 and the rest).
+
+**Result**
+
+iter14 confirmed present on disk (per-record byte parse: rec 0-4,6-11 carry 104-byte SD; rec 5 carries 248-byte SD). chkdsk verdict on basic-256mib post-iter14: **identical to post-iter13** — `Read-only chkdsk found bad on-disk uppercase table - using system table`, Stage 1 + Stage 2 complete with `64 file records processed` / `68 index entries processed`, then `An unspecified error occurred (frs.cxx 60f)`. The SD addition fixes a real layout divergence (corroborated by byte-diff) but **does not** address the frs.cxx assert. Hypothesis was wrong — root cause lies elsewhere.
+
+Linux baseline tests pass (5 tests: `mkfs::tests::run_encode_decode_roundtrip`, `mkfs::tests::upcase_table_size`, `mkfs_bin_*`, `format_and_parse_back`, `capi_mkfs_then_parse`). `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` clean.
+
+**Next iteration's lead** (recorded for continuity, *not yet attempted*): reference's first 16 MFT records ALL carry FILE magic (records 12-15 are minimal 304-byte placeholders with seq=12..15, flags=0x01 IN_USE, attrs_offset=0x48, bytes_used=0x130). Ours pre-allocates 64 MFT slots but only writes FILE magic into slots 0-11 — slots 12-63 are entirely zero bytes. chkdsk reports "64 file records processed" which suggests it iterates the whole MFT $DATA; the all-zero slots may be triggering the frs.cxx assert.
