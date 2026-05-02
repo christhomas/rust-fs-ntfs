@@ -1060,8 +1060,27 @@ fn write_standard_information(
     is_dir: bool,
     is_system: bool,
 ) -> usize {
+    // $STANDARD_INFORMATION has two on-disk forms:
+    //   * NTFS 1.x — 48-byte value: 4 timestamps (32) + DOSAttributes (4)
+    //     + MaxVersions (4) + VersionNumber (4) + ClassId (4).
+    //   * NTFS 3.x — 72-byte value: same fields plus OwnerId (4)
+    //     + SecurityId (4) + QuotaCharged (8) + USN (8).
+    //
+    // Microsoft `format.com` ships the **48-byte** form on every system
+    // MFT record (CI iter13 byte-diff: reference-mft-16recs.bin rec
+    // 0/1/2/3/4/6/7/8/9/10/11 all carry attr len=72 / content_size=48).
+    // Emitting the 72-byte form on a system record diverges from the
+    // reference by 24 bytes per record. chkdsk's "Read-only chkdsk
+    // found bad on-disk uppercase table - using system table" warning
+    // persists from iter12 through iter16 even after the $UpCase
+    // bytes themselves were brought to byte-identical-with-reference
+    // — strong indication chkdsk's check keys on the *attribute layout*
+    // surrounding $UpCase, not the table content.
+    //
+    // For non-system files we preserve the 72-byte form (modern user
+    // files ship NTFS 3.x extended fields).
+    let value_size = if is_system { 48usize } else { 72usize };
     let header_size = 24usize;
-    let value_size = 72usize;
     let attr_length = align8(header_size + value_size);
     rec[at..at + 4].copy_from_slice(&ATTR_STANDARD_INFORMATION.to_le_bytes());
     rec[at + 4..at + 8].copy_from_slice(&(attr_length as u32).to_le_bytes());
@@ -1088,6 +1107,12 @@ fn write_standard_information(
         fa |= 0x06; // HIDDEN | SYSTEM
     }
     rec[v + 32..v + 36].copy_from_slice(&fa.to_le_bytes());
+    // For NTFS-3.x form (non-system), bytes v+36..v+72 are the extended
+    // fields (MaxVersions/VersionNumber/ClassId/OwnerId/SecurityId/
+    // QuotaCharged/USN). All zero — buffer is zero-initialised. For
+    // NTFS-1.x form (system), value_size = 48 means we stop at v+36
+    // and the remaining 12 bytes (MaxVersions+VersionNumber+ClassId)
+    // stay zero — that matches reference's 48-byte system $STD_INFO.
     at + attr_length
 }
 

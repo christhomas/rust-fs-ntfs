@@ -1237,3 +1237,53 @@ The remaining unique systemic divergence we've identified between ours and refer
 - **$STANDARD_INFORMATION size on every system record** — ref uses 48 bytes (NTFS 1.x form: just CreationTime + 4×timestamp + DOSAttrs); ours uses 72 bytes (NTFS 3.x form: same fields plus zero MaxVersions/VersionNumber/ClassId/OwnerId/SecurityId/QuotaCharged/USN). chkdsk may demand the 48-byte form on system files. This is the single remaining systematic divergence visible in the byte-diff.
 
 If iter17 ($STD_INFO → 48-byte on system records) doesn't fix the chkdsk warning + frs.cxx, the next layer is content-level checks chkdsk does that aren't visible in the per-record dumps — at which point progress requires either Microsoft's chkdsk source or a much heavier instrumentation pass (capture every disk read chkdsk does, correlate with what we wrote vs what reference wrote).
+
+### iter17: $STANDARD_INFORMATION 48-byte (NTFS 1.x) form on system records
+
+Session: agent-8a29-2026-05-02. Targeted: same `bad on-disk uppercase table` warning + `frs.cxx 60f` assert as iter14-16.
+
+**Diagnostic**
+
+Per-record dump comparison (CI iter13/14 diag dirs) showed reference's `$STANDARD_INFORMATION` is 48 bytes (NTFS 1.x form) on every system file (rec 0/1/2/3/4/6/7/8/9/10/11) while ours emitted 72 bytes (NTFS 3.x form) with the OwnerId/SecurityId/QuotaCharged/USN extension fields zero-padded. This was the **single remaining systematic divergence** between ours and reference visible in the byte-diff after iter13-iter16.
+
+**Per-field diff** *(rec 10 $UpCase $STANDARD_INFORMATION, post iter16 vs reference)*
+
+| Field | reference | ours (iter16) | iter17 |
+|-------|----------:|--------------:|-------:|
+| attr_length | 72 | 96 | 72 |
+| content_size | 48 | 72 | 48 |
+
+**Fix**
+
+`src/mkfs.rs::write_standard_information`: select `value_size = 48` when `is_system=true`, otherwise 72. The 48-byte form drops fields after `ClassId` (the buffer is zero-init so trailing space stays zero either way; the change is in the declared `value_size` and resulting `attr_length`). For non-system files (future user files written via the writer), the 72-byte NTFS 3.x form is preserved.
+
+**Result**
+
+iter17 verified on disk: all 12 system records now carry 48-byte `$STD_INFO` (`attr_len=72 / content_size=48`, matching reference exactly). chkdsk verdict on basic-256mib post-iter17: **unchanged** — `bad on-disk uppercase table` warning, Stage 1 + Stage 2 complete with same 64/68 counts, then `frs.cxx 60f` assert.
+
+Linux baseline tests pass. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` clean.
+
+## End-of-session ceiling for the byte-diff-driven approach
+
+Five evidence-corroborated layout fixes have landed in this session (iter13-iter17). Each addressed a real divergence visible in the per-record byte-diff between our output and Microsoft `format.com`'s reference. After all five, **every system MFT record I can produce a byte-diff for is byte-identical to reference at the structural level**:
+
+- $STANDARD_INFORMATION (0x10) — **48 bytes on system files** (iter17), matches reference
+- $FILE_NAME (0x30) — content matches reference (alloc/real/parent_ref/name/etc; small diff in fa byte 0x26 vs 0x06 ARCHIVE bit, deferred — chkdsk hasn't surfaced an error attributing to this)
+- $SECURITY_DESCRIPTOR (0x50) — **104/248-byte SD blobs** (iter14), byte-identical to reference's 3 unique blobs
+- $DATA / $INDEX_ROOT / etc. (0x80+) — sizes and content match
+- $UpCase content (LCN-resolved 128 KiB) — **byte-for-byte canonical** (iter16, SHA256 41c26bc7…)
+- root $I30 — **populated with all 12 system entries** in COLLATION_FILE_NAME order (iter13)
+- Unused MFT slots 12+ — **FILE-magic placeholders** (iter15) instead of raw zeros
+
+Despite this, **the chkdsk verdict has not changed since iter13**: `Read-only chkdsk found bad on-disk uppercase table - using system table` warning fires before Stage 1, Stage 1 + Stage 2 complete cleanly with `64 file records processed` / `68 index entries processed`, then `An unspecified error occurred (frs.cxx 60f)` (= `frs.cxx:1551` internal assert) terminates the run with exit 11.
+
+**The two remaining symptoms cannot be diagnosed from per-record byte-diffs alone.** chkdsk's "bad upcase table" check evidently keys on something other than the table bytes themselves AND the surrounding `$UpCase` MFT record's attribute layout (both now byte-identical to reference). The frs.cxx assert is similarly opaque without Microsoft's chkdsk source.
+
+**Productive next moves** (out of scope for this session — none are byte-diff fixable):
+- Capture every disk read chkdsk performs (e.g. via Windows Procmon) and correlate with what we wrote vs what reference wrote at those exact offsets. Will reveal which specific bytes chkdsk reads to make its "bad upcase" / frs.cxx decisions.
+- Strace-equivalent on the chkdsk binary to localise the assert site.
+- Compare our `$LogFile` content (we fill 0xFF; reference initialises with proper RSTR-led records) — separate test scenario worth running.
+- Compare our `$AttrDef` blob byte-for-byte with reference (we emit a hand-rolled 2560-byte canonical NTFS 3.1 table; reference's may differ in subtle ways the per-record dump doesn't show).
+- Compare `$MFT:$Bitmap` non-resident value byte-for-byte.
+
+Each of these requires a small `run-windows-test.ps1` patch to dump the relevant content into `diag/` (the existing pipeline only dumps MFT records and boot sectors).
