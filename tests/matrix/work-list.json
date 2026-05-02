@@ -93,13 +93,14 @@
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
     },
     "mac-format-label-cjk": {
-      "status": "claimed-agent-c6a1-2026-05-02",
+      "status": "passed-implicitly-by-agent-5442-2026-05-02-c6a1",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "日本語ラベル"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c6a1-2026-05-02/iter-20260502-030838"
     },
     "mac-format-label-latin1": {
       "status": "pending",

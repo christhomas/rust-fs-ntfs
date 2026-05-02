@@ -544,6 +544,36 @@ iter12's post-fix output (after the orphan list, before chkdsk
 truncated). Not introduced here; surfaced by the orphan flood being
 peeled away. iter14 will tackle it.
 
+### iter13b: corroboration on `mac-format-label-cjk` (CJK volume label)
+
+Independent re-run of the iter13 fix on a different scenario by
+session `agent-c6a1-2026-05-02`: the same 256 MiB / 4 KiB-cluster
+volume but with `--label "日本語ラベル"` (CJK label, six BMP code
+points). Two findings:
+
+- **iter13 fix carries over verbatim.** Pre-fix
+  (`rust-fs-ntfs-diag/agent-c6a1-2026-05-02/iter-20260502-025140`)
+  showed the same orphan list (`$MFT (0)`...`$Secure (9)`) plus the
+  `frs.cxx 60f` tail; post-fix
+  (`iter-20260502-030838`) the orphan list is gone and only the
+  `frs.cxx 60f` line remains. Same residual error, same chkdsk
+  exit (3 readonly / 11 /scan), same shadow-copy snapshot warning.
+  Two independent scenarios reaching the same post-fix state means
+  the fix is not specific to the basic-256mib parameters.
+
+- **The CJK label survives `mkfs.ntfs` UTF-16 encoding intact.**
+  Decoded `$Volume`'s `$VOLUME_NAME` from
+  `iter-20260502-030838/ours-mft-16recs.bin` (rec 3): exactly
+  `E5 65 2C 67 9E 8A E9 30 D9 30 EB 30` — that's
+  `日本語ラベル` in UTF-16-LE, byte-perfect. chkdsk's stdout
+  rendering the label as `??????` is its own console-codepage
+  issue (chkdsk pipes to a non-UTF-aware stream); the bytes on
+  disk are correct.
+
+Per the work-list, `mac-format-label-cjk` is therefore
+`passed-implicitly-by-agent-5442-2026-05-02-c6a1` — same residual
+state as the basic scenario, no label-specific bug introduced.
+
 ## What we learned
 
 1. **Microsoft's NTFS implementation is the only authoritative
