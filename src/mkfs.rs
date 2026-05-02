@@ -1099,13 +1099,20 @@ fn write_standard_information(
     rec[v + 8..v + 16].copy_from_slice(&nt_time.to_le_bytes());
     rec[v + 16..v + 24].copy_from_slice(&nt_time.to_le_bytes());
     rec[v + 24..v + 32].copy_from_slice(&nt_time.to_le_bytes());
-    let mut fa: u32 = 0x20; // ARCHIVE
-    if is_dir {
-        fa |= 0x10000000;
-    }
-    if is_system {
-        fa |= 0x06; // HIDDEN | SYSTEM
-    }
+    // file_attributes: system records get HIDDEN|SYSTEM only (0x06), no
+    // ARCHIVE. Microsoft `format.com`'s reference per-record byte-diff
+    // (agent-8934-2026-05-02 iter19, diag iter-20260502-072713) shows
+    // file_attributes = 0x06 on every system record; ours emitted 0x26
+    // (HIDDEN|SYSTEM|ARCHIVE) before this fix. Regular files keep ARCHIVE.
+    let fa: u32 = if is_system {
+        0x06 // HIDDEN | SYSTEM (matches Microsoft reference)
+    } else {
+        let mut f: u32 = 0x20; // ARCHIVE
+        if is_dir {
+            f |= 0x10000000;
+        }
+        f
+    };
     rec[v + 32..v + 36].copy_from_slice(&fa.to_le_bytes());
     // For NTFS-3.x form (non-system), bytes v+36..v+72 are the extended
     // fields (MaxVersions/VersionNumber/ClassId/OwnerId/SecurityId/
