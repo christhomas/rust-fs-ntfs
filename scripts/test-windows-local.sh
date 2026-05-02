@@ -22,6 +22,10 @@ set -euo pipefail
 
 VM_HOST="${VM_HOST:-chris@192.168.213.145}"
 VM_WORKDIR="${VM_WORKDIR:-C:/Users/chris/dev/rust-fs-ntfs}"
+# SSH_OPTS lets callers bypass a broken ssh-agent. Set it to e.g.
+# "-i $(pwd)/privatekey -o IdentitiesOnly=yes" before invoking. Empty
+# default preserves prior agent-based behaviour.
+SSH_OPTS="${SSH_OPTS:-}"
 # PowerShell-safe path form for the workdir.
 VM_WORKDIR_PS="${VM_WORKDIR//\//\\}"
 
@@ -41,12 +45,13 @@ cd "${REPO_ROOT}"
 # remote untar overwrites whatever was there, so each run starts from
 # a known tree. (No need for rsync incrementality — source is ~10 MB.)
 echo "[push] tar-ssh source -> ${VM_HOST}:${VM_WORKDIR}"
-ssh "${VM_HOST}" "if (-not (Test-Path '${VM_WORKDIR_PS}')) { New-Item -ItemType Directory -Path '${VM_WORKDIR_PS}' -Force | Out-Null }"
+ssh ${SSH_OPTS} "${VM_HOST}" "if (-not (Test-Path '${VM_WORKDIR_PS}')) { New-Item -ItemType Directory -Path '${VM_WORKDIR_PS}' -Force | Out-Null }"
 tar --exclude='./target' --exclude='./.git' --exclude='./diag' --exclude='./diag-local-*' \
     --exclude='./test-disks' --exclude='./tarpaulin-report.html' \
     --exclude='*.swp' --exclude='.DS_Store' \
+    --exclude='./privatekey' --exclude='./privatekey.*' \
     -cf - . | \
-    ssh "${VM_HOST}" "tar -xf - -C '${VM_WORKDIR}'"
+    ssh ${SSH_OPTS} "${VM_HOST}" "tar -xf - -C '${VM_WORKDIR}'"
 
 # ─── 2. Run test on VM ───────────────────────────────────────────────
 # Scenario parameters; defaults match the original 256 MiB / CITEST scenario.
@@ -55,7 +60,7 @@ WRAPPER_SIZE_MB="${WRAPPER_SIZE_MB:-$(( VOLUME_SIZE_MB + 128 ))}"
 LABEL="${LABEL:-CITEST}"
 echo "[run]  scripts/run-windows-test.ps1 -VolumeSizeMb ${VOLUME_SIZE_MB} -WrapperSizeMb ${WRAPPER_SIZE_MB} -Label '${LABEL}' on ${VM_HOST}"
 set +e
-ssh "${VM_HOST}" "Set-Location '${VM_WORKDIR_PS}'; powershell -ExecutionPolicy Bypass -File '.\\scripts\\run-windows-test.ps1' -VolumeSizeMb ${VOLUME_SIZE_MB} -WrapperSizeMb ${WRAPPER_SIZE_MB} -Label '${LABEL}'"
+ssh ${SSH_OPTS} "${VM_HOST}" "Set-Location '${VM_WORKDIR_PS}'; powershell -ExecutionPolicy Bypass -File '.\\scripts\\run-windows-test.ps1' -VolumeSizeMb ${VOLUME_SIZE_MB} -WrapperSizeMb ${WRAPPER_SIZE_MB} -Label '${LABEL}'"
 RUN_EXIT=$?
 set -e
 
@@ -63,7 +68,7 @@ set -e
 echo "[pull] diag/ -> ${DIAG_LOCAL}"
 mkdir -p "${DIAG_LOCAL}"
 # Stream the diag/ tree back via tar over ssh (same trick).
-ssh "${VM_HOST}" "Set-Location '${VM_WORKDIR_PS}'; tar -cf - diag" | \
+ssh ${SSH_OPTS} "${VM_HOST}" "Set-Location '${VM_WORKDIR_PS}'; tar -cf - diag" | \
     tar -xf - -C "${DIAG_LOCAL}" --strip-components=1 2>/dev/null || \
     echo "[pull] no diag/ on remote (test may have failed before any output)"
 

@@ -26,3 +26,9 @@ test-disks/*.img
 diag*
 *.vhdx
 nfs.img
+
+# SSH key file for the test VM, used when ssh-agent is broken
+# (consumed via SSH_OPTS in scripts/test-windows-local.sh — see header).
+# Lives at the repo root only; never commit.
+/privatekey
+/privatekey.*

@@ -3,7 +3,7 @@
   "_doc": "Multi-agent NTFS test work list. See docs/multi-agent-test-protocol.md. Each scenario name is unique. status starts at 'pending'; agents transition via scripts/claim-scenario.sh.",
   "scenarios": {
     "mac-format-basic-256mib": {
-      "status": "blocked-on-agent-5442-2026-05-02",
+      "status": "pending",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -112,7 +112,7 @@
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
     },
     "mac-format-win-write-tiny": {
-      "status": "blocked-needs-runner-winfixtures-wiring-agent-c6a1-2026-05-02",
+      "status": "pending",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -127,7 +127,7 @@
       ]
     },
     "mac-format-win-write-medium": {
-      "status": "blocked-needs-runner-winfixtures-wiring-agent-c6a1-2026-05-02",
+      "status": "pending",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -143,7 +143,7 @@
       ]
     },
     "mac-format-win-write-large": {
-      "status": "blocked-needs-runner-winfixtures-wiring-agent-c6a1-2026-05-02",
+      "status": "pending",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -159,7 +159,7 @@
       ]
     },
     "mac-format-win-write-many-small": {
-      "status": "blocked-needs-runner-winfixtures-wiring-agent-c6a1-2026-05-02",
+      "status": "pending",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -168,7 +168,7 @@
       "operation_sequence": "mac:format -> win:chkdsk -> win:write(256 files of 16 bytes) -> win:chkdsk -> win:enumerate(all)"
     },
     "mac-format-win-write-then-delete": {
-      "status": "blocked-needs-runner-winfixtures-wiring-agent-c6a1-2026-05-02",
+      "status": "pending",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -177,7 +177,7 @@
       "operation_sequence": "mac:format -> win:write(F1,F2,F3) -> win:delete(F2) -> win:chkdsk -> win:enumerate(F1,F3)"
     },
     "mac-format-mac-enumerate-empty": {
-      "status": "blocked-needs-scaffolding-mac-enumerate-cli-agent-c6a1-2026-05-02",
+      "status": "pending",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -187,7 +187,7 @@
       "_note": "depends on Mac-side enumerate CLI; first agent picking this scaffolds tests/matrix/inspect/"
     },
     "mac-format-win-write-mac-enumerate": {
-      "status": "blocked-needs-scaffolding-mac-enumerate-cli-agent-c6a1-2026-05-02",
+      "status": "pending",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -197,7 +197,7 @@
       "_note": "depends on Mac-side enumerate CLI"
     },
     "mac-format-win-write-win-delete-mac-verify-empty": {
-      "status": "blocked-needs-scaffolding-mac-enumerate-cli-agent-c6a1-2026-05-02",
+      "status": "pending",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -207,7 +207,7 @@
       "_note": "depends on Mac-side enumerate CLI"
     },
     "win-format-win-write-mac-verify": {
-      "status": "blocked-needs-scaffolding-mac-enumerate-cli-agent-c6a1-2026-05-02",
+      "status": "pending",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -217,7 +217,7 @@
       "_note": "Microsoft format.com is the canonical reference; this proves our reader handles Microsoft-format output"
     },
     "win-format-win-write-mac-write-win-verify": {
-      "status": "blocked-needs-scaffolding-mac-writer-agent-c6a1-2026-05-02",
+      "status": "pending",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -227,7 +227,7 @@
       "_note": "depends on Mac-side writer; first agent scaffolds it or marks blocked-on-writer"
     },
     "win-format-win-write-mac-delete-win-verify": {
-      "status": "blocked-needs-scaffolding-mac-deleter-agent-c6a1-2026-05-02",
+      "status": "pending",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
