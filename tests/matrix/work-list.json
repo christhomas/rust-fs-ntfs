@@ -13,106 +13,128 @@
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-030255"
     },
     "mac-format-tiny-32mib": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 32,
         "cluster_size": 4096,
         "label": "TINY"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f as mac-format-basic-256mib; cluster_size and volume_size variations don't change chkdsk verdict — Stage 1 + Stage 2 verify clean, scan-for-reconnect phase errors out internally. Likely root $SECURITY_DESCRIPTOR. See findings iter13."
     },
     "mac-format-small-64mib": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 64,
         "cluster_size": 4096,
         "label": "SMALL"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f as mac-format-basic-256mib. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-large-1gib": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 1024,
         "cluster_size": 4096,
         "label": "ONE_GIB"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f as mac-format-basic-256mib. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-cluster-512": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 512,
         "label": "C512"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f as mac-format-basic-256mib. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-cluster-1k": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 1024,
         "label": "C1K"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f as mac-format-basic-256mib. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-cluster-8k": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 8192,
         "label": "C8K"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f as mac-format-basic-256mib. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-cluster-64k": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 1024,
         "cluster_size": 65536,
         "label": "C64K"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-label-empty": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": ""
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-label-32chars": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-label-cjk": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "日本語ラベル"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-label-latin1": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "Disk éclipse"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-win-write-tiny": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -124,10 +146,12 @@
           "name": "tiny.txt",
           "content": "hello world"
         }
-      ]
+      ],
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-win-write-medium": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -140,10 +164,12 @@
           "size_bytes": 4096,
           "content_pattern": "zeros"
         }
-      ]
+      ],
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-win-write-large": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -156,85 +182,97 @@
           "size_bytes": 4194304,
           "content_pattern": "incrementing"
         }
-      ]
+      ],
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-win-write-many-small": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "MANY"
       },
-      "operation_sequence": "mac:format -> win:chkdsk -> win:write(256 files of 16 bytes) -> win:chkdsk -> win:enumerate(all)"
+      "operation_sequence": "mac:format -> win:chkdsk -> win:write(256 files of 16 bytes) -> win:chkdsk -> win:enumerate(all)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-win-write-then-delete": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "WRDEL"
       },
-      "operation_sequence": "mac:format -> win:write(F1,F2,F3) -> win:delete(F2) -> win:chkdsk -> win:enumerate(F1,F3)"
+      "operation_sequence": "mac:format -> win:write(F1,F2,F3) -> win:delete(F2) -> win:chkdsk -> win:enumerate(F1,F3)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T//rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-031136",
+      "note": "Same post-Stage-2 frs.cxx:60f. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-mac-enumerate-empty": {
-      "status": "pending",
+      "status": "blocked-on-mac-enumerate-cli-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "MENUM"
       },
       "operation_sequence": "mac:format -> mac:enumerate(empty: only '.')",
-      "_note": "depends on Mac-side enumerate CLI; first agent picking this scaffolds tests/matrix/inspect/"
+      "_note": "depends on Mac-side enumerate CLI; first agent picking this scaffolds tests/matrix/inspect/",
+      "note": "Operation sequence requires Mac-side capabilities not yet plumbed: enumerate-cli. See docs/multi-agent-test-protocol.md 'Operation host requirements' table."
     },
     "mac-format-win-write-mac-enumerate": {
-      "status": "pending",
+      "status": "blocked-on-mac-enumerate-cli-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "RTRIP"
       },
       "operation_sequence": "mac:format -> win:write(F1,F2) -> mac:enumerate(F1,F2)",
-      "_note": "depends on Mac-side enumerate CLI"
+      "_note": "depends on Mac-side enumerate CLI",
+      "note": "Operation sequence requires Mac-side capabilities not yet plumbed: enumerate-cli. See docs/multi-agent-test-protocol.md 'Operation host requirements' table."
     },
     "mac-format-win-write-win-delete-mac-verify-empty": {
-      "status": "pending",
+      "status": "blocked-on-mac-enumerate-cli-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "DELRT"
       },
       "operation_sequence": "mac:format -> win:write(F1,F2,F3) -> win:delete(all) -> mac:enumerate(empty)",
-      "_note": "depends on Mac-side enumerate CLI"
+      "_note": "depends on Mac-side enumerate CLI",
+      "note": "Operation sequence requires Mac-side capabilities not yet plumbed: enumerate-cli. See docs/multi-agent-test-protocol.md 'Operation host requirements' table."
     },
     "win-format-win-write-mac-verify": {
-      "status": "pending",
+      "status": "blocked-on-mac-enumerate-cli-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "WINREF"
       },
       "operation_sequence": "win:format -> win:write(F1,F2) -> mac:enumerate(F1,F2)",
-      "_note": "Microsoft format.com is the canonical reference; this proves our reader handles Microsoft-format output"
+      "_note": "Microsoft format.com is the canonical reference; this proves our reader handles Microsoft-format output",
+      "note": "Operation sequence requires Mac-side capabilities not yet plumbed: enumerate-cli. See docs/multi-agent-test-protocol.md 'Operation host requirements' table."
     },
     "win-format-win-write-mac-write-win-verify": {
-      "status": "pending",
+      "status": "blocked-on-mac-writer-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "INTERMIX"
       },
       "operation_sequence": "win:format -> win:write(F1) -> mac:write(F2) -> win:chkdsk -> win:enumerate(F1,F2)",
-      "_note": "depends on Mac-side writer; first agent scaffolds it or marks blocked-on-writer"
+      "_note": "depends on Mac-side writer; first agent scaffolds it or marks blocked-on-writer",
+      "note": "Operation sequence requires Mac-side capabilities not yet plumbed: writer. See docs/multi-agent-test-protocol.md 'Operation host requirements' table."
     },
     "win-format-win-write-mac-delete-win-verify": {
-      "status": "pending",
+      "status": "blocked-on-mac-deleter-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "MACDEL"
       },
       "operation_sequence": "win:format -> win:write(F1,F2) -> mac:delete(F1) -> win:chkdsk -> win:enumerate(F2)",
-      "_note": "depends on Mac-side deleter"
+      "_note": "depends on Mac-side deleter",
+      "note": "Operation sequence requires Mac-side capabilities not yet plumbed: deleter. See docs/multi-agent-test-protocol.md 'Operation host requirements' table."
     }
   }
 }

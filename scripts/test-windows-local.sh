@@ -49,9 +49,21 @@ tar --exclude='./target' --exclude='./.git' --exclude='./diag' --exclude='./diag
     ssh "${VM_HOST}" "tar -xf - -C '${VM_WORKDIR}'"
 
 # ─── 2. Run test on VM ───────────────────────────────────────────────
-echo "[run]  scripts/run-windows-test.ps1 on ${VM_HOST}"
+# Optional per-scenario overrides from the environment. The runner has
+# matching defaults (256 MiB volume / 384 MiB wrapper / 4 KiB cluster /
+# label CITEST).
+PS_ARGS=""
+[[ -n "${VOL_MB:-}" ]]       && PS_ARGS+=" -VolumeSizeMb ${VOL_MB}"
+[[ -n "${WRAP_MB:-}" ]]      && PS_ARGS+=" -WrapperSizeMb ${WRAP_MB}"
+[[ -n "${CLUSTER_SIZE:-}" ]] && PS_ARGS+=" -ClusterSize ${CLUSTER_SIZE}"
+if [[ -n "${LABEL+x}" ]]; then
+    # PowerShell takes the next token as the value; quote so spaces
+    # survive (and still pass through the ssh shell).
+    PS_ARGS+=" -Label '${LABEL//\'/\'\'}'"
+fi
+echo "[run]  scripts/run-windows-test.ps1${PS_ARGS} on ${VM_HOST}"
 set +e
-ssh "${VM_HOST}" "Set-Location '${VM_WORKDIR_PS}'; powershell -ExecutionPolicy Bypass -File '.\\scripts\\run-windows-test.ps1'"
+ssh "${VM_HOST}" "Set-Location '${VM_WORKDIR_PS}'; powershell -ExecutionPolicy Bypass -File '.\\scripts\\run-windows-test.ps1'${PS_ARGS}"
 RUN_EXIT=$?
 set -e
 

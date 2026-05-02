@@ -16,6 +16,7 @@
 param(
     [int]$VolumeSizeMb = 256,
     [int]$WrapperSizeMb = 384,
+    [int]$ClusterSize = 4096,
     [string]$Label = "CITEST"
 )
 
@@ -52,7 +53,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "[2/6] Generating nfs.img and wrapping in VHDX ..."
 $rawSize = $VolumeSizeMb * 1MB
 fsutil file createnew nfs.img $rawSize | Out-Null
-./target/release/mkfs_ntfs.exe -L $Label --serial deadbeefcafe1234 nfs.img |
+./target/release/mkfs_ntfs.exe -L $Label -c $ClusterSize --serial deadbeefcafe1234 nfs.img |
     Tee-Object diag/mkfs-output.txt
 
 # Pre-wrap BPB dump (ground-truth view of mkfs_ntfs output).
@@ -170,7 +171,7 @@ $refPart = New-Partition -DiskNumber $refVhd.Number -UseMaximumSize -AssignDrive
 Start-Sleep -Seconds 3
 $refPart = Get-Partition -DiskNumber $refVhd.Number |
     Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
-$fmtArgs = @("$($refPart.DriveLetter):", "/FS:NTFS", "/Q", "/A:4096", "/L", "/V:CITESTREF", "/Y")
+$fmtArgs = @("$($refPart.DriveLetter):", "/FS:NTFS", "/Q", "/A:$ClusterSize", "/L", "/V:CITESTREF", "/Y")
 $fp = Start-Process -FilePath "format.com" -ArgumentList $fmtArgs `
     -NoNewWindow -PassThru -Wait `
     -RedirectStandardOutput diag/reference-format.txt
