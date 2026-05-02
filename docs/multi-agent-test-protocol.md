@@ -77,6 +77,52 @@ explaining what evidence would have justified the change, and pick
 the next scenario. Never wait for a human to confirm. Never merge
 speculative changes -- when in doubt, don't change.
 
+## Connecting to the Windows VM
+
+All Windows-side execution goes through the local pipeline scripts.
+Agents do not invent their own SSH commands or interact with the VM
+directly outside of these scripts.
+
+- **VM**: Windows ARM64 11, reachable at `chris@192.168.213.145` via
+  SSH key authentication (no password, no further prompts). The host
+  is fully provisioned by `scripts/setup-windows-vm.sh` and includes
+  `rustup` (gnullvm toolchain), `LLVM-MinGW`, and `qemu-img`. See
+  `docs/local-test-pipeline.md`.
+
+- **Default VM workdir**: `C:/Users/chris/dev/rust-fs-ntfs`. Agents
+  MUST override this with their session-scoped path so concurrent
+  runs don't trample each other:
+
+  ```sh
+  export VM_WORKDIR="C:/Users/chris/dev/rust-fs-ntfs-${AGENT_SESSION}"
+  ```
+
+- **The only sanctioned entry point** is
+  `scripts/test-windows-local.sh` (driving the local Mac->VM->Mac
+  round trip) and any future matrix runner under `scripts/`. The
+  scripts handle source push, build, test execution, diag retrieval,
+  and dismount cleanup. Agents that bypass them and ssh manually risk
+  leaving orphaned VHDX mounts or contaminating other agents' state.
+
+- **Diag output location**: `$DIAG_DIR/iter-<timestamp>/` per agent;
+  default `$TMPDIR/rust-fs-ntfs-diag/`. Agents override:
+
+  ```sh
+  export DIAG_DIR="$TMPDIR/rust-fs-ntfs-diag/${AGENT_SESSION}"
+  ```
+
+- **If the VM is unreachable**: the orchestrator script's first SSH
+  call will fail. Mark the scenario `blocked-infra-vm-unreachable-<session>`
+  and pick another. Do NOT attempt to ssh-fix the VM (e.g. reinstall
+  toolchains, restart services) -- that's outside the agent's scope
+  and would conflict with concurrent agents that may be using the VM
+  successfully.
+
+- **If `cargo build` on the VM fails for environmental reasons**
+  (missing component, broken `aarch64-w64-mingw32-clang`): mark
+  `blocked-infra-build-<session>` and pick another. Do NOT install
+  toolchain components from an agent.
+
 ## The full operation matrix
 
 Each scenario is a sequence of operations on a single volume. Each
