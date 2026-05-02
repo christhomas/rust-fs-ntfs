@@ -58,9 +58,10 @@ tar --exclude='./target' --exclude='./.git' --exclude='./diag' --exclude='./diag
 VOLUME_SIZE_MB="${VOLUME_SIZE_MB:-256}"
 WRAPPER_SIZE_MB="${WRAPPER_SIZE_MB:-$(( VOLUME_SIZE_MB + 128 ))}"
 LABEL="${LABEL:-CITEST}"
-echo "[run]  scripts/run-windows-test.ps1 -VolumeSizeMb ${VOLUME_SIZE_MB} -WrapperSizeMb ${WRAPPER_SIZE_MB} -Label '${LABEL}' on ${VM_HOST}"
+CLUSTER_SIZE="${CLUSTER_SIZE:-4096}"
+echo "[run]  scripts/run-windows-test.ps1 -VolumeSizeMb ${VOLUME_SIZE_MB} -WrapperSizeMb ${WRAPPER_SIZE_MB} -Label '${LABEL}' -ClusterSize ${CLUSTER_SIZE} on ${VM_HOST}"
 set +e
-ssh ${SSH_OPTS} "${VM_HOST}" "Set-Location '${VM_WORKDIR_PS}'; powershell -ExecutionPolicy Bypass -File '.\\scripts\\run-windows-test.ps1' -VolumeSizeMb ${VOLUME_SIZE_MB} -WrapperSizeMb ${WRAPPER_SIZE_MB} -Label '${LABEL}'"
+ssh ${SSH_OPTS} "${VM_HOST}" "Set-Location '${VM_WORKDIR_PS}'; powershell -ExecutionPolicy Bypass -File '.\\scripts\\run-windows-test.ps1' -VolumeSizeMb ${VOLUME_SIZE_MB} -WrapperSizeMb ${WRAPPER_SIZE_MB} -Label '${LABEL}' -ClusterSize ${CLUSTER_SIZE}"
 RUN_EXIT=$?
 set -e
 
