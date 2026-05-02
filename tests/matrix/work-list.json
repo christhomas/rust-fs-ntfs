@@ -12,7 +12,7 @@
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan) -> win:enumerate(empty)"
     },
     "mac-format-tiny-32mib": {
-      "status": "claimed-agent-c6a1-2026-05-02",
+      "status": "pending",
       "volume_params": {
         "size_mib": 32,
         "cluster_size": 4096,
