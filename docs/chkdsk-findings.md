@@ -654,6 +654,61 @@ debug ladder is: dump `ours-rec5-sd.bin` and decode against the
 public Microsoft SECURITY_DESCRIPTOR layout (MS-DTYP §2.4.6) for
 self-consistency before changing it again.
 
+**iter14 verification — REVERTED (broke mount before chkdsk could run)**
+
+Once VM SSH was restored, ran the iter14 build through the local
+pipeline (diag dir
+`$TMPDIR/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-053623`).
+The 72-byte SD attribute on rec 5 caused a NEW failure mode:
+
+> chkdsk readonly output:
+>   Cannot open volume for direct access.
+
+`Get-Volume` showed `FileSystemType: FAT32` (instead of NTFS), and
+the Event Log filled with NTFS Event ID 55 errors:
+
+> A corruption was discovered in the file system structure on
+> volume \\?\Volume{1a4cfdd9-…}. The exact nature of the corruption
+> is unknown.  The file system structures need to be scanned and
+> fixed offline.
+
+So Windows rejected our volume at *mount* time — before chkdsk got
+a chance to read anything. The byte-level SD content I built decoded
+back via Python as structurally valid (revision=1, control=0x8004,
+correct offsets, valid SIDs, ACL_REVISION=2, AceCount=1, AccessMask
+=0x001F01FF). The structure being valid in isolation is necessary
+but not sufficient — Windows additionally checks invariants we
+haven't matched, e.g.:
+
+- Reference rec 5 places the DACL **before** owner/group (OffsetDacl
+  =0x14, OffsetOwner=0xCC, OffsetGroup=0xDC). Ours puts owner/group
+  first (OffsetOwner=20, OffsetGroup=32, OffsetDacl=44). Both are
+  formally legal per MS-DTYP §2.4.6 but Windows kernel apparently
+  prefers / requires the reference layout.
+- Reference's SD has **8 ACEs** with several ACE types (allow + audit
+  + inherited). Ours has 1 ACE. A minimal SD may need additional
+  control flags (e.g. SE_DACL_AUTO_INHERITED 0x0400) we didn't set.
+- $STANDARD_INFORMATION's `security_id` (offset 0x34, NTFS 3.1) is
+  always 0 in our writer; reference may set it to a concrete index
+  into $Secure even when an explicit SD attribute is present, and
+  the kernel cross-checks the two.
+
+Reverted iter14's SD changes (commit follows). Falls back to iter13's
+verified state: 17 scenarios at `failed-needs-iter14-sd-*`, with
+post-Stage-2 `frs.cxx:60f` as the single remaining symptom. The
+correct iter14 fix is materially harder than the byte-budget I
+allowed it; the next iteration of this task should:
+
+1. Capture a wider byte-diff: dump every byte of reference rec 5's
+   SD attribute (offsets/sizes/control/all SIDs/all ACEs) and walk
+   it against MS-DTYP §2.4.6, §2.4.5.1 (SID), §2.4.4 (ACL/ACE).
+2. Build a `$SECURITY_DESCRIPTOR` attribute that matches reference's
+   *layout order* (DACL before owner/group), plus SE_DACL_AUTO_
+   INHERITED if reference sets it, plus the 8 standard ACEs (or
+   reduce to a minimal valid 2-ACE SYSTEM+Administrators DACL with
+   the right control flags).
+3. Re-run the pipeline before claiming any fix.
+
 ## What we learned
 
 1. **Microsoft's NTFS implementation is the only authoritative
