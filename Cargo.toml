@@ -26,6 +26,13 @@ crate-type = ["staticlib", "rlib"]
 name = "mkfs_ntfs"
 path = "src/bin/mkfs_ntfs.rs"
 
+# Read-only enumerate of an NTFS image — wraps Filesystem::read_dir.
+# Used by the multi-agent test matrix's `mac:enumerate` operation
+# (see docs/multi-agent-test-protocol.md).
+[[bin]]
+name = "inspect_ntfs"
+path = "src/bin/inspect_ntfs.rs"
+
 [dependencies]
 ntfs = { version = "0.4", default-features = false, features = ["std"] }
 
