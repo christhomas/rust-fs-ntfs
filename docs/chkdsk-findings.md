@@ -449,6 +449,114 @@ errors hidden behind it on rec 9 (and orphan-recovery messages for
 rec 10+, which were truncated in the iter11 run) will only become
 visible after this fix.
 
+### iter13 (agent-c5fe-2026-05-02): root $I30 was empty — every system file was reported as orphaned
+
+**Symptom**
+
+Post-iter12 chkdsk output (diag dir
+`$TMPDIR/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-024129`):
+
+> Stage 1: Examining basic file system structure ...
+> 64 file records processed.  File verification completed.
+> 0 large file records processed.  0 bad file records processed.
+> Stage 2: Examining file name linkage ...
+> 68 index entries processed.  Index verification completed.
+> CHKDSK is scanning unindexed files for reconnect to their original directory.
+> Detected orphaned file $MFT (0), should be recovered into directory file 5.
+> Detected orphaned file $MFTMirr (1), should be recovered into directory file 5.
+> Detected orphaned file $LogFile (2), should be recovered into directory file 5.
+> Detected orphaned file $Volume (3), should be recovered into directory file 5.
+> Detected orphaned file $AttrDef (4), should be recovered into directory file 5.
+> Detected orphaned file . (5), should be recovered into directory file 5.
+> Detected orphaned file $Bitmap (6), should be recovered into directory file 5.
+> Detected orphaned file $Boot (7), should be recovered into directory file 5.
+> Detected orphaned file $BadClus (8), should be recovered into directory file 5.
+> Detected orphaned file $Secure (9), should be recovered into directory file 5.
+> Skipping further messages about recovering orphans.
+> An unspecified error occurred (6672732e637878 60f).
+
+iter12's $Secure flag fix is confirmed working — Stage 1 reports zero
+errors. The new symptom is at Stage 2: every system record's
+$FILE_NAME points to (rec=5, seq=5) but root rec 5's $I30 contains
+**no entries** beyond the LAST sentinel, so every child appears as an
+orphan.
+
+**Diagnostic**
+
+Decoded rec 5's $INDEX_ROOT body from `ours-mft-16recs.bin` /
+`reference-mft-16recs.bin` and dumped each $I30 entry side-by-side.
+
+**Per-field diff** (root rec 5 $INDEX_ROOT)
+
+| Field                     | reference        | ours (pre-fix) | spec |
+|---------------------------|------------------|----------------|------|
+| $INDEX_ROOT total length  | 0x488            | 0x50           | publicly documented NTFS layout |
+| Index value total_size    | 0x458            | 0x20           | INDEX_HEADER total_size |
+| Number of $I30 entries    | 11 (every system file + `.`) | 0 (LAST sentinel only) | NTFS directory layout |
+
+**Root cause**
+
+`build_empty_index_root_attr` was being used unconditionally for rec 5,
+producing a directory whose $I30 contained only the LAST sentinel. The
+12 system records that we wrote with `parent_reference=(rec=5,seq=5)`
+therefore had no return-link from root, and chkdsk's Stage 2 reconcile
+phase reports each as orphaned.
+
+**Fix**
+
+Add `build_root_index_root_attr` and `RootIndexChild`. Walk the 12
+system records (records 0..11 plus `.` self-link, dropping the
+duplicate by routing root through the same builder), sort by NTFS
+COLLATION_FILE_NAME (case-insensitive UTF-16 — ASCII uppercase
+suffices for these names, see the comment on `collate_filename`), and
+emit one $I30 entry per child followed by the LAST sentinel.
+
+The $FILE_NAME copy embedded in each $I30 entry zeros allocated_size,
+real_size, and file_attributes — matching Microsoft's pattern (every
+ref entry except $MFT has these as 0; the per-record $FILE_NAME is
+authoritative). $MFT alone in ref has alloc=0x10000 real=0x10000
+fa=0x6 in its $I30 entry; we leave ours zeroed too — the inconsistency
+is one Microsoft chose to introduce, not one chkdsk requires.
+
+**Result (partial — Stage 2 orphan messages gone, post-Stage-2 still
+errors)**
+
+Re-ran the local pipeline (diag dir
+`$TMPDIR/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-030255`).
+chkdsk now produces:
+
+> Stage 1: ... 64 file records processed.  File verification completed.
+> Stage 2: ... 68 index entries processed.  Index verification completed.
+> CHKDSK is scanning unindexed files for reconnect to their original directory.
+> An unspecified error occurred (6672732e637878 60f).
+
+The 12 "Detected orphaned file …" lines are gone — Stage 2 no longer
+reports any orphans, and "Index verification completed" passes clean.
+**chkdsk now gets further than it ever has on our output**, but a new
+internal error (`frs.cxx:60f`) surfaces in the post-Stage-2 phase.
+Likely root causes (none yet corroborated by byte-diff):
+
+1. Root rec 5 lacks a `$SECURITY_DESCRIPTOR` attribute. Reference's
+   rec 5 carries an embedded SD of 248 bytes (val_len=0xF8). Without
+   it, chkdsk may fail when it tries to compute or verify the DACL
+   for root.
+2. Reference rec 11 is *not* `$Extend` — it has no $FILE_NAME, just
+   $STANDARD_INFORMATION + $SECURITY_DESCRIPTOR + $DATA. We use rec 11
+   for `$Extend` and link it from root. chkdsk may have hardcoded
+   knowledge of rec 11 as a non-$Extend slot.
+3. `$Extend` belongs at a higher MFT record number with non-trivial
+   children ($ObjId, $Quota, $Reparse, $UsnJrnl) that we don't write.
+
+Adding a default $SECURITY_DESCRIPTOR is the next iteration's task —
+it's spec-citable (MS-FSCC SECURITY_DESCRIPTOR layout) and self-
+contained — but bigger than one byte-diff fix, so it's deferred.
+
+Linux test contract held throughout: `cargo test --release --lib mkfs
+--test mkfs_roundtrip --test mkfs_bin_smoke` passes (6/6) before and
+after. `cargo fmt --check` and `cargo clippy --all-targets -- -D
+warnings` clean. Scenario `mac-format-basic-256mib` is therefore
+marked `failed-needs-iter14-sd-<session>` rather than `passed-*`.
+
 ## What we learned
 
 1. **Microsoft's NTFS implementation is the only authoritative

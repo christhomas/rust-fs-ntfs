@@ -3,13 +3,14 @@
   "_doc": "Multi-agent NTFS test work list. See docs/multi-agent-test-protocol.md. Each scenario name is unique. status starts at 'pending'; agents transition via scripts/claim-scenario.sh.",
   "scenarios": {
     "mac-format-basic-256mib": {
-      "status": "pending",
+      "status": "failed-needs-iter14-sd-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
         "label": "CITEST"
       },
-      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan) -> win:enumerate(empty)"
+      "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan) -> win:enumerate(empty)",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-030255"
     },
     "mac-format-tiny-32mib": {
       "status": "pending",

@@ -130,6 +130,24 @@ Get-Disk | Format-List | Out-File diag/get-disk-on-mount.txt
 Get-Volume | Format-List | Out-File diag/get-volume-on-mount.txt
 Get-Partition -ErrorAction SilentlyContinue | Format-List | Out-File diag/get-partition-on-mount.txt
 
+# Enumerate the freshly-formatted root for the win:enumerate leg of
+# scenarios like mac-format-basic-256mib. -Force surfaces hidden system
+# files; user-visible content should be empty on a clean format.
+"with -Force:" | Out-File diag/enumerate-root.txt
+Get-ChildItem -LiteralPath "${letter}:\" -Force -ErrorAction SilentlyContinue |
+    Select-Object Mode, Length, Name | Format-Table -AutoSize |
+    Out-File diag/enumerate-root.txt -Append
+"" | Out-File diag/enumerate-root.txt -Append
+"user-visible (no -Force):" | Out-File diag/enumerate-root.txt -Append
+$visible = @(Get-ChildItem -LiteralPath "${letter}:\" -ErrorAction SilentlyContinue)
+if ($visible.Count -eq 0) {
+    "(empty)" | Out-File diag/enumerate-root.txt -Append
+} else {
+    $visible | Select-Object Mode, Length, Name | Format-Table -AutoSize |
+        Out-File diag/enumerate-root.txt -Append
+}
+"user_visible_count=$($visible.Count)" | Tee-Object diag/enumerate-root-count.txt | Out-Null
+
 # Event log (NTFS / Disk / partmgr).
 try {
     Get-WinEvent -LogName 'System' -MaxEvents 100 -ErrorAction SilentlyContinue |

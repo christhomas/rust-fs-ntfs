@@ -362,11 +362,14 @@ pub fn format_filesystem(
     }
 
     // record 4: $AttrDef (canonical 2560-byte table)
+    let attrdef_blob = build_attrdef_table();
+    // Always non-resident at 2560 bytes (well over the resident
+    // ceiling for our 1024/4096 record sizes).
+    let attrdef_clusters: u64 = (attrdef_blob.len() as u64).div_ceil(cluster_size as u64);
+    // $Boot is always 8 KiB regardless of cluster size.
+    let boot_value_len: u64 = 8192;
+    let boot_clusters: u64 = boot_value_len.div_ceil(cluster_size as u64);
     {
-        let attrdef_blob = build_attrdef_table();
-        // Always non-resident at 2560 bytes (well over the resident
-        // ceiling for our 1024/4096 record sizes).
-        let attrdef_clusters = (attrdef_blob.len() as u64).div_ceil(cluster_size as u64);
         // Allocate clusters at the tail of the early-allocation region.
         let attrdef_lcn = upcase_lcn + upcase_clusters;
         // Mark allocated in our in-memory bitmap and rewrite.
@@ -412,7 +415,78 @@ pub fn format_filesystem(
     // record 5: root directory "."
     {
         let index_block_size: u32 = 4096;
-        let index_root = build_empty_index_root_attr(3, index_block_size, bytes_per_sector);
+        // Children of the root: every system record we populate (0..11),
+        // plus `.` itself (NTFS convention — root self-links into its
+        // own $I30). Without these entries chkdsk Stage 2 reports each
+        // system file as `Detected orphaned file X (n), should be
+        // recovered into directory file 5` because the children's
+        // $FILE_NAME parent_reference points at root but root's $I30
+        // doesn't list them back. See iter13 in chkdsk-findings.md.
+        let children = [
+            RootIndexChild {
+                rec_num: rec::MFT,
+                seq: 1,
+                name: "$MFT",
+            },
+            RootIndexChild {
+                rec_num: rec::MFTMIRR,
+                seq: rec::MFTMIRR as u16,
+                name: "$MFTMirr",
+            },
+            RootIndexChild {
+                rec_num: rec::LOGFILE,
+                seq: rec::LOGFILE as u16,
+                name: "$LogFile",
+            },
+            RootIndexChild {
+                rec_num: rec::VOLUME,
+                seq: rec::VOLUME as u16,
+                name: "$Volume",
+            },
+            RootIndexChild {
+                rec_num: rec::ATTRDEF,
+                seq: rec::ATTRDEF as u16,
+                name: "$AttrDef",
+            },
+            RootIndexChild {
+                rec_num: rec::ROOT,
+                seq: rec::ROOT as u16,
+                name: ".",
+            },
+            RootIndexChild {
+                rec_num: rec::BITMAP,
+                seq: rec::BITMAP as u16,
+                name: "$Bitmap",
+            },
+            RootIndexChild {
+                rec_num: rec::BOOT,
+                seq: rec::BOOT as u16,
+                name: "$Boot",
+            },
+            RootIndexChild {
+                rec_num: rec::BADCLUS,
+                seq: rec::BADCLUS as u16,
+                name: "$BadClus",
+            },
+            RootIndexChild {
+                rec_num: rec::SECURE,
+                seq: rec::SECURE as u16,
+                name: "$Secure",
+            },
+            RootIndexChild {
+                rec_num: rec::UPCASE,
+                seq: rec::UPCASE as u16,
+                name: "$UpCase",
+            },
+            RootIndexChild {
+                rec_num: rec::EXTEND,
+                seq: rec::EXTEND as u16,
+                name: "$Extend",
+            },
+        ];
+        let parent_ref = encode_file_reference(rec::ROOT as u64, rec::ROOT as u16);
+        let index_root =
+            build_root_index_root_attr(3, index_block_size, now, parent_ref, &children);
         // Root directory has no $DATA (only an $INDEX_ROOT), so $FILE_NAME
         // sizes are 0/0 — matches Microsoft's reference (rec 5).
         let rec_bytes = build_system_record(
@@ -459,8 +533,6 @@ pub fn format_filesystem(
     // record 7: $Boot — non-resident, single-cluster run at LCN 0,
     // value_length = 8192 (boot file is conventionally 8 KiB).
     {
-        let boot_value_len: u64 = 8192;
-        let boot_clusters: u64 = boot_value_len.div_ceil(cluster_size as u64);
         let runs = vec![DataRun {
             starting_vcn: 0,
             length: boot_clusters,
@@ -979,6 +1051,154 @@ fn build_resident_unnamed(attr_type: u32, attr_id: u16, value: &[u8]) -> Vec<u8>
     if !value.is_empty() {
         buf[header_size..header_size + value.len()].copy_from_slice(value);
     }
+    buf
+}
+
+/// One $I30 child record to populate root's $INDEX_ROOT with.
+///
+/// Per byte-diff against Microsoft `format.com` (CI iter13 diag dir),
+/// the $FILE_NAME copy embedded in a root $I30 entry has its
+/// allocated_size, real_size, and file_attributes fields zeroed —
+/// even though the child's own per-record $FILE_NAME carries the
+/// real values. The per-record copy is authoritative; the index-entry
+/// copy is a key for lookup. We mirror that pattern: only `name` and
+/// the mft_ref/seq + parent_ref + is_dir flag bit (for the namespace
+/// distinction) are populated in the entry. allocated_size/real_size/
+/// file_attributes are written as zero.
+struct RootIndexChild<'a> {
+    rec_num: u32,
+    seq: u16,
+    name: &'a str,
+}
+
+/// NTFS COLLATION_FILE_NAME ordering. The on-disk $UpCase table
+/// governs case folding for arbitrary Unicode names; for the system
+/// records this builder indexes (all ASCII), ASCII uppercase suffices
+/// and matches the reference's observed order
+/// ($AttrDef, $BadClus, $Bitmap, $Boot, $LogFile, $MFT, $MFTMirr,
+/// $Quota, $UpCase, $Volume, .).
+fn collate_filename(a: &str, b: &str) -> std::cmp::Ordering {
+    fn upper16(s: &str) -> Vec<u16> {
+        s.encode_utf16()
+            .map(|c| {
+                if (b'a' as u16..=b'z' as u16).contains(&c) {
+                    c - 32
+                } else {
+                    c
+                }
+            })
+            .collect()
+    }
+    upper16(a).cmp(&upper16(b))
+}
+
+/// Build the root directory's $INDEX_ROOT populated with one $I30
+/// entry per system record. Without these entries chkdsk's Stage 2
+/// reports every system record as `Detected orphaned file X (n),
+/// should be recovered into directory file 5` — its parent reference
+/// pointed at root but root's index didn't list it back. Confirmed
+/// by byte-diff against Microsoft format.com (CI iter13 diag dir):
+/// reference rec 5 carries an 0x488-byte $INDEX_ROOT with 11 entries
+/// covering every system file plus `.`; ours carried only the LAST
+/// sentinel.
+fn build_root_index_root_attr(
+    attr_id: u16,
+    index_block_size: u32,
+    nt_time: u64,
+    root_parent_ref: u64,
+    children: &[RootIndexChild<'_>],
+) -> Vec<u8> {
+    let mut sorted: Vec<&RootIndexChild<'_>> = children.iter().collect();
+    sorted.sort_by(|a, b| collate_filename(a.name, b.name));
+
+    let mut entries_buf: Vec<u8> = Vec::new();
+    for c in &sorted {
+        let utf16: Vec<u16> = c.name.encode_utf16().collect();
+        let key_len = 0x42usize + utf16.len() * 2;
+        let entry_len = align8(0x10 + key_len);
+        let mut e = vec![0u8; entry_len];
+
+        let child_ref = encode_file_reference(c.rec_num as u64, c.seq);
+        e[0..8].copy_from_slice(&child_ref.to_le_bytes());
+        e[8..10].copy_from_slice(&(entry_len as u16).to_le_bytes());
+        e[10..12].copy_from_slice(&(key_len as u16).to_le_bytes());
+        e[12..14].copy_from_slice(&0u16.to_le_bytes());
+        e[14..16].copy_from_slice(&0u16.to_le_bytes());
+
+        // $FILE_NAME body. Only parent_ref + timestamps + name fields
+        // are populated; allocated_size, real_size, and file_attributes
+        // are left zero — matching Microsoft format.com's $I30 entries
+        // for system records (CI iter13 byte-diff: ref's entries had
+        // alloc=0/real=0/fa=0 for every system child except $MFT, which
+        // alone carried the real $DATA size). The per-record $FILE_NAME
+        // is the authoritative copy; chkdsk does not appear to require
+        // the $I30 entry to mirror those numeric fields.
+        let v = 0x10;
+        e[v..v + 8].copy_from_slice(&root_parent_ref.to_le_bytes());
+        e[v + 8..v + 16].copy_from_slice(&nt_time.to_le_bytes());
+        e[v + 16..v + 24].copy_from_slice(&nt_time.to_le_bytes());
+        e[v + 24..v + 32].copy_from_slice(&nt_time.to_le_bytes());
+        e[v + 32..v + 40].copy_from_slice(&nt_time.to_le_bytes());
+        e[v + 64] = utf16.len() as u8;
+        e[v + 65] = NAMESPACE_WIN32_DOS;
+        for (i, ch) in utf16.iter().enumerate() {
+            let off = v + 66 + i * 2;
+            e[off..off + 2].copy_from_slice(&ch.to_le_bytes());
+        }
+        entries_buf.extend_from_slice(&e);
+    }
+
+    // LAST sentinel: zero mft_ref, entry_length=16, key_length=0,
+    // flags=0x0002 (END_OF_LIST).
+    let mut sentinel = [0u8; 16];
+    sentinel[8..10].copy_from_slice(&16u16.to_le_bytes());
+    sentinel[12..14].copy_from_slice(&0x0002u16.to_le_bytes());
+    entries_buf.extend_from_slice(&sentinel);
+
+    // Wrap in attribute header + INDEX_ROOT body.
+    let common_header = 16usize;
+    let resident_fields = 8usize;
+    let header_size = common_header + resident_fields;
+    let name_offset = header_size;
+    let name_bytes = 8usize;
+    let value_offset = align8(name_offset + name_bytes);
+    let ir_value_size = 16 + 16 + entries_buf.len();
+    let attr_length = align8(value_offset + ir_value_size);
+
+    let mut buf = vec![0u8; attr_length];
+    buf[0..4].copy_from_slice(&ATTR_INDEX_ROOT.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 0;
+    buf[9] = 4;
+    buf[10..12].copy_from_slice(&(name_offset as u16).to_le_bytes());
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+    buf[16..20].copy_from_slice(&(ir_value_size as u32).to_le_bytes());
+    buf[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes());
+    buf[22] = 0;
+    buf[23] = 0;
+
+    let i30: [u16; 4] = ['$' as u16, 'I' as u16, '3' as u16, '0' as u16];
+    for (i, c) in i30.iter().enumerate() {
+        let off = name_offset + i * 2;
+        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    }
+
+    let v = value_offset;
+    buf[v..v + 4].copy_from_slice(&0x30u32.to_le_bytes());
+    buf[v + 4..v + 8].copy_from_slice(&1u32.to_le_bytes());
+    buf[v + 8..v + 12].copy_from_slice(&index_block_size.to_le_bytes());
+    buf[v + 12] = 1;
+
+    let ih = v + 16;
+    buf[ih..ih + 4].copy_from_slice(&16u32.to_le_bytes());
+    let total_size = (16 + entries_buf.len()) as u32;
+    buf[ih + 4..ih + 8].copy_from_slice(&total_size.to_le_bytes());
+    buf[ih + 8..ih + 12].copy_from_slice(&total_size.to_le_bytes());
+
+    let eo = ih + 16;
+    buf[eo..eo + entries_buf.len()].copy_from_slice(&entries_buf);
+
     buf
 }
 
