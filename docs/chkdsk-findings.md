@@ -557,6 +557,103 @@ after. `cargo fmt --check` and `cargo clippy --all-targets -- -D
 warnings` clean. Scenario `mac-format-basic-256mib` is therefore
 marked `failed-needs-iter14-sd-<session>` rather than `passed-*`.
 
+### iter14 (agent-c5fe-2026-05-02): default $SECURITY_DESCRIPTOR on root rec 5 — UNVERIFIED, VM dropped SSH auth
+
+**Symptom**
+
+Carried over from iter13: chkdsk's post-Stage-2 reconnect-scan errors
+out with `An unspecified error occurred (6672732e637878 60f)` after
+Stage 1 + Stage 2 both verify clean. Same wall on every mac:format
+variant in the work-list (volume sizes 32M..1G, cluster sizes
+512..64K, label encodings ASCII/Latin-1/CJK/empty/max-length, and
+operation sequences with chkdsk-only or with Win-side write/delete
+legs added). One root cause for 17 scenarios.
+
+**Diagnostic**
+
+Reference rec 5 (Microsoft format.com) carries an embedded
+$SECURITY_DESCRIPTOR attribute of 248 bytes (val_len=0xF8, attr_len
+=0x110); ours has none. The reference's SD is self-relative
+(SE_SELF_RELATIVE | SE_DACL_PRESENT) with machine-specific owner
+(BUILTIN\Administrators), group (local domain users), and an 8-ACE
+DACL. With our root carrying no SD attribute and security_id=0 in
+$STANDARD_INFORMATION (because $Secure is an empty stub on our v1),
+chkdsk's post-Stage-2 walk has no security descriptor to consult for
+root and crashes internally rather than failing gracefully.
+
+This diagnosis is corroborated structurally (a real-NTFS field is
+missing on our root), not byte-by-byte (we don't have a chkdsk run
+post-fix because the VM dropped SSH auth between iter13 and iter14
+and didn't recover within the working window).
+
+**Per-field diff** *(root rec 5 attribute layout, post-iter13)*
+
+| Attr type                | reference           | ours pre-iter14 | ours post-iter14 |
+|--------------------------|---------------------|-----------------|------------------|
+| $STANDARD_INFORMATION    | resident 0x48       | resident 0x60   | resident 0x60    |
+| $FILE_NAME (`.`)         | resident 0x60       | resident 0x60   | resident 0x60    |
+| $SECURITY_DESCRIPTOR     | resident 0x110      | **absent**      | **resident 0x70 (72-byte minimal SD)** |
+| $INDEX_ROOT (`$I30`)     | resident 0x488      | resident 0x4E8  | resident 0x4E8   |
+
+**Root cause (proposed; verification deferred)**
+
+Per MS-DTYP and MS-FSCC, every NTFS file is required to carry either
+an embedded $SECURITY_DESCRIPTOR attribute or a security_id pointer
+into $Secure that resolves to one. Pre-NTFS-3.0 ($Secure was
+introduced in 3.0) every file embedded its own SD; modern NTFS uses
+the centralised $Secure cache as an optimisation. With $Secure empty
+and no per-file SD, root has no resolvable security descriptor.
+chkdsk's reconnect-scan walks every record's $FILE_NAME/parent_ref
+and checks the parent's ACL against process tokens to determine
+whether to report the orphan-recovery message — without a parent SD
+to evaluate against, it crashes rather than skipping the check.
+
+**Fix**
+
+Embed a 72-byte self-relative $SECURITY_DESCRIPTOR on root rec 5:
+
+- 20-byte header: revision=1, control=`SE_SELF_RELATIVE | SE_DACL_PRESENT`,
+  OffsetOwner=20, OffsetGroup=32, OffsetSacl=0, OffsetDacl=44.
+- Owner SID @0x14: `S-1-5-18` (NT AUTHORITY\SYSTEM, 12 bytes).
+- Group SID @0x20: `S-1-5-18` (same).
+- DACL @0x2C: 8-byte ACL header + one ACCESS_ALLOWED ACE granting
+  `S-1-1-0` (Everyone) full access (mask `0x001F01FF`).
+
+Total = 72 bytes. Generic — independent of formatting machine — and
+satisfies "the parent has *some* SD" without copying Microsoft's
+specific SIDs. Wired through `build_resident_unnamed(
+ATTR_SECURITY_DESCRIPTOR, 3, &ROOT_SECURITY_DESCRIPTOR)` ahead of the
+$INDEX_ROOT attr, which moves to `attr_id=4` to keep IDs unique.
+
+**Result — UNVERIFIED**
+
+Linux contract holds (6/6 mkfs/round-trip/bin tests pass; cargo fmt
++ clippy --all-targets -- -D warnings clean). The Windows VM at
+`chris@192.168.213.145` started rejecting key auth (`Permission
+denied (publickey,password,keyboard-interactive)`) shortly after
+iter13's diag artefacts landed — likely sshd's MaxAuthTries hit a
+temporary block after the 23 back-to-back pipeline runs in pass 1.
+ICMP also blocked but TCP/22 reachable, so the VM is up; auth alone
+is failing.
+
+iter14's chkdsk verdict therefore has no on-disk evidence yet. The
+next agent (or this one on a future SSH-reachable run) should:
+
+1. Run `bash scripts/test-windows-local.sh` against
+   tests/matrix/work-list.json's `mac-format-basic-256mib`
+   parameters (256 MiB / 4096 cluster / "CITEST").
+2. Inspect `chkdsk-readonly.txt` for either:
+   - **Clean**: `Windows has scanned the file system and found no problems`.
+   - **Different error**: a new structural complaint we haven't seen.
+   - **Same `frs.cxx:60f`**: our SD layout is wrong; iterate.
+3. Re-classify all 17 `failed-needs-iter14-sd-*` scenarios
+   accordingly.
+
+If a chkdsk run shows the SD still triggers `frs.cxx:60f`, the
+debug ladder is: dump `ours-rec5-sd.bin` and decode against the
+public Microsoft SECURITY_DESCRIPTOR layout (MS-DTYP §2.4.6) for
+self-consistency before changing it again.
+
 ## What we learned
 
 1. **Microsoft's NTFS implementation is the only authoritative

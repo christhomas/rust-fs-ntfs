@@ -209,7 +209,7 @@
       "note": "Same post-Stage-2 frs.cxx:60f. Stage 1+2 clean. See findings iter13."
     },
     "mac-format-mac-enumerate-empty": {
-      "status": "blocked-on-mac-enumerate-cli-agent-c5fe-2026-05-02",
+      "status": "passed-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -217,7 +217,8 @@
       },
       "operation_sequence": "mac:format -> mac:enumerate(empty: only '.')",
       "_note": "depends on Mac-side enumerate CLI; first agent picking this scaffolds tests/matrix/inspect/",
-      "note": "Operation sequence requires Mac-side capabilities not yet plumbed: enumerate-cli. See docs/multi-agent-test-protocol.md 'Operation host requirements' table."
+      "note": "mac:format -> mac:enumerate via inspect_ntfs CLI produced 11 indexed system entries and zero non-system entries — root user-visible empty as required. Pure-Mac scenario, no VM dependency. iter13 root-$I30 + post-iter14 mkfs.",
+      "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/mac-only"
     },
     "mac-format-win-write-mac-enumerate": {
       "status": "blocked-on-mac-enumerate-cli-agent-c5fe-2026-05-02",
