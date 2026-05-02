@@ -700,6 +700,234 @@ NumberSectors fix retained on worktree branch
 `agent/agent-840e-2026-05-02` for downstream agents to consume; not
 pushed to main.
 
+### iter15: backup boot sector at last sector, not start of last cluster
+
+Session: `agent-c6a1-2026-05-02`. Picked up after iter14: 32 MiB still
+refused to mount even with the BPB NumberSectors fix.
+
+**Symptom**
+
+NTFS Event ID 55 fired on every mount attempt of a 32 MiB volume:
+
+> A corruption was discovered in the file system structure on volume
+> \\?\Volume{...}.
+> The exact nature of the corruption is unknown.  The file system
+> structures need to be scanned and fixed offline.
+
+`Get-Volume` reported `FileSystemType: Unknown`. `chkdsk DRIVE:`
+emitted "Cannot open volume for direct access" and exited 3.
+
+**Diagnostic**
+
+Compared backup-boot location against publicly documented NTFS
+layout. mkfs wrote the backup at byte
+`(cluster_count - 1) * cluster_size` = start of the last *cluster*
+(byte 33550336 for 32 MiB / 4096 cluster). Per the publicly published
+NTFS layout, ntfs.sys reads `BPB.NumberSectors` and probes the byte
+at offset `NumberSectors * bytes_per_sector` (= byte 33553920 = the
+last 512-byte *sector* of the volume, not the start of the last
+cluster). The two differ by 7 sectors / 3584 bytes.
+
+**Per-position diff** *(mac-format-tiny-32mib post-iter14, pre-iter15
+diag iter-20260502-054124)*
+
+| byte offset                    | value      | who reads it       |
+|--------------------------------|------------|--------------------|
+| start-of-last-cluster (33550336) | boot copy  | (no consumer at small volumes — ntfs.sys ignores) |
+| last-sector (33553920)         | zeros      | **ntfs.sys at small volumes — finds no signature → Event 55** |
+
+**Root cause**
+
+Pure layout error in mkfs's last write of the boot sector. Backup boot
+must live at the actual last 512-byte sector of the volume.
+
+**Fix** ([80a3d88], superseded by [2165997])
+
+`src/mkfs.rs`: replace the write at
+`backup_boot_lcn * cluster_size` with a write at
+`(cluster_count * cluster_size) - bytes_per_sector`. The whole last
+cluster is still bitmap-allocated.
+
+A first attempt wrote at BOTH positions (belt-and-suspenders); that
+broke `mac-format-basic-256mib` (Event 55 fired at >= 256 MiB when
+two valid boot signatures coexisted near the volume tail). The
+final fix writes at the last sector ONLY, which works for both
+volume sizes:
+
+| mkfs writes backup at         | 32 MiB chkdsk          | 256 MiB chkdsk        |
+|-------------------------------|------------------------|-----------------------|
+| start-of-last-cluster (only)  | Event 55, mount refuse | clean to frs.cxx 60f  |
+| last-sector (only) — fix      | clean to frs.cxx 60f   | clean to frs.cxx 60f  |
+| both positions                | clean                  | Event 55, mount refuse |
+
+**Result**
+
+mac-format-tiny-32mib now mounts cleanly. Same scenarios verified
+post-fix: tiny-32mib, small-64mib, basic-256mib, large-1gib,
+label-empty/32chars/cjk/latin1 — all reach the same residual chkdsk
+state ("frs.cxx 60f" trailing internal error during Stage 2
+orphan-recovery). Eight scenarios passed-to-ceiling on this fix.
+
+Linux test contract (6/6) intact; pre-commit fmt + clippy clean.
+
+### iter16: ATTRS_OFFSET hardcoded to 0x38 — broke writes against 4 KiB MFT records
+
+Session: `agent-c6a1-2026-05-02`. Surfaced when the new
+`write_ntfs` Mac CLI tried to write into a freshly-formatted volume.
+
+**Symptom**
+
+```
+$ write_ntfs create vol.img / hello.txt
+created file rec=24 //hello.txt
+$ write_ntfs write  vol.img /hello.txt --content 'hi'
+write_ntfs: write /hello.txt: unnamed $DATA attribute not found
+```
+
+`tests/write_root_ops.rs` did NOT catch this — those tests use a
+1024-byte-record fixture (`test-disks/ntfs-basic.img`).
+
+**Per-byte diff** *(rec 24 just after `create_file` in a 4096-byte-record image)*
+
+| header field      | written value | expected for 4096/512 |
+|-------------------|---------------|------------------------|
+| `attrs_offset` (0x14) | 0x38          | 0x48                   |
+| bytes 0x38..0x42  | (attribute data) | (USA[4..8] save-words) |
+| bytes 0x42..      | (zeros)       | (attribute data)       |
+
+The USA region for a 4096-byte record at 512-byte sectors is
+1 USN + 8 sector-saved-words = 18 bytes spanning 0x30..0x42.
+`record_build.rs:49` hardcoded `ATTRS_OFFSET = 0x38`, which is
+*inside* the USA. `apply_fixup_on_write` then overwrote the
+freshly-written attribute bytes (at 0x38..0x42) with the saved
+sector-end words (zero-init). The file's $DATA attribute literally
+disappeared. 0x38 happened to be correct only for 1024-byte records
+(sectors=2 → align8(0x36) = 0x38), which is why the existing test
+fixture passed.
+
+**Root cause**
+
+Pure layout error. mkfs.rs computes `attrs_offset` per-record
+(`align8(USA_OFFSET + 2 + sectors * 2)`); record_build.rs used a
+hardcoded constant for both `build_regular_file_record` and
+`build_directory_record`.
+
+**Fix** ([9a640c5])
+
+`src/record_build.rs`: replace the constant with the same per-record
+computation. Both call sites updated.
+
+**Result**
+
+End-to-end Mac-side smoke now passes: mkfs → write_ntfs create
+/hello.txt → write 'hi' → mkdir /docs → create /docs/notes.bin →
+write 256 bytes incrementing → inspect_ntfs lists 14 entries (11
+system + /docs + /hello.txt + /docs/notes.bin) → unlink /hello.txt
+→ inspect_ntfs lists 13. The Mac-side write/delete/enumerate CLIs
+all work end-to-end against the freshly-formatted volume.
+
+Linux test contract (6/6) intact.
+
+### iter17: per-cluster-size bug catalog — non-default cluster sizes each surface a distinct mkfs bug
+
+Session: `agent-c6a1-2026-05-02`. After iter15 unblocked the
+volume-size axis, ran the cluster-size axis end-to-end. Each
+non-default cluster size surfaces a *different* chkdsk error —
+documenting the catalog so subsequent iterations can pick them off.
+
+| scenario              | cluster | chkdsk verdict                                                                  |
+|-----------------------|---------|---------------------------------------------------------------------------------|
+| basic-256mib          | 4096    | clean to `frs.cxx 60f` ceiling                                                  |
+| cluster-512           | 512     | "Cannot open volume for direct access" — ntfs.sys refuses mount                 |
+| cluster-1k            | 1024    | "Corrupt master file table. CHKDSK aborted." — mounts but MFT structure invalid  |
+| cluster-8k            | 8192    | "Attribute record (80, $Bad) from file record segment 8 is corrupt." — Stage 1 |
+| cluster-64k           | 65536   | "Incorrect information was detected in file record segment 5." — Stage 2        |
+
+The four cluster failures are real bugs in mkfs that the default
+4096-cluster path doesn't exercise. Each will need its own iteration
+to chase down — likely candidates per the byte layout:
+
+- 512 cluster: MFT placement at LCN 4 puts $MFT at byte 2048,
+  immediately after the boot's 512 bytes; ntfs.sys may require more
+  reserved space at small clusters.
+- 1k cluster: similar boundary issue, or `clusters_per_mft_record`
+  encoding (cpmr=4 for 4096-byte records / 1024-cluster) hits a
+  validator quirk.
+- 8k cluster: $BadClus's named "$Bad" sparse run encoding may overflow
+  a length field at 32768-cluster volumes, or ntfs.sys checks sparse
+  attrs more strictly when cluster_size > 4096.
+- 64k cluster: 1 GiB / 65536-cluster gives only 16384 clusters
+  total; root-dir's $I30 with 12 entries may overrun the residency
+  threshold (entries grow proportionally with name length, but the
+  $INDEX_ROOT total is capped by mft_record_size).
+
+Diag dirs (each contains the per-record dump pre- and post-mount):
+- `iter-20260502-063326` (cluster-512)
+- `iter-20260502-063421` (cluster-1k)
+- `iter-20260502-063739` (cluster-8k)
+- `iter-20260502-064211` (cluster-64k)
+
+### iter18: Windows can't WRITE to our volumes — "Insufficient system resources"
+
+Session: `agent-c6a1-2026-05-02`. Surfaced when wiring up the
+WinFixtures runner block to support `mac:format → win:write` scenarios.
+
+**Symptom** (PowerShell on Windows ARM64 against a freshly-formatted
+256 MiB volume that mounts cleanly per iter15 + already passes Stage 1
++ Stage 2 chkdsk):
+
+```
+[3/6] Mounting + capturing diagnostics ...
+  Mounted at E:
+  Writing WinFixtures: tiny.txt=text:hello world
+Exception calling "WriteAllText" with "3" argument(s):
+  "Insufficient system resources exist to complete the requested service."
+At ...run-windows-test.ps1:187 char:17
++ ...   [System.IO.File]::WriteAllText("${letter}:\$name", $value ...
+  + FullyQualifiedErrorId : IOException
+```
+
+Win32 error 1450 (`ERROR_NO_SYSTEM_RESOURCES`). Equivalent failures
+expected from `Set-Content`, `New-Item`, anything that asks ntfs.sys
+to allocate buffers for a write.
+
+**Root cause** (working theory)
+
+Volume passes the *read* path (chkdsk reads it; Get-ChildItem on the
+empty volume returns the system files). The write path requires
+ntfs.sys to allocate from internal pools tied to `$Secure`'s
+security-descriptor cache, $LogFile transactional state, etc. Our
+writer ships:
+
+- `$Secure` as a 9-byte resident stub (no `$SDH`/`$SII` view indexes,
+  iter12 marked the flag but didn't populate the indexes).
+- `$LogFile` filled with 0xFF (no `RSTR` / `RCRD` records).
+- No `$SECURITY_DESCRIPTOR` (attr 0x50) on system MFT records
+  (8934's iter15 candidate).
+
+Without these, ntfs.sys can mount the volume read-only (or read-only
+in effect) but refuses writes because it can't fault in an SD or
+write a transaction record. `frs.cxx 60f` (the trailing chkdsk
+error all our scenarios bottom out at) is the same family of issue
+manifesting through chkdsk's deeper passes.
+
+**Implication for the work-list**
+
+Every `mac-format → win:write` scenario currently fails identically
+("Insufficient system resources"). 5 scenarios marked
+`failed-windows-cant-write-insufficient-resources-blocks-on-frs60f`.
+
+Mitigation: the `win:format → win:write → mac:enumerate` family
+SHOULD work since Microsoft's `format.com` produces a fully writable
+volume. Those scenarios are blocked on the runner's lack of a
+"primary format = format.com" mode (3 scenarios marked
+`blocked-needs-winformat-mode-runner-refactor`).
+
+Forward path: implement the `$SECURITY_DESCRIPTOR` + `$Secure`
+indexes + valid `$LogFile` writers; this should unblock both the
+chkdsk `frs.cxx 60f` ceiling AND the Windows-write resource error
+in one go.
+
 ## What we learned
 
 1. **Microsoft's NTFS implementation is the only authoritative

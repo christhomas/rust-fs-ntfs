@@ -59,9 +59,19 @@ VOLUME_SIZE_MB="${VOLUME_SIZE_MB:-256}"
 WRAPPER_SIZE_MB="${WRAPPER_SIZE_MB:-$(( VOLUME_SIZE_MB + 128 ))}"
 LABEL="${LABEL:-CITEST}"
 CLUSTER_SIZE="${CLUSTER_SIZE:-4096}"
-echo "[run]  scripts/run-windows-test.ps1 -VolumeSizeMb ${VOLUME_SIZE_MB} -WrapperSizeMb ${WRAPPER_SIZE_MB} -Label '${LABEL}' -ClusterSize ${CLUSTER_SIZE} on ${VM_HOST}"
+WIN_FIXTURES="${WIN_FIXTURES:-}"
+WIN_DELETE="${WIN_DELETE:-}"
+# Build optional flags conditionally — empty `-WinFixtures ""` survives
+# bash but gets dequoted to a bare `-WinFixtures` by the time it reaches
+# PowerShell through ssh+cmd, which then complains "Missing an argument
+# for parameter". Only emit the flag when the value is non-empty.
+WIN_FIXTURES_FLAG=""
+if [[ -n "${WIN_FIXTURES}" ]]; then WIN_FIXTURES_FLAG="-WinFixtures \"${WIN_FIXTURES}\""; fi
+WIN_DELETE_FLAG=""
+if [[ -n "${WIN_DELETE}" ]]; then WIN_DELETE_FLAG="-WinDelete \"${WIN_DELETE}\""; fi
+echo "[run]  scripts/run-windows-test.ps1 -VolumeSizeMb ${VOLUME_SIZE_MB} -WrapperSizeMb ${WRAPPER_SIZE_MB} -Label \"${LABEL}\" -ClusterSize ${CLUSTER_SIZE} ${WIN_FIXTURES_FLAG} ${WIN_DELETE_FLAG} on ${VM_HOST}"
 set +e
-ssh ${SSH_OPTS} "${VM_HOST}" "Set-Location '${VM_WORKDIR_PS}'; powershell -ExecutionPolicy Bypass -File '.\\scripts\\run-windows-test.ps1' -VolumeSizeMb ${VOLUME_SIZE_MB} -WrapperSizeMb ${WRAPPER_SIZE_MB} -Label '${LABEL}' -ClusterSize ${CLUSTER_SIZE}"
+ssh ${SSH_OPTS} "${VM_HOST}" "Set-Location \"${VM_WORKDIR_PS}\"; powershell -ExecutionPolicy Bypass -File \".\\scripts\\run-windows-test.ps1\" -VolumeSizeMb ${VOLUME_SIZE_MB} -WrapperSizeMb ${WRAPPER_SIZE_MB} -Label \"${LABEL}\" -ClusterSize ${CLUSTER_SIZE} ${WIN_FIXTURES_FLAG} ${WIN_DELETE_FLAG}"
 RUN_EXIT=$?
 set -e
 
