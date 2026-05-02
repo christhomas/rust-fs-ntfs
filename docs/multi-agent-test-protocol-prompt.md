@@ -155,45 +155,51 @@ The decision tree always terminates with EITHER a passing fix OR a
 status update + scenario switch. It never terminates with "wait for
 human."
 
-## Bootstrapping (if you are the first agent in this run)
+## Infrastructure assumed in place
 
-The infrastructure may not be fully scaffolded. Check existence:
+These should exist on `main`. Verify before doing anything else; if
+any is missing, ANOTHER agent has likely deleted or moved them, which
+violates the "never delete other agents' work" rule -- in that case,
+restore from `git log` and proceed:
 
 ```sh
-[ -f tests/matrix/work-list.json ]    && echo "work-list exists"
-[ -f scripts/claim-scenario.sh ]      && echo "claim helper exists"
-[ -f scripts/run-windows-matrix.ps1 ] && echo "matrix runner exists"
-[ -d tests/matrix/scenarios ]         && echo "scenarios dir exists"
+[ -f tests/matrix/work-list.json ]      || echo "MISSING: work-list"
+[ -x scripts/claim-scenario.sh ]        || echo "MISSING: claim helper"
+[ -x scripts/update-scenario-status.sh ] || echo "MISSING: status helper"
+[ -x scripts/test-windows-local.sh ]    || echo "MISSING: pipeline runner"
 ```
 
-If any are missing, your first task is to scaffold them under the
-same corroborated-debug discipline. The expected layouts:
+What does NOT yet exist (and may need to be scaffolded by the agent
+who picks a scenario requiring it):
 
-- `tests/matrix/work-list.json`: a JSON object keyed by scenario
-  name; each entry has `status` (one of `pending`, `claimed-<sess>`,
-  `passed-<sess>`, `failed-<sess>`, `blocked-<reason>-<sess>`,
-  `timed-out-<sess>`, `superseded-by-<sess>`), `operation_sequence`
-  (string from the matrix doc), `volume_params` (size, cluster,
-  label), and optionally `evidence_link` (path to diag dir).
+- **Mac-side enumerate CLI** -- a binary that opens a `.img` file and
+  uses `fs_ntfs`'s reader to enumerate the volume contents. Needed
+  for any scenario whose operation sequence contains `mac:enumerate`.
+  Search for existing capabilities first (`grep -rn "fn list" src/`
+  and similar). If absent, scaffold a minimal binary at
+  `src/bin/inspect_ntfs.rs` that reads the volume and prints a sorted
+  file list. Keep it under 200 lines; it's just a CLI wrapper around
+  the existing reader.
 
-- `scripts/claim-scenario.sh`: bash script that reads the work list,
-  picks the first `pending` scenario, atomically rewrites it as
-  `claimed-<session>`, prints the scenario name on stdout. Use
-  `mktemp` + `mv` for atomicity. Validate by reading back -- if the
-  resulting status isn't `claimed-<your-session>`, retry with the
-  next pending scenario.
+- **Mac-side writer** -- needed for `mac:write` scenarios. This is a
+  bigger task. If you draw such a scenario, look for existing write
+  capabilities; if absent, mark the scenario `blocked-on-writer-<session>`
+  and pick another. Don't try to scaffold an NTFS writer in 60 minutes.
 
-- `scripts/run-windows-matrix.ps1`: extends `run-windows-test.ps1`
-  to take a scenario JSON path, parameterises VHDX/letter naming on
-  the scenario name, supports `Start-Job` for in-VM parallelism.
+- **Mac-side deleter** -- same situation as the writer. Scenarios
+  needing this should be marked `blocked-on-deleter-<session>` until
+  the writer exists.
 
-- `tests/matrix/scenarios/`: one TOML file per scenario with the
-  exact parameters and operation sequence. (Or roll into
-  work-list.json directly -- whichever is simpler.)
+- **`scripts/run-windows-matrix.ps1`** -- a parallel test runner on
+  the VM that builds `mkfs_ntfs.exe` once and dispatches N scenarios
+  via `Start-Job`. The current `scripts/run-windows-test.ps1` is
+  serial. The matrix runner is a future optimisation; the serial one
+  is correct for single-scenario use today.
 
-If scaffolding takes more than ~30 minutes, mark your bootstrapping
-task `blocked-needs-bootstrap-iter` and stop. The next agent can
-continue from where you left off.
+If your claimed scenario needs scaffolding that turns out to be
+larger than ~500 lines or ~30 minutes, mark your scenario
+`blocked-needs-scaffolding-<thing>-<session>` with a findings-doc
+entry naming what's missing. Pick another scenario.
 
 ## Done criteria for your individual session
 
