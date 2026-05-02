@@ -449,6 +449,101 @@ errors hidden behind it on rec 9 (and orphan-recovery messages for
 rec 10+, which were truncated in the iter11 run) will only become
 visible after this fix.
 
+### iter13: root `$I30` was empty — populate with all 12 system files
+
+**Symptom**
+
+> Stage 1: Examining basic file system structure ... [clean]
+> Stage 2: Examining file name linkage ...
+>   68 index entries processed.
+> Index verification completed.
+> CHKDSK is scanning unindexed files for reconnect to their original directory.
+> Detected orphaned file $MFT (0), should be recovered into directory file 5.
+> Detected orphaned file $MFTMirr (1), should be recovered into directory file 5.
+> [...all 12 system records 0..11...]
+> Skipping further messages about recovering orphans.
+> An unspecified error occurred (6672732e637878 60f).
+
+(Verbatim from `rust-fs-ntfs-diag/agent-5442-2026-05-02/iter-20260502-024032/chkdsk-readonly.txt`,
+captured pre-fix at iter13 by session `agent-5442-2026-05-02` against
+the `mac-format-basic-256mib` scenario.)
+
+**Diagnostic**
+
+Local pipeline (`scripts/test-windows-local.sh`) Stage 1 cleared
+post-iter12. Stage 2 reported every system record as orphaned —
+chkdsk wants each file's parent's `$I30` to contain an `INDEX_ENTRY`
+referencing it, but our root rec 5 shipped an empty index.
+
+Decoded both `reference-mft-16recs.bin` (Microsoft `format.com`
+output) and `ours-mft-16recs.bin`, comparing root rec 5's
+`INDEX_ROOT '$I30'` attribute byte-for-byte:
+
+**Per-field diff** *(rec 5 root `INDEX_ROOT '$I30'` attribute)*
+
+| Field                  | reference | ours  | spec citation |
+|------------------------|-----------|-------|---------------|
+| INDEX_ROOT attr length | 0x488     | 0x50  | publicly published NTFS layout |
+| value size             | 0x468     | 0x30  | same |
+| INDEX_HEADER.entries_used | 0x458   | 0x20  | INDEX_HEADER struct |
+| INDEX_ENTRY count      | 12 + LAST | LAST only | index walk |
+
+Reference's 12 entries (sorted by COLLATION_FILE_NAME):
+`$AttrDef`, `$BadClus`, `$Bitmap`, `$Boot`, `$LogFile`, `$MFT`,
+`$MFTMirr`, `$Quota`, `$UpCase`, `$Volume`, `.`, plus LAST sentinel.
+Each entry carries a `$FILE_NAME` stream byte-identical to that
+record's in-record `$FILE_NAME` attribute value.
+
+**Root cause**
+
+NTFS requires every file's parent's `$I30` index to contain an
+`INDEX_ENTRY` referencing the child via `(rec_num, sequence)` and
+carrying the child's `$FILE_NAME` stream. The 12 system files all
+declare `parent_reference = (rec=5, seq=5)`; the root therefore must
+list all 12 (plus `.` itself, per Microsoft convention). Without
+those entries, chkdsk Stage 2's "scanning unindexed files" walks the
+MFT, finds in-use records whose parent claims to host them but
+whose parent's `$I30` doesn't, and reports each as orphaned.
+
+The cause was `build_empty_index_root_attr` literally building a
+LAST-sentinel-only index. No mechanism existed to populate it.
+
+**Fix** ([f3ea014])
+
+`src/mkfs.rs`: collect `(rec_num, name, is_dir, data_alloc, data_real)`
+during each rec 0..11 build (except rec 5 itself); move rec 5 build
+to AFTER rec 11 so we have every system record's metadata. Sort by
+COLLATION_FILE_NAME (ASCII upcase + UTF-16-LE bytewise — pure-ASCII
+names match Microsoft's order). Emit one `INDEX_ENTRY` per record
+carrying a `$FILE_NAME` stream byte-identical to the in-record one
+(parent=(5,5), sequence=max(1, rec_num) per iter11, alloc/real per
+iter9). Terminate with the LAST sentinel.
+
+Helpers added:
+* `build_file_name_stream` — reusable `$FILE_NAME` value bytes.
+* `build_index_entry` — 16-byte header + stream + 8-byte align.
+* `build_populated_index_root_attr` — wraps entries in `$I30` attr.
+* `collate_file_name` + `ascii_upcase16` — COLLATION_FILE_NAME order.
+
+**Result**
+
+Post-fix Stage 2 output (`iter-20260502-025958/chkdsk-readonly.txt`):
+
+> Stage 2: Examining file name linkage ...
+>   68 index entries processed.
+> Index verification completed.
+> CHKDSK is scanning unindexed files for reconnect to their original directory.
+> An unspecified error occurred (6672732e637878 60f).
+
+The 12 orphan-recovery lines are GONE — every system record is now
+properly indexed. Linux tests still pass (6/6). `cargo fmt --check`
+clean; `cargo clippy --all-targets -- -D warnings` clean.
+
+The remaining `frs.cxx 0x60f` internal error was *also* present in
+iter12's post-fix output (after the orphan list, before chkdsk
+truncated). Not introduced here; surfaced by the orphan flood being
+peeled away. iter14 will tackle it.
+
 ## What we learned
 
 1. **Microsoft's NTFS implementation is the only authoritative
