@@ -47,6 +47,7 @@ const ATTR_VOLUME_INFORMATION: u32 = 0x70;
 const ATTR_DATA: u32 = 0x80;
 const ATTR_INDEX_ROOT: u32 = 0x90;
 const ATTR_END_MARKER: u32 = 0xFFFF_FFFF;
+const COLLATION_FILE_NAME: u32 = 0x01;
 
 /// Win32 + DOS namespace value for $FILE_NAME.
 const NAMESPACE_WIN32_DOS: u8 = 3;
@@ -216,6 +217,15 @@ pub fn format_filesystem(
 
     let mut mft_buf = vec![0u8; (mft_clusters * cluster_size as u64) as usize];
 
+    // Collected during rec 0..11 building so root's $I30 can carry an
+    // INDEX_ENTRY per system file. Microsoft's reference root $I30
+    // contains all 12 system files (incl. `.` itself); chkdsk Stage 2
+    // reports them as orphaned ("Detected orphaned file $X (N), should
+    // be recovered into directory file 5") when the index is empty.
+    // Per-record byte-diff in iter13 (rust-fs-ntfs-diag iter-20260502-024032).
+    // Tuple: (rec_num, name, is_dir, data_alloc, data_real).
+    let mut sys_entries: Vec<(u32, &'static str, bool, u64, u64)> = Vec::with_capacity(12);
+
     // record 0: $MFT
     {
         let mft_data_runs = vec![DataRun {
@@ -265,6 +275,7 @@ pub fn format_filesystem(
             &[data_attr, bitmap_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::MFT, rec_bytes)?;
+        sys_entries.push((rec::MFT, "$MFT", false, mft_data_size, mft_data_size));
     }
 
     // record 1: $MFTMirr  — non-resident $DATA pointing at mftmirr_lcn.
@@ -294,6 +305,7 @@ pub fn format_filesystem(
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::MFTMIRR, rec_bytes)?;
+        sys_entries.push((rec::MFTMIRR, "$MFTMirr", false, len_bytes, len_bytes));
     }
 
     // record 2: $LogFile
@@ -323,6 +335,7 @@ pub fn format_filesystem(
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::LOGFILE, rec_bytes)?;
+        sys_entries.push((rec::LOGFILE, "$LogFile", false, len_bytes, len_bytes));
     }
 
     // record 3: $Volume
@@ -359,6 +372,7 @@ pub fn format_filesystem(
             &combined,
         )?;
         place_record(&mut mft_buf, rs, rec::VOLUME, rec_bytes)?;
+        sys_entries.push((rec::VOLUME, "$Volume", false, 0, 0));
     }
 
     // record 4: $AttrDef (canonical 2560-byte table)
@@ -407,25 +421,18 @@ pub fn format_filesystem(
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::ATTRDEF, rec_bytes)?;
+        sys_entries.push((
+            rec::ATTRDEF,
+            "$AttrDef",
+            false,
+            attrdef_clusters * cluster_size as u64,
+            attrdef_blob.len() as u64,
+        ));
     }
 
-    // record 5: root directory "."
-    {
-        let index_block_size: u32 = 4096;
-        let index_root = build_empty_index_root_attr(3, index_block_size, bytes_per_sector);
-        // Root directory has no $DATA (only an $INDEX_ROOT), so $FILE_NAME
-        // sizes are 0/0 — matches Microsoft's reference (rec 5).
-        let rec_bytes = build_system_record(
-            &mft_record_layout,
-            rec::ROOT,
-            ".",
-            true,
-            0,
-            0,
-            &[index_root],
-        )?;
-        place_record(&mut mft_buf, rs, rec::ROOT, rec_bytes)?;
-    }
+    // record 5: root directory "." — built last so $I30 can include
+    // INDEX_ENTRY for every system file (rec 0..11). See block at end of
+    // this function.
 
     // record 6: $Bitmap (non-resident $DATA over bitmap_lcn..)
     {
@@ -454,6 +461,13 @@ pub fn format_filesystem(
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::BITMAP, rec_bytes)?;
+        sys_entries.push((
+            rec::BITMAP,
+            "$Bitmap",
+            false,
+            bitmap_clusters * cluster_size as u64,
+            value_len,
+        ));
     }
 
     // record 7: $Boot — non-resident, single-cluster run at LCN 0,
@@ -485,6 +499,13 @@ pub fn format_filesystem(
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::BOOT, rec_bytes)?;
+        sys_entries.push((
+            rec::BOOT,
+            "$Boot",
+            false,
+            boot_clusters * cluster_size as u64,
+            boot_value_len,
+        ));
     }
 
     // record 8: $BadClus — empty unnamed $DATA + named "$Bad" sparse
@@ -524,6 +545,7 @@ pub fn format_filesystem(
             &[empty_data, bad_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::BADCLUS, rec_bytes)?;
+        sys_entries.push((rec::BADCLUS, "$BadClus", false, 0, 0));
     }
 
     // record 9: $Secure — minimal resident stub. Real NTFS has $SDS /
@@ -543,6 +565,7 @@ pub fn format_filesystem(
             &[empty_data],
         )?;
         place_record(&mut mft_buf, rs, rec::SECURE, rec_bytes)?;
+        sys_entries.push((rec::SECURE, "$Secure", false, 0, 0));
     }
 
     // record 10: $UpCase
@@ -571,6 +594,13 @@ pub fn format_filesystem(
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::UPCASE, rec_bytes)?;
+        sys_entries.push((
+            rec::UPCASE,
+            "$UpCase",
+            false,
+            upcase_clusters * cluster_size as u64,
+            upcase_value_bytes,
+        ));
     }
 
     // record 11: $Extend (empty directory)
@@ -588,6 +618,57 @@ pub fn format_filesystem(
             &[index_root],
         )?;
         place_record(&mut mft_buf, rs, rec::EXTEND, rec_bytes)?;
+        sys_entries.push((rec::EXTEND, "$Extend", true, 0, 0));
+    }
+
+    // record 5: root directory "." — built AFTER rec 0..4 and rec 6..11
+    // so we have every system file's name + $DATA size to emit as
+    // INDEX_ENTRYs in `$I30`. Microsoft's reference root contains
+    // entries for all 12 system files (incl. `.` itself); chkdsk Stage 2
+    // walks `$I30` and reports every record absent from it as orphaned.
+    // Per-record byte-diff in iter13 (rust-fs-ntfs-diag iter-20260502-024032)
+    // confirmed reference $I30 = 0x468 bytes (12 entries + LAST sentinel)
+    // vs ours = 0x30 bytes (just the LAST sentinel).
+    {
+        let index_block_size: u32 = 4096;
+        sys_entries.push((rec::ROOT, ".", true, 0, 0));
+        sys_entries.sort_by(|a, b| collate_file_name(a.1, b.1));
+
+        // Every system $FILE_NAME's parent is the root directory at
+        // (rec=5, seq=5). Same convention used by `build_system_record`.
+        let parent_ref = encode_file_reference(rec::ROOT as u64, 5);
+
+        let mut entries_blob: Vec<u8> = Vec::new();
+        for &(rec_num, name, is_dir, alloc, real) in &sys_entries {
+            // sequence_number = max(1, rec_num) per iter11 byte-diff.
+            let seq: u16 = if rec_num == 0 { 1 } else { rec_num as u16 };
+            let stream = build_file_name_stream(
+                parent_ref,
+                mft_record_layout.nt_time,
+                name,
+                is_dir,
+                true,
+                alloc,
+                real,
+            )?;
+            let entry =
+                build_index_entry(encode_file_reference(rec_num as u64, seq), &stream, false);
+            entries_blob.extend_from_slice(&entry);
+        }
+        // LAST sentinel terminates the inline index.
+        entries_blob.extend_from_slice(&build_index_entry(0, &[], true));
+
+        let index_root = build_populated_index_root_attr(3, index_block_size, &entries_blob);
+        let rec_bytes = build_system_record(
+            &mft_record_layout,
+            rec::ROOT,
+            ".",
+            true,
+            0,
+            0,
+            &[index_root],
+        )?;
+        place_record(&mut mft_buf, rs, rec::ROOT, rec_bytes)?;
     }
 
     // 12..15 reserved — leave free in $MFT:$Bitmap (handled above) and
@@ -980,6 +1061,138 @@ fn build_resident_unnamed(attr_type: u32, attr_id: u16, value: &[u8]) -> Vec<u8>
         buf[header_size..header_size + value.len()].copy_from_slice(value);
     }
     buf
+}
+
+/// Compose just the value bytes of a `$FILE_NAME` attribute (the
+/// attribute *stream*, without the attribute header). Same byte layout
+/// `write_file_name` produces in-record; reused so root's `$I30`
+/// `INDEX_ENTRY`s carry byte-identical streams to the in-record `$FILE_NAME`s.
+fn build_file_name_stream(
+    parent_reference: u64,
+    nt_time: u64,
+    name: &str,
+    is_dir: bool,
+    is_system: bool,
+    data_alloc: u64,
+    data_real: u64,
+) -> Result<Vec<u8>, String> {
+    let utf16: Vec<u16> = name.encode_utf16().collect();
+    if utf16.is_empty() || utf16.len() > 255 {
+        return Err(format!("invalid name length {}", utf16.len()));
+    }
+    let key_fixed = 0x42usize;
+    let mut buf = vec![0u8; key_fixed + utf16.len() * 2];
+    buf[0..8].copy_from_slice(&parent_reference.to_le_bytes());
+    buf[8..16].copy_from_slice(&nt_time.to_le_bytes());
+    buf[16..24].copy_from_slice(&nt_time.to_le_bytes());
+    buf[24..32].copy_from_slice(&nt_time.to_le_bytes());
+    buf[32..40].copy_from_slice(&nt_time.to_le_bytes());
+    buf[40..48].copy_from_slice(&data_alloc.to_le_bytes());
+    buf[48..56].copy_from_slice(&data_real.to_le_bytes());
+    let mut fa: u32 = 0x20;
+    if is_dir {
+        fa |= 0x10000000;
+    }
+    if is_system {
+        fa |= 0x06;
+    }
+    buf[56..60].copy_from_slice(&fa.to_le_bytes());
+    buf[60..64].copy_from_slice(&0u32.to_le_bytes());
+    buf[64] = utf16.len() as u8;
+    buf[65] = NAMESPACE_WIN32_DOS;
+    for (i, c) in utf16.iter().enumerate() {
+        let off = 66 + i * 2;
+        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    }
+    Ok(buf)
+}
+
+/// Build a single `INDEX_ENTRY` for an `$I30` index. Header is 16 bytes;
+/// stream follows; entry padded to 8. `is_last=true` produces the LAST
+/// sentinel (zero-length stream, flags=0x02).
+fn build_index_entry(file_reference: u64, stream: &[u8], is_last: bool) -> Vec<u8> {
+    let header = 0x10usize;
+    let entry_len = align8(header + stream.len());
+    let mut buf = vec![0u8; entry_len];
+    buf[0..8].copy_from_slice(&file_reference.to_le_bytes());
+    buf[8..10].copy_from_slice(&(entry_len as u16).to_le_bytes());
+    buf[10..12].copy_from_slice(&(stream.len() as u16).to_le_bytes());
+    let flags: u32 = if is_last { 0x02 } else { 0x00 };
+    buf[12..16].copy_from_slice(&flags.to_le_bytes());
+    if !stream.is_empty() {
+        buf[16..16 + stream.len()].copy_from_slice(stream);
+    }
+    buf
+}
+
+/// Build a populated `$INDEX_ROOT` `$I30` attribute. `entries_blob` must
+/// already contain pre-sorted `INDEX_ENTRY`s terminated by a LAST sentinel.
+fn build_populated_index_root_attr(
+    attr_id: u16,
+    index_block_size: u32,
+    entries_blob: &[u8],
+) -> Vec<u8> {
+    let common_header = 16usize;
+    let resident_fields = 8usize;
+    let header_size = common_header + resident_fields;
+    let name_offset = header_size;
+    let name_bytes = 8usize;
+    let value_offset = align8(name_offset + name_bytes);
+    let ir_value_size = 16 + 16 + entries_blob.len();
+    let attr_length = align8(value_offset + ir_value_size);
+
+    let mut buf = vec![0u8; attr_length];
+    buf[0..4].copy_from_slice(&ATTR_INDEX_ROOT.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 0;
+    buf[9] = 4;
+    buf[10..12].copy_from_slice(&(name_offset as u16).to_le_bytes());
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+    buf[16..20].copy_from_slice(&(ir_value_size as u32).to_le_bytes());
+    buf[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes());
+    buf[22] = 0;
+    buf[23] = 0;
+
+    let i30: [u16; 4] = ['$' as u16, 'I' as u16, '3' as u16, '0' as u16];
+    for (i, c) in i30.iter().enumerate() {
+        let off = name_offset + i * 2;
+        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    }
+
+    let v = value_offset;
+    buf[v..v + 4].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
+    buf[v + 4..v + 8].copy_from_slice(&COLLATION_FILE_NAME.to_le_bytes());
+    buf[v + 8..v + 12].copy_from_slice(&index_block_size.to_le_bytes());
+    buf[v + 12] = 1;
+
+    let ih = v + 16;
+    buf[ih..ih + 4].copy_from_slice(&16u32.to_le_bytes());
+    let used = 16u32 + entries_blob.len() as u32;
+    buf[ih + 4..ih + 8].copy_from_slice(&used.to_le_bytes());
+    buf[ih + 8..ih + 12].copy_from_slice(&used.to_le_bytes());
+
+    let entries_at = ih + 16;
+    buf[entries_at..entries_at + entries_blob.len()].copy_from_slice(entries_blob);
+
+    buf
+}
+
+/// COLLATION_FILE_NAME ordering. Our system file names are ASCII with
+/// `$` prefix (and `.` for root), so simple ASCII upcase + UTF-16-LE
+/// bytewise comparison reproduces Microsoft's reference order exactly.
+fn collate_file_name(a: &str, b: &str) -> std::cmp::Ordering {
+    let ua: Vec<u16> = a.encode_utf16().map(ascii_upcase16).collect();
+    let ub: Vec<u16> = b.encode_utf16().map(ascii_upcase16).collect();
+    ua.cmp(&ub)
+}
+
+fn ascii_upcase16(c: u16) -> u16 {
+    if (0x61..=0x7A).contains(&c) {
+        c - 0x20
+    } else {
+        c
+    }
 }
 
 fn build_empty_index_root_attr(
