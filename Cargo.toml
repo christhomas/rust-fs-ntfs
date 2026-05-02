@@ -26,6 +26,25 @@ crate-type = ["staticlib", "rlib"]
 name = "mkfs_ntfs"
 path = "src/bin/mkfs_ntfs.rs"
 
+# Read-only enumerate of an NTFS image — wraps Filesystem::read_dir.
+# Used by the multi-agent test matrix's `mac:enumerate` operation
+# (see docs/multi-agent-test-protocol.md).
+[[bin]]
+name = "inspect_ntfs"
+path = "src/bin/inspect_ntfs.rs"
+
+# Mac-side write helper — wraps Filesystem::create_file/mkdir/
+# write_file_contents. Used by the test matrix's `mac:write` operation.
+[[bin]]
+name = "write_ntfs"
+path = "src/bin/write_ntfs.rs"
+
+# Mac-side delete helper — wraps Filesystem::unlink/rmdir. Used by the
+# test matrix's `mac:delete` operation.
+[[bin]]
+name = "delete_ntfs"
+path = "src/bin/delete_ntfs.rs"
+
 [dependencies]
 ntfs = { version = "0.4", default-features = false, features = ["std"] }
 

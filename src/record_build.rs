@@ -46,7 +46,16 @@ const REC_OFF_BASE_FILE_REF: usize = 0x20;
 const REC_OFF_NEXT_ATTR_ID: usize = 0x28;
 const REC_OFF_MFT_REC_NUM: usize = 0x2C;
 const USA_OFFSET: usize = 0x30;
-const ATTRS_OFFSET: usize = 0x38;
+// NOTE: `attrs_offset` is computed per-record from `record_size /
+// bytes_per_sector`. The previous hardcoded `0x38` happened to be
+// correct only for 1024-byte records (sectors=2 → USA spans
+// 0x30..0x36 → align8 → 0x38). For 4096-byte / 512-sector records
+// the USA spans 0x30..0x42 (1 USN + 8 sector-saved-words), so attrs
+// must start at align8(0x42) = 0x48; the hardcoded 0x38 collided with
+// USA[4..8] and `apply_fixup_on_write` clobbered the freshly-written
+// $STANDARD_INFORMATION attribute. Surfaced when running write_ntfs
+// against a default-format (4096) image; tests/write_root_ops.rs
+// passes because it uses 1024-byte records.
 
 const ATTR_STANDARD_INFORMATION: u32 = 0x10;
 const ATTR_FILE_NAME: u32 = 0x30;
@@ -110,8 +119,11 @@ pub fn build_directory_record(
     rec[REC_OFF_LSN..REC_OFF_LSN + 8].copy_from_slice(&0u64.to_le_bytes());
     rec[REC_OFF_SEQ..REC_OFF_SEQ + 2].copy_from_slice(&sequence.to_le_bytes());
     rec[REC_OFF_LINK_COUNT..REC_OFF_LINK_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
+    // attrs_offset = first 8-aligned byte past the USA. USA is 1 USN
+    // plus one saved-word per sector, all u16. See note on USA_OFFSET.
+    let attrs_offset = align8(USA_OFFSET + 2 + sectors * 2);
     rec[REC_OFF_ATTRS_OFFSET..REC_OFF_ATTRS_OFFSET + 2]
-        .copy_from_slice(&(ATTRS_OFFSET as u16).to_le_bytes());
+        .copy_from_slice(&(attrs_offset as u16).to_le_bytes());
     // IN_USE | DIRECTORY
     rec[REC_OFF_FLAGS..REC_OFF_FLAGS + 2].copy_from_slice(&0x0003u16.to_le_bytes());
     rec[REC_OFF_BYTES_ALLOCATED..REC_OFF_BYTES_ALLOCATED + 4]
@@ -122,7 +134,7 @@ pub fn build_directory_record(
     // Initial USN = 1.
     rec[USA_OFFSET..USA_OFFSET + 2].copy_from_slice(&1u16.to_le_bytes());
 
-    let mut cursor = ATTRS_OFFSET;
+    let mut cursor = attrs_offset;
     cursor = write_standard_information(&mut rec, cursor, 0, nt_time, /* is_dir */ true);
     cursor = write_file_name(
         &mut rec,
@@ -267,8 +279,10 @@ fn build_record_inner(
     rec[REC_OFF_LSN..REC_OFF_LSN + 8].copy_from_slice(&0u64.to_le_bytes());
     rec[REC_OFF_SEQ..REC_OFF_SEQ + 2].copy_from_slice(&sequence.to_le_bytes());
     rec[REC_OFF_LINK_COUNT..REC_OFF_LINK_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
+    // attrs_offset = first 8-aligned byte past the USA (see USA_OFFSET).
+    let attrs_offset = align8(USA_OFFSET + 2 + sectors * 2);
     rec[REC_OFF_ATTRS_OFFSET..REC_OFF_ATTRS_OFFSET + 2]
-        .copy_from_slice(&(ATTRS_OFFSET as u16).to_le_bytes());
+        .copy_from_slice(&(attrs_offset as u16).to_le_bytes());
     let flags = 0x0001u16 | if is_dir { 0x0002 } else { 0x0000 };
     rec[REC_OFF_FLAGS..REC_OFF_FLAGS + 2].copy_from_slice(&flags.to_le_bytes());
     // bytes_used + bytes_allocated: filled below.
@@ -285,7 +299,7 @@ fn build_record_inner(
     // sector-end slots ARE 0 — which is what the USA should reflect).
 
     // ----- Attributes -----
-    let mut cursor = ATTRS_OFFSET;
+    let mut cursor = attrs_offset;
 
     cursor = write_standard_information(&mut rec, cursor, 0, nt_time, is_dir);
     cursor = write_file_name(

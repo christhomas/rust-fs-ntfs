@@ -22,6 +22,10 @@ set -euo pipefail
 
 VM_HOST="${VM_HOST:-chris@192.168.213.145}"
 VM_WORKDIR="${VM_WORKDIR:-C:/Users/chris/dev/rust-fs-ntfs}"
+# SSH_OPTS lets callers bypass a broken ssh-agent. Set it to e.g.
+# "-i $(pwd)/privatekey -o IdentitiesOnly=yes" before invoking. Empty
+# default preserves prior agent-based behaviour.
+SSH_OPTS="${SSH_OPTS:-}"
 # PowerShell-safe path form for the workdir.
 VM_WORKDIR_PS="${VM_WORKDIR//\//\\}"
 
@@ -41,29 +45,33 @@ cd "${REPO_ROOT}"
 # remote untar overwrites whatever was there, so each run starts from
 # a known tree. (No need for rsync incrementality — source is ~10 MB.)
 echo "[push] tar-ssh source -> ${VM_HOST}:${VM_WORKDIR}"
-ssh "${VM_HOST}" "if (-not (Test-Path '${VM_WORKDIR_PS}')) { New-Item -ItemType Directory -Path '${VM_WORKDIR_PS}' -Force | Out-Null }"
+ssh ${SSH_OPTS} "${VM_HOST}" "if (-not (Test-Path '${VM_WORKDIR_PS}')) { New-Item -ItemType Directory -Path '${VM_WORKDIR_PS}' -Force | Out-Null }"
 tar --exclude='./target' --exclude='./.git' --exclude='./diag' --exclude='./diag-local-*' \
     --exclude='./test-disks' --exclude='./tarpaulin-report.html' \
     --exclude='*.swp' --exclude='.DS_Store' \
+    --exclude='./privatekey' --exclude='./privatekey.*' \
     -cf - . | \
-    ssh "${VM_HOST}" "tar -xf - -C '${VM_WORKDIR}'"
+    ssh ${SSH_OPTS} "${VM_HOST}" "tar -xf - -C '${VM_WORKDIR}'"
 
 # ─── 2. Run test on VM ───────────────────────────────────────────────
-# Optional per-scenario overrides from the environment. The runner has
-# matching defaults (256 MiB volume / 384 MiB wrapper / 4 KiB cluster /
-# label CITEST).
-PS_ARGS=""
-[[ -n "${VOL_MB:-}" ]]       && PS_ARGS+=" -VolumeSizeMb ${VOL_MB}"
-[[ -n "${WRAP_MB:-}" ]]      && PS_ARGS+=" -WrapperSizeMb ${WRAP_MB}"
-[[ -n "${CLUSTER_SIZE:-}" ]] && PS_ARGS+=" -ClusterSize ${CLUSTER_SIZE}"
-if [[ -n "${LABEL+x}" ]]; then
-    # PowerShell takes the next token as the value; quote so spaces
-    # survive (and still pass through the ssh shell).
-    PS_ARGS+=" -Label '${LABEL//\'/\'\'}'"
-fi
-echo "[run]  scripts/run-windows-test.ps1${PS_ARGS} on ${VM_HOST}"
+# Scenario parameters; defaults match the original 256 MiB / CITEST scenario.
+VOLUME_SIZE_MB="${VOLUME_SIZE_MB:-256}"
+WRAPPER_SIZE_MB="${WRAPPER_SIZE_MB:-$(( VOLUME_SIZE_MB + 128 ))}"
+LABEL="${LABEL:-CITEST}"
+CLUSTER_SIZE="${CLUSTER_SIZE:-4096}"
+WIN_FIXTURES="${WIN_FIXTURES:-}"
+WIN_DELETE="${WIN_DELETE:-}"
+# Build optional flags conditionally — empty `-WinFixtures ""` survives
+# bash but gets dequoted to a bare `-WinFixtures` by the time it reaches
+# PowerShell through ssh+cmd, which then complains "Missing an argument
+# for parameter". Only emit the flag when the value is non-empty.
+WIN_FIXTURES_FLAG=""
+if [[ -n "${WIN_FIXTURES}" ]]; then WIN_FIXTURES_FLAG="-WinFixtures \"${WIN_FIXTURES}\""; fi
+WIN_DELETE_FLAG=""
+if [[ -n "${WIN_DELETE}" ]]; then WIN_DELETE_FLAG="-WinDelete \"${WIN_DELETE}\""; fi
+echo "[run]  scripts/run-windows-test.ps1 -VolumeSizeMb ${VOLUME_SIZE_MB} -WrapperSizeMb ${WRAPPER_SIZE_MB} -Label \"${LABEL}\" -ClusterSize ${CLUSTER_SIZE} ${WIN_FIXTURES_FLAG} ${WIN_DELETE_FLAG} on ${VM_HOST}"
 set +e
-ssh "${VM_HOST}" "Set-Location '${VM_WORKDIR_PS}'; powershell -ExecutionPolicy Bypass -File '.\\scripts\\run-windows-test.ps1'${PS_ARGS}"
+ssh ${SSH_OPTS} "${VM_HOST}" "Set-Location \"${VM_WORKDIR_PS}\"; powershell -ExecutionPolicy Bypass -File \".\\scripts\\run-windows-test.ps1\" -VolumeSizeMb ${VOLUME_SIZE_MB} -WrapperSizeMb ${WRAPPER_SIZE_MB} -Label \"${LABEL}\" -ClusterSize ${CLUSTER_SIZE} ${WIN_FIXTURES_FLAG} ${WIN_DELETE_FLAG}"
 RUN_EXIT=$?
 set -e
 
@@ -71,7 +79,7 @@ set -e
 echo "[pull] diag/ -> ${DIAG_LOCAL}"
 mkdir -p "${DIAG_LOCAL}"
 # Stream the diag/ tree back via tar over ssh (same trick).
-ssh "${VM_HOST}" "Set-Location '${VM_WORKDIR_PS}'; tar -cf - diag" | \
+ssh ${SSH_OPTS} "${VM_HOST}" "Set-Location '${VM_WORKDIR_PS}'; tar -cf - diag" | \
     tar -xf - -C "${DIAG_LOCAL}" --strip-components=1 2>/dev/null || \
     echo "[pull] no diag/ on remote (test may have failed before any output)"
 

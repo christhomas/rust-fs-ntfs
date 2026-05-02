@@ -16,8 +16,10 @@
 param(
     [int]$VolumeSizeMb = 256,
     [int]$WrapperSizeMb = 384,
+    [string]$Label = "CITEST",
     [int]$ClusterSize = 4096,
-    [string]$Label = "CITEST"
+    [string]$WinFixtures = "",
+    [string]$WinDelete = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,9 +33,23 @@ $env:PATH = "$env:USERPROFILE\.cargo\bin;C:\Program Files\Cloudbase Solutions\QE
 # that PowerShell's strict mode treats as a fatal error.)
 $env:RUSTUP_TOOLCHAIN = "stable-aarch64-pc-windows-gnullvm"
 
-# Workspace already contains the source; clean prior diag/ + artefacts.
+# Workspace already contains the source; defensive cleanup of any
+# leftover mounts from a previous run that crashed before dismount,
+# THEN clean prior diag/ + artefacts.
+foreach ($vhdx in @("$pwd\wrapper.vhdx", "$pwd\reference.vhdx")) {
+    try {
+        Get-DiskImage -ImagePath $vhdx -ErrorAction SilentlyContinue |
+            Where-Object Attached | Dismount-DiskImage -ErrorAction SilentlyContinue | Out-Null
+    } catch { }
+}
+Start-Sleep -Seconds 2
 Remove-Item -Recurse -Force diag, nfs.img, wrapper.vhdx, reference.vhdx -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path diag -Force | Out-Null
+
+# Debug: record params we received (before anything else can fail).
+$paramDump = "WinFixtures=[$WinFixtures] WinDelete=[$WinDelete] Label=[$Label]"
+$paramDump | Out-File -FilePath diag/params-received.txt -Encoding ASCII
+Write-Host "DEBUG-PARAMS: $paramDump"
 
 # --- Build ------------------------------------------------------------
 Write-Host "[1/6] Building mkfs_ntfs.exe ..."
@@ -131,23 +147,89 @@ Get-Disk | Format-List | Out-File diag/get-disk-on-mount.txt
 Get-Volume | Format-List | Out-File diag/get-volume-on-mount.txt
 Get-Partition -ErrorAction SilentlyContinue | Format-List | Out-File diag/get-partition-on-mount.txt
 
-# Enumerate the freshly-formatted root for the win:enumerate leg of
-# scenarios like mac-format-basic-256mib. -Force surfaces hidden system
-# files; user-visible content should be empty on a clean format.
-"with -Force:" | Out-File diag/enumerate-root.txt
-Get-ChildItem -LiteralPath "${letter}:\" -Force -ErrorAction SilentlyContinue |
-    Select-Object Mode, Length, Name | Format-Table -AutoSize |
-    Out-File diag/enumerate-root.txt -Append
-"" | Out-File diag/enumerate-root.txt -Append
-"user-visible (no -Force):" | Out-File diag/enumerate-root.txt -Append
-$visible = @(Get-ChildItem -LiteralPath "${letter}:\" -ErrorAction SilentlyContinue)
-if ($visible.Count -eq 0) {
-    "(empty)" | Out-File diag/enumerate-root.txt -Append
-} else {
-    $visible | Select-Object Mode, Length, Name | Format-Table -AutoSize |
-        Out-File diag/enumerate-root.txt -Append
+
+# --- WinFixtures: write scenario fixture files into the mounted volume ---
+# Spec format: semicolon-separated entries, each "name=type:value".
+#   text:STRING       — UTF-8 text content (no trailing newline)
+#   zeros:N           — N bytes of 0x00
+#   incrementing:N    — N bytes, each = (i & 0xFF)
+#   ones:N            — N bytes of 0xFF
+# Example: "tiny.txt=text:hello world;medium.bin=zeros:4096"
+# Special form "many:COUNT:size:N:pattern:zeros" creates COUNT
+# files named f000..f<COUNT-1> each N bytes of the given pattern.
+if ($WinFixtures -ne "") {
+    Write-Host "  Writing WinFixtures: $WinFixtures"
+    "$WinFixtures" | Out-File diag/win-fixtures-spec.txt
+    foreach ($entry in $WinFixtures.Split(';')) {
+        $entry = $entry.Trim()
+        if ($entry -eq "") { continue }
+        $parts = $entry.Split('=', 2)
+        $name = $parts[0]
+        $spec = $parts[1]
+        $specParts = $spec.Split(':', 3)
+        $type = $specParts[0]
+        if ($type -eq "many") {
+            # many:COUNT:N  → COUNT files of N zero bytes each.
+            $count = [int]$specParts[1]
+            $size = [int]$specParts[2]
+            for ($i = 0; $i -lt $count; $i++) {
+                $fname = ("f{0:D4}" -f $i)
+                $bytes = New-Object byte[] $size
+                [System.IO.File]::WriteAllBytes("${letter}:\$fname", $bytes)
+            }
+            Write-Host "    many: wrote $count files of $size bytes"
+            continue
+        }
+        $value = $specParts[1]
+        switch ($type) {
+            "text" {
+                # PS 5.1 doesn't have Set-Content -NoNewline; use the .NET API.
+                [System.IO.File]::WriteAllText("${letter}:\$name", $value, [System.Text.Encoding]::UTF8)
+            }
+            "zeros" {
+                $n = [int]$value
+                $b = New-Object byte[] $n
+                [System.IO.File]::WriteAllBytes("${letter}:\$name", $b)
+            }
+            "ones" {
+                $n = [int]$value
+                $b = New-Object byte[] $n
+                for ($i = 0; $i -lt $n; $i++) { $b[$i] = 0xFF }
+                [System.IO.File]::WriteAllBytes("${letter}:\$name", $b)
+            }
+            "incrementing" {
+                $n = [int]$value
+                $b = New-Object byte[] $n
+                for ($i = 0; $i -lt $n; $i++) { $b[$i] = ($i -band 0xFF) }
+                [System.IO.File]::WriteAllBytes("${letter}:\$name", $b)
+            }
+            default {
+                Write-Warning "WinFixtures: unknown spec type '$type' in '$entry'"
+            }
+        }
+        Write-Host "    wrote ${letter}:\$name ($type)"
+    }
+    # Capture post-write listing for diff against mac-side enumerate.
+    Get-ChildItem -Path "${letter}:\" -Force -Recurse |
+        Select-Object FullName, Length |
+        Format-Table -AutoSize | Out-File diag/win-fixtures-listing.txt
 }
-"user_visible_count=$($visible.Count)" | Tee-Object diag/enumerate-root-count.txt | Out-Null
+
+# WinDelete: comma-separated paths to delete from the mounted volume,
+# applied AFTER WinFixtures. e.g. "f0001.bin,f0003.bin"
+if ($WinDelete -ne "") {
+    Write-Host "  Deleting WinDelete: $WinDelete"
+    "$WinDelete" | Out-File diag/win-delete-spec.txt
+    foreach ($p in $WinDelete.Split(',')) {
+        $p = $p.Trim()
+        if ($p -eq "") { continue }
+        Remove-Item -LiteralPath "${letter}:\$p" -Force -ErrorAction SilentlyContinue
+        Write-Host "    deleted ${letter}:\$p"
+    }
+    Get-ChildItem -Path "${letter}:\" -Force -Recurse |
+        Select-Object FullName, Length |
+        Format-Table -AutoSize | Out-File diag/win-post-delete-listing.txt
+}
 
 # Event log (NTFS / Disk / partmgr).
 try {
@@ -171,7 +253,7 @@ $refPart = New-Partition -DiskNumber $refVhd.Number -UseMaximumSize -AssignDrive
 Start-Sleep -Seconds 3
 $refPart = Get-Partition -DiskNumber $refVhd.Number |
     Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
-$fmtArgs = @("$($refPart.DriveLetter):", "/FS:NTFS", "/Q", "/A:$ClusterSize", "/L", "/V:CITESTREF", "/Y")
+$fmtArgs = @("$($refPart.DriveLetter):", "/FS:NTFS", "/Q", "/A:4096", "/L", "/V:CITESTREF", "/Y")
 $fp = Start-Process -FilePath "format.com" -ArgumentList $fmtArgs `
     -NoNewWindow -PassThru -Wait `
     -RedirectStandardOutput diag/reference-format.txt
@@ -200,11 +282,18 @@ try {
 } finally { $refsh.Close() }
 Dismount-DiskImage -ImagePath "$pwd\reference.vhdx" | Out-Null
 
-# Dump our MFT from nfs.img (already on disk).
+# Dump our MFT from nfs.img. Compute byte offset from BPB so the diag
+# is correct for non-default cluster sizes (was hardcoded 16384 = LCN 4
+# × 4096 byte cluster; broke for cluster_size != 4096 which left us
+# inspecting zeros and misdiagnosing chkdsk's complaints).
 $ourBoot = $bytes[0..511]
-$ourMft = $bytes[16384..(16384+65535)]
+$ourMftOff = [int64]$mftLcn * [int64]$bps * [int64]$spc
+$ourMftEnd = [int64]$ourMftOff + 65535
+$ourMft = $bytes[$ourMftOff..$ourMftEnd]
 [System.IO.File]::WriteAllBytes("$pwd\diag\ours-boot.bin", $ourBoot)
 [System.IO.File]::WriteAllBytes("$pwd\diag\ours-mft-16recs.bin", $ourMft)
+"ours MFT byte offset: $ourMftOff (mft_lcn=$mftLcn, cluster=$($bps*$spc))" |
+    Tee-Object diag/ours-mft-offset.txt
 
 # --- chkdsk -----------------------------------------------------------
 Write-Host "[5/6] chkdsk passes ..."

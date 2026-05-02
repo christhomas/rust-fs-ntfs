@@ -42,68 +42,12 @@ const USA_OFFSET: usize = 0x30;
 
 const ATTR_STANDARD_INFORMATION: u32 = 0x10;
 const ATTR_FILE_NAME: u32 = 0x30;
-/// iter16 reservation. Kept for the future iter17 SD redo even though
-/// the current writer does not emit a `$SECURITY_DESCRIPTOR` attribute.
-#[allow(dead_code)]
-const ATTR_SECURITY_DESCRIPTOR: u32 = 0x50;
 const ATTR_VOLUME_NAME: u32 = 0x60;
 const ATTR_VOLUME_INFORMATION: u32 = 0x70;
 const ATTR_DATA: u32 = 0x80;
 const ATTR_INDEX_ROOT: u32 = 0x90;
 const ATTR_END_MARKER: u32 = 0xFFFF_FFFF;
-
-/// Canonical NTFS-system-record SECURITY_DESCRIPTOR. 104 bytes, byte-
-/// for-byte identical to Microsoft format.com's $SECURITY_DESCRIPTOR
-/// attribute on records 0, 1, 2, 4, 5 (root), 6, 7, 8, 10 (rec 3
-/// `$Volume`, rec 9, rec 11 differ in 4 bytes — see iter16). Layout
-/// matches MS-DTYP §2.4.6 (self-relative SD) / §2.4.4.4 (ACL/ACE) /
-/// §2.4.2.2 (SID).
-///
-/// Decoded:
-///   header (20):
-///     01 00          rev=1, Sbz1=0
-///     04 80          control = SE_SELF_RELATIVE | SE_DACL_PRESENT
-///     48 00 00 00    OffsetOwner = 72
-///     58 00 00 00    OffsetGroup = 88
-///     00 00 00 00    OffsetSacl  = 0   (none)
-///     14 00 00 00    OffsetDacl  = 20
-///   DACL @20 (52):
-///     02 00 34 00    AclRev=2, Sbz1=0, AclSize=52
-///     02 00 00 00    AceCount=2, Sbz2=0
-///     ACE 1 (ACCESS_ALLOWED, 20B): SYSTEM (S-1-5-18), mask=0x00120089
-///     ACE 2 (ACCESS_ALLOWED, 24B): BUILTIN\Administrators (S-1-5-32-544),
-///                                  mask=0x00120089
-///   Owner @72  (16): S-1-5-32-544 (BUILTIN\Administrators)
-///   Group @88  (16): S-1-5-32-544 (BUILTIN\Administrators)
-///
-/// Without an SD on every system record, chkdsk's post-Stage-2
-/// reconnect-scan crashes internally with `An unspecified error
-/// occurred (frs.cxx:60f)`. Confirmed via byte-diff against
-/// format.com reference (agent-8a29-2026-05-02 + agent-c5fe-2026-05-02
-/// iter16 byte-diff: every system record in the reference carries an
-/// SD attribute of length 0x80 with this exact 104-byte value, except
-/// rec 5/9/11 which add minor variations). iter16 attempted but
-/// reverted — see iter16-attempt findings.
-#[allow(dead_code)]
-const SYSTEM_SECURITY_DESCRIPTOR: [u8; 104] = [
-    // header (20)
-    0x01, 0x00, 0x04, 0x80, 0x48, 0x00, 0x00, 0x00, 0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x14, 0x00, 0x00, 0x00, //
-    // DACL header (8)
-    0x02, 0x00, 0x34, 0x00, 0x02, 0x00, 0x00, 0x00, //
-    // ACE 1: ACCESS_ALLOWED, type=0 flags=0 size=20, mask=0x00120089 (SYSTEM)
-    0x00, 0x00, 0x14, 0x00, 0x89, 0x00, 0x12, 0x00, //
-    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x12, 0x00, 0x00, 0x00, //
-    // ACE 2: ACCESS_ALLOWED, size=24, mask=0x00120089 (BUILTIN\Administrators)
-    0x00, 0x00, 0x18, 0x00, 0x89, 0x00, 0x12, 0x00, //
-    0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00,
-    0x00, //
-    // Owner SID (16): S-1-5-32-544 = BUILTIN\Administrators
-    0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00,
-    0x00, //
-    // Group SID (16): S-1-5-32-544 = BUILTIN\Administrators
-    0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00,
-];
+const COLLATION_FILE_NAME: u32 = 0x01;
 
 /// Win32 + DOS namespace value for $FILE_NAME.
 const NAMESPACE_WIN32_DOS: u8 = 3;
@@ -121,11 +65,10 @@ mod rec {
     pub const BADCLUS: u32 = 8;
     pub const SECURE: u32 = 9;
     pub const UPCASE: u32 = 10;
-    /// iter15: rec 11 reservation kept as a documented constant, but
-    /// the slot is intentionally not populated (Microsoft's reference
-    /// rec 11 is a non-indexed system blob, not $Extend).
-    #[allow(dead_code)]
-    pub const EXTEND: u32 = 11;
+    // Records 11..15 are reserved (no $FILE_NAME, not in root $I30).
+    // Microsoft format.com leaves these as in-use placeholder records;
+    // we leave them zero-bytes — see the iter14-v2 block in
+    // format_filesystem.
 }
 
 /// Format an NTFS volume in place over a [`BlockIo`].
@@ -212,14 +155,14 @@ pub fn format_filesystem(
     )?;
     dev.write_all_at(0, &boot)?;
     // Backup boot lives at the LAST 512-byte sector of the volume —
-    // byte offset (cluster_count * cluster_size) - bytes_per_sector —
-    // matching what publicly documented NTFS layout descriptions say
-    // ntfs.sys probes via BPB.NumberSectors. Was previously written at
-    // start-of-last-cluster; that was 7 sectors too early for the
-    // 4 KiB / 512 default and triggered Event ID 55 on small volumes
-    // (mac-format-tiny-32mib). Moving it to the last sector clears
-    // Event 55. Cross-applied from agent-c6a1-2026-05-02 (commits
-    // 80a3d88 + 2165997).
+    // byte offset (cluster_count * cluster_size) - bytes_per_sector
+    // — matching what publicly documented NTFS layout descriptions
+    // say ntfs.sys probes via BPB.NumberSectors. Was previously
+    // written at start-of-last-cluster; that was 7 sectors too early
+    // for the 4 KiB / 512 default and triggered Event ID 55
+    // ("corruption discovered, exact nature unknown") on
+    // mac-format-tiny-32mib (diag iter-20260502-054124). Moving it to
+    // the last sector cleared Event 55 on tiny (iter-20260502-061249).
     let volume_bytes = cluster_count * cluster_size as u64;
     let backup_boot_byte_offset = volume_bytes - bytes_per_sector as u64;
     dev.write_all_at(backup_boot_byte_offset, &boot)?;
@@ -288,6 +231,15 @@ pub fn format_filesystem(
 
     let mut mft_buf = vec![0u8; (mft_clusters * cluster_size as u64) as usize];
 
+    // Collected during rec 0..11 building so root's $I30 can carry an
+    // INDEX_ENTRY per system file. Microsoft's reference root $I30
+    // contains all 12 system files (incl. `.` itself); chkdsk Stage 2
+    // reports them as orphaned ("Detected orphaned file $X (N), should
+    // be recovered into directory file 5") when the index is empty.
+    // Per-record byte-diff in iter13 (rust-fs-ntfs-diag iter-20260502-024032).
+    // Tuple: (rec_num, name, is_dir, data_alloc, data_real).
+    let mut sys_entries: Vec<(u32, &'static str, bool, u64, u64)> = Vec::with_capacity(12);
+
     // record 0: $MFT
     {
         let mft_data_runs = vec![DataRun {
@@ -305,14 +257,6 @@ pub fn format_filesystem(
             &mp,
         )?;
         let bitmap_value_size = mft_records_capacity.div_ceil(8) as usize;
-        // iter15: rec 11 is intentionally LEFT FREE (not marked in-use,
-        // not written below). Microsoft's reference at rec 11 is a
-        // non-indexed system blob ($STANDARD_INFORMATION + $SECURITY_
-        // DESCRIPTOR + $DATA, no $FILE_NAME, no IS_DIRECTORY flag) —
-        // ours used to be a $FILE_NAME-bearing $Extend directory linked
-        // from root. With our $Extend present, chkdsk's post-Stage-2
-        // reconnect-scan crashed internally with `frs.cxx:60f`. Removing
-        // the slot until we know what reference's rec 11 actually is.
         let mft_bitmap_value = make_mft_internal_bitmap(
             bitmap_value_size,
             &[
@@ -327,6 +271,8 @@ pub fn format_filesystem(
                 rec::BADCLUS,
                 rec::SECURE,
                 rec::UPCASE,
+                // rec::EXTEND (11) deliberately omitted — see iter14-v2
+                // block at the rec 11 slot.
             ],
         );
         let bitmap_attr = build_resident_unnamed(0xB0, 4, &mft_bitmap_value);
@@ -344,6 +290,7 @@ pub fn format_filesystem(
             &[data_attr, bitmap_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::MFT, rec_bytes)?;
+        sys_entries.push((rec::MFT, "$MFT", false, mft_data_size, mft_data_size));
     }
 
     // record 1: $MFTMirr  — non-resident $DATA pointing at mftmirr_lcn.
@@ -373,6 +320,7 @@ pub fn format_filesystem(
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::MFTMIRR, rec_bytes)?;
+        sys_entries.push((rec::MFTMIRR, "$MFTMirr", false, len_bytes, len_bytes));
     }
 
     // record 2: $LogFile
@@ -402,6 +350,7 @@ pub fn format_filesystem(
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::LOGFILE, rec_bytes)?;
+        sys_entries.push((rec::LOGFILE, "$LogFile", false, len_bytes, len_bytes));
     }
 
     // record 3: $Volume
@@ -438,17 +387,15 @@ pub fn format_filesystem(
             &combined,
         )?;
         place_record(&mut mft_buf, rs, rec::VOLUME, rec_bytes)?;
+        sys_entries.push((rec::VOLUME, "$Volume", false, 0, 0));
     }
 
     // record 4: $AttrDef (canonical 2560-byte table)
-    let attrdef_blob = build_attrdef_table();
-    // Always non-resident at 2560 bytes (well over the resident
-    // ceiling for our 1024/4096 record sizes).
-    let attrdef_clusters: u64 = (attrdef_blob.len() as u64).div_ceil(cluster_size as u64);
-    // $Boot is always 8 KiB regardless of cluster size.
-    let boot_value_len: u64 = 8192;
-    let boot_clusters: u64 = boot_value_len.div_ceil(cluster_size as u64);
     {
+        let attrdef_blob = build_attrdef_table();
+        // Always non-resident at 2560 bytes (well over the resident
+        // ceiling for our 1024/4096 record sizes).
+        let attrdef_clusters = (attrdef_blob.len() as u64).div_ceil(cluster_size as u64);
         // Allocate clusters at the tail of the early-allocation region.
         let attrdef_lcn = upcase_lcn + upcase_clusters;
         // Mark allocated in our in-memory bitmap and rewrite.
@@ -489,97 +436,18 @@ pub fn format_filesystem(
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::ATTRDEF, rec_bytes)?;
+        sys_entries.push((
+            rec::ATTRDEF,
+            "$AttrDef",
+            false,
+            attrdef_clusters * cluster_size as u64,
+            attrdef_blob.len() as u64,
+        ));
     }
 
-    // record 5: root directory "."
-    {
-        let index_block_size: u32 = 4096;
-        // Children of the root: every system record we populate (0..11),
-        // plus `.` itself (NTFS convention — root self-links into its
-        // own $I30). Without these entries chkdsk Stage 2 reports each
-        // system file as `Detected orphaned file X (n), should be
-        // recovered into directory file 5` because the children's
-        // $FILE_NAME parent_reference points at root but root's $I30
-        // doesn't list them back. See iter13 in chkdsk-findings.md.
-        let children = [
-            RootIndexChild {
-                rec_num: rec::MFT,
-                seq: 1,
-                name: "$MFT",
-            },
-            RootIndexChild {
-                rec_num: rec::MFTMIRR,
-                seq: rec::MFTMIRR as u16,
-                name: "$MFTMirr",
-            },
-            RootIndexChild {
-                rec_num: rec::LOGFILE,
-                seq: rec::LOGFILE as u16,
-                name: "$LogFile",
-            },
-            RootIndexChild {
-                rec_num: rec::VOLUME,
-                seq: rec::VOLUME as u16,
-                name: "$Volume",
-            },
-            RootIndexChild {
-                rec_num: rec::ATTRDEF,
-                seq: rec::ATTRDEF as u16,
-                name: "$AttrDef",
-            },
-            RootIndexChild {
-                rec_num: rec::ROOT,
-                seq: rec::ROOT as u16,
-                name: ".",
-            },
-            RootIndexChild {
-                rec_num: rec::BITMAP,
-                seq: rec::BITMAP as u16,
-                name: "$Bitmap",
-            },
-            RootIndexChild {
-                rec_num: rec::BOOT,
-                seq: rec::BOOT as u16,
-                name: "$Boot",
-            },
-            RootIndexChild {
-                rec_num: rec::BADCLUS,
-                seq: rec::BADCLUS as u16,
-                name: "$BadClus",
-            },
-            RootIndexChild {
-                rec_num: rec::SECURE,
-                seq: rec::SECURE as u16,
-                name: "$Secure",
-            },
-            RootIndexChild {
-                rec_num: rec::UPCASE,
-                seq: rec::UPCASE as u16,
-                name: "$UpCase",
-            },
-            // iter15: $Extend (rec 11) intentionally NOT indexed — see
-            // bitmap comment above. Reference root \$I30 has 11 entries
-            // (no $Extend); ours used to have 12. Drops back to 11.
-        ];
-        let parent_ref = encode_file_reference(rec::ROOT as u64, rec::ROOT as u16);
-        let index_root =
-            build_root_index_root_attr(3, index_block_size, now, parent_ref, &children);
-        // SD on rec 5 is now emitted by build_system_record alongside
-        // every other system record (iter16). $INDEX_ROOT goes back to
-        // attr_id=3 (STD_INFO=0, FILE_NAME=1, SD=2, INDEX_ROOT=3).
-        // Root directory has no $DATA (only an $INDEX_ROOT), so $FILE_NAME
-        // sizes are 0/0 — matches Microsoft's reference (rec 5).
-        let rec_bytes = build_system_record(
-            &mft_record_layout,
-            rec::ROOT,
-            ".",
-            true,
-            0,
-            0,
-            &[index_root],
-        )?;
-        place_record(&mut mft_buf, rs, rec::ROOT, rec_bytes)?;
-    }
+    // record 5: root directory "." — built last so $I30 can include
+    // INDEX_ENTRY for every system file (rec 0..11). See block at end of
+    // this function.
 
     // record 6: $Bitmap (non-resident $DATA over bitmap_lcn..)
     {
@@ -608,11 +476,20 @@ pub fn format_filesystem(
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::BITMAP, rec_bytes)?;
+        sys_entries.push((
+            rec::BITMAP,
+            "$Bitmap",
+            false,
+            bitmap_clusters * cluster_size as u64,
+            value_len,
+        ));
     }
 
     // record 7: $Boot — non-resident, single-cluster run at LCN 0,
     // value_length = 8192 (boot file is conventionally 8 KiB).
     {
+        let boot_value_len: u64 = 8192;
+        let boot_clusters: u64 = boot_value_len.div_ceil(cluster_size as u64);
         let runs = vec![DataRun {
             starting_vcn: 0,
             length: boot_clusters,
@@ -637,6 +514,13 @@ pub fn format_filesystem(
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::BOOT, rec_bytes)?;
+        sys_entries.push((
+            rec::BOOT,
+            "$Boot",
+            false,
+            boot_clusters * cluster_size as u64,
+            boot_value_len,
+        ));
     }
 
     // record 8: $BadClus — empty unnamed $DATA + named "$Bad" sparse
@@ -676,6 +560,7 @@ pub fn format_filesystem(
             &[empty_data, bad_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::BADCLUS, rec_bytes)?;
+        sys_entries.push((rec::BADCLUS, "$BadClus", false, 0, 0));
     }
 
     // record 9: $Secure — minimal resident stub. Real NTFS has $SDS /
@@ -695,6 +580,7 @@ pub fn format_filesystem(
             &[empty_data],
         )?;
         place_record(&mut mft_buf, rs, rec::SECURE, rec_bytes)?;
+        sys_entries.push((rec::SECURE, "$Secure", false, 0, 0));
     }
 
     // record 10: $UpCase
@@ -723,15 +609,79 @@ pub fn format_filesystem(
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::UPCASE, rec_bytes)?;
+        sys_entries.push((
+            rec::UPCASE,
+            "$UpCase",
+            false,
+            upcase_clusters * cluster_size as u64,
+            upcase_value_bytes,
+        ));
     }
 
-    // record 11..15: intentionally left free. iter15 stopped writing a
-    // $FILE_NAME-bearing $Extend directory at rec 11 because Microsoft's
-    // reference doesn't put $Extend there (its rec 11 is a non-indexed
-    // system blob), and chkdsk's post-Stage-2 reconnect-scan crashes
-    // internally (`frs.cxx:60f`) when it walks our $Extend's $FILE_NAME.
-    // Slot is left zero (no FILE magic, IN_USE bit clear in $MFT:$Bitmap).
-    // NTFS treats records with no FILE magic and IN_USE clear as available.
+    // record 11: NOT WRITTEN. Microsoft's reference rec 11 has no
+    // $FILE_NAME (link_count=0) and is not present in root's $I30.
+    // chkdsk's "scanning unindexed files for reconnect" stage hits an
+    // internal `frs.cxx 0x60f` error when our rec 11 is `$Extend` with
+    // a $FILE_NAME pointing to root and an entry in root's $I30. Per
+    // iter14-v2 byte-diff (`rust-fs-ntfs-diag/iter-20260502-025958/`,
+    // ref rec 11: STD_INFO+0x50+DATA, link_count=0, no $FILE_NAME).
+    //
+    // We leave the slot zero-bytes (not even FILE-magic). The MFT
+    // bitmap will not mark rec 11 as in use.
+
+    // record 5: root directory "." — built AFTER rec 0..4 and rec 6..11
+    // so we have every system file's name + $DATA size to emit as
+    // INDEX_ENTRYs in `$I30`. Microsoft's reference root contains
+    // entries for all 12 system files (incl. `.` itself); chkdsk Stage 2
+    // walks `$I30` and reports every record absent from it as orphaned.
+    // Per-record byte-diff in iter13 (rust-fs-ntfs-diag iter-20260502-024032)
+    // confirmed reference $I30 = 0x468 bytes (12 entries + LAST sentinel)
+    // vs ours = 0x30 bytes (just the LAST sentinel).
+    {
+        let index_block_size: u32 = 4096;
+        sys_entries.push((rec::ROOT, ".", true, 0, 0));
+        sys_entries.sort_by(|a, b| collate_file_name(a.1, b.1));
+
+        // Every system $FILE_NAME's parent is the root directory at
+        // (rec=5, seq=5). Same convention used by `build_system_record`.
+        let parent_ref = encode_file_reference(rec::ROOT as u64, 5);
+
+        let mut entries_blob: Vec<u8> = Vec::new();
+        for &(rec_num, name, is_dir, alloc, real) in &sys_entries {
+            // sequence_number = max(1, rec_num) per iter11 byte-diff.
+            let seq: u16 = if rec_num == 0 { 1 } else { rec_num as u16 };
+            let stream = build_file_name_stream(
+                parent_ref,
+                mft_record_layout.nt_time,
+                name,
+                is_dir,
+                true,
+                alloc,
+                real,
+            )?;
+            let entry =
+                build_index_entry(encode_file_reference(rec_num as u64, seq), &stream, false);
+            entries_blob.extend_from_slice(&entry);
+        }
+        // LAST sentinel terminates the inline index.
+        entries_blob.extend_from_slice(&build_index_entry(0, &[], true));
+
+        let index_root = build_populated_index_root_attr(3, index_block_size, &entries_blob);
+        let rec_bytes = build_system_record(
+            &mft_record_layout,
+            rec::ROOT,
+            ".",
+            true,
+            0,
+            0,
+            &[index_root],
+        )?;
+        place_record(&mut mft_buf, rs, rec::ROOT, rec_bytes)?;
+    }
+
+    // 12..15 reserved — leave free in $MFT:$Bitmap (handled above) and
+    // the record bytes zero. NTFS treats records with no FILE magic and
+    // IN_USE clear as available.
 
     // 6. Write $MFT to disk + mirror first 4 records ----------------------
     dev.write_all_at(mft_lcn * cluster_size as u64, &mft_buf)?;
@@ -784,13 +734,13 @@ fn build_boot_sector(
     // BPB NumberSectors at offset 0x28: count of *data* sectors in the
     // volume, NOT counting the trailing backup-boot sector. Microsoft
     // format.com always writes (volume_sectors - 1). Corroborated in
-    // agent-840e-2026-05-02 / agent-c6a1-2026-05-02 iter13: 96 MiB
-    // reference shows NumberSectors=0x0002FEFF for 196352 partition
-    // sectors, i.e. N-1. We previously wrote N (the full sector count);
-    // at >= 256 MiB the off-by-one was tolerated by chkdsk + ntfs.sys,
-    // but at 32 MiB it pushes the kernel's expected backup-boot location
-    // past EOV and ntfs.sys refuses to mount. Cross-applied from
-    // agent-c6a1-2026-05-02 commit 84a83d7.
+    // iter13 (agent-840e-2026-05-02): a 96 MiB reference volume showed
+    // NumberSectors=0x0002FEFF for 196352 partition sectors, i.e. N-1.
+    // We previously wrote N (the full sector count); at >= 256 MiB the
+    // off-by-one was tolerated by chkdsk + ntfs.sys, but at 32 MiB it
+    // pushes the kernel's expected backup-boot location past EOV and
+    // ntfs.sys refuses to mount the volume (Get-Volume reports
+    // FileSystemType=Unknown, Size=0).
     let volume_sectors: u64 = cluster_count * (cluster_size as u64) / bytes_per_sector as u64;
     let number_sectors: u64 = volume_sectors - 1;
     b[0x28..0x30].copy_from_slice(&number_sectors.to_le_bytes());
@@ -955,17 +905,6 @@ fn build_system_record(
         fn_data_alloc,
         fn_data_real,
     )?;
-
-    // iter16 attempted: emit a $SECURITY_DESCRIPTOR attribute on every
-    // system record (matching reference byte-for-byte). Reverted —
-    // although the SD bytes were verified identical to format.com's
-    // output (SYSTEM_SECURITY_DESCRIPTOR), adding it on every record
-    // caused Windows to reject the volume at mount with Event 55
-    // corruption (`Cannot open volume for direct access`). Some
-    // structural interaction with our $STANDARD_INFORMATION
-    // security_id=0 / $Secure stub or attribute-cursor placement is
-    // not yet understood. iter17+ task: investigate why the SD
-    // addition triggers mount refusal even though bytes match ref.
 
     for attr in extra_attrs {
         if cursor + attr.len() + 8 > rs {
@@ -1141,115 +1080,82 @@ fn build_resident_unnamed(attr_type: u32, attr_id: u16, value: &[u8]) -> Vec<u8>
     buf
 }
 
-/// One $I30 child record to populate root's $INDEX_ROOT with.
-///
-/// Per byte-diff against Microsoft `format.com` (CI iter13 diag dir),
-/// the $FILE_NAME copy embedded in a root $I30 entry has its
-/// allocated_size, real_size, and file_attributes fields zeroed —
-/// even though the child's own per-record $FILE_NAME carries the
-/// real values. The per-record copy is authoritative; the index-entry
-/// copy is a key for lookup. We mirror that pattern: only `name` and
-/// the mft_ref/seq + parent_ref + is_dir flag bit (for the namespace
-/// distinction) are populated in the entry. allocated_size/real_size/
-/// file_attributes are written as zero.
-struct RootIndexChild<'a> {
-    rec_num: u32,
-    seq: u16,
-    name: &'a str,
-}
-
-/// NTFS COLLATION_FILE_NAME ordering. The on-disk $UpCase table
-/// governs case folding for arbitrary Unicode names; for the system
-/// records this builder indexes (all ASCII), ASCII uppercase suffices
-/// and matches the reference's observed order
-/// ($AttrDef, $BadClus, $Bitmap, $Boot, $LogFile, $MFT, $MFTMirr,
-/// $Quota, $UpCase, $Volume, .).
-fn collate_filename(a: &str, b: &str) -> std::cmp::Ordering {
-    fn upper16(s: &str) -> Vec<u16> {
-        s.encode_utf16()
-            .map(|c| {
-                if (b'a' as u16..=b'z' as u16).contains(&c) {
-                    c - 32
-                } else {
-                    c
-                }
-            })
-            .collect()
+/// Compose just the value bytes of a `$FILE_NAME` attribute (the
+/// attribute *stream*, without the attribute header). Same byte layout
+/// `write_file_name` produces in-record; reused so root's `$I30`
+/// `INDEX_ENTRY`s carry byte-identical streams to the in-record `$FILE_NAME`s.
+fn build_file_name_stream(
+    parent_reference: u64,
+    nt_time: u64,
+    name: &str,
+    is_dir: bool,
+    is_system: bool,
+    data_alloc: u64,
+    data_real: u64,
+) -> Result<Vec<u8>, String> {
+    let utf16: Vec<u16> = name.encode_utf16().collect();
+    if utf16.is_empty() || utf16.len() > 255 {
+        return Err(format!("invalid name length {}", utf16.len()));
     }
-    upper16(a).cmp(&upper16(b))
+    let key_fixed = 0x42usize;
+    let mut buf = vec![0u8; key_fixed + utf16.len() * 2];
+    buf[0..8].copy_from_slice(&parent_reference.to_le_bytes());
+    buf[8..16].copy_from_slice(&nt_time.to_le_bytes());
+    buf[16..24].copy_from_slice(&nt_time.to_le_bytes());
+    buf[24..32].copy_from_slice(&nt_time.to_le_bytes());
+    buf[32..40].copy_from_slice(&nt_time.to_le_bytes());
+    buf[40..48].copy_from_slice(&data_alloc.to_le_bytes());
+    buf[48..56].copy_from_slice(&data_real.to_le_bytes());
+    let mut fa: u32 = 0x20;
+    if is_dir {
+        fa |= 0x10000000;
+    }
+    if is_system {
+        fa |= 0x06;
+    }
+    buf[56..60].copy_from_slice(&fa.to_le_bytes());
+    buf[60..64].copy_from_slice(&0u32.to_le_bytes());
+    buf[64] = utf16.len() as u8;
+    buf[65] = NAMESPACE_WIN32_DOS;
+    for (i, c) in utf16.iter().enumerate() {
+        let off = 66 + i * 2;
+        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    }
+    Ok(buf)
 }
 
-/// Build the root directory's $INDEX_ROOT populated with one $I30
-/// entry per system record. Without these entries chkdsk's Stage 2
-/// reports every system record as `Detected orphaned file X (n),
-/// should be recovered into directory file 5` — its parent reference
-/// pointed at root but root's index didn't list it back. Confirmed
-/// by byte-diff against Microsoft format.com (CI iter13 diag dir):
-/// reference rec 5 carries an 0x488-byte $INDEX_ROOT with 11 entries
-/// covering every system file plus `.`; ours carried only the LAST
-/// sentinel.
-fn build_root_index_root_attr(
+/// Build a single `INDEX_ENTRY` for an `$I30` index. Header is 16 bytes;
+/// stream follows; entry padded to 8. `is_last=true` produces the LAST
+/// sentinel (zero-length stream, flags=0x02).
+fn build_index_entry(file_reference: u64, stream: &[u8], is_last: bool) -> Vec<u8> {
+    let header = 0x10usize;
+    let entry_len = align8(header + stream.len());
+    let mut buf = vec![0u8; entry_len];
+    buf[0..8].copy_from_slice(&file_reference.to_le_bytes());
+    buf[8..10].copy_from_slice(&(entry_len as u16).to_le_bytes());
+    buf[10..12].copy_from_slice(&(stream.len() as u16).to_le_bytes());
+    let flags: u32 = if is_last { 0x02 } else { 0x00 };
+    buf[12..16].copy_from_slice(&flags.to_le_bytes());
+    if !stream.is_empty() {
+        buf[16..16 + stream.len()].copy_from_slice(stream);
+    }
+    buf
+}
+
+/// Build a populated `$INDEX_ROOT` `$I30` attribute. `entries_blob` must
+/// already contain pre-sorted `INDEX_ENTRY`s terminated by a LAST sentinel.
+fn build_populated_index_root_attr(
     attr_id: u16,
     index_block_size: u32,
-    nt_time: u64,
-    root_parent_ref: u64,
-    children: &[RootIndexChild<'_>],
+    entries_blob: &[u8],
 ) -> Vec<u8> {
-    let mut sorted: Vec<&RootIndexChild<'_>> = children.iter().collect();
-    sorted.sort_by(|a, b| collate_filename(a.name, b.name));
-
-    let mut entries_buf: Vec<u8> = Vec::new();
-    for c in &sorted {
-        let utf16: Vec<u16> = c.name.encode_utf16().collect();
-        let key_len = 0x42usize + utf16.len() * 2;
-        let entry_len = align8(0x10 + key_len);
-        let mut e = vec![0u8; entry_len];
-
-        let child_ref = encode_file_reference(c.rec_num as u64, c.seq);
-        e[0..8].copy_from_slice(&child_ref.to_le_bytes());
-        e[8..10].copy_from_slice(&(entry_len as u16).to_le_bytes());
-        e[10..12].copy_from_slice(&(key_len as u16).to_le_bytes());
-        e[12..14].copy_from_slice(&0u16.to_le_bytes());
-        e[14..16].copy_from_slice(&0u16.to_le_bytes());
-
-        // $FILE_NAME body. Only parent_ref + timestamps + name fields
-        // are populated; allocated_size, real_size, and file_attributes
-        // are left zero — matching Microsoft format.com's $I30 entries
-        // for system records (CI iter13 byte-diff: ref's entries had
-        // alloc=0/real=0/fa=0 for every system child except $MFT, which
-        // alone carried the real $DATA size). The per-record $FILE_NAME
-        // is the authoritative copy; chkdsk does not appear to require
-        // the $I30 entry to mirror those numeric fields.
-        let v = 0x10;
-        e[v..v + 8].copy_from_slice(&root_parent_ref.to_le_bytes());
-        e[v + 8..v + 16].copy_from_slice(&nt_time.to_le_bytes());
-        e[v + 16..v + 24].copy_from_slice(&nt_time.to_le_bytes());
-        e[v + 24..v + 32].copy_from_slice(&nt_time.to_le_bytes());
-        e[v + 32..v + 40].copy_from_slice(&nt_time.to_le_bytes());
-        e[v + 64] = utf16.len() as u8;
-        e[v + 65] = NAMESPACE_WIN32_DOS;
-        for (i, ch) in utf16.iter().enumerate() {
-            let off = v + 66 + i * 2;
-            e[off..off + 2].copy_from_slice(&ch.to_le_bytes());
-        }
-        entries_buf.extend_from_slice(&e);
-    }
-
-    // LAST sentinel: zero mft_ref, entry_length=16, key_length=0,
-    // flags=0x0002 (END_OF_LIST).
-    let mut sentinel = [0u8; 16];
-    sentinel[8..10].copy_from_slice(&16u16.to_le_bytes());
-    sentinel[12..14].copy_from_slice(&0x0002u16.to_le_bytes());
-    entries_buf.extend_from_slice(&sentinel);
-
-    // Wrap in attribute header + INDEX_ROOT body.
     let common_header = 16usize;
     let resident_fields = 8usize;
     let header_size = common_header + resident_fields;
     let name_offset = header_size;
     let name_bytes = 8usize;
     let value_offset = align8(name_offset + name_bytes);
-    let ir_value_size = 16 + 16 + entries_buf.len();
+    let ir_value_size = 16 + 16 + entries_blob.len();
     let attr_length = align8(value_offset + ir_value_size);
 
     let mut buf = vec![0u8; attr_length];
@@ -1272,21 +1178,38 @@ fn build_root_index_root_attr(
     }
 
     let v = value_offset;
-    buf[v..v + 4].copy_from_slice(&0x30u32.to_le_bytes());
-    buf[v + 4..v + 8].copy_from_slice(&1u32.to_le_bytes());
+    buf[v..v + 4].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
+    buf[v + 4..v + 8].copy_from_slice(&COLLATION_FILE_NAME.to_le_bytes());
     buf[v + 8..v + 12].copy_from_slice(&index_block_size.to_le_bytes());
     buf[v + 12] = 1;
 
     let ih = v + 16;
     buf[ih..ih + 4].copy_from_slice(&16u32.to_le_bytes());
-    let total_size = (16 + entries_buf.len()) as u32;
-    buf[ih + 4..ih + 8].copy_from_slice(&total_size.to_le_bytes());
-    buf[ih + 8..ih + 12].copy_from_slice(&total_size.to_le_bytes());
+    let used = 16u32 + entries_blob.len() as u32;
+    buf[ih + 4..ih + 8].copy_from_slice(&used.to_le_bytes());
+    buf[ih + 8..ih + 12].copy_from_slice(&used.to_le_bytes());
 
-    let eo = ih + 16;
-    buf[eo..eo + entries_buf.len()].copy_from_slice(&entries_buf);
+    let entries_at = ih + 16;
+    buf[entries_at..entries_at + entries_blob.len()].copy_from_slice(entries_blob);
 
     buf
+}
+
+/// COLLATION_FILE_NAME ordering. Our system file names are ASCII with
+/// `$` prefix (and `.` for root), so simple ASCII upcase + UTF-16-LE
+/// bytewise comparison reproduces Microsoft's reference order exactly.
+fn collate_file_name(a: &str, b: &str) -> std::cmp::Ordering {
+    let ua: Vec<u16> = a.encode_utf16().map(ascii_upcase16).collect();
+    let ub: Vec<u16> = b.encode_utf16().map(ascii_upcase16).collect();
+    ua.cmp(&ub)
+}
+
+fn ascii_upcase16(c: u16) -> u16 {
+    if (0x61..=0x7A).contains(&c) {
+        c - 0x20
+    } else {
+        c
+    }
 }
 
 // ---------------------------------------------------------------------------

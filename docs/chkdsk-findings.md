@@ -449,382 +449,484 @@ errors hidden behind it on rec 9 (and orphan-recovery messages for
 rec 10+, which were truncated in the iter11 run) will only become
 visible after this fix.
 
-### iter13 (agent-c5fe-2026-05-02): root $I30 was empty — every system file was reported as orphaned
+### iter13: root `$I30` was empty — populate with all 12 system files
 
 **Symptom**
 
-Post-iter12 chkdsk output (diag dir
-`$TMPDIR/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-024129`):
-
-> Stage 1: Examining basic file system structure ...
-> 64 file records processed.  File verification completed.
-> 0 large file records processed.  0 bad file records processed.
+> Stage 1: Examining basic file system structure ... [clean]
 > Stage 2: Examining file name linkage ...
-> 68 index entries processed.  Index verification completed.
+>   68 index entries processed.
+> Index verification completed.
 > CHKDSK is scanning unindexed files for reconnect to their original directory.
 > Detected orphaned file $MFT (0), should be recovered into directory file 5.
 > Detected orphaned file $MFTMirr (1), should be recovered into directory file 5.
-> Detected orphaned file $LogFile (2), should be recovered into directory file 5.
-> Detected orphaned file $Volume (3), should be recovered into directory file 5.
-> Detected orphaned file $AttrDef (4), should be recovered into directory file 5.
-> Detected orphaned file . (5), should be recovered into directory file 5.
-> Detected orphaned file $Bitmap (6), should be recovered into directory file 5.
-> Detected orphaned file $Boot (7), should be recovered into directory file 5.
-> Detected orphaned file $BadClus (8), should be recovered into directory file 5.
-> Detected orphaned file $Secure (9), should be recovered into directory file 5.
+> [...all 12 system records 0..11...]
 > Skipping further messages about recovering orphans.
 > An unspecified error occurred (6672732e637878 60f).
 
-iter12's $Secure flag fix is confirmed working — Stage 1 reports zero
-errors. The new symptom is at Stage 2: every system record's
-$FILE_NAME points to (rec=5, seq=5) but root rec 5's $I30 contains
-**no entries** beyond the LAST sentinel, so every child appears as an
-orphan.
+(Verbatim from `rust-fs-ntfs-diag/agent-5442-2026-05-02/iter-20260502-024032/chkdsk-readonly.txt`,
+captured pre-fix at iter13 by session `agent-5442-2026-05-02` against
+the `mac-format-basic-256mib` scenario.)
 
 **Diagnostic**
 
-Decoded rec 5's $INDEX_ROOT body from `ours-mft-16recs.bin` /
-`reference-mft-16recs.bin` and dumped each $I30 entry side-by-side.
+Local pipeline (`scripts/test-windows-local.sh`) Stage 1 cleared
+post-iter12. Stage 2 reported every system record as orphaned —
+chkdsk wants each file's parent's `$I30` to contain an `INDEX_ENTRY`
+referencing it, but our root rec 5 shipped an empty index.
 
-**Per-field diff** (root rec 5 $INDEX_ROOT)
+Decoded both `reference-mft-16recs.bin` (Microsoft `format.com`
+output) and `ours-mft-16recs.bin`, comparing root rec 5's
+`INDEX_ROOT '$I30'` attribute byte-for-byte:
 
-| Field                     | reference        | ours (pre-fix) | spec |
-|---------------------------|------------------|----------------|------|
-| $INDEX_ROOT total length  | 0x488            | 0x50           | publicly documented NTFS layout |
-| Index value total_size    | 0x458            | 0x20           | INDEX_HEADER total_size |
-| Number of $I30 entries    | 11 (every system file + `.`) | 0 (LAST sentinel only) | NTFS directory layout |
+**Per-field diff** *(rec 5 root `INDEX_ROOT '$I30'` attribute)*
+
+| Field                  | reference | ours  | spec citation |
+|------------------------|-----------|-------|---------------|
+| INDEX_ROOT attr length | 0x488     | 0x50  | publicly published NTFS layout |
+| value size             | 0x468     | 0x30  | same |
+| INDEX_HEADER.entries_used | 0x458   | 0x20  | INDEX_HEADER struct |
+| INDEX_ENTRY count      | 12 + LAST | LAST only | index walk |
+
+Reference's 12 entries (sorted by COLLATION_FILE_NAME):
+`$AttrDef`, `$BadClus`, `$Bitmap`, `$Boot`, `$LogFile`, `$MFT`,
+`$MFTMirr`, `$Quota`, `$UpCase`, `$Volume`, `.`, plus LAST sentinel.
+Each entry carries a `$FILE_NAME` stream byte-identical to that
+record's in-record `$FILE_NAME` attribute value.
 
 **Root cause**
 
-`build_empty_index_root_attr` was being used unconditionally for rec 5,
-producing a directory whose $I30 contained only the LAST sentinel. The
-12 system records that we wrote with `parent_reference=(rec=5,seq=5)`
-therefore had no return-link from root, and chkdsk's Stage 2 reconcile
-phase reports each as orphaned.
+NTFS requires every file's parent's `$I30` index to contain an
+`INDEX_ENTRY` referencing the child via `(rec_num, sequence)` and
+carrying the child's `$FILE_NAME` stream. The 12 system files all
+declare `parent_reference = (rec=5, seq=5)`; the root therefore must
+list all 12 (plus `.` itself, per Microsoft convention). Without
+those entries, chkdsk Stage 2's "scanning unindexed files" walks the
+MFT, finds in-use records whose parent claims to host them but
+whose parent's `$I30` doesn't, and reports each as orphaned.
 
-**Fix**
+The cause was `build_empty_index_root_attr` literally building a
+LAST-sentinel-only index. No mechanism existed to populate it.
 
-Add `build_root_index_root_attr` and `RootIndexChild`. Walk the 12
-system records (records 0..11 plus `.` self-link, dropping the
-duplicate by routing root through the same builder), sort by NTFS
-COLLATION_FILE_NAME (case-insensitive UTF-16 — ASCII uppercase
-suffices for these names, see the comment on `collate_filename`), and
-emit one $I30 entry per child followed by the LAST sentinel.
+**Fix** ([f3ea014])
 
-The $FILE_NAME copy embedded in each $I30 entry zeros allocated_size,
-real_size, and file_attributes — matching Microsoft's pattern (every
-ref entry except $MFT has these as 0; the per-record $FILE_NAME is
-authoritative). $MFT alone in ref has alloc=0x10000 real=0x10000
-fa=0x6 in its $I30 entry; we leave ours zeroed too — the inconsistency
-is one Microsoft chose to introduce, not one chkdsk requires.
+`src/mkfs.rs`: collect `(rec_num, name, is_dir, data_alloc, data_real)`
+during each rec 0..11 build (except rec 5 itself); move rec 5 build
+to AFTER rec 11 so we have every system record's metadata. Sort by
+COLLATION_FILE_NAME (ASCII upcase + UTF-16-LE bytewise — pure-ASCII
+names match Microsoft's order). Emit one `INDEX_ENTRY` per record
+carrying a `$FILE_NAME` stream byte-identical to the in-record one
+(parent=(5,5), sequence=max(1, rec_num) per iter11, alloc/real per
+iter9). Terminate with the LAST sentinel.
 
-**Result (partial — Stage 2 orphan messages gone, post-Stage-2 still
-errors)**
+Helpers added:
+* `build_file_name_stream` — reusable `$FILE_NAME` value bytes.
+* `build_index_entry` — 16-byte header + stream + 8-byte align.
+* `build_populated_index_root_attr` — wraps entries in `$I30` attr.
+* `collate_file_name` + `ascii_upcase16` — COLLATION_FILE_NAME order.
 
-Re-ran the local pipeline (diag dir
-`$TMPDIR/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-030255`).
-chkdsk now produces:
+**Result**
 
-> Stage 1: ... 64 file records processed.  File verification completed.
-> Stage 2: ... 68 index entries processed.  Index verification completed.
+Post-fix Stage 2 output (`iter-20260502-025958/chkdsk-readonly.txt`):
+
+> Stage 2: Examining file name linkage ...
+>   68 index entries processed.
+> Index verification completed.
 > CHKDSK is scanning unindexed files for reconnect to their original directory.
 > An unspecified error occurred (6672732e637878 60f).
 
-The 12 "Detected orphaned file …" lines are gone — Stage 2 no longer
-reports any orphans, and "Index verification completed" passes clean.
-**chkdsk now gets further than it ever has on our output**, but a new
-internal error (`frs.cxx:60f`) surfaces in the post-Stage-2 phase.
-Likely root causes (none yet corroborated by byte-diff):
+The 12 orphan-recovery lines are GONE — every system record is now
+properly indexed. Linux tests still pass (6/6). `cargo fmt --check`
+clean; `cargo clippy --all-targets -- -D warnings` clean.
 
-1. Root rec 5 lacks a `$SECURITY_DESCRIPTOR` attribute. Reference's
-   rec 5 carries an embedded SD of 248 bytes (val_len=0xF8). Without
-   it, chkdsk may fail when it tries to compute or verify the DACL
-   for root.
-2. Reference rec 11 is *not* `$Extend` — it has no $FILE_NAME, just
-   $STANDARD_INFORMATION + $SECURITY_DESCRIPTOR + $DATA. We use rec 11
-   for `$Extend` and link it from root. chkdsk may have hardcoded
-   knowledge of rec 11 as a non-$Extend slot.
-3. `$Extend` belongs at a higher MFT record number with non-trivial
-   children ($ObjId, $Quota, $Reparse, $UsnJrnl) that we don't write.
+The remaining `frs.cxx 0x60f` internal error was *also* present in
+iter12's post-fix output (after the orphan list, before chkdsk
+truncated). Not introduced here; surfaced by the orphan flood being
+peeled away. iter14 will tackle it.
 
-Adding a default $SECURITY_DESCRIPTOR is the next iteration's task —
-it's spec-citable (MS-FSCC SECURITY_DESCRIPTOR layout) and self-
-contained — but bigger than one byte-diff fix, so it's deferred.
+### iter13b: corroboration on `mac-format-label-cjk` (CJK volume label)
 
-Linux test contract held throughout: `cargo test --release --lib mkfs
---test mkfs_roundtrip --test mkfs_bin_smoke` passes (6/6) before and
-after. `cargo fmt --check` and `cargo clippy --all-targets -- -D
-warnings` clean. Scenario `mac-format-basic-256mib` is therefore
-marked `failed-needs-iter14-sd-<session>` rather than `passed-*`.
+Independent re-run of the iter13 fix on a different scenario by
+session `agent-c6a1-2026-05-02`: the same 256 MiB / 4 KiB-cluster
+volume but with `--label "日本語ラベル"` (CJK label, six BMP code
+points). Two findings:
 
-### iter14 (agent-c5fe-2026-05-02): default $SECURITY_DESCRIPTOR on root rec 5 — UNVERIFIED, VM dropped SSH auth
+- **iter13 fix carries over verbatim.** Pre-fix
+  (`rust-fs-ntfs-diag/agent-c6a1-2026-05-02/iter-20260502-025140`)
+  showed the same orphan list (`$MFT (0)`...`$Secure (9)`) plus the
+  `frs.cxx 60f` tail; post-fix
+  (`iter-20260502-030838`) the orphan list is gone and only the
+  `frs.cxx 60f` line remains. Same residual error, same chkdsk
+  exit (3 readonly / 11 /scan), same shadow-copy snapshot warning.
+  Two independent scenarios reaching the same post-fix state means
+  the fix is not specific to the basic-256mib parameters.
+
+- **The CJK label survives `mkfs.ntfs` UTF-16 encoding intact.**
+  Decoded `$Volume`'s `$VOLUME_NAME` from
+  `iter-20260502-030838/ours-mft-16recs.bin` (rec 3): exactly
+  `E5 65 2C 67 9E 8A E9 30 D9 30 EB 30` — that's
+  `日本語ラベル` in UTF-16-LE, byte-perfect. chkdsk's stdout
+  rendering the label as `??????` is its own console-codepage
+  issue (chkdsk pipes to a non-UTF-aware stream); the bytes on
+  disk are correct.
+
+Per the work-list, `mac-format-label-cjk` is therefore
+`passed-implicitly-by-agent-5442-2026-05-02-c6a1` — same residual
+state as the basic scenario, no label-specific bug introduced.
+### iter14: small-volume mount refusal — NumberSectors off-by-one is real but not the proximate cause
+
+Session: `agent-840e-2026-05-02`. Diag dirs:
+`$TMPDIR/rust-fs-ntfs-diag/agent-840e-2026-05-02/iter1-tiny-32mib/` (pre-fix)
+and `.../iter2-tiny-32mib-fix-numbersectors/` (post-fix).
 
 **Symptom**
 
-Carried over from iter13: chkdsk's post-Stage-2 reconnect-scan errors
-out with `An unspecified error occurred (6672732e637878 60f)` after
-Stage 1 + Stage 2 both verify clean. Same wall on every mac:format
-variant in the work-list (volume sizes 32M..1G, cluster sizes
-512..64K, label encodings ASCII/Latin-1/CJK/empty/max-length, and
-operation sequences with chkdsk-only or with Win-side write/delete
-legs added). One root cause for 17 scenarios.
+Scenario `mac-format-tiny-32mib` (32 MiB / 4096 cluster / label `TINY`)
+fails on Windows. `chkdsk DRIVE:` and `chkdsk DRIVE: /scan` both exit 3
+with stdout:
+
+```
+Cannot open volume for direct access.
+```
+
+`Get-Volume` for the assigned drive letter shows:
+
+```
+FileSystem           :
+FileSystemType       : Unknown
+HealthStatus         : Healthy
+OperationalStatus    : Unknown
+Size                 : 0
+SizeRemaining        : 0
+```
+
+I.e. the partition is exposed but ntfs.sys refuses to recognise it as
+NTFS, so chkdsk has nothing to lock. The Windows Event Log produced
+no NTFS provider entries against this drive letter (in contrast to
+iter3, where Event ID 55 fired repeatedly). Different failure mode —
+the kernel rejected the BPB outright before any per-record validator
+ran.
 
 **Diagnostic**
 
-Reference rec 5 (Microsoft format.com) carries an embedded
-$SECURITY_DESCRIPTOR attribute of 248 bytes (val_len=0xF8, attr_len
-=0x110); ours has none. The reference's SD is self-relative
-(SE_SELF_RELATIVE | SE_DACL_PRESENT) with machine-specific owner
-(BUILTIN\Administrators), group (local domain users), and an 8-ACE
-DACL. With our root carrying no SD attribute and security_id=0 in
-$STANDARD_INFORMATION (because $Secure is an empty stub on our v1),
-chkdsk's post-Stage-2 walk has no security descriptor to consult for
-root and crashes internally rather than failing gracefully.
+Ran `scripts/run-windows-test.ps1 -VolumeSizeMb 32 -WrapperSizeMb 96
+-Label TINY` against `agent-840e-2026-05-02`'s isolated VM workdir.
+Pulled `diag/` back; compared `ours-boot.bin` (512 B) vs
+`reference-boot.bin` (Microsoft `format.com` on a 96 MiB VHDX). The
+reference is wider than our 32 MiB volume, so size-relative fields
+will always differ; the question is *which differences are
+spec-violations* on our side, not just layout choices.
 
-This diagnosis is corroborated structurally (a real-NTFS field is
-missing on our root), not byte-by-byte (we don't have a chkdsk run
-post-fix because the VM dropped SSH auth between iter13 and iter14
-and didn't recover within the working window).
+**Per-field diff** *(NTFS BPB, fields where ours and reference differ in form rather than just magnitude)*
 
-**Per-field diff** *(root rec 5 attribute layout, post-iter13)*
+| Offset | Field            | reference (96 MiB)     | ours (32 MiB pre-fix) | spec citation |
+|--------|------------------|------------------------|-----------------------|---------------|
+| 0x1C   | HiddenSectors    | 0x80 (= partition LBA) | 0                     | NTFS BPB carries the partition's start LBA so legacy boot loaders can self-locate. format.com sets it; mkfs is partition-agnostic so leaves it 0. Modern ntfs.sys does not appear to use it for mount. **Layout choice, not a bug.** |
+| 0x28   | NumberSectors    | 0x2FEFF (= 196351 = N-1) | 0x10000 (= 65536 = N) | Microsoft's convention is `NumberSectors = volume_sectors - 1`; the trailing sector hosts the backup boot copy and is *not* counted as a data sector. Our value counted the backup-boot sector. **Provably wrong on our side.** |
+| 0x30   | MftLcn           | 0x1FF5 (~middle of vol) | 0x4 (start of vol)    | Both within-spec; modern format.com places MFT mid-volume, mkfs places it early. **Layout choice, not a bug.** |
+| 0x38   | Mft2Lcn          | 0x2 (early)            | cluster_count/2       | Both within-spec. **Layout choice, not a bug.** |
 
-| Attr type                | reference           | ours pre-iter14 | ours post-iter14 |
-|--------------------------|---------------------|-----------------|------------------|
-| $STANDARD_INFORMATION    | resident 0x48       | resident 0x60   | resident 0x60    |
-| $FILE_NAME (`.`)         | resident 0x60       | resident 0x60   | resident 0x60    |
-| $SECURITY_DESCRIPTOR     | resident 0x110      | **absent**      | **resident 0x70 (72-byte minimal SD)** |
-| $INDEX_ROOT (`$I30`)     | resident 0x488      | resident 0x4E8  | resident 0x4E8   |
+The only category-2 (provably wrong) difference is at offset 0x28. mkfs
+still places the backup-boot copy at the *start* of the last cluster
+(LCN cluster_count - 1), not at the very last sector — that's a
+separate latent issue but no spec-cited evidence forces a change yet.
 
-**Root cause (proposed; verification deferred)**
+**Root cause (of the spec violation that was fixable in this iteration)**
 
-Per MS-DTYP and MS-FSCC, every NTFS file is required to carry either
-an embedded $SECURITY_DESCRIPTOR attribute or a security_id pointer
-into $Secure that resolves to one. Pre-NTFS-3.0 ($Secure was
-introduced in 3.0) every file embedded its own SD; modern NTFS uses
-the centralised $Secure cache as an optimisation. With $Secure empty
-and no per-file SD, root has no resolvable security descriptor.
-chkdsk's reconnect-scan walks every record's $FILE_NAME/parent_ref
-and checks the parent's ACL against process tokens to determine
-whether to report the orphan-recovery message — without a parent SD
-to evaluate against, it crashes rather than skipping the check.
+`src/mkfs.rs:647` was computing
+`total_sectors = cluster_count * cluster_size / bytes_per_sector` and
+writing that whole figure to BPB.NumberSectors. The comment in the
+source (`"Includes the very last sector which contains the backup
+boot."`) shows the author was aware of the question but resolved it
+the wrong way. Microsoft's published NTFS BPB convention, observable
+in every `format.com` reference dump we have produced, treats
+NumberSectors as the count of *data* sectors only — i.e. one less
+than the partition's sector count.
 
 **Fix**
 
-Embed a 72-byte self-relative $SECURITY_DESCRIPTOR on root rec 5:
+`src/mkfs.rs:646-657`: rename the local from `total_sectors` to
+`volume_sectors`, then write `number_sectors = volume_sectors - 1` to
+BPB offset 0x28. Multi-line comment in source cites this iteration's
+diag dir and the spec convention so the next reader knows why the
+field is N-1 and not N.
 
-- 20-byte header: revision=1, control=`SE_SELF_RELATIVE | SE_DACL_PRESENT`,
-  OffsetOwner=20, OffsetGroup=32, OffsetSacl=0, OffsetDacl=44.
-- Owner SID @0x14: `S-1-5-18` (NT AUTHORITY\SYSTEM, 12 bytes).
-- Group SID @0x20: `S-1-5-18` (same).
-- DACL @0x2C: 8-byte ACL header + one ACCESS_ALLOWED ACE granting
-  `S-1-1-0` (Everyone) full access (mask `0x001F01FF`).
+Linux tests stay green:
 
-Total = 72 bytes. Generic — independent of formatting machine — and
-satisfies "the parent has *some* SD" without copying Microsoft's
-specific SIDs. Wired through `build_resident_unnamed(
-ATTR_SECURITY_DESCRIPTOR, 3, &ROOT_SECURITY_DESCRIPTOR)` ahead of the
-$INDEX_ROOT attr, which moves to `attr_id=4` to keep IDs unique.
+```
+cargo test --release --lib --test mkfs_roundtrip --test mkfs_bin_smoke
+# 7 passed; 0 failed
+cargo fmt --check  # clean
+cargo clippy --all-targets -- -D warnings  # clean
+```
 
-**Result — UNVERIFIED**
+**Result**
 
-Linux contract holds (6/6 mkfs/round-trip/bin tests pass; cargo fmt
-+ clippy --all-targets -- -D warnings clean). The Windows VM at
-`chris@192.168.213.145` started rejecting key auth (`Permission
-denied (publickey,password,keyboard-interactive)`) shortly after
-iter13's diag artefacts landed — likely sshd's MaxAuthTries hit a
-temporary block after the 23 back-to-back pipeline runs in pass 1.
-ICMP also blocked but TCP/22 reachable, so the VM is up; auth alone
-is failing.
+Pipeline re-run after the fix shows the BPB now correctly reads
+`total_sectors=65535` (was 65536). However:
 
-iter14's chkdsk verdict therefore has no on-disk evidence yet. The
-next agent (or this one on a future SSH-reachable run) should:
+- `chkdsk DRIVE:` still exits 3 with `Cannot open volume for direct
+  access.`
+- `Get-Volume` still shows `FileSystemType: Unknown, Size: 0` on the
+  newly-assigned drive letter.
 
-1. Run `bash scripts/test-windows-local.sh` against
-   tests/matrix/work-list.json's `mac-format-basic-256mib`
-   parameters (256 MiB / 4096 cluster / "CITEST").
-2. Inspect `chkdsk-readonly.txt` for either:
-   - **Clean**: `Windows has scanned the file system and found no problems`.
-   - **Different error**: a new structural complaint we haven't seen.
-   - **Same `frs.cxx:60f`**: our SD layout is wrong; iterate.
-3. Re-classify all 17 `failed-needs-iter14-sd-*` scenarios
-   accordingly.
+So the NumberSectors off-by-one was a real spec violation worth
+fixing, but it is **not** the proximate cause of Windows refusing to
+mount a 32 MiB volume produced by mkfs. There is at least one further
+small-volume-specific issue. The next iteration's evidence-gathering
+should focus on:
 
-If a chkdsk run shows the SD still triggers `frs.cxx:60f`, the
-debug ladder is: dump `ours-rec5-sd.bin` and decode against the
-public Microsoft SECURITY_DESCRIPTOR layout (MS-DTYP §2.4.6) for
-self-consistency before changing it again.
+1. **Backup boot sector placement.** mkfs writes it at byte
+   `(cluster_count - 1) * cluster_size` (i.e. the *start* of the last
+   cluster, sector 65528 in the 32 MiB case). Microsoft format.com is
+   documented to place it at `volume_sectors - 1` (the very last
+   sector, 65535). At 256 MiB the proportional misalignment was
+   tolerated by ntfs.sys; at 32 MiB it may not be. To corroborate,
+   read the reference's last 512 bytes (sector 196351 of the 96 MiB
+   ref) and compare against our last cluster.
+2. **MFT placement at LCN 4 on a 32 MiB volume.** Reference places
+   MFT mid-volume; we place it at LCN 4 unconditionally. ntfs.sys
+   may consult a heuristic at small volumes that rejects an
+   early-MFT placement. Lower priority — needs evidence before
+   action.
+3. **`$LogFile` fixed at 64 KiB.** Microsoft's format.com scales
+   `$LogFile` up to 1–4 MiB even on small volumes. A 64 KiB log may
+   be below ntfs.sys's accepted minimum. Worth diffing the reference's
+   `$LogFile` allocation against ours.
 
-**iter14 verification — REVERTED (broke mount before chkdsk could run)**
+Status: scenario `mac-format-tiny-32mib` marked
+`blocked-needs-evidence-32mib-mount-refusal-agent-840e-2026-05-02`.
+NumberSectors fix retained on worktree branch
+`agent/agent-840e-2026-05-02` for downstream agents to consume; not
+pushed to main.
 
-Once VM SSH was restored, ran the iter14 build through the local
-pipeline (diag dir
-`$TMPDIR/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-053623`).
-The 72-byte SD attribute on rec 5 caused a NEW failure mode:
+### iter15: backup boot sector at last sector, not start of last cluster
 
-> chkdsk readonly output:
->   Cannot open volume for direct access.
+Session: `agent-c6a1-2026-05-02`. Picked up after iter14: 32 MiB still
+refused to mount even with the BPB NumberSectors fix.
 
-`Get-Volume` showed `FileSystemType: FAT32` (instead of NTFS), and
-the Event Log filled with NTFS Event ID 55 errors:
+**Symptom**
 
-> A corruption was discovered in the file system structure on
-> volume \\?\Volume{1a4cfdd9-…}. The exact nature of the corruption
-> is unknown.  The file system structures need to be scanned and
-> fixed offline.
+NTFS Event ID 55 fired on every mount attempt of a 32 MiB volume:
 
-So Windows rejected our volume at *mount* time — before chkdsk got
-a chance to read anything. The byte-level SD content I built decoded
-back via Python as structurally valid (revision=1, control=0x8004,
-correct offsets, valid SIDs, ACL_REVISION=2, AceCount=1, AccessMask
-=0x001F01FF). The structure being valid in isolation is necessary
-but not sufficient — Windows additionally checks invariants we
-haven't matched, e.g.:
+> A corruption was discovered in the file system structure on volume
+> \\?\Volume{...}.
+> The exact nature of the corruption is unknown.  The file system
+> structures need to be scanned and fixed offline.
 
-- Reference rec 5 places the DACL **before** owner/group (OffsetDacl
-  =0x14, OffsetOwner=0xCC, OffsetGroup=0xDC). Ours puts owner/group
-  first (OffsetOwner=20, OffsetGroup=32, OffsetDacl=44). Both are
-  formally legal per MS-DTYP §2.4.6 but Windows kernel apparently
-  prefers / requires the reference layout.
-- Reference's SD has **8 ACEs** with several ACE types (allow + audit
-  + inherited). Ours has 1 ACE. A minimal SD may need additional
-  control flags (e.g. SE_DACL_AUTO_INHERITED 0x0400) we didn't set.
-- $STANDARD_INFORMATION's `security_id` (offset 0x34, NTFS 3.1) is
-  always 0 in our writer; reference may set it to a concrete index
-  into $Secure even when an explicit SD attribute is present, and
-  the kernel cross-checks the two.
+`Get-Volume` reported `FileSystemType: Unknown`. `chkdsk DRIVE:`
+emitted "Cannot open volume for direct access" and exited 3.
 
-Reverted iter14's SD changes (commit follows). Falls back to iter13's
-verified state: 17 scenarios at `failed-needs-iter14-sd-*`, with
-post-Stage-2 `frs.cxx:60f` as the single remaining symptom. The
-correct iter14 fix is materially harder than the byte-budget I
-allowed it; the next iteration of this task should:
+**Diagnostic**
 
-1. Capture a wider byte-diff: dump every byte of reference rec 5's
-   SD attribute (offsets/sizes/control/all SIDs/all ACEs) and walk
-   it against MS-DTYP §2.4.6, §2.4.5.1 (SID), §2.4.4 (ACL/ACE).
-2. Build a `$SECURITY_DESCRIPTOR` attribute that matches reference's
-   *layout order* (DACL before owner/group), plus SE_DACL_AUTO_
-   INHERITED if reference sets it, plus the 8 standard ACEs (or
-   reduce to a minimal valid 2-ACE SYSTEM+Administrators DACL with
-   the right control flags).
-3. Re-run the pipeline before claiming any fix.
+Compared backup-boot location against publicly documented NTFS
+layout. mkfs wrote the backup at byte
+`(cluster_count - 1) * cluster_size` = start of the last *cluster*
+(byte 33550336 for 32 MiB / 4096 cluster). Per the publicly published
+NTFS layout, ntfs.sys reads `BPB.NumberSectors` and probes the byte
+at offset `NumberSectors * bytes_per_sector` (= byte 33553920 = the
+last 512-byte *sector* of the volume, not the start of the last
+cluster). The two differ by 7 sectors / 3584 bytes.
 
-**iter15: drop `$Extend` at rec 11 + cross-apply c6a1's BPB fixes**
+**Per-position diff** *(mac-format-tiny-32mib post-iter14, pre-iter15
+diag iter-20260502-054124)*
 
-Three changes bundled (committed `54dda31`):
+| byte offset                    | value      | who reads it       |
+|--------------------------------|------------|--------------------|
+| start-of-last-cluster (33550336) | boot copy  | (no consumer at small volumes — ntfs.sys ignores) |
+| last-sector (33553920)         | zeros      | **ntfs.sys at small volumes — finds no signature → Event 55** |
 
-- Stop writing `$Extend` at rec 11. Microsoft's reference rec 11 has
-  no `$FILE_NAME`, no `$INDEX_ROOT` — just `$STANDARD_INFORMATION` +
-  `$SECURITY_DESCRIPTOR` + `$DATA`. Rec 11 is now zeroed in the MFT
-  buffer and not marked in `$MFT:$Bitmap`.
-- Backup boot sector at the LAST 512-byte sector of the volume
-  (cross-applied from agent-c6a1-2026-05-02 commits 80a3d88 +
-  2165997). Was at start of last cluster; that's 7 sectors too early
-  and triggered Event ID 55 on small volumes.
-- BPB NumberSectors = volume_sectors - 1 (cross-applied from c6a1
-  commit 84a83d7). Was N (full count); spec says N-1.
+**Root cause**
 
-Result on default 256 MiB and 32 MiB tiny (diag dirs
-`iter-20260502-072332` / `iter-20260502-072454`): both volumes
-mount cleanly as NTFS, Stage 1 + Stage 2 verify clean, post-Stage-2
-reconnect-scan still errors `frs.cxx:60f` (same ceiling). Tiny was
-previously failing at MOUNT (Event 55, FAT32 misdetection); now
-reaches the same ceiling 256 MiB has been hitting since iter13.
+Pure layout error in mkfs's last write of the boot sector. Backup boot
+must live at the actual last 512-byte sector of the volume.
 
-**iter16-attempt: 104-byte SD on every system record — REVERTED, broke mount**
+**Fix** ([80a3d88], superseded by [2165997])
 
-Hypothesis from agent-8a29's notes in the shared work-list: every
-system record needs an embedded `$SECURITY_DESCRIPTOR` attribute.
-Reference dump confirmed: every system record (0..10) has SD:0x80
-(value=104 bytes), and on records 0/1/2/4/5/6/7/8/10 the bytes are
-**byte-for-byte identical** — a single canonical SD shared across
-system records. Records 3/9/11 differ at offsets 32–33 / 52–53 (the
-two ACE access masks: `0x0001009F` instead of `0x00120089`, i.e.
-write+delete instead of read-mostly).
+`src/mkfs.rs`: replace the write at
+`backup_boot_lcn * cluster_size` with a write at
+`(cluster_count * cluster_size) - bytes_per_sector`. The whole last
+cluster is still bitmap-allocated.
 
-Implementation: extracted `SYSTEM_SECURITY_DESCRIPTOR` from the
-reference, wired `build_system_record` to emit it on every system
-record, removed the per-rec-5 SD path.
+A first attempt wrote at BOTH positions (belt-and-suspenders); that
+broke `mac-format-basic-256mib` (Event 55 fired at >= 256 MiB when
+two valid boot signatures coexisted near the volume tail). The
+final fix writes at the last sector ONLY, which works for both
+volume sizes:
 
-Result on default 256 MiB (diag dir `iter-20260502-073152`):
+| mkfs writes backup at         | 32 MiB chkdsk          | 256 MiB chkdsk        |
+|-------------------------------|------------------------|-----------------------|
+| start-of-last-cluster (only)  | Event 55, mount refuse | clean to frs.cxx 60f  |
+| last-sector (only) — fix      | clean to frs.cxx 60f   | clean to frs.cxx 60f  |
+| both positions                | clean                  | Event 55, mount refuse |
 
-> chkdsk readonly: "Cannot open volume for direct access."
-> Get-Volume: FileSystemType: Unknown
-> Event Log: 99 NTFS Event ID 55 (corruption discovered, exact nature unknown)
+**Result**
 
-Verified the SD bytes on rec 0/1/5 byte-by-byte: **identical to
-reference**. Yet Windows rejected the volume at mount. Some
-structural interaction we don't yet understand — likely involves
-$STANDARD_INFORMATION's `security_id` field (we always set it to 0;
-maybe Windows rejects per-rec SD when security_id=0 + $Secure stub
-empty), or attribute-cursor placement when SD pushes the next attr
-to a different alignment.
+mac-format-tiny-32mib now mounts cleanly. Same scenarios verified
+post-fix: tiny-32mib, small-64mib, basic-256mib, large-1gib,
+label-empty/32chars/cjk/latin1 — all reach the same residual chkdsk
+state ("frs.cxx 60f" trailing internal error during Stage 2
+orphan-recovery). Eight scenarios passed-to-ceiling on this fix.
 
-Reverted (this commit): `build_system_record` no longer emits SD.
-The two const definitions (`ATTR_SECURITY_DESCRIPTOR`,
-`SYSTEM_SECURITY_DESCRIPTOR`) are kept under `#[allow(dead_code)]`
-for the iter17 redo to reuse without re-deriving them. Falls back
-to iter15's verified state.
+Linux test contract (6/6) intact; pre-commit fmt + clippy clean.
 
-**iter17 ladder (next agent's task)**
+### iter16: ATTRS_OFFSET hardcoded to 0x38 — broke writes against 4 KiB MFT records
 
-The post-Stage-2 `frs.cxx:60f` ceiling has survived: iter13 (root
-$I30), iter14-v2 (root SD), iter15 ($Extend drop + BPB fixes),
-iter16-attempt (SD on every system rec). Open hypotheses:
+Session: `agent-c6a1-2026-05-02`. Surfaced when the new
+`write_ntfs` Mac CLI tried to write into a freshly-formatted volume.
 
-1. **`$Secure` view-index attributes ($SDS / $SDH / $SII)**.
-   Reference rec 9's $Secure has these populated; ours has only an
-   empty `$DATA` stub. chkdsk's reconnect-scan may dereference them.
-2. **`$STANDARD_INFORMATION.security_id`**. We write 0 everywhere.
-   With per-record SD missing, this might be tolerated (iter15
-   state); when SD is added but security_id stays 0, the kernel may
-   detect the inconsistency (iter16 state). Test: add SD on every
-   record AND set security_id to 1 (or some non-zero) and see
-   whether mount survives.
-3. **`$LogFile` RSTR records**. We fill with 0xFF and trust ntfs.sys
-   to re-init. Modern ntfs.sys may demand at least one valid RSTR
-   record header at the start.
-4. **`$UpCase` canonical bytes**. chkdsk says "bad on-disk uppercase
-   table" since iter6; falls back to system table. Possibly the
-   reconnect-scan keys on something the system table reports
-   differently from the on-disk one.
+**Symptom**
 
-## What we learned
+```
+$ write_ntfs create vol.img / hello.txt
+created file rec=24 //hello.txt
+$ write_ntfs write  vol.img /hello.txt --content 'hi'
+write_ntfs: write /hello.txt: unnamed $DATA attribute not found
+```
 
-Restructured `ROOT_SECURITY_DESCRIPTOR` to put DACL right after the
-20-byte header (offset 0x14) with owner/group at the tail (offsets
-0x30, 0x3C), matching the reference layout. Same total length
-(72 bytes), same content fields (one ACE granting Everyone full
-access; SYSTEM as owner+group). Diag dir
-`$TMPDIR/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925`.
+`tests/write_root_ops.rs` did NOT catch this — those tests use a
+1024-byte-record fixture (`test-disks/ntfs-basic.img`).
 
-Outcome:
+**Per-byte diff** *(rec 24 just after `create_file` in a 4096-byte-record image)*
 
-- Volume **mounts cleanly** as NTFS (`get-volume` reports
-  `FileSystemType: NTFS`; the FAT32 misdetection that iter14-v1
-  caused is gone).
-- chkdsk completes Stage 1 clean (64 file records, no
-  "First free byte" / "is corrupt" messages) and Stage 2 clean (68
-  index entries verified).
-- Post-Stage-2 reconnect-scan still errors with
-  `An unspecified error occurred (frs.cxx:60f)`.
-- NTFS Event ID 55 still fires (100 entries) during the chkdsk run
-  itself — the kernel logs the corruption-discovered event when
-  chkdsk's internal assertion trips, even though chkdsk Stage 1 + 2
-  reported clean.
+| header field      | written value | expected for 4096/512 |
+|-------------------|---------------|------------------------|
+| `attrs_offset` (0x14) | 0x38          | 0x48                   |
+| bytes 0x38..0x42  | (attribute data) | (USA[4..8] save-words) |
+| bytes 0x42..      | (zeros)       | (attribute data)       |
 
-So the missing $SECURITY_DESCRIPTOR was *not* the cause of the
-post-Stage-2 error. iter14-v2's SD makes our root structurally
-closer to reference but doesn't unblock the matrix. The actual
-cause of `frs.cxx:60f` lies elsewhere — most likely in $Extend's
-contents (reference rec 11 has no $FILE_NAME and is just $DATA, ours
-has $Extend with empty $I30) or in $Secure's view-index
-attributes ($SDS / $SDH / $SII) which our v1 stub omits.
+The USA region for a 4096-byte record at 512-byte sectors is
+1 USN + 8 sector-saved-words = 18 bytes spanning 0x30..0x42.
+`record_build.rs:49` hardcoded `ATTRS_OFFSET = 0x38`, which is
+*inside* the USA. `apply_fixup_on_write` then overwrote the
+freshly-written attribute bytes (at 0x38..0x42) with the saved
+sector-end words (zero-init). The file's $DATA attribute literally
+disappeared. 0x38 happened to be correct only for 1024-byte records
+(sectors=2 → align8(0x36) = 0x38), which is why the existing test
+fixture passed.
 
-Kept iter14-v2 in (structurally correct, no regression, sets up
-iter15+ to attack the right cause without confounding factors).
-The matrix's 17 mac:format scenarios remain at
-`failed-needs-iter15-<...>`.
+**Root cause**
+
+Pure layout error. mkfs.rs computes `attrs_offset` per-record
+(`align8(USA_OFFSET + 2 + sectors * 2)`); record_build.rs used a
+hardcoded constant for both `build_regular_file_record` and
+`build_directory_record`.
+
+**Fix** ([9a640c5])
+
+`src/record_build.rs`: replace the constant with the same per-record
+computation. Both call sites updated.
+
+**Result**
+
+End-to-end Mac-side smoke now passes: mkfs → write_ntfs create
+/hello.txt → write 'hi' → mkdir /docs → create /docs/notes.bin →
+write 256 bytes incrementing → inspect_ntfs lists 14 entries (11
+system + /docs + /hello.txt + /docs/notes.bin) → unlink /hello.txt
+→ inspect_ntfs lists 13. The Mac-side write/delete/enumerate CLIs
+all work end-to-end against the freshly-formatted volume.
+
+Linux test contract (6/6) intact.
+
+### iter17: per-cluster-size bug catalog — non-default cluster sizes each surface a distinct mkfs bug
+
+Session: `agent-c6a1-2026-05-02`. After iter15 unblocked the
+volume-size axis, ran the cluster-size axis end-to-end. Each
+non-default cluster size surfaces a *different* chkdsk error —
+documenting the catalog so subsequent iterations can pick them off.
+
+| scenario              | cluster | chkdsk verdict                                                                  |
+|-----------------------|---------|---------------------------------------------------------------------------------|
+| basic-256mib          | 4096    | clean to `frs.cxx 60f` ceiling                                                  |
+| cluster-512           | 512     | "Cannot open volume for direct access" — ntfs.sys refuses mount                 |
+| cluster-1k            | 1024    | "Corrupt master file table. CHKDSK aborted." — mounts but MFT structure invalid  |
+| cluster-8k            | 8192    | "Attribute record (80, $Bad) from file record segment 8 is corrupt." — Stage 1 |
+| cluster-64k           | 65536   | "Incorrect information was detected in file record segment 5." — Stage 2        |
+
+The four cluster failures are real bugs in mkfs that the default
+4096-cluster path doesn't exercise. Each will need its own iteration
+to chase down — likely candidates per the byte layout:
+
+- 512 cluster: MFT placement at LCN 4 puts $MFT at byte 2048,
+  immediately after the boot's 512 bytes; ntfs.sys may require more
+  reserved space at small clusters.
+- 1k cluster: similar boundary issue, or `clusters_per_mft_record`
+  encoding (cpmr=4 for 4096-byte records / 1024-cluster) hits a
+  validator quirk.
+- 8k cluster: $BadClus's named "$Bad" sparse run encoding may overflow
+  a length field at 32768-cluster volumes, or ntfs.sys checks sparse
+  attrs more strictly when cluster_size > 4096.
+- 64k cluster: 1 GiB / 65536-cluster gives only 16384 clusters
+  total; root-dir's $I30 with 12 entries may overrun the residency
+  threshold (entries grow proportionally with name length, but the
+  $INDEX_ROOT total is capped by mft_record_size).
+
+Diag dirs (each contains the per-record dump pre- and post-mount):
+- `iter-20260502-063326` (cluster-512)
+- `iter-20260502-063421` (cluster-1k)
+- `iter-20260502-063739` (cluster-8k)
+- `iter-20260502-064211` (cluster-64k)
+
+### iter18: Windows can't WRITE to our volumes — "Insufficient system resources"
+
+Session: `agent-c6a1-2026-05-02`. Surfaced when wiring up the
+WinFixtures runner block to support `mac:format → win:write` scenarios.
+
+**Symptom** (PowerShell on Windows ARM64 against a freshly-formatted
+256 MiB volume that mounts cleanly per iter15 + already passes Stage 1
++ Stage 2 chkdsk):
+
+```
+[3/6] Mounting + capturing diagnostics ...
+  Mounted at E:
+  Writing WinFixtures: tiny.txt=text:hello world
+Exception calling "WriteAllText" with "3" argument(s):
+  "Insufficient system resources exist to complete the requested service."
+At ...run-windows-test.ps1:187 char:17
++ ...   [System.IO.File]::WriteAllText("${letter}:\$name", $value ...
+  + FullyQualifiedErrorId : IOException
+```
+
+Win32 error 1450 (`ERROR_NO_SYSTEM_RESOURCES`). Equivalent failures
+expected from `Set-Content`, `New-Item`, anything that asks ntfs.sys
+to allocate buffers for a write.
+
+**Root cause** (working theory)
+
+Volume passes the *read* path (chkdsk reads it; Get-ChildItem on the
+empty volume returns the system files). The write path requires
+ntfs.sys to allocate from internal pools tied to `$Secure`'s
+security-descriptor cache, $LogFile transactional state, etc. Our
+writer ships:
+
+- `$Secure` as a 9-byte resident stub (no `$SDH`/`$SII` view indexes,
+  iter12 marked the flag but didn't populate the indexes).
+- `$LogFile` filled with 0xFF (no `RSTR` / `RCRD` records).
+- No `$SECURITY_DESCRIPTOR` (attr 0x50) on system MFT records
+  (8934's iter15 candidate).
+
+Without these, ntfs.sys can mount the volume read-only (or read-only
+in effect) but refuses writes because it can't fault in an SD or
+write a transaction record. `frs.cxx 60f` (the trailing chkdsk
+error all our scenarios bottom out at) is the same family of issue
+manifesting through chkdsk's deeper passes.
+
+**Implication for the work-list**
+
+Every `mac-format → win:write` scenario currently fails identically
+("Insufficient system resources"). 5 scenarios marked
+`failed-windows-cant-write-insufficient-resources-blocks-on-frs60f`.
+
+Mitigation: the `win:format → win:write → mac:enumerate` family
+SHOULD work since Microsoft's `format.com` produces a fully writable
+volume. Those scenarios are blocked on the runner's lack of a
+"primary format = format.com" mode (3 scenarios marked
+`blocked-needs-winformat-mode-runner-refactor`).
+
+Forward path: implement the `$SECURITY_DESCRIPTOR` + `$Secure`
+indexes + valid `$LogFile` writers; this should unblock both the
+chkdsk `frs.cxx 60f` ceiling AND the Windows-write resource error
+in one go.
 
 ## What we learned
 
