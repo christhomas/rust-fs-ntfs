@@ -309,6 +309,146 @@ sanity check.
 
 **Fix (iter11):** in `build_system_record`, `seq = max(1, rec_num)`.
 
+### iter12: $Secure flags
+
+**Symptom**
+
+> Stage 1: Examining basic file system structure ...
+> 64 file records processed.
+> File verification completed.
+> 0 large file records processed.
+> 0 bad file records processed.
+> Flags for file record segment 9 are incorrect.
+>
+> Stage 2: ...
+> CHKDSK is scanning unindexed files for reconnect to their original directory.
+> Detected orphaned file $MFT (0), should be recovered into directory file 5.
+> [...orphan list runs 0..9 then stops...]
+
+(Verbatim from the local-pipeline diag dir
+`$TMPDIR/rust-fs-ntfs-diag/iter-20260502-014556/chkdsk-readonly.txt`,
+captured pre-fix on this iteration.)
+
+**Diagnostic**
+
+Ran `bash scripts/test-windows-local.sh` (with
+`VM_WORKDIR=C:/Users/chris/dev/rust-fs-ntfs-a` to avoid colliding with
+a sibling agent worktree). The pipeline:
+
+1. Builds `mkfs_ntfs.exe` on the Windows ARM64 VM.
+2. Formats `nfs.img` with our mkfs.
+3. In parallel, formats a 256 MiB reference VHDX with Microsoft's own
+   `format.com /FS:NTFS`.
+4. Dumps the first 16 MFT records from each into
+   `ours-mft-16recs.bin` / `reference-mft-16recs.bin`.
+5. Wraps ours in a GPT VHDX, mounts, runs `chkdsk` read-only.
+
+Parsed both 16-record dumps with `python3 -c struct.unpack` to get
+field-level decode of every system record. Stride is 4096 in both
+files (one record per MFT_RECORD_SIZE-aligned slot).
+
+**Per-field diff** *(rec 9 MFT record header bytes 0x00..0x48)*
+
+| Offset | Field          | reference | ours | diff |
+|--------|----------------|-----------|------|------|
+| 0x00   | magic          | `FILE`    | `FILE` |   |
+| 0x04   | usa_offset     | 0x30      | 0x30 |    |
+| 0x06   | usa_count      | 0x09      | 0x09 |    |
+| 0x10   | sequence       | 0x09      | 0x09 |    |
+| 0x12   | link_count     | 0x01      | 0x01 |    |
+| 0x14   | attrs_offset   | 0x48      | 0x48 |    |
+| **0x16** | **flags**    | **0x0001** | **0x0001** | **identical** |
+| 0x18   | bytes_used     | 0x0198    | 0x0130 | layout (ref has $SD attr we don't write) |
+| 0x1C   | bytes_allocated | 0x1000   | 0x1000 |    |
+| 0x28   | next_attr_id   | 0x04      | 0x10 | initialiser choice |
+| 0x2C   | mft_rec_num    | 0x09      | 0x09 |    |
+
+The flag byte at 0x16 is **identical** between reference and ours.
+The corroboration mechanism is **uninformative for this field on this
+record** because the reference's rec 9 is structurally a different
+file than ours:
+
+| rec | reference $FN  | ours $FN   |
+|-----|---------------|------------|
+| 8   | `$BadClus`    | `$BadClus` |
+| **9** | **`$Quota`** | **`$Secure`** |
+| 10  | `$UpCase`     | `$UpCase`  |
+| 11  | (no $FN)      | `$Extend`  |
+
+Microsoft's modern `format.com` lays `$Secure` somewhere outside the
+first 16 records (likely under `\$Extend\$Secure`) and parks `$Quota`
+at the historic NTFS-3.0 `$Secure` slot (rec 9). chkdsk reads our
+`$FILE_NAME` and identifies our rec 9 *by name* as `$Secure`
+(confirmed by the orphan-recovery line `Detected orphaned file
+$Secure (9)…` in the same chkdsk run), so its expectations for the
+flags field are keyed on the name, not the slot.
+
+**Root cause**
+
+Per Microsoft MS-FSCC field references for
+`_FILE_RECORD_SEGMENT_HEADER.Flags`, the MFT record header `Flags`
+field at offset 0x16 carries:
+
+- 0x0001 `MFT_RECORD_IN_USE`
+- 0x0002 `MFT_RECORD_IS_DIRECTORY` (record hosts an `$I30`
+  $FILE_NAME index — i.e. an ordinary directory)
+- 0x0004 reserved / "is 4"
+- 0x0008 `MFT_RECORD_IS_VIEW_INDEX` (record hosts a *named view
+  index* — anything indexing something other than `$FILE_NAME`,
+  e.g. `$Secure`'s `$SDH`/`$SII`, `$Quota`'s `$O`/`$Q`,
+  `$ObjId`'s `$O`, `$Reparse`'s `$R`)
+
+`$Secure` is the canonical view-index host: it's a security
+descriptor cache backed by two named indexes (`$SDH` keyed on hash,
+`$SII` keyed on security ID). chkdsk has hardcoded knowledge of
+`$Secure` and demands the `IS_VIEW_INDEX` bit on its MFT header
+even when the on-disk view-index attributes are absent (our v1 ships
+an empty stub with just an empty `$DATA`).
+
+Why the byte-diff doesn't show this: `format.com`'s rec 9 is
+`$Quota`, not `$Secure`. Since `$Quota` is *also* historically a
+view-index host but format.com's stub of it doesn't yet carry the
+view indexes either, format.com leaves `flags=0x0001` and chkdsk
+apparently doesn't check `$Quota` as strictly. The diff is between
+two different files, each unflagged, so no flag-bit diff exists to
+read off. The fix is keyed on the public NTFS-layout description of
+the `$Secure` system file rather than a flag-byte diff against the
+reference.
+
+**Fix**
+
+`src/mkfs.rs`: in `build_system_record`, set
+`MFT_RECORD_IS_VIEW_INDEX (0x0008)` on rec 9 only.
+
+```rust
+let is_view_index = record_number == rec::SECURE;
+let flags: u16 = 0x0001
+    | if is_dir { 0x0002 } else { 0x0000 }
+    | if is_view_index { 0x0008 } else { 0x0000 };
+```
+
+A multi-line code comment near the change cites this iteration's diag
+dir and the public spec, so the next reader knows why rec 9 is
+special-cased.
+
+Strict scope: only rec 9 changes. The other 11 system records keep
+their previous flags values — no other chkdsk error has yet pointed
+at them, and the corroboration mechanism doesn't justify a wider
+change.
+
+**Result**
+
+To be verified by the merging step. Linux tests pass (`cargo test
+--release --lib mkfs --test mkfs_roundtrip --test mkfs_bin_smoke`),
+`cargo fmt --check` clean, `cargo clippy --all-targets -- -D
+warnings` clean. The next iteration's chkdsk run on the Windows VM
+will tell us whether (a) `Flags for file record segment 9 are
+incorrect` is gone, and (b) whether a deeper chkdsk error now
+surfaces — chkdsk previously stopped Stage 1 at this error, so any
+errors hidden behind it on rec 9 (and orphan-recovery messages for
+rec 10+, which were truncated in the iter11 run) will only become
+visible after this fix.
+
 ## What we learned
 
 1. **Microsoft's NTFS implementation is the only authoritative

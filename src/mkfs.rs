@@ -753,7 +753,29 @@ fn build_system_record(
     rec[REC_OFF_LINK_COUNT..REC_OFF_LINK_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
     rec[REC_OFF_ATTRS_OFFSET..REC_OFF_ATTRS_OFFSET + 2]
         .copy_from_slice(&(attrs_offset as u16).to_le_bytes());
-    let flags: u16 = 0x0001 | if is_dir { 0x0002 } else { 0x0000 };
+    // MFT record header flags (publicly published NTFS layout):
+    //   0x0001 MFT_RECORD_IN_USE
+    //   0x0002 MFT_RECORD_IS_DIRECTORY (set when the record hosts an
+    //          $I30 ($FILE_NAME) index — i.e. a normal directory)
+    //   0x0004 (reserved / "is 4")
+    //   0x0008 MFT_RECORD_IS_VIEW_INDEX (set when the record hosts a
+    //          named view index — anything indexing something other
+    //          than $FILE_NAME, e.g. $Secure's $SDH/$SII).
+    //
+    // chkdsk has hardcoded knowledge that record 9 is `$Secure` and
+    // demands the VIEW_INDEX bit on its MFT header even when the
+    // on-disk view-index attributes are absent (our v1 stub). CI
+    // iter11 (chkdsk readonly diag dir 20260502-014556) reported
+    // `Flags for file record segment 9 are incorrect` against an
+    // otherwise-clean Stage 1; rec 9 was the only segment named.
+    //
+    // The Microsoft format.com reference can't corroborate this via
+    // byte-diff — its rec 9 is `$Quota`, not `$Secure`, so the
+    // comparable flag field is uninformative. Fix is keyed on the
+    // public spec rather than a flag-byte diff.
+    let is_view_index = record_number == rec::SECURE;
+    let flags: u16 =
+        0x0001 | if is_dir { 0x0002 } else { 0x0000 } | if is_view_index { 0x0008 } else { 0x0000 };
     rec[REC_OFF_FLAGS..REC_OFF_FLAGS + 2].copy_from_slice(&flags.to_le_bytes());
     rec[REC_OFF_BYTES_ALLOCATED..REC_OFF_BYTES_ALLOCATED + 4]
         .copy_from_slice(&(rs as u32).to_le_bytes());
