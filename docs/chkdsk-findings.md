@@ -709,6 +709,43 @@ allowed it; the next iteration of this task should:
    the right control flags).
 3. Re-run the pipeline before claiming any fix.
 
+**iter14-v2 (this session): SD with reference layout order — mounts cleanly, chkdsk verdict unchanged**
+
+Restructured `ROOT_SECURITY_DESCRIPTOR` to put DACL right after the
+20-byte header (offset 0x14) with owner/group at the tail (offsets
+0x30, 0x3C), matching the reference layout. Same total length
+(72 bytes), same content fields (one ACE granting Everyone full
+access; SYSTEM as owner+group). Diag dir
+`$TMPDIR/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925`.
+
+Outcome:
+
+- Volume **mounts cleanly** as NTFS (`get-volume` reports
+  `FileSystemType: NTFS`; the FAT32 misdetection that iter14-v1
+  caused is gone).
+- chkdsk completes Stage 1 clean (64 file records, no
+  "First free byte" / "is corrupt" messages) and Stage 2 clean (68
+  index entries verified).
+- Post-Stage-2 reconnect-scan still errors with
+  `An unspecified error occurred (frs.cxx:60f)`.
+- NTFS Event ID 55 still fires (100 entries) during the chkdsk run
+  itself — the kernel logs the corruption-discovered event when
+  chkdsk's internal assertion trips, even though chkdsk Stage 1 + 2
+  reported clean.
+
+So the missing $SECURITY_DESCRIPTOR was *not* the cause of the
+post-Stage-2 error. iter14-v2's SD makes our root structurally
+closer to reference but doesn't unblock the matrix. The actual
+cause of `frs.cxx:60f` lies elsewhere — most likely in $Extend's
+contents (reference rec 11 has no $FILE_NAME and is just $DATA, ours
+has $Extend with empty $I30) or in $Secure's view-index
+attributes ($SDS / $SDH / $SII) which our v1 stub omits.
+
+Kept iter14-v2 in (structurally correct, no regression, sets up
+iter15+ to attack the right cause without confounding factors).
+The matrix's 17 mac:format scenarios remain at
+`failed-needs-iter15-<...>`.
+
 ## What we learned
 
 1. **Microsoft's NTFS implementation is the only authoritative

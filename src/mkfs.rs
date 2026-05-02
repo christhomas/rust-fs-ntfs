@@ -42,11 +42,48 @@ const USA_OFFSET: usize = 0x30;
 
 const ATTR_STANDARD_INFORMATION: u32 = 0x10;
 const ATTR_FILE_NAME: u32 = 0x30;
+const ATTR_SECURITY_DESCRIPTOR: u32 = 0x50;
 const ATTR_VOLUME_NAME: u32 = 0x60;
 const ATTR_VOLUME_INFORMATION: u32 = 0x70;
 const ATTR_DATA: u32 = 0x80;
 const ATTR_INDEX_ROOT: u32 = 0x90;
 const ATTR_END_MARKER: u32 = 0xFFFF_FFFF;
+
+/// Self-relative SECURITY_DESCRIPTOR for the root directory, layout
+/// order matching Microsoft's reference (DACL right after the 20-byte
+/// header; owner/group at the tail). MS-DTYP §2.4.6 / §2.4.5.1.
+///
+/// Total: 72 bytes
+///   header 20 + DACL 28 (8 hdr + 20 ACE) + Owner 12 + Group 12.
+///
+///   header (20):
+///     01 00          rev=1, Sbz1=0
+///     04 80          control = SE_SELF_RELATIVE | SE_DACL_PRESENT
+///     30 00 00 00    OffsetOwner = 48
+///     3C 00 00 00    OffsetGroup = 60
+///     00 00 00 00    OffsetSacl  = 0   (no SACL)
+///     14 00 00 00    OffsetDacl  = 20
+///   DACL @20 (28): 8-byte ACL header + 1 ACCESS_ALLOWED ACE granting
+///                  Everyone (S-1-1-0) full access (0x001F01FF).
+///   Owner @48 (12): S-1-5-18 (NT AUTHORITY\SYSTEM).
+///   Group @60 (12): S-1-5-18 (same).
+///
+/// Reference rec 5's SD has 8 ACEs (SYSTEM full, Administrators full,
+/// Users read+exec, plus inherited variants) and ~248 bytes total.
+/// We ship a one-ACE Everyone-full-access DACL — minimal but per
+/// MS-DTYP §2.4.4.4 a structurally valid ACE list.
+const ROOT_SECURITY_DESCRIPTOR: [u8; 72] = [
+    // header
+    0x01, 0x00, 0x04, 0x80, 0x30, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x14, 0x00, 0x00, 0x00, // DACL header
+    0x02, 0x00, 0x1C, 0x00, 0x01, 0x00, 0x00, 0x00,
+    // ACE: ACCESS_ALLOWED, mask=0x001F01FF, sid=S-1-1-0 Everyone
+    0x00, 0x00, 0x14, 0x00, 0xFF, 0x01, 0x1F, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, // Owner SID: S-1-5-18 (NT AUTHORITY\SYSTEM)
+    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x12, 0x00, 0x00, 0x00,
+    // Group SID: S-1-5-18
+    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x12, 0x00, 0x00, 0x00,
+];
 
 /// Win32 + DOS namespace value for $FILE_NAME.
 const NAMESPACE_WIN32_DOS: u8 = 3;
@@ -486,7 +523,12 @@ pub fn format_filesystem(
         ];
         let parent_ref = encode_file_reference(rec::ROOT as u64, rec::ROOT as u16);
         let index_root =
-            build_root_index_root_attr(3, index_block_size, now, parent_ref, &children);
+            build_root_index_root_attr(4, index_block_size, now, parent_ref, &children);
+        // iter14-v2: SD with reference layout order (DACL @0x14, owner/
+        // group at tail). v1 (DACL after owner/group) caused Windows to
+        // reject the volume at mount with Event ID 55 corruption.
+        let sd_attr =
+            build_resident_unnamed(ATTR_SECURITY_DESCRIPTOR, 3, &ROOT_SECURITY_DESCRIPTOR);
         // Root directory has no $DATA (only an $INDEX_ROOT), so $FILE_NAME
         // sizes are 0/0 — matches Microsoft's reference (rec 5).
         let rec_bytes = build_system_record(
@@ -496,7 +538,7 @@ pub fn format_filesystem(
             true,
             0,
             0,
-            &[index_root],
+            &[sd_attr, index_root],
         )?;
         place_record(&mut mft_buf, rs, rec::ROOT, rec_bytes)?;
     }
