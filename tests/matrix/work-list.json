@@ -3,7 +3,7 @@
   "_doc": "Multi-agent NTFS test work list. See docs/multi-agent-test-protocol.md. Each scenario name is unique. status starts at 'pending'; agents transition via scripts/claim-scenario.sh.",
   "scenarios": {
     "mac-format-basic-256mib": {
-      "status": "pending",
+      "status": "blocked-on-agent-5442-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
@@ -93,7 +93,7 @@
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)"
     },
     "mac-format-label-cjk": {
-      "status": "pending",
+      "status": "claimed-agent-c6a1-2026-05-02",
       "volume_params": {
         "size_mib": 256,
         "cluster_size": 4096,
