@@ -112,14 +112,27 @@ try {
     if ($part.Size -lt $rawSize) { throw "partition smaller than raw image" }
 
     $rawPath = "\\.\PhysicalDrive$($disk.Number)"
-    $ourBytes = [System.IO.File]::ReadAllBytes($Img)
+    # Stream-copy the image into the partition (chunked) — `ReadAllBytes`
+    # is capped at 2 GiB by PowerShell's CLR, so 4 GiB / 16 GiB scenarios
+    # fail there. Use FileStream + a 16 MiB buffer instead.
+    $imgFs = [System.IO.File]::Open($Img, [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     $fs = [System.IO.File]::Open($rawPath, [System.IO.FileMode]::Open,
         [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
     try {
         $fs.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
-        $fs.Write($ourBytes, 0, $ourBytes.Length)
+        $bufSize = 16 * 1024 * 1024
+        $buf = New-Object byte[] $bufSize
+        while ($true) {
+            $n = $imgFs.Read($buf, 0, $bufSize)
+            if ($n -le 0) { break }
+            $fs.Write($buf, 0, $n)
+        }
         $fs.Flush($true)
-    } finally { $fs.Close() }
+    } finally {
+        $fs.Close()
+        $imgFs.Close()
+    }
     Dismount-DiskImage -ImagePath $Vhdx | Out-Null
 
     # ── Stage B: re-mount; Windows recognises the populated partition ─
@@ -625,6 +638,52 @@ try {
         } | Sort-Object -Unique | Out-File "$Diag\eventlog-summary.txt"
     } catch {
         "eventlog capture failed: $_" | Out-File "$Diag\eventlog-ntfs.txt"
+    }
+
+    # ── Stage F.5: extract post-Windows partition bytes back to a
+    # flat image so post-Windows mac ops (e.g. mac:enumerate after
+    # win:write) can run via the rust-ntfs CLI.
+    #
+    # Path is $Img with `.post.img` appended (e.g. nfs-foo.img.post.img).
+    # Skip when Stage E2's /F unmounted the volume — the post-/F bytes
+    # are already dumped under post-fix-* and the harness can fall back
+    # to those if it needs the post-repair state.
+    try {
+        $vhdLive = Get-DiskImage -ImagePath $Vhdx -EA SilentlyContinue
+        if ($vhdLive -and $vhdLive.Attached) {
+            $disk2 = Get-Disk -Number $vhdLive.Number
+            $part2 = Get-Partition -DiskNumber $disk2.Number |
+                Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
+            if ($part2) {
+                $rawPath2 = "\\.\PhysicalDrive$($disk2.Number)"
+                $postPath = "${Img}.post.img"
+                $partSize = [int64]$part2.Size
+                $srcFs = [System.IO.File]::Open($rawPath2, [System.IO.FileMode]::Open,
+                    [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                $dstFs = [System.IO.File]::Open($postPath, [System.IO.FileMode]::Create,
+                    [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+                try {
+                    $srcFs.Seek($part2.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+                    $bufSz = 16 * 1024 * 1024
+                    $bf = New-Object byte[] $bufSz
+                    $remaining = $partSize
+                    while ($remaining -gt 0) {
+                        $want = [int][System.Math]::Min([int64]$bufSz, $remaining)
+                        $got = $srcFs.Read($bf, 0, $want)
+                        if ($got -le 0) { break }
+                        $dstFs.Write($bf, 0, $got)
+                        $remaining -= $got
+                    }
+                    $dstFs.Flush($true)
+                } finally {
+                    $dstFs.Close()
+                    $srcFs.Close()
+                }
+                "$postPath ($partSize B)" | Out-File "$Diag\post-windows-img.txt" -Encoding UTF8
+            }
+        }
+    } catch {
+        "post-windows extract failed: $_" | Out-File "$Diag\post-windows-extract-error.txt" -Encoding UTF8
     }
 
     # ── Stage G: emit verdict markers for the Rust harness ────────────

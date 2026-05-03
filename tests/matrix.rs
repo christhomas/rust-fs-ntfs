@@ -211,19 +211,24 @@ fn is_runnable(sequence: &str) -> bool {
         }
     }
 
-    // Win suffix: chkdsk / enumerate / repeat-mount are handled
-    // directly. win:write / win:delete are folded in via the
-    // FixturesJson PS parameter (the file recipe lives in
-    // scenario.fixture_files). Reject anything else.
+    // Win suffix: chkdsk / enumerate / repeat-mount handled directly.
+    // win:write / win:delete are folded in via the FixturesJson PS
+    // parameter. mac:* ops are allowed AFTER win: ops too — they run
+    // post-Windows on the extracted partition image (Stage F.5 of the
+    // PS script). Reject anything else.
     for op in win_suffix {
-        if !op.starts_with("win:chkdsk")
-            && !op.starts_with("win:enumerate")
-            && !op.starts_with("win:repeat-mount")
-            && !op.starts_with("win:write")
-            && !op.starts_with("win:delete")
-            && !op.starts_with("win:dismount")
-            && !op.starts_with("win:remount")
-        {
+        let ok = op.starts_with("win:chkdsk")
+            || op.starts_with("win:enumerate")
+            || op.starts_with("win:repeat-mount")
+            || op.starts_with("win:write")
+            || op.starts_with("win:delete")
+            || op.starts_with("win:dismount")
+            || op.starts_with("win:remount")
+            || {
+                let verb = op.split('(').next().unwrap_or(op).trim();
+                known_mac.contains(&verb)
+            };
+        if !ok {
             return false;
         }
     }
@@ -469,11 +474,48 @@ fn run_scenario_inner(
     //             technical debt, not a real corruption.
     //   * Any other exit code = real corruption, fail.
     let scan_ok = matches!(scan, 0 | 11 | 13);
-    if ro == 0 && scan_ok {
-        Ok((ro, scan))
-    } else {
-        Err(ScenarioFailure::ChkdskFail { ro, scan })
+    if !(ro == 0 && scan_ok) {
+        return Err(ScenarioFailure::ChkdskFail { ro, scan });
     }
+
+    // Post-Windows mac ops: any mac:* ops AFTER the first win: op run
+    // against the partition contents extracted by Stage F.5 of the PS
+    // script (suffix `.post.img`). The PS script writes the post image
+    // before its final dismount; if it isn't present, treat as an
+    // infrastructure error rather than silently passing.
+    let mac_suffix: Vec<&&str> = ops[win_idx..]
+        .iter()
+        .filter(|op| op.starts_with("mac:"))
+        .collect();
+    if !mac_suffix.is_empty() {
+        let post_img = workdir.join(format!(
+            "{}.post.img",
+            img.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("nfs.img")
+        ));
+        if !post_img.is_file() {
+            return Err(ScenarioFailure::Errored(format!(
+                "post-windows mac ops require {} but the PS script did not produce it (Stage F.5 may have failed)",
+                post_img.display()
+            )));
+        }
+        for (i, raw) in mac_suffix.iter().enumerate() {
+            run_one_mac_op(raw, &bin, &post_img, diag, 100 + i + 1, scn).map_err(|e| {
+                ScenarioFailure::Errored(format!(
+                    "post-win mac step {} ({raw}): {}",
+                    i + 1,
+                    match e {
+                        ScenarioFailure::Errored(m) => m,
+                        ScenarioFailure::ChkdskFail { .. } =>
+                            "unexpected chkdsk failure in post-win mac path".into(),
+                    }
+                ))
+            })?;
+        }
+    }
+
+    Ok((ro, scan))
 }
 
 fn parse_marker(s: &str, prefix: &str) -> Option<i32> {
