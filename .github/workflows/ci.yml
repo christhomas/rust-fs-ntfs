@@ -81,6 +81,36 @@ jobs:
   # iterating on the mkfs implementation — see the doc'd path in
   # diskjockey/docs/windows-validation-environment.md.
 
+  # AddressSanitizer smoke test (§5.5). Catches OOB reads/writes in
+  # the raw-byte buffer manipulations (mft_io / data_runs / attr_io /
+  # ea_io) that the regular test suite would otherwise let through
+  # silently. Nightly-only; non-blocking via continue-on-error so
+  # nightly toolchain breakage doesn't block PRs against stable.
+  asan:
+    name: AddressSanitizer (nightly)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: asan-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run unit tests under ASan
+        env:
+          RUSTFLAGS: "-Zsanitizer=address"
+          RUSTDOCFLAGS: "-Zsanitizer=address"
+        run: |
+          cargo +nightly test --release --lib \
+            --target x86_64-unknown-linux-gnu
+
   # Windows-side validation: chkdsk is the canonical "is this a valid
   # NTFS volume?" check, against the same code Microsoft ships.
   # Triggers:

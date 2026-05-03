@@ -213,16 +213,18 @@ Convert as `(ts / 10_000_000) as i64 - EPOCH_DIFF` +
 (100 ns intervals since 1601-01-01 UTC, representable to year 30828);
 only the FFI projection is widening.
 
-### §1.4 `fs_ntfs_dirent_t::name[256]` truncation
+### §1.4 `fs_ntfs_dirent_t::name[256]` truncation (resolved)
 
-**Today**: fixed 256-byte buffer, `min(name_bytes.len(), 255)`.
+Widened to `name[1024]` via the new `FS_NTFS_DIRENT_NAME_BYTES`
+constant in `include/fs_ntfs.h` and `src/lib.rs`. Worst-case UTF-8
+encoding of a 255-UTF-16-code-unit NTFS filename is 1020 bytes; a
+1024-byte buffer fits content + NUL with margin. Files whose names
+exceed the buffer surface with `name_len = FS_NTFS_DIRENT_NAME_BYTES
+- 1`; callers can compare against the constant to detect.
 
-**Problem**: NTFS filenames are 255 UTF-16 code units. UTF-8
-encoding can be up to 4 bytes/unit → 1020 bytes max. A single emoji
-or long CJK name gets silently truncated; subsequent `fs_ntfs_stat`
-on the truncated name fails with ENOENT.
-
-**Fix**: widen to `name[1024]`. ~5 LOC.
+**ABI break**: the struct's size and `name` member layout changed in
+v0.1.2. Consumers compiled against the old 256-byte layout will
+mis-read `name`. Bump SO version on the next release.
 
 ---
 
@@ -412,10 +414,21 @@ already wired up (tag-/manual-triggered). Still missing:
 stable Rust matrix. ~30 lines of `ci.yml` plus making sure the
 fixture-generation pipeline runs on macOS.
 
-### §5.5 Sanitizer runs
+### §5.5 Sanitizer runs (resolved)
 
-`cargo +nightly test -Zsanitizer=address`. The crate's raw-byte
-buffer manipulations are the most likely spot for OOB reads/writes.
+A nightly-only `asan` job runs `cargo +nightly test --release --lib`
+with `RUSTFLAGS="-Zsanitizer=address"` against
+`x86_64-unknown-linux-gnu`. Marked `continue-on-error: true` so
+nightly-toolchain breakage doesn't block stable PRs but the smoke
+signal is still recorded.
+
+Catches OOB reads/writes in the raw-byte helpers (mft_io / data_runs
+/ attr_io / ea_io) that pure cargo test on the test fixtures
+wouldn't otherwise surface.
+
+Future: also wire Miri once we have tests that don't depend on
+real-FS access (Miri can't drive `std::fs::File` against on-disk
+images).
 
 ### §5.7 Release pipeline (resolved)
 

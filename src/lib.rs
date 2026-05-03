@@ -278,12 +278,18 @@ pub struct FsNtfsAttr {
     attributes: u32,
 }
 
+/// Max bytes a filename can occupy in `FsNtfsDirent::name`, including
+/// the trailing NUL the C-side documents. NTFS allows up to 255
+/// UTF-16 code units; UTF-8 worst-case encoding is 4 bytes per code
+/// unit → 1020 bytes content + 1 NUL → 1024 (rounded up for alignment).
+pub const FS_NTFS_DIRENT_NAME_BYTES: usize = 1024;
+
 #[repr(C)]
 pub struct FsNtfsDirent {
     file_record_number: u64,
     file_type: u8,
     name_len: u16,
-    name: [u8; 256],
+    name: [u8; FS_NTFS_DIRENT_NAME_BYTES],
 }
 
 #[repr(C)]
@@ -348,8 +354,8 @@ fn make_dirent(file_record_number: u64, file_type: u8, name: &[u8]) -> FsNtfsDir
     let mut out = FsNtfsDirent {
         file_record_number,
         file_type,
-        name_len: std::cmp::min(name.len(), 255) as u16,
-        name: [0u8; 256],
+        name_len: std::cmp::min(name.len(), FS_NTFS_DIRENT_NAME_BYTES - 1) as u16,
+        name: [0u8; FS_NTFS_DIRENT_NAME_BYTES],
     };
     let n = out.name_len as usize;
     out.name[..n].copy_from_slice(&name[..n]);
@@ -865,8 +871,8 @@ pub extern "C" fn fs_ntfs_dir_open(
         let mut dirent = FsNtfsDirent {
             file_record_number: entry.file_reference().file_record_number(),
             file_type: if file_name.is_directory() { 2 } else { 1 },
-            name_len: std::cmp::min(name_bytes.len(), 255) as u16,
-            name: [0u8; 256],
+            name_len: std::cmp::min(name_bytes.len(), FS_NTFS_DIRENT_NAME_BYTES - 1) as u16,
+            name: [0u8; FS_NTFS_DIRENT_NAME_BYTES],
         };
 
         let copy_len = dirent.name_len as usize;

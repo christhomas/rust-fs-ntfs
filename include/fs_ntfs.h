@@ -45,12 +45,26 @@ typedef struct {
     uint32_t attributes;    /* NTFS file attributes (hidden, system, etc.) */
 } fs_ntfs_attr_t;
 
+/*
+ * Max bytes a filename can occupy in `fs_ntfs_dirent_t::name`,
+ * including the trailing NUL. NTFS allows up to 255 UTF-16 code
+ * units; worst-case UTF-8 is 4 bytes per code unit → 1020 bytes
+ * of content + 1 NUL → 1024 (rounded up). Files with names that
+ * exceed this surface with `name_len = 1023` and the buffer
+ * truncated; callers that need to detect should compare
+ * `name_len` against `FS_NTFS_DIRENT_NAME_BYTES - 1`.
+ *
+ * ABI note: this widened from 256 in v0.1.2; structs sized to the
+ * old 256-byte layout will mis-read `name` past the new bounds.
+ */
+#define FS_NTFS_DIRENT_NAME_BYTES 1024
+
 /* Directory entry (returned during iteration) */
 typedef struct {
     uint64_t file_record_number;
     uint8_t  file_type;     /* fs_ntfs_file_type_t */
     uint16_t name_len;
-    char     name[256];     /* UTF-8, null-terminated */
+    char     name[FS_NTFS_DIRENT_NAME_BYTES];     /* UTF-8, null-terminated */
 } fs_ntfs_dirent_t;
 
 /* Volume information */
