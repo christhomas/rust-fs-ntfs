@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claim-scenario.sh -- atomic scenario claim from tests/matrix/work-list.json.
+# claim-scenario.sh -- atomic scenario claim from test-matrix.json.
 #
 # Usage:
 #   bash scripts/claim-scenario.sh "<session-name>"
@@ -31,7 +31,7 @@ if [[ -z "${SESSION}" ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK_LIST="${REPO_ROOT}/tests/matrix/work-list.json"
+WORK_LIST="${REPO_ROOT}/test-matrix.json"
 
 if [[ ! -f "${WORK_LIST}" ]]; then
     echo "missing work list: ${WORK_LIST}" >&2

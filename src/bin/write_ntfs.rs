@@ -3,7 +3,7 @@
 //! Wraps `fs_ntfs::facade::Filesystem`'s mutation API into a tiny CLI so
 //! orchestrators can populate a freshly-formatted image without going
 //! through the Windows VM. Required by scenarios in
-//! `tests/matrix/work-list.json` that contain a `mac:write` operation.
+//! `test-matrix.json` that contain a `mac:write` operation.
 //!
 //! Subcommands:
 //!   create   <image> <parent> <basename>          create empty file

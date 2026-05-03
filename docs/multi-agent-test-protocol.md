@@ -254,7 +254,7 @@ Together they span the matrix:
 - **Sparse**: 1 GiB sparse file with 2 small populated runs.
 
 Not every cell in the (size × cluster × label × ops) cube is a useful
-test. The work list (`tests/matrix/work-list.json`) lists the cells
+test. The work list (`test-matrix.json`) lists the cells
 we actually want covered. Start with ~20 scenarios spanning the axes
 and add coverage for any new bug we surface.
 
@@ -319,7 +319,7 @@ Multiple agent instances pick scenarios from the work list, each
 fixing whatever bug their scenario surfaces. Coordination is
 file-based, not git-based:
 
-- Work list lives at `tests/matrix/work-list.json` -- a JSON object
+- Work list lives at `test-matrix.json` -- a JSON object
   keyed by scenario name with status fields.
 - Agents pick the first scenario whose status is `pending` and
   atomically transition it to `claimed-<session-name>` via a
@@ -344,7 +344,7 @@ Each agent instance, on starting, MUST:
 2. **Read the three skills** (`dev-loop`, `corroborated-debug`,
    `documentation-protocol`) and the latest `docs/chkdsk-findings.md`.
 
-3. **Claim a scenario** from `tests/matrix/work-list.json`.
+3. **Claim a scenario** from `test-matrix.json`.
 
 4. **Run the scenario.**
    - Half 1: drive the Mac → Windows → Mac round-trip via
@@ -366,7 +366,7 @@ Each agent instance, on starting, MUST:
 
 The matrix is "done" when **all of**:
 
-- Every scenario in `tests/matrix/work-list.json` has status `passed-*`.
+- Every scenario in `test-matrix.json` has status `passed-*`.
 - All Linux tests still pass on the merged main.
 - Local pipeline produces a clean chkdsk verdict (Stage 1 + Stage 2)
   on the default scenario after the merge.
@@ -406,7 +406,7 @@ The supporting code lives at:
 
 - `tests/matrix/scenarios/` -- one TOML file per scenario describing
   parameters.
-- `tests/matrix/work-list.json` -- shared queue.
+- `test-matrix.json` -- shared queue.
 - `tests/matrix/inspect/` -- small Mac-side CLI binary that uses
   `fs_ntfs`'s reader to enumerate a `.img` (for the Mac-verify legs
   of the round-trip).

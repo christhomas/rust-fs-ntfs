@@ -3,7 +3,7 @@
 //! Wraps `fs_ntfs::facade::Filesystem::unlink` and `rmdir` so
 //! orchestrators can exercise the `mac:delete` operation without going
 //! through the Windows VM. Required by scenarios in
-//! `tests/matrix/work-list.json` that contain a `mac:delete` step.
+//! `test-matrix.json` that contain a `mac:delete` step.
 //!
 //! Subcommands:
 //!   unlink <image> <path>      remove a regular file

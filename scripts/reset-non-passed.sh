@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # reset-non-passed.sh -- pass-2/3 helper: reset every non-`passed-*`
-# scenario in tests/matrix/work-list.json back to `pending` so a new
+# scenario in test-matrix.json back to `pending` so a new
 # pass can re-claim them. Idempotent.
 #
 # Usage: bash scripts/reset-non-passed.sh
 
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK_LIST="${REPO_ROOT}/tests/matrix/work-list.json"
+WORK_LIST="${REPO_ROOT}/test-matrix.json"
 
 python3 - "${WORK_LIST}" <<'PY'
 import json, sys

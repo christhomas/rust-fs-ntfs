@@ -71,7 +71,7 @@ autonomous for the duration of the run.
    cd ".claude/worktrees/${AGENT_SESSION}"
    ```
 
-4. **Claim a scenario** from `tests/matrix/work-list.json`. Use atomic
+4. **Claim a scenario** from `test-matrix.json`. Use atomic
    rename to avoid race:
 
    ```sh
@@ -186,7 +186,7 @@ violates the "never delete other agents' work" rule -- in that case,
 restore from `git log` and proceed:
 
 ```sh
-[ -f tests/matrix/work-list.json ]      || echo "MISSING: work-list"
+[ -f test-matrix.json ]      || echo "MISSING: work-list"
 [ -x scripts/claim-scenario.sh ]        || echo "MISSING: claim helper"
 [ -x scripts/update-scenario-status.sh ] || echo "MISSING: status helper"
 [ -x scripts/test-windows-local.sh ]    || echo "MISSING: pipeline runner"

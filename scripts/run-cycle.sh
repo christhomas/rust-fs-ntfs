@@ -15,7 +15,7 @@ SESSION="${1:?session name required}"
 CYCLE_TAG="${2:-}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PARENT_REPO="/Volumes/sdcard256gb/projects/diskjockey/vendor/rust-fs-ntfs"
-WORK_LIST_PARENT="${PARENT_REPO}/tests/matrix/work-list.json"
+WORK_LIST_PARENT="${PARENT_REPO}/test-matrix.json"
 DIAG_BASE="${TMPDIR:-/tmp}/rust-fs-ntfs-diag/${SESSION}"
 mkdir -p "${DIAG_BASE}"
 

@@ -22,7 +22,7 @@ if [[ -z "${SCENARIO}" || -z "${NEW_STATUS}" ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK_LIST="${REPO_ROOT}/tests/matrix/work-list.json"
+WORK_LIST="${REPO_ROOT}/test-matrix.json"
 TMP="$(mktemp "${WORK_LIST}.tmp.XXXXXX")"
 
 python3 - "${WORK_LIST}" "${TMP}" "${SCENARIO}" "${NEW_STATUS}" "${EVIDENCE}" <<'PY'
