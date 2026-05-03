@@ -30,33 +30,107 @@ use std::sync::Mutex;
 // because each scenario gets a distinct .img path.
 static MOUNT_LOCK: Mutex<()> = Mutex::new(());
 
-// --verbose / MATRIX_VERBOSE=1 toggles the ASCII per-step tree report
-// printed after libtest-mimic finishes. We collect step outcomes per
-// scenario into VERBOSE_TRACES and emit the whole tree in one pass at
-// the end of main() so libtest-mimic's own progress lines and the
-// scenario trees never interleave.
+// --verbose / MATRIX_VERBOSE=1 turns on the live per-step tree printed
+// from each trial body. Every op in operation_sequence becomes one line
+// inside the trial: the description prints first (no newline) and the
+// `OK` / `FAIL` status appends to the same line once the op finishes.
+// libtest-mimic's stderr capture is disabled (args.nocapture = true) so
+// the lines actually reach the terminal as the trial runs.
 static VERBOSE: AtomicBool = AtomicBool::new(false);
-static VERBOSE_TRACES: Mutex<Vec<VerboseTrace>> = Mutex::new(Vec::new());
 
-#[derive(Clone)]
-struct StepOutcome {
-    op: String,
-    description: String,
-    status: StepStatus,
+// Per-trial verbose context. Tracks how many steps have been emitted so
+// the ASCII connector flips to `└──` for the final step.
+struct Verbose {
+    enabled: bool,
+    step_idx: usize,
+    total: usize,
 }
 
-#[derive(Clone)]
-enum StepStatus {
-    Pass,
-    Fail(String),
-}
+impl Verbose {
+    fn new(scn: &Scenario) -> Self {
+        let total = scn
+            .operation_sequence
+            .split("->")
+            .filter(|s| !s.trim().is_empty())
+            .count();
+        Self {
+            enabled: VERBOSE.load(Ordering::Relaxed),
+            step_idx: 0,
+            total,
+        }
+    }
 
-struct VerboseTrace {
-    name: String,
-    scenario_summary: String,
-    steps: Vec<StepOutcome>,
-    final_status: &'static str,
-    final_detail: Option<String>,
+    fn header(&self, name: &str, summary: &str) {
+        if !self.enabled {
+            return;
+        }
+        eprintln!();
+        eprintln!("• {name}");
+        eprintln!("  scenario: {summary}");
+    }
+
+    fn connector(&self) -> &'static str {
+        if self.step_idx + 1 == self.total {
+            "└──"
+        } else {
+            "├──"
+        }
+    }
+
+    // Step kicks off: print description, no newline, flush so the user
+    // sees it before the actual work begins.
+    fn step_start(&self, description: &str) {
+        if !self.enabled {
+            return;
+        }
+        use std::io::Write;
+        let c = self.connector();
+        eprint!("  {c} we are testing: {description} ... ");
+        let _ = std::io::stderr().flush();
+    }
+
+    fn step_ok(&mut self) {
+        if self.enabled {
+            eprintln!("OK");
+        }
+        self.step_idx += 1;
+    }
+
+    fn step_fail(&mut self, reason: &str) {
+        if self.enabled {
+            eprintln!("FAIL ({reason})");
+        }
+        self.step_idx += 1;
+    }
+
+    // For batched ops (e.g. win:* verbs handled in one PS invocation)
+    // there's no live time gap between description and result, so we
+    // emit both halves on a single eprintln.
+    fn step_inline_ok(&mut self, description: &str) {
+        if self.enabled {
+            let c = self.connector();
+            eprintln!("  {c} we are testing: {description} ... OK");
+        }
+        self.step_idx += 1;
+    }
+
+    fn step_inline_fail(&mut self, description: &str, reason: &str) {
+        if self.enabled {
+            let c = self.connector();
+            eprintln!("  {c} we are testing: {description} ... FAIL ({reason})");
+        }
+        self.step_idx += 1;
+    }
+
+    fn footer(&self, status: &str, detail: Option<&str>) {
+        if !self.enabled {
+            return;
+        }
+        match detail {
+            Some(d) => eprintln!("  => {status} ({d})"),
+            None => eprintln!("  => {status}"),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -174,7 +248,14 @@ fn main() {
         }
     }
 
-    let args = Arguments::from_iter(argv);
+    let mut args = Arguments::from_iter(argv);
+    if VERBOSE.load(Ordering::Relaxed) {
+        // Force libtest-mimic to stream stderr from trial bodies so the
+        // per-scenario tree we print from run_scenario actually reaches
+        // the terminal (otherwise libtest-mimic buffers and only emits
+        // captured output for failing trials).
+        args.nocapture = true;
+    }
 
     let worklist_path = workspace_root().join("test-matrix.json");
     let raw = std::fs::read_to_string(&worklist_path)
@@ -227,16 +308,6 @@ fn main() {
     // joins all threads before returning the Conclusion).
     if !args.list {
         let _ = aggregate_results();
-    }
-
-    if VERBOSE.load(Ordering::Relaxed) && !args.list {
-        let mut traces = VERBOSE_TRACES.lock().unwrap_or_else(|p| p.into_inner());
-        traces.sort_by(|a, b| a.name.cmp(&b.name));
-        eprintln!();
-        eprintln!("=== verbose subtask trace ===");
-        for t in traces.iter() {
-            print_verbose_tree(t);
-        }
     }
 
     conclusion.exit();
@@ -354,7 +425,9 @@ fn run_scenario(name: &str, scn: &Scenario) -> Result<(), Failed> {
     let _ = std::fs::remove_file(&vhdx);
     let _ = std::fs::remove_file(&reference_vhdx);
 
-    let mut outcomes: Vec<StepOutcome> = Vec::new();
+    let mut v = Verbose::new(scn);
+    v.header(name, &scenario_summary(scn));
+
     let outcome = run_scenario_inner(
         name,
         scn,
@@ -363,28 +436,16 @@ fn run_scenario(name: &str, scn: &Scenario) -> Result<(), Failed> {
         &img,
         &vhdx,
         &reference_vhdx,
-        &mut outcomes,
+        &mut v,
     );
     let elapsed = started.elapsed().as_secs_f64();
 
-    if VERBOSE.load(Ordering::Relaxed) {
-        let (final_status, final_detail) = match &outcome {
-            Ok((ro, scan)) => ("passed", Some(format!("ro={ro} scan={scan}"))),
-            Err(ScenarioFailure::ChkdskFail { ro, scan }) => {
-                ("failed", Some(format!("ro={ro} scan={scan}")))
-            }
-            Err(ScenarioFailure::Errored(m)) => ("errored", Some(m.clone())),
-        };
-        let trace = VerboseTrace {
-            name: name.to_string(),
-            scenario_summary: scenario_summary(scn),
-            steps: outcomes,
-            final_status,
-            final_detail,
-        };
-        if let Ok(mut g) = VERBOSE_TRACES.lock() {
-            g.push(trace);
+    match &outcome {
+        Ok((ro, scan)) => v.footer("PASSED", Some(&format!("ro={ro} scan={scan}"))),
+        Err(ScenarioFailure::ChkdskFail { ro, scan }) => {
+            v.footer("FAILED", Some(&format!("ro={ro} scan={scan}")))
         }
+        Err(ScenarioFailure::Errored(m)) => v.footer("ERRORED", Some(m)),
     }
 
     // Always write result.json — pass, fail, or error all share the
@@ -449,7 +510,7 @@ fn run_scenario_inner(
     img: &Path,
     vhdx: &Path,
     reference_vhdx: &Path,
-    outcomes: &mut Vec<StepOutcome>,
+    v: &mut Verbose,
 ) -> Result<(i32, i32), ScenarioFailure> {
     // 1. Allocate blank raw image.
     let f_img = std::fs::File::create(img)
@@ -463,7 +524,7 @@ fn run_scenario_inner(
     // and skip the VHDX/PowerShell leg entirely. Returns (0, 0) on
     // success so the existing chkdsk-shaped result schema still fits.
     if is_pure_mac_chain(&scn.operation_sequence) {
-        run_mac_ops(scn, img, diag, outcomes)?;
+        run_mac_ops(scn, img, diag, v)?;
         return Ok((0, 0));
     }
 
@@ -508,19 +569,12 @@ fn run_scenario_inner(
     let bin = rust_ntfs_path();
     for (i, raw) in mac_prefix.iter().enumerate() {
         let desc = describe_op(raw, scn);
+        v.step_start(&desc);
         match run_one_mac_op(raw, &bin, img, diag, i + 1, scn) {
-            Ok(()) => outcomes.push(StepOutcome {
-                op: (*raw).to_string(),
-                description: desc,
-                status: StepStatus::Pass,
-            }),
+            Ok(()) => v.step_ok(),
             Err(e) => {
                 let reason = scenario_failure_msg(&e);
-                outcomes.push(StepOutcome {
-                    op: (*raw).to_string(),
-                    description: desc,
-                    status: StepStatus::Fail(reason.clone()),
-                });
+                v.step_fail(&reason);
                 return Err(ScenarioFailure::Errored(format!(
                     "mac-prefix step {} ({raw}): {reason}",
                     i + 1
@@ -561,14 +615,10 @@ fn run_scenario_inner(
     let _ = std::fs::write(diag.join("ps-stderr.txt"), &stderr);
 
     if !out.status.success() {
-        let reason = format!("run-scenario.ps1 failed (exit {:?})", out.status.code());
+        let reason = format!("run-scenario.ps1 exit {:?}", out.status.code());
         for raw in &ops[win_idx..] {
             if raw.starts_with("win:") {
-                outcomes.push(StepOutcome {
-                    op: (*raw).to_string(),
-                    description: describe_op(raw, scn),
-                    status: StepStatus::Fail(reason.clone()),
-                });
+                v.step_inline_fail(&describe_op(raw, scn), &reason);
             }
         }
         return Err(ScenarioFailure::Errored(format!(
@@ -640,20 +690,15 @@ fn run_scenario_inner(
             continue;
         }
         let desc = describe_op(raw, scn);
-        let status = if raw.starts_with("win:chkdsk") {
+        if raw.starts_with("win:chkdsk") {
             if scenario_passed {
-                StepStatus::Pass
+                v.step_inline_ok(&desc);
             } else {
-                StepStatus::Fail(format!("ro={ro} scan={scan}"))
+                v.step_inline_fail(&desc, &format!("ro={ro} scan={scan}"));
             }
         } else {
-            StepStatus::Pass
-        };
-        outcomes.push(StepOutcome {
-            op: (*raw).to_string(),
-            description: desc,
-            status,
-        });
+            v.step_inline_ok(&desc);
+        }
     }
 
     if !scenario_passed {
@@ -685,19 +730,12 @@ fn run_scenario_inner(
         }
         for (i, raw) in mac_suffix.iter().enumerate() {
             let desc = describe_op(raw, scn);
+            v.step_start(&desc);
             match run_one_mac_op(raw, &bin, &post_img, diag, 100 + i + 1, scn) {
-                Ok(()) => outcomes.push(StepOutcome {
-                    op: (*raw).to_string(),
-                    description: desc,
-                    status: StepStatus::Pass,
-                }),
+                Ok(()) => v.step_ok(),
                 Err(e) => {
                     let reason = scenario_failure_msg(&e);
-                    outcomes.push(StepOutcome {
-                        op: (*raw).to_string(),
-                        description: desc,
-                        status: StepStatus::Fail(reason.clone()),
-                    });
+                    v.step_fail(&reason);
                     return Err(ScenarioFailure::Errored(format!(
                         "post-win mac step {} ({raw}): {reason}",
                         i + 1
@@ -827,7 +865,7 @@ fn run_mac_ops(
     scn: &Scenario,
     img: &Path,
     diag: &Path,
-    outcomes: &mut Vec<StepOutcome>,
+    v: &mut Verbose,
 ) -> Result<(), ScenarioFailure> {
     let bin = rust_ntfs_path();
     let mut step = 0usize;
@@ -837,19 +875,12 @@ fn run_mac_ops(
         }
         step += 1;
         let desc = describe_op(raw, scn);
+        v.step_start(&desc);
         match run_one_mac_op(raw, &bin, img, diag, step, scn) {
-            Ok(()) => outcomes.push(StepOutcome {
-                op: raw.to_string(),
-                description: desc,
-                status: StepStatus::Pass,
-            }),
+            Ok(()) => v.step_ok(),
             Err(e) => {
                 let reason = scenario_failure_msg(&e);
-                outcomes.push(StepOutcome {
-                    op: raw.to_string(),
-                    description: desc,
-                    status: StepStatus::Fail(reason.clone()),
-                });
+                v.step_fail(&reason);
                 return Err(ScenarioFailure::Errored(format!(
                     "step {step} ({raw}): {reason}"
                 )));
@@ -1102,36 +1133,5 @@ fn describe_op(raw: &str, scn: &Scenario) -> String {
         "win:dismount" => "dismount Windows volume".into(),
         "win:remount" => "remount Windows volume".into(),
         other => format!("{other} (no description)"),
-    }
-}
-
-fn print_verbose_tree(t: &VerboseTrace) {
-    eprintln!();
-    eprintln!("{}", t.name);
-    eprintln!("  scenario: {}", t.scenario_summary);
-    if t.steps.is_empty() {
-        eprintln!("  (no subtask outcomes recorded)");
-    } else {
-        let max_op = t.steps.iter().map(|s| s.op.len()).max().unwrap_or(0);
-        let n = t.steps.len();
-        for (i, step) in t.steps.iter().enumerate() {
-            let connector = if i + 1 == n { "└──" } else { "├──" };
-            let (sym, suffix) = match &step.status {
-                StepStatus::Pass => ("[PASS]", String::new()),
-                StepStatus::Fail(reason) => ("[FAIL]", format!("  ({reason})")),
-            };
-            let op_padded = format!("{:<width$}", step.op, width = max_op);
-            let desc_text = &step.description;
-            eprintln!("  {connector} {op_padded}  {sym}  {desc_text}{suffix}");
-        }
-    }
-    let arrow = match t.final_status {
-        "passed" => "=> PASSED",
-        "failed" => "=> FAILED",
-        _ => "=> ERRORED",
-    };
-    match &t.final_detail {
-        Some(d) => eprintln!("  {arrow} ({d})"),
-        None => eprintln!("  {arrow}"),
     }
 }
