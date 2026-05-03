@@ -213,6 +213,18 @@ pub fn clear_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
     clear_dirty_io(&mut io)
 }
 
+/// Set the `VOLUME_IS_DIRTY` flag on the given NTFS image. Inverse of
+/// [`clear_dirty`]; intended for test scenarios that need to exercise
+/// dirty-volume code paths (e.g. ntfs.sys's mount-time checks,
+/// chkdsk's "needs full scan" branch).
+///
+/// Returns `Ok(true)` if the flag was clear and has been set,
+/// `Ok(false)` if the volume was already dirty, `Err` otherwise.
+pub fn set_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
+    let mut io = PathIo::open(path.as_ref())?;
+    set_dirty_io(&mut io)
+}
+
 /// Overwrite `$LogFile` with `0xFF` bytes so Windows / NTFS driver reinitialize
 /// it on next mount (matches comparable recovery behaviour). Returns the number of bytes
 /// overwritten.
@@ -264,6 +276,20 @@ pub fn clear_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
         return Ok(false);
     }
     let new_flags = current_flags & !NtfsVolumeFlags::IS_DIRTY.bits();
+    io.write_all_at(flag_disk_offset, &new_flags.to_le_bytes())
+        .map_err(|e| format!("write volume flags: {e}"))?;
+    io.sync().map_err(|e| format!("fsync: {e}"))?;
+    Ok(true)
+}
+
+/// `set_dirty` over an arbitrary `FsckIo`.
+pub fn set_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
+    let (flag_disk_offset, current_flags) = locate_volume_flags_io(io)?;
+    let flags = NtfsVolumeFlags::from_bits_truncate(current_flags);
+    if flags.contains(NtfsVolumeFlags::IS_DIRTY) {
+        return Ok(false);
+    }
+    let new_flags = current_flags | NtfsVolumeFlags::IS_DIRTY.bits();
     io.write_all_at(flag_disk_offset, &new_flags.to_le_bytes())
         .map_err(|e| format!("write volume flags: {e}"))?;
     io.sync().map_err(|e| format!("fsync: {e}"))?;

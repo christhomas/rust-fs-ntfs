@@ -22,6 +22,7 @@ mod ls;
 mod mkdir;
 mod rm;
 mod rmdir;
+mod set_dirty;
 mod touch;
 mod write;
 
@@ -38,6 +39,7 @@ Subcommands:
   write   Write bytes to an existing file's $DATA stream.
   rm      Remove a regular file.
   rmdir   Remove an empty directory.
+  set-dirty  Mark an NTFS volume as dirty (test-scenario helper).
 
 Run `rust-ntfs <subcommand> --help` for per-subcommand options.
 
@@ -62,6 +64,7 @@ fn main() -> ExitCode {
         "write" => write::run(rest),
         "rm" => rm::run(rest),
         "rmdir" => rmdir::run(rest),
+        "set-dirty" => set_dirty::run(rest),
         "-h" | "--help" => {
             print!("{HELP}");
             ExitCode::SUCCESS
