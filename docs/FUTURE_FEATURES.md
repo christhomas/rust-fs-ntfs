@@ -394,12 +394,22 @@ quiet-by-default contract.
 
 ## 🔵 Tooling — around the crate
 
-### §5.2 Fuzz harness
+### §5.2 Fuzz harness (resolved)
 
-`cargo-fuzz` target for `data_runs::decode_runs`, `ea_io::decode`,
-`attr_io::iter_attributes`. All three take raw bytes and are the
-most likely panic sources on a crafted image. Finds off-by-ones
-fast.
+`fuzz/` subcrate ships three `libfuzzer-sys` targets covering the
+crate's three byte-decoders most likely to panic on a crafted image:
+
+  - `decode_runs` — wraps `fs_ntfs::data_runs::decode_runs`
+  - `decode_eas` — wraps `fs_ntfs::ea_io::decode`
+  - `iter_attributes` — drains `fs_ntfs::attr_io::iter_attributes`
+
+Run with `cargo +nightly fuzz run <target>` (after
+`cargo install cargo-fuzz`). Each returns ok on Err — we're hunting
+panics, OOB reads, and infinite loops, not Result::Err shapes.
+
+`fuzz/target` and `fuzz/corpus` are gitignored. Future work: store
+seed corpora alongside as `corpus/<target>/{seed1,seed2,…}` once
+crash-replicating inputs surface.
 
 ### §5.3 Criterion benchmarks
 

@@ -1,0 +1,46 @@
+[package]
+name = "fs-ntfs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Fuzz harness for the three byte-decoding helpers most likely to
+# panic on a crafted NTFS image: data-run decoder, EA decoder, and
+# attribute iterator. All three take raw bytes and walk them per the
+# NTFS on-disk structure docs (Windows Internals 7th ed., MS-FSCC) —
+# the kind of code where one off-by-one can sit unnoticed forever.
+#
+# Run a single target:
+#   cargo +nightly fuzz run decode_runs
+# Or all targets in turn:
+#   for t in decode_runs decode_eas iter_attributes; do
+#       cargo +nightly fuzz run $t -- -max_total_time=60
+#   done
+
+[dependencies]
+libfuzzer-sys = "0.4"
+fs-ntfs = { path = ".." }
+
+[[bin]]
+name = "decode_runs"
+path = "fuzz_targets/decode_runs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_eas"
+path = "fuzz_targets/decode_eas.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "iter_attributes"
+path = "fuzz_targets/iter_attributes.rs"
+test = false
+doc = false
+bench = false
