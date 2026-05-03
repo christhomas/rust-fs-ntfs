@@ -1,0 +1,365 @@
+# Open questions
+
+Cross-cutting `[UNVERIFIED]` claims that don't yet belong to one section. Move
+entries into the relevant section's local Open Questions list once placed.
+
+## Format
+```
+- [ ] (YYYY-MM-DD) Claim — source(s) — proposed test
+```
+
+## Entries
+
+### §1 Volume geometry & boot sector
+
+- [ ] (2026-05-03) `SectorsPerTrack = 63` and `NumberOfHeads = 255` cosmetic on modern hardware — no permitted source corroborates this. — Test: format with non-default values, verify Windows mount.
+- [ ] (2026-05-03) `HiddenSectors` semantics for partitioned vs unpartitioned NTFS images — no permitted source. — Test: dump both image types and compare.
+- [ ] (2026-05-03) Boot-sector bytes `0x24..0x28` value `0x00800080` (Windows-Internals-derived "NTFS signature byte") — uncorroborated. — Test: cross-reference vs `[MS-NTFS]`.
+- [ ] (2026-05-03) Boot-sector `Checksum` field at `0x50..0x54` — historically sum of bytes `0x00..0x50`. no permitted source confirms validation; `rust-fs-ntfs` writes zero and modern consumers accept. — Test: flip a byte; observe rejection by any consumer.
+- [ ] (2026-05-03) `SectorsPerCluster` large-value encoding (`raw ≥ 0x80` ⇒ `1 << (256 − raw)`) for cluster sizes ≥ 64 KiB — `rust-fs-ntfs` parses this; asserted in lead material as "valid negative shift", without further specification. — Test: format at 64 KiB / 128 KiB / 1 MiB / 2 MiB clusters; dump `0x0D`.
+- [ ] (2026-05-03) Windows refuses to mount NTFS with `BytesPerSector ≠ 512` — asserted in lead material; not yet experimentally confirmed. — Test: emit a boot with `BytesPerSector = 4096`; observe Windows mount.
+- [ ] (2026-05-03) Microsoft format.com default cluster sizes per volume size — claimed "4 KiB up to 16 TiB" but no permitted source cites this. — Test: format reference volumes at multiple sizes; dump byte `0x0D`.
+- [ ] (2026-05-03) `BAAD` magic for torn / fixup-failed records — uncorroborated. — Test: cross-reference vs `[MS-NTFS]` / `[MSDN]`; capture a torn record dump.
+- [ ] (2026-05-03) Global MFT size cap — no permitted source states a global maximum. — Test: cross-reference vs `[MS-NTFS]` for any documented MFT size limit.
+- [ ] (2026-05-03) Backup boot sector is byte-identical to primary and lives at the last sector of the partition — uncorroborated — Test: byte-diff sector 0 vs sector N−1 on a `format.com` reference volume.
+- [ ] (2026-05-03) Mount-time validation set (boot signature, OEM ID, logical sector size = 512, `SectorsPerCluster` power-of-two) — uncorroborated — Test: cross-reference vs `[MS-NTFS]` mount-time validation requirements.
+- [ ] (2026-05-03) Cross-check against backup boot sector at `partition_start + (TotalSectors − 1) × bytes_per_sector` and reconciliation of divergence — uncorroborated — Test: corrupt primary boot sector and observe `chkdsk` / Windows mount fallback.
+- [ ] (2026-05-03) Boot sector is 512 bytes, little-endian, ends in `0x55 0xAA` at `0x1FE`, with x86 bootstrap occupying `0x54..0x1FE` — uncorroborated — Test: cross-reference vs `[MS-NTFS]` boot sector layout.
+- [ ] (2026-05-03) `JmpInstruction` canonical bytes `EB 52 90` (jmp +0x52, nop) at offset `0x000` — uncorroborated — Test: dump byte 0..3 from a `format.com` reference volume.
+- [ ] (2026-05-03) `OemId` ASCII `"NTFS    "` (4 chars + 4 spaces) at offset `0x003` — uncorroborated — Test: cross-reference vs `[MS-NTFS]` and dump a reference image.
+- [ ] (2026-05-03) `ReservedSectors` = `0` for NTFS at offset `0x00E` — uncorroborated — Test: dump bytes `0x00E..0x010` on a reference image.
+- [ ] (2026-05-03) `MFT_LCN` at `0x030` is the starting LCN of `$MFT`; `MFTMirr_LCN` at `0x038` is the starting LCN of `$MFTMirr` — uncorroborated — Test: cross-reference vs `[MS-NTFS]` BPB layout.
+- [ ] (2026-05-03) `ClustersPerFileRecordSegment` (offset `0x40`) signed-int8 with negative-value `2^|n|` bytes regime; `ClustersPerIndexBuffer` (offset `0x44`) uses the same encoding — uncorroborated — Test: format reference volumes at multiple cluster sizes and dump `0x40` / `0x44`.
+- [ ] (2026-05-03) `parse_record_size` algorithm (signed-byte, positive = clusters, negative = `2^|raw|` bytes) — uncorroborated — Test: cross-reference vs `[MS-NTFS]`.
+- [ ] (2026-05-03) Worked-example decode table for raw bytes `0x01..0xF4` (positive = `raw × cluster_size`, negative shifts to bytes) — uncorroborated — Test: cross-reference vs `[MS-NTFS]` and dump real volumes.
+- [ ] (2026-05-03) Negative-regime switch for MFT records when cluster size ≥ 4 KiB — uncorroborated — Test: dump `0x40` on a 64 KiB-cluster reference volume.
+- [ ] (2026-05-03) INDX 4096-byte page encoding examples (8 clusters at 512 B, 1 cluster at 4 KiB) — uncorroborated — Test: dump `0x44` on reference volumes with 512 B / 4 KiB clusters.
+- [ ] (2026-05-03) Hardcoding 1024 for record size is fatal on 4096-byte-record volumes (must derive dynamically) — uncorroborated — Test: black-box mount of a 4 KiB-record volume by an engine with hardcoded 1024.
+- [ ] (2026-05-03) USA fixup-array entry count = `record_size / 512` — uncorroborated — Test: cross-reference vs `[MS-NTFS]` USA layout.
+- [ ] (2026-05-03) Bidirectional boot-sector synchronization recovery flow (read both, repair the corrupt copy from the valid copy, fatal on both-corrupt) — uncorroborated — Test: corrupt one copy, observe Windows / `chkdsk` repair behaviour.
+- [ ] (2026-05-03) Primary-corrupt-backup-valid path reconciles geometry fields (e.g. `TotalSectors` after partition resize) rather than blind copy — uncorroborated — Test: synthesize a backup with a smaller `TotalSectors` and observe ntfs.sys behaviour.
+- [ ] (2026-05-03) Field-level correction permitted when sector is largely intact — uncorroborated — Test: cross-reference vs `[MS-NTFS]` repair semantics.
+- [ ] (2026-05-03) Both-copies-corrupt is fatal / unmountable — uncorroborated — Test: corrupt both and observe Windows mount.
+- [ ] (2026-05-03) 4Kn / 512e physical alignment requirement (align buffers to physical sector size to avoid RMW penalty) even though addressing uses logical 512 — uncorroborated — Test: cross-reference vs `[MSDN]` 4Kn guidance.
+- [ ] (2026-05-03) Cluster size range 512 B – 2 MiB validated dynamically from `sectors_per_cluster` — uncorroborated — Test: cross-reference vs `[MS-NTFS]` `[MS-FSCC]`.
+- [ ] (2026-05-03) Cluster-size arithmetic MUST be derived dynamically from the boot sector — uncorroborated — Test: cross-reference vs `[MS-NTFS]` requirement statement.
+- [ ] (2026-05-03) Runlist cache entry layout `{ start_vcn: u64, lcn: u64, count: u64 }` (24 bytes each) — uncorroborated — Test: cross-reference vs `[MS-NTFS]` cache descriptor; this is an in-memory runtime structure, may be implementation-specific.
+- [ ] (2026-05-03) 64-bit LCN required to preserve 256 TiB headroom (u32 caps at 16 TiB with 4 KiB clusters) — uncorroborated — Test: cross-reference vs `[MS-NTFS]` LCN width specification.
+- [ ] (2026-05-03) VCN→LCN translation is binary search over the runlist cache, not re-parse on every read — uncorroborated — Test: implementation-dependent; cross-reference vs `[MS-NTFS]` if it specifies access pattern.
+- [ ] (2026-05-03) NTFS version is read from MFT record 3 (`$Volume`) `$VOLUME_INFORMATION` (attribute type `0x70`) — uncorroborated — Test: cross-reference vs `[MS-FSCC §2.4]` attribute-type table; dump record 3 on a reference volume.
+- [ ] (2026-05-03) NTFS 1.2 (NT 4.0/9x): `MajorVersion=1`, `MinorVersion=2`, no CRC32, no `$UsnJrnl`, no 8-byte attribute alignment — uncorroborated — Test: cross-reference vs `[MS-NTFS]` version table; observe a 1.2 reference volume.
+- [ ] (2026-05-03) NTFS 3.0 (Windows 2000): `MajorVersion=3`, `MinorVersion=0`, no CRC32, optional `$UsnJrnl`, 8-byte aligned attrs — uncorroborated — Test: cross-reference vs `[MS-NTFS]` and a Windows-2000 reference image.
+- [ ] (2026-05-03) NTFS 3.1 (XP / Vista+): `MajorVersion=3`, `MinorVersion=1`, mandatory CRC32, `$UsnJrnl`, 8-byte aligned attrs — uncorroborated — Test: cross-reference vs `[MS-NTFS]` and a modern reference image.
+- [ ] (2026-05-03) Engine MUST skip CRC32 step on `MajorVersion == 1` records — uncorroborated — Test: apply CRC32 to a 1.2 record and observe whether the last 4 bytes happen to match.
+- [ ] (2026-05-03) When `$VOLUME_INFORMATION` is unreadable, default to most-permissive (1.2, no CRC32) and warn — uncorroborated — Test: cross-reference vs `[MS-NTFS]` recovery behaviour.
+- [ ] (2026-05-03) Version-conditional behaviour MUST be gated on a single state-object flag set once during discovery — uncorroborated — Test: implementation guidance; cross-reference vs `[MS-NTFS]` if documented.
+- [ ] (2026-05-03) Engine MUST use the volume's own `$UpCase` table (MFT record 10) for case-insensitive collation rather than host OS Unicode tables — uncorroborated — Test: cross-reference vs `[MS-NTFS]`; observe whether Windows uses the on-volume table.
+- [ ] (2026-05-03) `$UpCase` missing-or-destroyed fallback to statically-compiled NT-era uppercase mapping with `WARN_UPCASE_FALLBACK` — uncorroborated — Test: implementation guidance; cross-reference vs `[MS-NTFS]` recovery behaviour.
+- [ ] (2026-05-03) Volume geometry limits table (cluster size 512 B – 2 MiB; MFT record 1024 / 4096 B; INDX 4096 B; volume up to 256 TiB; max file 16 TiB; logical sector 512 B; physical 512 B / 4096 B) — uncorroborated — Test: cross-reference each row against `[MS-NTFS]` `[MS-FSCC]` `[MSDN]`.
+- [ ] (2026-05-03) 256 TiB volume cap derives from 64-bit LCN × max cluster size — uncorroborated — Test: cross-reference vs `[MS-NTFS]` cap derivation.
+- [ ] (2026-05-03) `TXBG` (`0x54584247`) `BEGIN_TX` log record header magic — uncorroborated — Test: cross-reference vs `[MS-NTFS] §2.6` LFS opcodes; dump a dirty `$LogFile` and confirm.
+- [ ] (2026-05-03) `TXCM` (`0x5458434D`) `COMMIT_TX` log record header magic — uncorroborated — Test: same as `TXBG`.
+
+### §2 MFT & records
+
+- [ ] (2026-05-03) `IN_USE` flag (record header `+0x16` bit `0x0001`) and `$MFT:$Bitmap` agreement on a healthy mounted volume — [uncorroborated] mandates double-pass reconciliation in repair, but no permitted source states which is authoritative on a non-corrupt volume — corroborate against `[MS-FSCC]` or capture per-record bitmap-vs-flag agreement on a freshly mounted reference image.
+- [ ] (2026-05-03) MFT record header LSN at `+0x08` — no permitted source specifies the value for a freshly built record; `rust-fs-ntfs` writes 0 — read several MFT records on a mounted reference volume, dump LSNs, and check whether 0 actually appears for never-touched-since-format slots.
+- [ ] (2026-05-03) MFT record number at header `+0x2C` — version gating (NTFS 3.1 only?) inferred but not stated by [uncorroborated] — corroborate against `[MS-FSCC]` `_FILE_RECORD_SEGMENT_HEADER` schema, or dump records from an NTFS 3.0 reference volume and compare bytes at `+0x2C`.
+- [ ] (2026-05-03) NTFS 3.1+ per-record CRC32 footer — [uncorroborated] mandates post-fixup computation order, but `rust-fs-ntfs` does not yet validate or emit it — implement CRC32 verification on read, run against a Microsoft-format reference image, and confirm post-fixup bytes match the stored CRC.
+- [ ] (2026-05-03) `$MFTMirr` repair decision matrix (struct-fail vs semantic-fail × primary vs mirror) — [uncorroborated] prescribes the matrix; no `rust-fs-ntfs` test exercises it — fault-injection: corrupt primary record `n` (n ≤ mirror range) and verify mirror-driven recovery path matches the matrix.
+- [ ] (2026-05-03) Slot 9 ownership (`$Secure` vs `$Quota`) — `rust-fs-ntfs` follows older NTFS-3.0 convention (`$Secure` at #9); modern `format.com` uses `$Quota` — dump rec 9 across multiple Microsoft-format reference images at different Windows versions and tabulate.
+- [ ] (2026-05-03) `$STANDARD_INFORMATION` vs `$FILE_NAME` timestamp authority on conflict — operational observation in `docs/STATUS.md` says SI wins, but no permitted source states this — set divergent timestamps via two paths (SI write vs FN write), mount on Windows, observe which propagates to user-visible `Get-Item`.
+- [ ] (2026-05-03) `$ATTRIBUTE_LIST` on-disk entry byte layout — [uncorroborated] gives traversal semantics only; layout is in `[MS-FSCC]` and not yet ingested — extract and document per-entry layout from `[MS-FSCC]`, verify against an extension-record-bearing reference image.
+- [ ] (2026-05-03) `$ATTRIBUTE_LIST` migration trigger — which attribute is spilled out first when a base record overflows — synthesize a file with growing `$DATA` plus many ADS, observe via `format.com` or `chkdsk` reference image which attribute migrates first.
+- [ ] (2026-05-03) `$ATTRIBUTE_LIST` sort invariant on healthy volumes — [uncorroborated] emits sorted post-rebuild, but unclear whether NTFS requires sort on a non-corrupt volume — locate a reference volume with multiple `$ATTRIBUTE_LIST` entries and check whether out-of-order entries appear.
+- [ ] (2026-05-03) Sequence-number initial-value rule for non-system records — convention used by `rust-fs-ntfs` is "starts at 1, no bump-on-reuse implemented yet" — verify against a Microsoft-format reference: allocate, free, reallocate a slot and observe whether the sequence increments.
+- [ ] (2026-05-03) File-reference resolution: sequence mismatch as "stale (ignore)" vs "corrupt (error)" — implementation-defined; not stated in permitted sources — black-box test: write a stale reference into `$INDEX_ROOT`, mount, observe Windows behaviour.
+- [ ] (2026-05-03) Attribute instance-ID uniqueness scope (per physical record vs per logical file across base + extensions) — inferred from [uncorroborated] dedup key — corroborate against `[MS-FSCC]` `_FILE_RECORD_SEGMENT_HEADER` and `$ATTRIBUTE_LIST` schemas.
+- [ ] (2026-05-03) Sequence-number-zero avoidance — analogous to USN-skip-zero, but no permitted source corroborates the rule for sequence numbers — observe sequence values on a long-lived reference volume after slot churn; check whether 0 ever appears.
+- [ ] (2026-05-03) Whether `chkdsk /F` ever performs base ↔ extension attribute compaction — [uncorroborated] forbids the behaviour for its own engine; closed-source `chkdsk` behaviour undocumented in our sources — synthesise a file with a now-collapsible `$ATTRIBUTE_LIST`, run `chkdsk /F` on a Windows reference VM, diff records before / after.
+- [ ] (2026-05-03) Extension-record `base_file_reference` at `+0x20` points back at the owning base record (and is `0` on the base itself) — uncorroborated — corroborate against `[MS-FSCC]` `_FILE_RECORD_SEGMENT_HEADER` `BaseFileRecordSegment`; dump base + extension pair from a Microsoft-format reference image and confirm.
+- [ ] (2026-05-03) Canonical 1024-byte MFT record header byte layout (USA at `0x30`, attrs at `0x38`) as a worked example — uncorroborated — corroborate against `[MS-FSCC §2.4]` / `[MS-NTFS]`; dump record 0 of a Microsoft-format reference and byte-diff.
+- [ ] (2026-05-03) USA mismatch must NOT be heuristically recovered (no pattern-match, no rebuild from adjacent sectors) — uncorroborated — corroborate against `[MS-NTFS]` multi-sector transfer protection rules.
+- [ ] (2026-05-03) `$MFTMirr` mirrored-record count `N` is computed from the mirror's data-run size, not hardcoded to 4 — uncorroborated — corroborate against `[MS-NTFS]`; dump `$MFTMirr` data-run on Microsoft-formatted volumes at multiple record sizes and tabulate `N`.
+- [ ] (2026-05-03) Range Limitation Rule blockquote (mirror size dictates `N`) — uncorroborated — same proposed test as the `N` claim above; corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Semantic Validation Barrier: structurally clean primary that fails semantic checks must NOT overwrite a healthy mirror — uncorroborated — corroborate against `[MS-NTFS]` if any equivalent rule is documented; otherwise repair-engine policy only.
+- [ ] (2026-05-03) `$MFTMirr` decision matrix table (struct-fail × semantic-fail × primary × mirror) — uncorroborated — fault-injection per cell against a Windows VM running chkdsk; tabulate observed action.
+- [ ] (2026-05-03) Orphan recovery for records beyond the mirrored range rebuilds identity from `$ATTRIBUTE_LIST`, parent-index entries, and hard-link counts — uncorroborated — corroborate against `[MS-NTFS]` repair semantics; observe closed-source chkdsk on a synthesised orphan.
+- [ ] (2026-05-03) NTFS 1.2 lacks `$Extend`, `$Secure`, the 24-byte `$STANDARD_INFORMATION` extension, and the per-record CRC32 — uncorroborated — corroborate against `[MS-NTFS]` version-feature matrix and `[MSDN]` NTFS history articles.
+- [ ] (2026-05-03) Resident → non-resident shrink-back is format-permitted (the prohibition is a repair-engine policy, not a format invariant) — uncorroborated — corroborate against `[MS-NTFS]` attribute-form constraints; observe Microsoft writer behaviour on truncate-to-resident-size.
+- [ ] (2026-05-03) Repair-engine prohibition on retro-grade non-resident → resident migration with `ERR_INVALID_RESIDENT_CODE` delete-on-conflict — uncorroborated — repair-engine policy; verify whether `[MS-NTFS]` documents equivalent guidance for closed-source chkdsk.
+- [ ] (2026-05-03) `Sparse` flag at attribute-header `+0x0C` must agree with sparse-run presence in mapping pairs (else `ERR_SPARSE_FLAG_MISMATCH`) — uncorroborated — corroborate against `[MS-FSCC §2.4]`; construct mismatched test image and observe chkdsk verdict.
+- [ ] (2026-05-03) Extension records' only purpose is to host attribute fragments listed by the base's `$ATTRIBUTE_LIST`; their own `$FILE_NAME` is absent and they are invisible to directory enumeration — uncorroborated — corroborate against `[MS-FSCC]` `_FILE_RECORD_SEGMENT_HEADER` semantics; dump an extension-record-bearing file from a Microsoft-format reference.
+- [ ] (2026-05-03) Full-attribute assembly procedure: read base → parse `$ATTRIBUTE_LIST` → for each entry read the cited extension (or the base) — uncorroborated — corroborate against `[MS-FSCC]` `$ATTRIBUTE_LIST` traversal contract.
+- [ ] (2026-05-03) `$ATTRIBUTE_LIST` chain traversal must be iterative with explicit visited-set + max-entries cap (recursive walkers segfault on adversarial 25k-record chains) — uncorroborated — implementation guidance, not a format invariant; corroborate against `[MS-NTFS]` if any traversal contract is documented; otherwise treat as defensive coding policy.
+- [ ] (2026-05-03) `$ATTRIBUTE_LIST` circular-reference protection via visited bitset — uncorroborated — same status as the iterative-traversal entry; defensive coding policy.
+- [ ] (2026-05-03) `$ATTRIBUTE_LIST` max-entry hard cap (e.g., 256 or 1024) — uncorroborated — same status as the iterative-traversal entry; defensive bound.
+- [ ] (2026-05-03) Recursive `$ATTRIBUTE_LIST` walker exhausts the typical 8 MiB Linux stack at ~25,000 records — uncorroborated — vulnerability rationale for iterative traversal; reproduce by synthesising a deep chain and running a recursive walker.
+- [ ] (2026-05-03) `rebuild_attribute_list` pseudocode (stack + visited bitset, sort by `(type, vcn)`, deduplicate) — uncorroborated — repair-time algorithm; corroborate against `[MS-NTFS]` if documented.
+- [ ] (2026-05-03) `$FILE_NAME.parent_reference` / index-entry / `base_file_reference` carry both 48-bit record number + 16-bit sequence — uncorroborated — corroborate against `[MS-FSCC §2.1.5]` `MFT_SEGMENT_REFERENCE` layout.
+- [ ] (2026-05-03) Disagreement between `IN_USE` flag and `$MFT:$Bitmap` is the canonical repair case for the double-pass reconciliation — uncorroborated — covered by the existing `IN_USE` / `$MFT:$Bitmap` agreement entry; same proposed test.
+- [ ] (2026-05-03) Attribute instance ID disambiguates same-type attributes in `$ATTRIBUTE_LIST` references and in `$LogFile` log records targeting a specific attribute — uncorroborated — corroborate against `[MS-NTFS]` log-record schema and `[MS-FSCC]` `$ATTRIBUTE_LIST` entry layout.
+- [ ] (2026-05-03) Format itself permits base ↔ extension compaction; ordinary mounted drivers may perform it — uncorroborated — corroborate against `[MS-NTFS]` attribute-form rules; observe Microsoft writer on a now-collapsible base record.
+
+### §3 Data runs & cluster allocation
+
+- [ ] (2026-05-03) No per-cluster back-pointer to owning attribute on NTFS; reverse mapping requires MFT walk — [uncorroborated] (implied) — confirm by byte-level inspection of MS-formatted volumes and absence of reverse-map structure in `[MS-NTFS]`.
+- [ ] (2026-05-03) External pseudocode caps `length_len > 4`; `src/data_runs.rs:51-53` accepts up to 8 — [uncorroborated] vs. `src/data_runs.rs` — write a probe attribute with a 5-byte length field, observe chkdsk verdict.
+- [ ] (2026-05-03) Negative LCN delta example — [uncorroborated] — produce a black-box round-trip with a fragmented file that lays clusters backward; confirm encoded bytes against Microsoft-formatted volume.
+- [ ] (2026-05-03) Run-list parsing when bounding `length` ends mid-run (no `0x00` seen) — `src/data_runs.rs:103-105` — confirm ntfs.sys behavior; current decoder tolerates.
+- [ ] (2026-05-03) `ERR_SPARSE_FLAG_MISMATCH` — sparse run inside non-sparse-flagged attribute — [uncorroborated] — construct test image, observe chkdsk verdict.
+- [ ] (2026-05-03) VCN-to-LCN linear scan vs. an alternative binary-search caching strategy — [uncorroborated] vs. `src/data_runs.rs:111-121` — measure fragmented-file read perf to decide on switch.
+- [ ] (2026-05-03) `valid_data_length` semantics for sparse + physical mixed runs — `src/attr_io.rs:142-148` — write attribute with mid-file sparse hole; observe Windows reads in `[valid_data_length, data_size)`.
+- [ ] (2026-05-03) Resident → non-resident migration threshold is dynamic (record free-space dependent), not fixed byte count — [uncorroborated] — probe by growing resident attribute byte-by-byte; observe at which length the Microsoft writer migrates.
+- [ ] (2026-05-03) Reverse migration on truncate-to-zero (non-resident → resident) — `[NTFSCOM: NTFS Attributes]` — confirm whether Microsoft writer ever moves a non-resident attribute back to resident.
+- [ ] (2026-05-03) `$Bitmap` byte/bit ordering: LSB-first within byte per `[MS-FSCC §2.6]` — confirm the section number actually documents this; current cite is best-guess pending FSCC re-read.
+- [ ] (2026-05-03) WAL ordering of `$Bitmap` writes vs. `$LogFile` records — [uncorroborated] vs. `src/bitmap.rs:323-324` — current implementation `sync`s but doesn't journal; cross-link with §5 when journal write path lands.
+- [ ] (2026-05-03) Allocate-before-write vs. write-before-allocate ordering claim — [uncorroborated] (implied) — confirm against `[MS-NTFS]` write semantics; currently implementation folklore.
+- [ ] (2026-05-03) Cross-link survival priority (System > User > Younger files) — [uncorroborated] — uncorroborated; no permitted source corroborates ordering.
+- [ ] (2026-05-03) Intra-attribute LCN overlap fatality — [uncorroborated] — confirm whether ntfs.sys treats this as fatal or merely flag-and-truncate.
+- [ ] (2026-05-03) `$Bad` "physical run pointing at itself" convention for quarantined LCN — [uncorroborated] — confirm by dumping Microsoft-formatted volume after deliberate bad-sector injection.
+- [ ] (2026-05-03) `$BadClus` sparse-run split mechanics on bad-sector append (one sparse run → `[sparse | physical | sparse]`) — [uncorroborated] — observe Microsoft repair-tool output to confirm split shape.
+- [ ] (2026-05-03) Per-file reconstruction policy for user files hit by EIO (zero-fill vs. truncate at point of failure) — [uncorroborated] — no permitted source specifies; observe Microsoft tool behavior.
+- [ ] (2026-05-03) `$Bitmap` self-relocation when the file's own clusters are bad: chicken-and-egg in writing new mapping-pairs into new bitmap — [uncorroborated] — verify sequencing against Microsoft repair tool.
+- [ ] (2026-05-03) `$MFT` records beyond mirror range hit by EIO marked FREE → orphan recovery — [uncorroborated] — confirm orphan-recovery policy.
+- [ ] (2026-05-03) Bad-sector relocation step 4: update affected file's data runs to point at new LCN — [uncorroborated] — exact mapping-pair rewrite procedure unverified.
+- [ ] (2026-05-03) `$BadClus` repair-mode bad-sector relocation unimplemented in `rust-fs-ntfs` — `docs/STATUS.md` — full path captured in §3 spec but not yet code.
+- [ ] (2026-05-03) Double-Pass reconciliation detects cluster leak and cross-link failure modes — uncorroborated — corroborate against `[MS-NTFS]` chkdsk semantics or capture chkdsk output on a deliberately corrupted volume.
+- [ ] (2026-05-03) Data-run length field is unsigned little-endian, F bytes wide — uncorroborated — corroborate against `[MS-FSCC]` / `[MS-NTFS]` mapping-pairs definition.
+- [ ] (2026-05-03) Data-run negative LCN delta requires sign extension on the most-significant offset byte — uncorroborated — produce a fragmented file with backward LCN deltas, dump bytes, and verify Microsoft reader interprets them as signed.
+- [ ] (2026-05-03) First-run offset field reads as the absolute LCN (previous-LCN implicitly 0) — uncorroborated — byte-diff a Microsoft-formatted file's first run against our decoder.
+- [ ] (2026-05-03) Sparse runs encoded with V=0 (no LCN bytes follow, only length) — uncorroborated — corroborate against `[MS-NTFS]` sparse-attribute layout; observe a Microsoft-emitted sparse run.
+- [ ] (2026-05-03) Sparse runs MUST NOT contribute bits to `$Bitmap` during reconciliation — uncorroborated — observe Microsoft chkdsk on a sparse-attribute volume; confirm sparse VCNs are not flagged.
+- [ ] (2026-05-03) Run-list invariants (terminator, F≠0, F/V bounds, monotonic VCN, no-overlap, length sums) are corruption when violated — uncorroborated — corroborate against `[MS-NTFS]` mapping-pairs validation; deliberately violate each invariant and observe ntfs.sys verdict.
+- [ ] (2026-05-03) Sum of all runs' lengths must equal `last_vcn − first_vcn + 1` from non-resident header — uncorroborated — synthesize a mismatched run list, observe chkdsk reaction.
+- [ ] (2026-05-03) Sum of run lengths × cluster size must be ≥ attribute's `allocated_size` — uncorroborated — synthesize a truncated run list, observe chkdsk reaction.
+- [ ] (2026-05-03) Repair-time policy: no resident→non-resident or non-resident→resident migration (compaction/expansion forbidden in repair) — uncorroborated — corroborate against `[MS-NTFS]` chkdsk behavior; run chkdsk /F against shrinkable non-resident attributes and observe.
+- [ ] (2026-05-03) `$MFT:$BITMAP` reconciliation capped to actual MFT record count to avoid off-by-N — uncorroborated — corroborate against `[MS-NTFS]`; black-box test by truncating MFT past last allocated record and observing chkdsk.
+- [ ] (2026-05-03) WAL "Formal Release Barrier" — journal+`fsync` of `$Bitmap` change before on-disk byte rewrite — uncorroborated — corroborate against `[MS-NTFS] $LogFile` semantics.
+- [ ] (2026-05-03) Pass 1 of Double-Pass: corrupt run logs warning and skips, does not abort the pass — uncorroborated — corroborate against `[MS-NTFS]` chkdsk; inject a corrupt run and observe whether chkdsk continues mapping the rest.
+- [ ] (2026-05-03) Pass 2 reconciliation truth table (FREE/FREE, USED/USED, FREE/USED→reclaim, USED/FREE→enforce) — uncorroborated — corroborate against `[MS-NTFS]` chkdsk; observe a deliberately desynchronized `$Bitmap` after chkdsk /F.
+- [ ] (2026-05-03) Pass 2 enforces attribute's claim by marking USED on USED-in-truth/FREE-on-disk mismatches — uncorroborated — same test as truth-table.
+- [ ] (2026-05-03) Bulk-free heuristic-consensus barrier thresholds (EIO < 0.1%, MFT yield > 90%, lost-cluster ratio ≤ 10%) — uncorroborated — no MS source corroborates the specific thresholds.
+- [ ] (2026-05-03) `ERR_CONSENSUS_FAILED` raised if ≥ 2 of 3 thresholds fail — uncorroborated — same status as thresholds; no MS source.
+- [ ] (2026-05-03) TRIM/DISCARD prohibition during leaked-cluster reclamation — uncorroborated — corroborate against `[MS-NTFS]` or `[MSDN]` chkdsk TRIM behavior.
+- [ ] (2026-05-03) `$BadClus` named-attribute identification (type=0x80, name_len=4, name="$Bad") — uncorroborated — byte-diff a Microsoft-formatted volume's `$BadClus` against the spec; corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) `$Bad` named runs MUST be USED in `$Bitmap` (subset rule); USED-in-bitmap-but-not-in-`$Bad` is permitted — uncorroborated — confirm via bad-sector injection round-trip on Windows.
+- [ ] (2026-05-03) Bad-sector relocation triggered by hard EIO on `$MFT`/`$Bitmap`/`$MFTMirr`/`$LogFile`/user files; soft errors do not trigger — uncorroborated — corroborate against `[MS-NTFS]` or observe a closed-source repair tool's behavior under fault injection.
+- [ ] (2026-05-03) Bad-sector relocation step 2: setting bad LCN's `$Bitmap` bit USED so the allocator never hands it out — uncorroborated — confirm via Microsoft repair-tool round-trip.
+- [ ] (2026-05-03) Per-file reconstruction: `$MFT` (rec ≤ N) recovered from `$MFTMirr`, otherwise FREE+orphan-recovery — uncorroborated — corroborate against `[MS-NTFS]` chkdsk per-file recovery matrix.
+- [ ] (2026-05-03) `$MFTMirr` relocation requires updating LCN in both primary and backup boot sectors; otherwise log `WARN_MFTMIRR_REDUNDANCY_LOST` — uncorroborated — corroborate against `[MS-NTFS]`; observe Microsoft repair-tool behavior under MFTMirr-region bad-sector injection.
+- [ ] (2026-05-03) `$Bitmap` reconstruction from Pass 1 ground-truth on bad-sector hit — uncorroborated — corroborate against `[MS-NTFS]` repair semantics.
+- [ ] (2026-05-03) `$BadClus` self-recovery rebuilds bad-cluster list from EIOs collected during Pass 1 / Pass 5 scans — uncorroborated — corroborate against `[MS-NTFS]`; inject `$BadClus`-region bad sector and observe Microsoft tool.
+- [ ] (2026-05-03) `find_free_run` returning `None` falls back to fatal warning + continue-without-redundancy — uncorroborated — corroborate against `[MS-NTFS]` repair-tool out-of-space behavior.
+- [ ] (2026-05-03) Backup boot sector at end-of-volume MUST also update on `$MFTMirr` relocation; missing it leaves a stale pointer — uncorroborated — corroborate by dumping both boot sectors after Microsoft repair-tool relocates `$MFTMirr`.
+
+### §4 Indexes & directories
+
+- [ ] (2026-05-03) `$FILE_NAME` timestamps in `$I30` entries are written-once at link/rename time and not synced to subsequent `$STANDARD_INFORMATION` updates — `docs/STATUS.md` `set_times` semantics + [uncorroborated] silence — black-box test: mutate SI via `set_times`, re-read parent `$I30` entry, diff timestamps.
+- [ ] (2026-05-03) `$FILE_NAME.allocated_size` / `real_size` snapshot semantics — `docs/STATUS.md` — confirm chkdsk does not flag stale values: write a file, truncate via SI/$DATA, leave parent `$I30` size fields stale, run `chkdsk`.
+- [ ] (2026-05-03) Namespace value table {0=POSIX, 1=Win32, 2=DOS, 3=Win32&DOS} — [uncorroborated] mentions the bits, not all four numeric values — corroborate the numeric assignment against `[MS-FSCC §2.1.5.2]`.
+- [ ] (2026-05-03) `Win32 + DOS` paired entries point at the same MFT record number — [uncorroborated] (implication) — confirm with a formatter that creates a long name violating 8.3 and dump the parent `$I30`.
+- [ ] (2026-05-03) `chkdsk` flags lone DOS entries lacking a Win32 partner — [uncorroborated] Validation/Cross-Validation — synthesise such a volume and observe chkdsk report.
+- [ ] (2026-05-03) `NtfsDisable8dot3NameCreation` detectable from disk state alone (absence of any DOS entry on the volume) — [uncorroborated] Volume Config Exception — format with the flag set on Windows, confirm no `namespace=2` entries.
+- [ ] (2026-05-03) `clusters_per_index_block` negative encoding when `index_block_size < cluster_size` — parallel to BPB `clusters_per_mft_record`; not corroborated for INDX — synthesise volume with 4 KiB clusters and 512-byte INDX blocks, verify chkdsk acceptance.
+- [ ] (2026-05-03) `$INDEX_ALLOCATION` block-size 4096 bytes default across cluster sizes — [uncorroborated] example uses 4096 (single instance) — confirm Windows formatter writes 4096 for 512 / 1024 / 2048 / 4096 cluster sizes.
+- [ ] (2026-05-03) `$BITMAP:$I30` trailing-bit padding to byte boundary — spec convention; not explicit in permitted sources — observe a directory with non-multiple-of-8 INDX-block count.
+- [ ] (2026-05-03) Index-entry body 8-byte alignment — spec convention — confirm via hex inspection of `$I30` entries with variable-length keys.
+- [ ] (2026-05-03) INDX free-space pointer semantics — no permitted source. — does Windows emit any explicit free-list within an INDX block, or only `total_size` < `allocated_size`?
+- [ ] (2026-05-03) `COLLATION_UNICODE_STRING` (0x02), `COLLATION_NTOFS_SECURITY_HASH` (0x12), `COLLATION_NTOFS_ULONGS` (0x13) numeric values — [uncorroborated] names the rules but not the codes — corroborate against `[MS-FSCC]`.
+- [ ] (2026-05-03) `COLLATION_NTOFS_GUID` ↔ `COLLATION_BINARY` equivalence for `$ObjId\$O` — [uncorroborated] calls it `_GUID` and notes raw byte comparison — observe the `collation_rule` byte in a freshly-formatted `$ObjId` record.
+- [ ] (2026-05-03) `COLLATION_FILE_NAME` performs no Unicode normalisation — spec convention; permitted sources describe only `$UpCase` mapping — confirm by sorting NFC vs NFD forms of the same text under `$UpCase`.
+- [ ] (2026-05-03) Surrogate-pair ordering under `COLLATION_FILE_NAME` is code-unit (not code-point) lexicographic — spec convention — write filenames with supplementary-plane characters and observe `$I30` order.
+- [ ] (2026-05-03) `$I30` does not contain `.` or `..` entries — spec convention — confirm by raw dump of an arbitrary directory's `$INDEX_ROOT`.
+- [ ] (2026-05-03) `$Reparse\$R` value-side layout — [uncorroborated] only describes the key — observe by formatting a volume, creating a junction, and dumping `$Extend\$Reparse`.
+- [ ] (2026-05-03) Level-1 "7 strict validation criteria" — only four are pinned — enumerate the remaining three checks beyond size / parent-ref / MFT-status / `$FILE_NAME`-match.
+- [ ] (2026-05-03) `Win32&DOS` (`namespace=3`) collapse heuristic — [uncorroborated] implication — confirm Windows uses it iff the LFN already satisfies 8.3 uppercase.
+- [ ] (2026-05-03) `IsCaseSensitive` per-directory flag (Windows 10) is *not* a new `$FILE_NAME` namespace value but a separate attribute — spec convention — confirm by raw-dump of a per-dir-case-sensitive directory.
+- [ ] (2026-05-03) `MFT_RECORD_IS_VIEW_INDEX` set on host record for every view index in §4.13 — `docs/chkdsk-improvement-findings.md` §2.2.3 corroborates `$Secure`; `$Quota` / `$ObjId` / `$Reparse` not yet observed — confirm by raw dump of each.
+- [ ] (2026-05-03) Modern Windows preserves POSIX namespace on read but folds it into Win32 collation in repair — uncorroborated — corroborate against `[MS-FSCC]` / observe an MS-formatted volume with a POSIX entry.
+- [ ] (2026-05-03) `LinkCount` on an MFT record equals the count of `$I30` entries pointing at the record (excluding the `Win32&DOS` collapse) — uncorroborated — synthesise hardlinked files, count entries, compare with `LinkCount`.
+- [ ] (2026-05-03) Modern Windows formatters do not emit POSIX (`namespace=0`) entries — uncorroborated — dump a freshly-formatted Windows volume and confirm absence of any namespace-0 entries.
+- [ ] (2026-05-03) DOS 8.3 short-alias generation algorithm (normalise + truncate + 3-tier collision resolution) — uncorroborated — generate aliases via Windows on a long-name corpus and diff against our implementation.
+- [ ] (2026-05-03) DOS 8.3 normalisation step uppercases the LFN via the volume's own `$UpCase` (not host Unicode) — uncorroborated — synthesise a volume with a custom `$UpCase`, observe Windows alias output.
+- [ ] (2026-05-03) DOS 8.3 illegal-character set (`" * / : < > ? \ | + , ; = [ ]` plus < `0x20`) replaced with `_` — uncorroborated — feed each illegal byte through Windows alias generation and observe substitution.
+- [ ] (2026-05-03) DOS 8.3 truncation rule (basename = first 6 valid chars before last period; extension = first 3 after) — uncorroborated — generate aliases via Windows on long names and observe truncation lengths.
+- [ ] (2026-05-03) DOS 8.3 3-tier collision-resolution table (`{base6}~{N}` / `{base5}~{NN}` / `{base2}{HHHH}~{N}`) — uncorroborated — force collisions on Windows past N=9 and N=99 and observe alias shape.
+- [ ] (2026-05-03) DOS 8.3 hash function for tier 3 is implementation-defined (any deterministic 16-bit hash is structurally valid) — uncorroborated — produce alias and observe whether Windows accepts non-Microsoft hashes.
+- [ ] (2026-05-03) View indexes (`$Secure`, `$Quota`, `$ObjId`) carry `attribute_type_indexed = 0x00` because the value is synthetic — uncorroborated — dump `$INDEX_ROOT` headers from each view-index record on a freshly-formatted volume.
+- [ ] (2026-05-03) INDX records inside `$INDEX_ALLOCATION` are USA-protected multi-sector records with `INDX` magic — uncorroborated — corroborate against `[MS-NTFS]` / observe USA fixup on a freshly-formatted reference image.
+- [ ] (2026-05-03) `$BITMAP:$I30` is authoritative — a block whose bit is clear is not part of any tree even if its on-disk bytes still parse — uncorroborated — clear a bit on a synthetic volume, mount on Windows, observe whether the entries are visible.
+- [ ] (2026-05-03) Each block in `$INDEX_ALLOCATION` is an INDX multi-sector record of size `index_block_size` — uncorroborated — corroborate against `[MS-NTFS]` and dump a reference image.
+- [ ] (2026-05-03) MFT-reference sequence-number mismatch in an index entry indicates a stale entry that must be ignored — uncorroborated — write a stale reference, mount on Windows, observe behaviour.
+- [ ] (2026-05-03) Index entries are sorted by key under the indexed attribute's collation rule — uncorroborated — corroborate against `[MS-NTFS]` and verify by inspecting MS-formatted index dumps.
+- [ ] (2026-05-03) `INDEX_HEADER.flags` bit `HAS_SUBNODES` indicates the node is a non-leaf root (any entry has children) — uncorroborated — corroborate against `[MS-NTFS]` / inspect a multi-level reference index.
+- [ ] (2026-05-03) `COLLATION_NTOFS_ULONG` (0x10) used by `$Quota\$Q` — uncorroborated — observe `collation_rule` byte in a freshly-formatted `$Quota` record.
+- [ ] (2026-05-03) `COLLATION_NTOFS_SID` (0x11) used by `$Quota\$O` — uncorroborated — observe `collation_rule` byte in a freshly-formatted `$Quota\$O` record.
+- [ ] (2026-05-03) `COLLATION_FILE_NAME` takes the Win32-namespace UTF-16 form (POSIX folded to Win32) — uncorroborated — corroborate against `[MS-NTFS]` / observe collation on a synthetic POSIX entry.
+- [ ] (2026-05-03) `COLLATION_FILE_NAME` maps each UTF-16 code unit through the volume's `$UpCase` table — uncorroborated — corroborate against `[MS-NTFS]` and verify ordering against a manually-collated reference.
+- [ ] (2026-05-03) The volume's own `$UpCase` (not host OS Unicode tables) is mandatory for `COLLATION_FILE_NAME` — uncorroborated — synthesise a custom `$UpCase` and observe Windows ordering.
+- [ ] (2026-05-03) Source columns for the named-index table (`$I30`, `$SDH`, `$SII`, `$O`/$ObjId, `$O`/$Quota, `$Q`, `$R`, `$J`, `$Max`) — uncorroborated — corroborate each row against `[MS-NTFS]` / `[MS-FSCC]` and observed reference images.
+- [ ] (2026-05-03) Directories may carry named `$DATA` streams alongside `$INDEX_ROOT` (no mutual exclusion) — uncorroborated — corroborate against `[MS-NTFS]` / observe a directory with a `Zone.Identifier` ADS on a Windows volume.
+- [ ] (2026-05-03) Two complementary orphan classes exist (MFT-orphan vs INDX-orphan) — uncorroborated — corroborate against `[MS-NTFS]` repair documentation or chkdsk source-of-truth.
+- [ ] (2026-05-03) MFT-first reconstruction has a blind spot when an INDX block is detached and listed-files' MFTs are damaged — uncorroborated — corroborate against `[MS-NTFS]` repair documentation.
+- [ ] (2026-05-03) Conceptual `$I30` rebuild Level 1 (linear scan + ghost drop) — uncorroborated — corroborate against `[MS-NTFS]` repair documentation.
+- [ ] (2026-05-03) Conceptual `$I30` rebuild Level 2 (resort under `COLLATION_FILE_NAME`) — uncorroborated — corroborate against `[MS-NTFS]` repair documentation.
+- [ ] (2026-05-03) Conceptual `$I30` rebuild Level 3 (rebuild B+ tree from scratch with node splits) — uncorroborated — corroborate against `[MS-NTFS]` repair documentation.
+- [ ] (2026-05-03) Conceptual `$I30` rebuild Level 4 (orphan INDX page sweep, harvest names from damaged MFTs) — uncorroborated — corroborate against `[MS-NTFS]` repair documentation.
+- [ ] (2026-05-03) Post-rebuild hardlink reconciliation rewrites MFT `LinkCount` to match observed index reality (not the converse) — uncorroborated — corroborate against `[MS-NTFS]` repair documentation / observe chkdsk behaviour on a synthesised mismatch.
+
+### §5 $LogFile & journal
+
+- [ ] (2026-05-03) `LFS_RESTART_AREA.Flags` bits beyond `0x02 CLEAN_DISMOUNT` — [uncorroborated] enumerates only that one bit — confirm against `[MS-NTFS] §2.6`; diff prebaked restart pages vs a Microsoft-formatted reference image.
+- [ ] (2026-05-03) `LFS_RESTART_AREA` field set past `FileSize` (last-LSN data length, previous-client-restart info) — [uncorroborated] table stops at `FileSize` — confirm against `[MS-NTFS] §2.6`; map remaining bytes in `src/logfile-canonical-12k.bin` page 0 restart area.
+- [ ] (2026-05-03) LSN bit-packing direction (high vs low half of the 64-bit word for sequence number / file offset) — [uncorroborated] mentions `SeqNumberBits` but not packing — extract `current_lsn = 0x104408` and `0x10634B` from canonical bin, derive `SeqNumberBits`, validate by re-encoding.
+- [ ] (2026-05-03) LSN wrap-around comparison algorithm — [uncorroborated] describes conceptually — write a comparator and test against synthesized LSN pairs straddling a wrap.
+- [ ] (2026-05-03) Opcodes `0x21`–`0x28` listed in [uncorroborated] opcode table but not in dispatch-count summary — corroborate via `[MS-NTFS]` and capture live `$LogFile` records on a working Windows volume.
+- [ ] (2026-05-03) Open-attribute-table on-disk dump format (opcode `0x1D OpenAttributeTableDump`) — not in [uncorroborated] — corroborate against `[MS-NTFS]`; dump RCRD records on a dirty Windows volume and parse.
+- [ ] (2026-05-03) Dirty-page-table on-disk dump format (opcode `0x1F DirtyPageTableDump`) — same status as `0x1D` — same proposed test.
+- [ ] (2026-05-03) Driver-side undo behavior on dirty mount — [uncorroborated] covers only the repair tool's redo-only model — out of scope until a write-replay path is added.
+- [ ] (2026-05-03) `$UsnJrnl::$Max` exact field layout — [uncorroborated] does not enumerate — corroborate against `[MS-NTFS]` / `[MS-FSCC §2.3]`; capture from a Windows volume with the USN journal enabled.
+- [ ] (2026-05-03) `$UsnJrnl::$J` sparse-truncation mechanism for old entries — [uncorroborated] mentions OS truncation but not the FSCTL — confirm via `[MS-FSCC §2.3.5]` `FSCTL_DELETE_USN_JOURNAL` semantics.
+- [ ] (2026-05-03) `USN_RECORD_V2.Reason` flag constants — [uncorroborated] does not enumerate — pull from `[MS-FSCC §2.3.6]`.
+- [ ] (2026-05-03) `USN_RECORD_V3` / `USN_RECORD_V4` field layouts — out of scope for currently ingested sources — pull from `[MS-FSCC §2.3]` if support is ever needed.
+- [ ] (2026-05-03) `$LogFile` size scaling formula across volume sizes — [uncorroborated] quotes no formula; only the 256 MiB / 4 KiB-cluster `0x3B_0000` reference is concrete — capture `format.com` outputs at multiple volume sizes and derive the rule.
+- [ ] (2026-05-03) Typical `$LogFile` size cap on large volumes — claim "tens of MiB on large volumes" is uncited — same proposed test as scaling formula.
+- [ ] (2026-05-03) `LFS_CLIENT_RECORD.Padding` byte content (offsets `0x16`..`0x1B`) — [uncorroborated] marks "Reserved" — diff prebaked `src/logfile-canonical-12k.bin` against a fresh Windows reference; non-zero contents would be informative.
+- [ ] (2026-05-03) Per-record `client_id.client_index = 0` invariant for the NTFS client — [uncorroborated] says "usually 0" — confirm against `[MS-NTFS]` and a corpus of dirty Windows volumes.
+- [ ] (2026-05-03) Bit `0x01` of LFS log-record `flags` (multi-page record) — [uncorroborated] defines the bit but not the multi-page reassembly algorithm — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) `LFS_RESTART_PAGE.MajorVersion = 2` (LFS 2.0) full layout — [uncorroborated] defers to `[MS-FSCC] 2.1.1` — pull layout once a citation pass is run; needed only for Windows 8.1+ dirty-replay support.
+- [ ] (2026-05-03) `$LogFile` is MFT record 2 backing the WAL; metadata transactions journal-then-update so power loss can be unwound at next mount — uncorroborated — corroborate against `[MS-NTFS] §2` and `[MSDN]` driver overviews.
+- [ ] (2026-05-03) LFS owns restart pages, `RCRD` page envelopes, and the LSN addressing scheme; LFS stores opaque client-data payloads — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) NTFS is the (typically only) registered LFS client with client name `"NTFS"`; opcode dispatch lives above the LFS layer — uncorroborated — corroborate against `[MS-NTFS]`; dump live `$LogFile` on Windows and confirm.
+- [ ] (2026-05-03) Recovery flow: clean unmount sets `CLEAN_DISMOUNT`; dirty unmount walks RCRD pages from oldest still-relevant LSN, redoing committed and discarding/rolling back uncommitted — uncorroborated — corroborate against `[MS-NTFS]`/`[MSDN]`.
+- [ ] (2026-05-03) `$UsnJrnl` lives at `$Extend\$UsnJrnl` and is structurally unrelated to `$LogFile` — uncorroborated — corroborate against `[MS-FSCC §2.3]`.
+- [ ] (2026-05-03) `$LogFile` size is recorded redundantly in MFT record 2 `$DATA.data_size` / `allocated_size` — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Restart-page selection: read both, validate each, pick higher `CurrentLsn` — uncorroborated — corroborate against `[MS-NTFS]`; observe `ntfs.sys` mount behaviour with intentionally divergent pages.
+- [ ] (2026-05-03) Neither restart page valid → `$LogFile` unrecoverable; repair contract is log major warning, bypass replay — uncorroborated — fault-injection test on a repair tool.
+- [ ] (2026-05-03) Double-buffer rationale: one restart copy survives if crash hits mid-write of the other — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Restart pages are USA-protected via `MULTI_SECTOR_HEADER.usa_offset` / `usa_count` — uncorroborated — corroborate against `[MS-NTFS]`; byte-diff prebaked blob.
+- [ ] (2026-05-03) Restart pages located at offset `0` and `SystemPageSize` (typically `0x1000`) — uncorroborated — corroborate against `[MS-NTFS]`; byte-diff prebaked blob.
+- [ ] (2026-05-03) `LFS_RESTART_PAGE` header field layout (offsets/sizes/names) — uncorroborated — corroborate against `[MS-NTFS]`/`[MS-FSCC]`; map prebaked blob.
+- [ ] (2026-05-03) Restart-page magic `RSTR` (`52 53 54 52`) — uncorroborated — corroborate against `[MS-NTFS]` / `[MSDN]`.
+- [ ] (2026-05-03) `MajorVersion == 1` → LFS 1.0 (Windows XP–8); `MajorVersion == 2` → LFS 2.0 (8.1/10) — uncorroborated — corroborate against `[MSDN]` / `[MS-NTFS]`.
+- [ ] (2026-05-03) v1.0 parser MUST refuse v2.0 logs; abort with `WARN_JOURNAL_VERSION_UNSUPPORTED` rather than crash — uncorroborated — implementation policy; cross-reference `[MS-NTFS]` for any version-handshake guidance.
+- [ ] (2026-05-03) `LFS_RESTART_AREA` is at `LFS_RESTART_PAGE.RestartOffset` and is the recovery anchor — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) `LFS_RESTART_AREA` field layout (`CurrentLsn`, `LogClients`, `ClientFreeList`, `ClientInUseList`, `Flags`, `SeqNumberBits`, `RestartAreaLength`, `ClientArrayOffset`, `FileSize`) — uncorroborated — corroborate against `[MS-NTFS]`/`[MS-FSCC]`.
+- [ ] (2026-05-03) `CLEAN_DISMOUNT` semantics (set on graceful shutdown, cleared on first dirty tx, skip replay if set at mount) — uncorroborated — corroborate against `[MS-NTFS]`/`[MSDN]`; observe ntfs.sys mount of dirty vs clean.
+- [ ] (2026-05-03) `LFS_CLIENT_RECORD` field layout (`OldestLsn`, `ClientRestartLsn`, `PrevClient`, `NextClient`, `SeqNumber`, `ClientNameLength`, `ClientName[128]`) — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) `OldestLsn` is the lower bound of replay; older records may be reclaimed by LFS — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Free/in-use linkage via `ClientFreeList`/`ClientInUseList` + `PrevClient`/`NextClient` threading — uncorroborated — corroborate against `[MS-NTFS]`; verify against prebaked blob.
+- [ ] (2026-05-03) Body of `$LogFile` past restart pages is a cyclic sequence of `RCRD` pages, `LogPageSize` bytes, USA-protected, multiple LFS records per page — uncorroborated — corroborate against `[MS-NTFS]`; capture live `$LogFile` from Windows.
+- [ ] (2026-05-03) RCRD pages use the same USA fixup mechanism as MFT/INDX — uncorroborated — corroborate against `[MS-NTFS]`/`[MS-FSCC]`.
+- [ ] (2026-05-03) RCRD page header field layout (magic `RCRD`, USA offset/count, `last_lsn`, `flags`, `page_count`, `page_position`, `next_record_offset`, `last_end_lsn`) — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Multi-record packing per page; single LFS record may span pages signalled by `flags & 0x01` — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) LSNs are 64-bit values that totally order log records — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) LSN encoding: sequence number in high bits, width = `SeqNumberBits`; file offset in remaining low bits — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Restart-page selection comparison must respect `SeqNumberBits` (wrap-aware) — uncorroborated — corroborate against `[MS-NTFS]`; synthesize wrapped LSNs.
+- [ ] (2026-05-03) LFS log record header field layout (`this_lsn`, `client_previous_lsn`, `client_undo_next_lsn`, `client_data_length`, `client_id` (seq/index), `record_type`, `transaction_id`, `flags`) — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) v1 client_data starts at `+0x28`; v2 at `+0x30` (extended padding) — uncorroborated — corroborate against `[MS-NTFS]`; byte-diff v1 vs v2 captures.
+- [ ] (2026-05-03) v1 parser must subtract the 8-byte padding gap before reading `client_data` — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) NTFS client data layout: fixed header + optional LCN list + redo + undo bytes — uncorroborated — corroborate against `[MS-NTFS]`/`[MS-FSCC]`.
+- [ ] (2026-05-03) NTFS-client redo/undo header field layout (`redo_operation`, `undo_operation`, `redo_offset`, `redo_length`, `undo_offset`, `undo_length`, `target_attribute`, `lcns_to_follow`, `record_offset`, `padding`/`attribute_offset`, `cluster_block_offset`, `target_vcn`, `lcn_list[N]`) — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Parsing rule sequence (read fixed header → LCN array → redo_data → undo_data) — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Use `redo_offset` (not `record_offset`/`padding`) for placement within target attribute — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Compressed `redo_data` decompressed via LZNT1 before application — uncorroborated — corroborate against `[MS-XCA §2.5]`.
+- [ ] (2026-05-03) Full v1.0 opcode table (`0x00`–`0x28`) — uncorroborated — corroborate against `[MS-NTFS]`; capture live RCRD records on Windows.
+- [ ] (2026-05-03) Handler categories: 23 generic-copy, 9 no-op, 5 specialized — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Repair contract treats most undo opcodes as no-ops (redo-only forward replay) — uncorroborated — implementation policy; verify against `[MS-NTFS]` for driver behaviour.
+- [ ] (2026-05-03) Bounds-check invariant: `target_offset_within_attr + redo_length ≤ attr_size` — uncorroborated — corroborate against `[MS-NTFS]`; fault-inject overflow input.
+- [ ] (2026-05-03) Within an MFT record, attribute write order is `$INDEX_ALLOCATION` before `$DATA` — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) LFS in-memory tracking tables (open-attribute, dirty-page, transaction) checkpointed and reconstructed at restart — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Transaction table tracks LSN/state (active/prepared/committed/forgotten) and undo-chain head; opcode `0x20 TransactionTableDump` snapshots it; feeds `Prepare`/`Commit`/`ForgetTransaction` state machine — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Three tables flushed at every checkpoint; analysis pass walks log forward reapplying dumps — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Replay engine = three passes (analysis, redo, undo) — uncorroborated — corroborate against `[MS-NTFS]`/standard WAL literature.
+- [ ] (2026-05-03) Analysis pass step list (read CurrentLsn/Flags/SeqNumberBits/LogClients/ClientArrayOffset; CLEAN_DISMOUNT → abort; walk from OldestLsn; apply USA; reconstruct tables; transition tx states) — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Only committed transactions are redo candidates; uncommitted skipped — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Redo pre-replay validation (USA + FILE/INDX magic + allocated_size ∈ {1024,4096}); failure → drop record — uncorroborated — corroborate against `[MS-NTFS]`; fault-inject corrupted target blocks.
+- [ ] (2026-05-03) Locate target attribute by `(target_attribute, name)` using case-insensitive `$UpCase` comparison — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Attribute-not-found → create new attribute of specified type, 8-byte aligned — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Generic-copy dispatch: `memcpy(attr.data + redo_offset, redo_data, redo_length)` after bounds check — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Specialized opcodes: per-opcode logic or v1.0 emit `E_JOURNAL_SKIP` rather than misapply — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Re-apply USA protection and write the block back after each redo — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Replay order is strict LSN order across the log — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Finalization: flush MFT/$Bitmap/index caches; write fresh restart with `Flags |= CLEAN_DISMOUNT` and updated `CurrentLsn` — uncorroborated — corroborate against `[MS-NTFS]`.
+- [ ] (2026-05-03) Reference replay-engine pseudocode (find_latest_restart_page → walk records → dispatch on redo_op → memcpy → re-USA → write) — uncorroborated — corroborate against `[MS-NTFS]` and observed Windows replay behaviour.
+- [ ] (2026-05-03) Generic CRC-keyed roll-forward / no-op WAL recovery loop (used by repair tool's internal WAL, not `$LogFile` itself) — uncorroborated — internal contract; corroborate against standard WAL recovery literature.
+- [ ] (2026-05-03) `ntfs.sys` mount path: read both restart pages, validate `RSTR`+USA, pick higher `CurrentLsn`, check `CLEAN_DISMOUNT` to skip replay — uncorroborated — corroborate against `[MSDN]`/`[MS-NTFS]` and black-box ntfs.sys observation.
+- [ ] (2026-05-03) `$UsnJrnl` carries two named `$DATA` streams (`$Max` header and `$J` data) — uncorroborated — corroborate against `[MS-FSCC §2.3]`.
+- [ ] (2026-05-03) `$UsnJrnl` absent or `$J` size = 0 → silently skip the advisory scan — uncorroborated — corroborate against `[MS-FSCC §2.3]`.
+- [ ] (2026-05-03) `$UsnJrnl` parsing failure must never abort repair; advisory path is optional — uncorroborated — implementation policy.
+- [ ] (2026-05-03) Validate `MajorVersion`/`MinorVersion`/`RecordLength`; malformed records silently skipped — uncorroborated — corroborate against `[MS-FSCC §2.3.6]`.
+- [ ] (2026-05-03) Reject `RecordLength > 65 536` and `FileNameLength > 1024` to avoid buffer overflow on malicious volumes — uncorroborated — fuzz `$UsnJrnl` parser; corroborate against `[MS-FSCC]` upper bounds.
+- [ ] (2026-05-03) Staleness rule 1: `Usn` older than highest USN in `$MFT_BITMAP` or `$J` stream header — uncorroborated — corroborate against `[MS-FSCC §2.3]`.
+- [ ] (2026-05-03) Staleness rule 2: `TimeStamp` older than MFT record's `$STANDARD_INFORMATION.LastModificationTime` — uncorroborated — corroborate against `[MS-FSCC]`/`[MS-NTFS]`.
+- [ ] (2026-05-03) Stale records are advisory only — usable as filename hints for orphan recovery, never ground truth for structural repair — uncorroborated — implementation policy.
+- [ ] (2026-05-03) `$UsnJrnl` failure-mode table (disabled/wrapped/collision/corrupt-runs/multiple-records) and engine reactions — uncorroborated — implementation policy; corroborate against `[MS-FSCC]`.
+- [ ] (2026-05-03) `USN_RECORD_V2` is variable-length, packed sequentially in `$J` — uncorroborated — corroborate against `[MS-FSCC §2.3.6]`.
+- [ ] (2026-05-03) `USN_RECORD_V2` field layout (RecordLength, MajorVersion, MinorVersion, FileReferenceNumber, ParentFileReferenceNumber, Usn, TimeStamp, Reason, SourceInfo, SecurityId, FileAttributes, FileNameLength, FileNameOffset, FileName) — uncorroborated — corroborate against `[MS-FSCC §2.3.6]`.
+- [ ] (2026-05-03) `MajorVersion` MUST be `2`; other versions skipped — uncorroborated — corroborate against `[MS-FSCC §2.3.6]`.
+- [ ] (2026-05-03) `RecordLength` constraint `0x3C ≤ RecordLength ≤ 0xFFFF` — uncorroborated — corroborate against `[MS-FSCC §2.3.6]`.
+- [ ] (2026-05-03) `FileNameOffset` MUST be `0x3C` for V2; `FileNameLength ≤ RecordLength - FileNameOffset` — uncorroborated — corroborate against `[MS-FSCC §2.3.6]`.
+- [ ] (2026-05-03) `FileReferenceNumber` packing: lower 48 bits = MFT index, upper 16 bits = sequence — uncorroborated — corroborate against `[MS-FSCC]`/`[MS-NTFS]`.
+- [ ] (2026-05-03) Cross-check FRN sequence against MFT-record sequence to detect stale (slot-recycled) records — uncorroborated — corroborate against `[MS-FSCC]`.
+
+### §6 Special streams
+
+- [ ] (2026-05-03) Attribute type codes `0x40` / `0x50` / `0x60` / `0x70` layout — `[OBSERVED: src/record_build.rs]` covers the writer; needs `[MS-FSCC §2.4]` / `[MS-NTFS]` corroboration of header offsets.
+- [ ] (2026-05-03) LZNT1 `[MS-XCA §2.5]` citation — used in [uncorroborated]; verify section number and that the algorithm matches the public Microsoft spec verbatim.
+- [ ] (2026-05-03) Compressed-attribute `compression_unit_exponent` field offset within the non-resident attribute header — the exponent semantics are documented; the offset is not — proposed test: byte-diff a compressed `$DATA` attribute against `[MS-NTFS §2.4.4]`.
+- [ ] (2026-05-03) `valid_data_length` semantics for compressed streams — whether VDL is in uncompressed or compressed coordinates — proposed test: write a compressed file with `VDL < data_size`, read past VDL, observe whether zeroes come from the decompressor or the stream.
+- [ ] (2026-05-03) Compressed `$DATA` run-list shape (real runs followed by trailing sparse pad to CU boundary) — [uncorroborated] describes the philosophy; bit-for-bit field offsets are `[UNVERIFIED]` against `[MS-NTFS]`.
+- [ ] (2026-05-03) ADS stream-name encoding (UTF-16LE between resident header and value/run-list) — `[MS-FSCC §2.4.4]` `[UNVERIFIED]` — proposed test: byte-diff a named-stream attribute against MS-FSCC.
+- [ ] (2026-05-03) Per-file EA total size limit (typically 64 KiB across all FEAs) — `[MS-FSCC]` `[UNVERIFIED]` — proposed test: write progressively larger EA sets until Windows rejects.
+- [ ] (2026-05-03) `EFS_CERTIFICATE_BLOB` per-entry layout — [uncorroborated] names the type but does not enumerate fields — needs WDK `ntifs.h` cross-reference.
+- [ ] (2026-05-03) Reparse-tag header GUID-presence rule (third-party tags only, +0x08 for 16 bytes) — [uncorroborated] describes convention; `[MS-FSCC §2.1.2]` `[UNVERIFIED]` — proposed test: read a third-party reparse attribute and confirm GUID at +0x08.
+- [ ] (2026-05-03) Reparse tag bit layout (M=31, R=30, N=29, D=28, etc.) — only bit 31 (Microsoft vs third-party) is documented in our sources — needs `[MS-FSCC §2.1.2.1]`.
+- [ ] (2026-05-03) `IO_REPARSE_TAG_WOF` (`0x80000017`), `_APPEXECLINK` (`0x8000001B`), `_LX_SYMLINK` (`0xA000001D`) — present in `src/record_build.rs::reparse_tag` but not yet enumerated — proposed test: cross-check `[MS-FSCC §2.1.2.1]`.
+- [ ] (2026-05-03) `$Secure` introduction at NTFS 3.0 (vs per-record `$SECURITY_DESCRIPTOR` in 1.2) — version-cutover claim — needs `[MS-NTFS]` corroboration.
+- [ ] (2026-05-03) `SECURITY_DESCRIPTOR_RELATIVE` body inside `$SDS` entries — uncorroborated; defer to `[MS-DTYP §2.4.6]` for an entry-level reader.
+- [ ] (2026-05-03) `$VOLUME_INFORMATION` payload layout (offsets / fields beyond major/minor/flags) — `[MS-NTFS]` `[UNVERIFIED]` — proposed test: byte-diff against a `format.com` reference volume.
+- [ ] (2026-05-03) `$VOLUME_INFORMATION` flag-bit values (`VOLUME_DIRTY=0x0001`, `VOLUME_RESIZE_LOG_FILE=0x0002`, etc.) — conventional public values listed in §6 — needs `[MS-NTFS]` confirmation.
+- [ ] (2026-05-03) NTFS 1.2 / 3.0 / 3.1 cutover — exact Windows-version mapping for the `$Secure` introduction.
+- [ ] (2026-05-03) Per-volume "volume GUID" — confirm absence of any `$Volume` GUID attribute distinct from the 8-byte boot-sector volume serial number.
+- [ ] (2026-05-03) `$Extend` directory vs file structural shape — `docs/chkdsk-debugging.md` flags a difference between writer output and Microsoft reference — proposed test: diff `$Extend` MFT record body against a fresh `format.com` reference dump.
+- [ ] (2026-05-03) `$Extend` child record numbers (24 = `$Quota`, 25 = `$ObjId`, 26 = `$Reparse`) — needs cross-version corroboration; conventional values used.
+- [ ] (2026-05-03) `$OBJECT_ID` attribute optional-fields rule — public layout shows 16/16/16/16; rule for when `BirthVolumeId` / `BirthObjectId` / `DomainId` are present is `[UNVERIFIED]`.
+- [ ] (2026-05-03) `$Extend\$ObjId:$O` index entry layout (key = 16-byte GUID, value = MFT reference) — uncorroborated; conventional layout used.
+- [ ] (2026-05-03) `$Extend\$Quota:$Q` quota-record body layout — uncorroborated; conventional layout used (`[NTFSCOM: $Quota]`).
+- [ ] (2026-05-03) `$Extend\$Quota` requires NTFS 3.0+ — version cutoff `[UNVERIFIED]`.
+- [ ] (2026-05-03) `$Extend\$Reparse:$R` index entry layout (key = `(ReparseTag, FileReference)`) — index existence is corroborated; entry layout is not.
+- [ ] (2026-05-03) `$DATA` per-attribute validation independence (corruption in a named stream must not take down the unnamed stream or the record) — uncorroborated — proposed test: corrupt a named `$DATA` run-list, mount on Windows, observe whether the primary stream remains readable.
+- [ ] (2026-05-03) Directories may legitimately carry named `$DATA` attributes (e.g. `Zone.Identifier`) — uncorroborated — proposed test: write a directory with `$INDEX_ROOT` plus a named `$DATA`, mount on Windows, verify both coexist.
+- [ ] (2026-05-03) LZNT1 chunk header bit layout (bit 15 IsCompressed, bits 12–14 signature `0b011`, bits 0–11 ChunkSize-1) — uncorroborated — proposed test: byte-diff a compressed `$DATA` chunk against `[MS-XCA §2.5]`.
+- [ ] (2026-05-03) LZNT1 stream terminator `0x0000` semantics — uncorroborated — proposed test: emit a stream ending with `0x0000` and confirm Windows decompresses to expected length.
+- [ ] (2026-05-03) LZNT1 tagged-group flag-byte encoding (LSB-first, 0=literal, 1=back-reference) — uncorroborated — proposed test: cross-check `[MS-XCA §2.5]` against decoder.
+- [ ] (2026-05-03) LZNT1 dynamic displacement/length split rule (`n = max(ceil(log2(pos+1)), 4)`) — uncorroborated — proposed test: round-trip a known input through `[MS-XCA §2.5]` reference and confirm split point.
+- [ ] (2026-05-03) LZNT1 termination/bounds rules (`0x0000` terminator, `Data_Size` bound, displacement-before-start corruption) — uncorroborated — proposed test: synthesise corrupt streams covering each case, observe Windows behaviour.
+- [ ] (2026-05-03) `$EA_INFORMATION` cross-validation rules (`EaPackedLength` sum, `NEED_EA` count match, destructive repair) — uncorroborated — proposed test: write mismatched `$EA` / `$EA_INFORMATION`, observe chkdsk verdict.
+- [ ] (2026-05-03) `$EA` 5-rule validation chain (chain integrity, name bounds, ASCII-only names, NUL terminator, cross-validation) — uncorroborated — proposed test: synthesise volume violating each rule, observe chkdsk verdict.
+- [ ] (2026-05-03) `$EA` corruption policy: forbidden to truncate the FEA chain; `$EA` and `$EA_INFORMATION` deleted together — uncorroborated — proposed test: capture chkdsk repair behaviour on a partial FEA chain.
+- [ ] (2026-05-03) `$LOGGED_UTILITY_STREAM` as opaque internally-logged byte stream used by Windows sub-systems (`$EFS`, `$TXF_DATA`) — uncorroborated — needs `[MS-NTFS]` corroboration.
+- [ ] (2026-05-03) `$LOGGED_UTILITY_STREAM` treatment policy (parse like named `$DATA`, never interpret payload, attribute-local deletion on run-list corruption) — uncorroborated — proposed test: corrupt a `$LOGGED_UTILITY_STREAM` run-list, observe chkdsk verdict.
+- [ ] (2026-05-03) Zombie protection: a file with only `$LOGGED_UTILITY_STREAM` and no `$DATA` is not a zombie (encrypted-file invariant) — uncorroborated — proposed test: dump an EFS-encrypted file's MFT record and confirm both attributes present.
+- [ ] (2026-05-03) `$TXF_DATA` handling rules (no explicit support; LSN-bounds check; delete on out-of-bounds) — uncorroborated — proposed test: capture Windows behaviour on a corrupt `$TXF_DATA` payload.
+- [ ] (2026-05-03) `EFS_ATTR_HEADER` 24-byte fixed prefix (Length, State, Version, CryptoApiVersion, DDF_Offset, DRF_Offset, Reserved) — uncorroborated — proposed test: dump an EFS file's attribute, byte-diff against the prefix layout.
+- [ ] (2026-05-03) DDF/DRF body layout at named offsets (Count + `EFS_CERTIFICATE_BLOB[]`) — uncorroborated — needs WDK `ntifs.h` cross-reference.
+- [ ] (2026-05-03) EFS lightweight header validation (Length match, State whitelist, Version 2/3, DDF/DRF offset bounds) — uncorroborated — proposed test: corrupt each field in turn, observe chkdsk verdict.
+- [ ] (2026-05-03) `$REPARSE_POINT` redirects file/directory accesses; corruption can make a tree inaccessible — uncorroborated — needs `[MS-FSCC §2.1.2]` corroboration.
+- [ ] (2026-05-03) `$REPARSE_POINT` validation rules (tag well-formedness, size ≤ 16384, SI flag consistency, `$Reparse` index cross-check) — uncorroborated — proposed test: synthesise volumes violating each rule, observe chkdsk verdict.
+- [ ] (2026-05-03) `$REPARSE_POINT` corruption-action matrix (delete attribute on bad tag/size, toggle SI flag on flag mismatch, re-insert missing `$Reparse` entry) — uncorroborated — proposed test: capture chkdsk repair behaviour on each case.
+- [ ] (2026-05-03) Reparse-point circular-reference detection (Floyd / tortoise-and-hare, `E_REPARSE_CIRCULAR`) — uncorroborated — proposed test: build a self-referential reparse chain and observe Windows behaviour.
+- [ ] (2026-05-03) `ReparseTag` is a 32-bit value — uncorroborated — needs `[MS-FSCC §2.1.2.1]` corroboration.
+- [ ] (2026-05-03) Reparse tag table (MOUNT_POINT 0xA0000003, SYMLINK 0xA000000C, DEDUP 0x80000013, NFS 0x80000014, WCI 0x80000018, CLOUD 0x9000001A) — uncorroborated — needs `[MS-FSCC §2.1.2.1]` corroboration.
+- [ ] (2026-05-03) Reparse-tag-table preamble: tags as the minimum repair-engine acceptance set — uncorroborated — needs `[MS-FSCC §2.1.2.1]` corroboration.
+- [ ] (2026-05-03) `MOUNT_POINT_REPARSE_DATA_BUFFER` payload layout (substitute / print name offsets+lengths, PathBuffer) — uncorroborated — needs `[MS-FSCC §2.1.2.5]` corroboration.
+- [ ] (2026-05-03) Mount-point/symlink payload validation (offset+length ≤ ReparseDataLength-8, WCHAR alignment) — uncorroborated — proposed test: build a payload violating each invariant, observe Windows reaction.
+- [ ] (2026-05-03) `SYMBOLIC_LINK_REPARSE_DATA_BUFFER` adds a 4-byte `Flags` field after the four length/offset fields (0=absolute, 1=relative) — uncorroborated — needs `[MS-FSCC §2.1.2.4]` corroboration.
+- [ ] (2026-05-03) Dedup-stub data-run policy (`Allocated_Size = 0` with `Data_Size != 0` is valid when `IO_REPARSE_TAG_DEDUP` is present) — uncorroborated — proposed test: dump a deduplicated file's MFT record on a Windows Server reference volume.
+- [ ] (2026-05-03) `$Secure` streams (`$SDS` packed catalogue, `$SII` keyed by `security_id`, `$SDH` keyed by hash+id) — uncorroborated — needs `[MS-NTFS]` corroboration; dump a freshly formatted volume.
+- [ ] (2026-05-03) `$Secure` validation pass (linear `$SDS` walk, 256 KiB boundary check, self-offset check with mirror fallback, hash recompute, `$SII`/`$SDH` orphan deletion) — uncorroborated — proposed test: capture chkdsk's `$Secure` validation behaviour.
+- [ ] (2026-05-03) `compute_sii_hash` algorithm (rotate-right-29 accumulator with 32-bit truncation over 4-byte LE dwords of the SD body) — uncorroborated — proposed test: implement the hash, recompute against a Microsoft-format reference volume's `$SDS.hash_key` field.
+- [ ] (2026-05-03) `$SDS` entry layout (hash_key, security_id, self-offset, length, SD body, 16-byte pad) — uncorroborated — proposed test: dump `$SDS` from a Microsoft-format reference volume, verify field layout.
+- [ ] (2026-05-03) `$SDS` 256 KiB mirror (every entry duplicated at +0x40000; primary-preferred with mirror fallback; entries must not span boundary) — uncorroborated — proposed test: dump `$SDS` from a Microsoft-format reference volume and confirm mirror.
+- [ ] (2026-05-03) `$ObjId` index repair semantics (re-insert missing `:$O` entry; delete orphan `:$O` whose target lacks matching `$OBJECT_ID`) — uncorroborated — proposed test: capture chkdsk behaviour on each fault.
+- [ ] (2026-05-03) `$Reparse` cross-check rule (every file with `$REPARSE_POINT` MUST have a matching `:$R` entry; orphans deleted) — uncorroborated — proposed test: capture chkdsk verdict on a missing/orphan `:$R` entry.
