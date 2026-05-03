@@ -416,13 +416,23 @@ crash-replicating inputs surface.
 `bench/write_at_1gb.rs`, `bench/create_many.rs`. Detects performance
 regressions as we refactor.
 
-### §5.4 CI matrix expansion
+### §5.4 CI matrix expansion (partly resolved)
 
-Today: Ubuntu-latest only (test job). Windows chkdsk validation
-already wired up (tag-/manual-triggered). Still missing:
-**macOS-latest** (NTFS driver binary compat differs) and an MSRV /
-stable Rust matrix. ~30 lines of `ci.yml` plus making sure the
-fixture-generation pipeline runs on macOS.
+`test` job now runs on `ubuntu-latest` AND `macos-latest`, with
+`fail-fast: false` so one OS failing doesn't kill the other. The
+cargo-deny step is gated to ubuntu only since licence checks don't
+vary by OS.
+
+Still pending:
+
+- **MSRV check.** Pin a minimum Rust version in `rust-toolchain.toml`
+  and add a separate `runs-on: ubuntu-latest` job that builds with
+  that version. Catches accidental MSRV bumps when a new clippy lint
+  or std API gets used.
+- **Windows-runner test build.** `test` currently only runs on
+  Linux + macOS; a `cargo test --release --lib` on `windows-latest`
+  would catch path-separator / file-mode regressions before they
+  hit the validate-mkfs-windows chkdsk job.
 
 ### §5.5 Sanitizer runs (resolved)
 

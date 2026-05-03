@@ -17,8 +17,9 @@ jobs:
     name: test-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -44,8 +45,9 @@ jobs:
       # the MIT / Apache / BSD / ISC / Unicode / Zlib / CC0 / 0BSD
       # allowlist in deny.toml, or if a yanked / advisory-flagged
       # version creeps in. Pairs with the project's "no GPL/LGPL/AGPL"
-      # policy.
+      # policy. Run once on ubuntu — license check doesn't vary by OS.
       - name: cargo-deny check
+        if: matrix.os == 'ubuntu-latest'
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
