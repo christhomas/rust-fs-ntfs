@@ -4,9 +4,9 @@
 //! values are arbitrary bytes. On disk they're stored in `$EA` as a
 //! packed list of FILE_FULL_EA_INFORMATION entries, 4-byte aligned.
 //!
-//! Reference (no GPL code consulted):
-//! * [Flatcap $EA](https://flatcap.github.io/linux-ntfs/ntfs/attributes/ea.html)
-//! * MS-FSCC 2.4.15 FILE_FULL_EA_INFORMATION
+//! References (no GPL code consulted): MS-FSCC 2.4.15
+//! FILE_FULL_EA_INFORMATION; $EA / $EA_INFORMATION attribute layout
+//! per Windows Internals 7th ed. ch. "NTFS On-Disk Structure".
 
 use crate::attr_io::{self, AttrType};
 

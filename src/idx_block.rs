@@ -4,9 +4,9 @@
 //! with its own "INDX" magic and USA fixup. Block size is fixed per
 //! directory by the `index_block_size` field in `$INDEX_ROOT`.
 //!
-//! References (no GPL code consulted):
-//! * [Flatcap INDX Record](https://flatcap.github.io/linux-ntfs/ntfs/concepts/index_record.html)
-//! * [Flatcap $INDEX_ALLOCATION](https://flatcap.github.io/linux-ntfs/ntfs/attributes/index_allocation.html)
+//! References (no GPL code consulted): INDX record format and
+//! $INDEX_ALLOCATION layout per Windows Internals 7th ed.
+//! ch. "NTFS On-Disk Structure" and MS-FSCC.
 
 use crate::attr_io::{self, AttrType};
 use crate::block_io::{BlockIo, PathIo};

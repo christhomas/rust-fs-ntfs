@@ -8,12 +8,12 @@
 //!
 //! 1. [`clear_dirty`] — clear the `VOLUME_IS_DIRTY` flag in
 //!    `$Volume/$VOLUME_INFORMATION` (bit `0x0001` of the u16 `flags` field,
-//!    per MS-FSCC / [Flatcap $VOLUME_INFORMATION]). Without this, Windows
+//!    per MS-FSCC and Windows Internals 7th ed.). Without this, Windows
 //!    and several NTFS drivers refuse to mount.
 //! 2. [`reset_logfile`] — overwrite `$LogFile`'s `$DATA` with `0xFF` bytes.
 //!    The all-`0xFF` pattern is the format-level "no transactions pending,
-//!    reinitialize on mount" signal documented at
-//!    [Flatcap $LogFile](https://flatcap.github.io/linux-ntfs/ntfs/files/logfile.html).
+//!    reinitialize on mount" signal documented in Windows Internals
+//!    7th ed. ch. "NTFS Logging".
 //!
 //! Neither operation replays in-progress transactions. If the crash
 //! happened mid-MFT-update, whatever metadata hit the disk survives; the
@@ -44,19 +44,19 @@ use ntfs::structured_values::NtfsVolumeFlags;
 use ntfs::{KnownNtfsFileRecordNumber, Ntfs, NtfsAttributeType};
 
 /// Offset of the 2-byte `flags` field within the `$VOLUME_INFORMATION` structure.
-/// Layout (MS-FSCC / Flatcap): reserved(8) + major(1) + minor(1) + flags(2).
+/// Layout (MS-FSCC / Windows Internals 7th ed.): reserved(8) + major(1) + minor(1) + flags(2).
 const VOLUME_FLAGS_OFFSET: u64 = 10;
 
 /// Offset of the `value_offset` u16 field inside an NTFS resident attribute
-/// header ([Flatcap Resident Attribute](https://flatcap.github.io/linux-ntfs/ntfs/concepts/attribute_header.html)).
+/// header (per Windows Internals 7th ed. ch. "NTFS On-Disk Structure").
 /// Layout: type(4) + length(4) + non_resident(1) + name_length(1) +
 /// name_offset(2) + flags(2) + attribute_id(2) + value_length(4) +
 /// value_offset(2) + resident_flags(1) + reserved(1).
 const RESIDENT_ATTR_VALUE_OFFSET_FIELD: u64 = 0x14;
 
 /// NTFS format-level "empty log" sentinel byte. An all-`0xFF` `$LogFile`
-/// is the documented "no transactions pending" signal at
-/// [Flatcap $LogFile](https://flatcap.github.io/linux-ntfs/ntfs/files/logfile.html).
+/// is the documented "no transactions pending" signal per Windows
+/// Internals 7th ed. ch. "NTFS Logging".
 const LOGFILE_EMPTY_FILL: u8 = 0xFF;
 
 /// Chunk size used when overwriting `$LogFile` and when emitting progress

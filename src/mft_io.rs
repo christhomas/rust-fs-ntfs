@@ -1,11 +1,10 @@
 //! Low-level MFT-record read-modify-write with Update Sequence Array (USA)
 //! fixup. Primary primitive for any write that touches an MFT record.
 //!
-//! References (no GPL code consulted):
-//! * [Flatcap Fixup](https://flatcap.github.io/linux-ntfs/ntfs/concepts/fixup.html)
-//! * [Flatcap Boot Sector](https://flatcap.github.io/linux-ntfs/ntfs/files/boot.html)
-//! * [Flatcap File Record](https://flatcap.github.io/linux-ntfs/ntfs/concepts/file_record.html)
-//! * MS-FSCC
+//! References (no GPL code consulted): Multi-sector update sequence
+//! ("fixup"), boot sector / BPB layout, and FILE_RECORD_SEGMENT_HEADER
+//! per Windows Internals 7th ed. ch. "NTFS On-Disk Structure" and
+//! MS-FSCC.
 //!
 //! **Why fixup matters.** NTFS stores multi-sector records (MFT records,
 //! INDEX_ALLOCATION blocks) with the last 2 bytes of every 512-byte sector
@@ -98,7 +97,7 @@ pub fn mft_record_offset(params: &BootParams, record_number: u64) -> u64 {
     params.mft_lcn * params.cluster_size + record_number * params.file_record_size
 }
 
-/// In-memory MFT record header offsets (Flatcap).
+/// In-memory MFT record header offsets (per Windows Internals 7th ed.).
 const FILE_MAGIC: &[u8; 4] = b"FILE";
 const OFF_USA_OFFSET: usize = 0x04;
 const OFF_USA_COUNT: usize = 0x06;

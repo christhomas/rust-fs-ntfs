@@ -5,9 +5,9 @@
 //! through upstream parsers. Upstream is used for path → record-number
 //! resolution; once inside the RMW callback, we walk attributes here.
 //!
-//! References (no GPL code consulted): [Flatcap Attribute Header](https://flatcap.github.io/linux-ntfs/ntfs/concepts/attribute_header.html),
-//! [Flatcap File Record](https://flatcap.github.io/linux-ntfs/ntfs/concepts/file_record.html),
-//! MS-FSCC.
+//! References (no GPL code consulted): NTFS attribute-header layout
+//! and FILE_RECORD_SEGMENT_HEADER per Windows Internals 7th ed.
+//! ch. "NTFS On-Disk Structure" and MS-FSCC.
 
 /// NTFS attribute type codes we care about. Values match upstream's
 /// `NtfsAttributeType` and MS-FSCC.

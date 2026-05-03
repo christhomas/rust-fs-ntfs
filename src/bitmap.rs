@@ -10,9 +10,8 @@
 //! `data_runs::decode_runs` walker to translate cluster-range VCNs to
 //! on-disk byte offsets, then reads / writes the bits directly.
 //!
-//! References (no GPL code consulted):
-//! * [Flatcap $Bitmap](https://flatcap.github.io/linux-ntfs/ntfs/files/bitmap.html)
-//! * MS-FSCC
+//! References (no GPL code consulted): $Bitmap layout per Windows
+//! Internals 7th ed. ch. "NTFS On-Disk Structure" and MS-FSCC.
 //!
 //! **Scope.** Allocate / free contiguous cluster ranges, find the first
 //! contiguous free run of `N` clusters. No best-fit or locality

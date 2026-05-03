@@ -8,8 +8,8 @@
 //! it's non-resident and stored in clusters via its own data-run list.
 //! Both cases are handled here.
 //!
-//! References (no GPL code consulted): [Flatcap $Bitmap](https://flatcap.github.io/linux-ntfs/ntfs/files/bitmap.html),
-//! [Flatcap $MFT](https://flatcap.github.io/linux-ntfs/ntfs/files/mft.html).
+//! References (no GPL code consulted): $Bitmap and $MFT layout per
+//! Windows Internals 7th ed. ch. "NTFS On-Disk Structure" and MS-FSCC.
 
 use crate::attr_io::{self, AttrType};
 use crate::block_io::{BlockIo, PathIo};

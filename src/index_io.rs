@@ -2,9 +2,9 @@
 //! post-fixup MFT record buffer — used from inside `update_mft_record`
 //! mutator closures.
 //!
-//! Reference (no GPL code consulted): [Flatcap Indexes](https://flatcap.github.io/linux-ntfs/ntfs/concepts/indexes.html),
-//! [Flatcap $INDEX_ROOT](https://flatcap.github.io/linux-ntfs/ntfs/attributes/index_root.html),
-//! [Flatcap $FILE_NAME](https://flatcap.github.io/linux-ntfs/ntfs/attributes/file_name.html).
+//! References (no GPL code consulted): NTFS index B-tree layout,
+//! $INDEX_ROOT, and $FILE_NAME attribute formats per Windows Internals
+//! 7th ed. ch. "NTFS On-Disk Structure" and MS-FSCC.
 
 use crate::attr_io::{self, AttrType};
 

@@ -35,7 +35,7 @@ pub struct FileTimes {
     pub access: Option<u64>,
 }
 
-// $STANDARD_INFORMATION field offsets (Flatcap /ntfs/attributes/standard_information.html).
+// $STANDARD_INFORMATION field offsets (per Windows Internals 7th ed. and MS-FSCC).
 const SI_CREATION: usize = 0x00;
 const SI_MODIFICATION: usize = 0x08;
 const SI_MFT_MODIFICATION: usize = 0x10;
@@ -363,7 +363,7 @@ pub fn truncate_io<T: BlockIo + ?Sized>(
     truncate_by_record_number_io(io, rec, new_size)
 }
 
-/// Attribute-header offsets for non-resident lengths (Flatcap).
+/// Attribute-header offsets for non-resident lengths (per Windows Internals 7th ed.).
 const NONRES_ALLOCATED_LENGTH: usize = 0x28;
 const NONRES_DATA_LENGTH: usize = 0x30;
 const NONRES_INITIALIZED_LENGTH: usize = 0x38;

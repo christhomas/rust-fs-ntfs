@@ -8,11 +8,9 @@
 //! The caller then writes the bytes to disk (raw) and separately flips
 //! the `$MFT:$Bitmap` bit + inserts a parent-directory index entry.
 //!
-//! References (no GPL code consulted):
-//! * [Flatcap File Record](https://flatcap.github.io/linux-ntfs/ntfs/concepts/file_record.html)
-//! * [Flatcap $STANDARD_INFORMATION](https://flatcap.github.io/linux-ntfs/ntfs/attributes/standard_information.html)
-//! * [Flatcap $FILE_NAME](https://flatcap.github.io/linux-ntfs/ntfs/attributes/file_name.html)
-//! * [Flatcap $DATA](https://flatcap.github.io/linux-ntfs/ntfs/attributes/data.html)
+//! References (no GPL code consulted): FILE_RECORD_SEGMENT_HEADER and
+//! the $STANDARD_INFORMATION / $FILE_NAME / $DATA attribute layouts per
+//! Windows Internals 7th ed. ch. "NTFS On-Disk Structure" and MS-FSCC.
 
 /// Encode an NTFS file-reference from (record_number, sequence_number).
 /// The low 48 bits are the record number; the high 16 are the sequence.

@@ -7,10 +7,9 @@
 //! [`mft_io::update_mft_record`](crate::mft_io::update_mft_record)
 //! mutator so fixup is re-applied and the record is fsync'd atomically.
 //!
-//! References (no GPL code consulted):
-//! * [Flatcap File Record](https://flatcap.github.io/linux-ntfs/ntfs/concepts/file_record.html)
-//! * [Flatcap Attribute Header](https://flatcap.github.io/linux-ntfs/ntfs/concepts/attribute_header.html)
-//! * MS-FSCC
+//! References (no GPL code consulted): FILE_RECORD_SEGMENT_HEADER
+//! and NTFS attribute-header layout per Windows Internals 7th ed.
+//! ch. "NTFS On-Disk Structure" and MS-FSCC.
 
 use crate::attr_io::attr_off;
 
