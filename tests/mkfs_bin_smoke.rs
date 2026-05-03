@@ -1,4 +1,4 @@
-//! Smoke test for the `mkfs.ntfs` (mkfs_ntfs) binary.
+//! Smoke test for the `rust-ntfs format` binary subcommand.
 //!
 //! Pre-creates a 64 MiB regular file, runs the binary against it with a
 //! known label + serial, then re-opens the file via the upstream `ntfs`
@@ -34,7 +34,7 @@ fn unique_tmp_path(suffix: &str) -> std::path::PathBuf {
 
 #[test]
 fn mkfs_bin_formats_a_pre_sized_file_and_parses_clean() {
-    let bin = env!("CARGO_BIN_EXE_mkfs_ntfs");
+    let bin = env!("CARGO_BIN_EXE_rust-ntfs");
     let img = unique_tmp_path("img");
     let img_str = img.to_string_lossy().into_owned();
 
@@ -46,14 +46,21 @@ fn mkfs_bin_formats_a_pre_sized_file_and_parses_clean() {
     }
 
     let out = Command::new(bin)
-        .args(["-L", TEST_LABEL, "--serial", TEST_SERIAL_HEX, &img_str])
+        .args([
+            "format",
+            "-L",
+            TEST_LABEL,
+            "--serial",
+            TEST_SERIAL_HEX,
+            &img_str,
+        ])
         .output()
-        .expect("spawn mkfs_ntfs");
+        .expect("spawn rust-ntfs format");
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         panic!(
-            "mkfs_ntfs failed: status={:?}\nstderr:\n{stderr}",
+            "rust-ntfs format failed: status={:?}\nstderr:\n{stderr}",
             out.status
         );
     }
@@ -85,13 +92,14 @@ fn mkfs_bin_create_size_creates_then_formats() {
     // --create-size end-to-end: point at a non-existent path with
     // --create-size 64M, expect the binary to create + size + format.
     // No prior `truncate` step.
-    let bin = env!("CARGO_BIN_EXE_mkfs_ntfs");
+    let bin = env!("CARGO_BIN_EXE_rust-ntfs");
     let img = unique_tmp_path("createsize");
     let img_str = img.to_string_lossy().into_owned();
     let _ = std::fs::remove_file(&img);
 
     let out = Command::new(bin)
         .args([
+            "format",
             "--create-size",
             "64M",
             "--serial",
@@ -99,10 +107,10 @@ fn mkfs_bin_create_size_creates_then_formats() {
             &img_str,
         ])
         .output()
-        .expect("spawn mkfs_ntfs --create-size");
+        .expect("spawn rust-ntfs format --create-size");
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        panic!("mkfs_ntfs --create-size failed: {stderr}");
+        panic!("rust-ntfs format --create-size failed: {stderr}");
     }
 
     let meta = std::fs::metadata(&img).expect("formatted file exists");
@@ -123,7 +131,7 @@ fn mkfs_bin_create_size_creates_then_formats() {
 
 #[test]
 fn mkfs_bin_dry_run_does_not_modify_file() {
-    let bin = env!("CARGO_BIN_EXE_mkfs_ntfs");
+    let bin = env!("CARGO_BIN_EXE_rust-ntfs");
     let img = unique_tmp_path("dryrun");
     let img_str = img.to_string_lossy().into_owned();
 
@@ -131,12 +139,12 @@ fn mkfs_bin_dry_run_does_not_modify_file() {
     std::fs::write(&img, &pattern).expect("seed pattern");
 
     let out = Command::new(bin)
-        .args(["-n", "-L", "DRYRUN", &img_str])
+        .args(["format", "-n", "-L", "DRYRUN", &img_str])
         .output()
-        .expect("spawn mkfs_ntfs -n");
+        .expect("spawn rust-ntfs format -n");
     assert!(
         out.status.success(),
-        "dry-run mkfs_ntfs should exit 0; stderr: {}",
+        "dry-run rust-ntfs format should exit 0; stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 

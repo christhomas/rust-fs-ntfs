@@ -1,7 +1,7 @@
 # Local Windows test pipeline
 
 A local mirror of the GitHub Actions `validate-mkfs-windows` job. Lets
-us iterate on `mkfs_ntfs` against Microsoft's `chkdsk` in **~30-90 s**
+us iterate on `rust-ntfs format` against Microsoft's `chkdsk` in **~30-90 s**
 per cycle instead of the ~2-4 min CI roundtrip, and without burning
 Actions minutes on every guess.
 
@@ -11,7 +11,7 @@ Every run, end-to-end:
 
 1. Tar the source tree from the Mac and stream it via SSH onto the
    Windows VM.
-2. SSH in, build `mkfs_ntfs.exe` against the gnullvm toolchain.
+2. SSH in, build `rust-ntfs.exe` against the gnullvm toolchain.
 3. Format an `nfs.img`, wrap in a GPT-partitioned VHDX (same layout
    `diskutil eraseDisk` produces on macOS), mount.
 4. **Format a parallel reference VHDX with Microsoft's own
@@ -23,7 +23,7 @@ Every run, end-to-end:
 7. Tar the `diag/` tree back to the Mac into a per-iteration tmp dir.
 
 The pipeline is the corroboration mechanism for the `corroborated-debug`
-skill -- every change to `mkfs_ntfs` must be backed by a byte-diff
+skill -- every change to `rust-ntfs format` must be backed by a byte-diff
 between our output and the Microsoft reference produced here.
 
 ## One-time setup
@@ -53,8 +53,8 @@ The two Rust-on-Windows targets are `aarch64-pc-windows-msvc` and
 - MSVC requires Visual Studio Build Tools (~3 GB) and Microsoft's
   commercial license acceptance.
 - gnullvm uses LLVM tooling end-to-end -- clean license, smaller
-  footprint, identical output for our use case (mkfs_ntfs is pure
-  Rust + `std::fs`, no Windows-API calls).
+  footprint, identical output for our use case (`rust-ntfs format` is
+  pure Rust + `std::fs`, no Windows-API calls).
 
 The only catch: rustup's gnullvm component ships `rust-lld` but
 expects an external `aarch64-w64-mingw32-clang` for build scripts.
@@ -91,7 +91,7 @@ DIAG_DIR=~/diags bash scripts/test-windows-local.sh
 The two binary files that matter most:
 
 - `diag/ours-mft-16recs.bin` -- 16 × 4 KiB MFT records from our
-  `mkfs_ntfs` output, starting at our `$MFT` location.
+  `rust-ntfs format` output, starting at our `$MFT` location.
 - `diag/reference-mft-16recs.bin` -- same 16 records from the
   Microsoft `format.com` reference.
 

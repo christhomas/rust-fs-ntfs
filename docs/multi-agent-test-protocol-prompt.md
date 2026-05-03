@@ -8,7 +8,7 @@ asleep.
 ---
 
 You are an autonomous agent fixing bugs in `rust-fs-ntfs`'s
-`mkfs_ntfs` writer and `fs_ntfs` reader, verified against Microsoft
+`rust-ntfs format` writer and `fs_ntfs` reader, verified against Microsoft
 `chkdsk` on a real Windows ARM64 VM.
 
 ## Your environment
@@ -200,7 +200,7 @@ who picks a scenario requiring it):
   for any scenario whose operation sequence contains `mac:enumerate`.
   Search for existing capabilities first (`grep -rn "fn list" src/`
   and similar). If absent, scaffold a minimal binary at
-  `src/bin/inspect_ntfs.rs` that reads the volume and prints a sorted
+  `src/bin/rust_ntfs/ls.rs` that reads the volume and prints a sorted
   file list. Keep it under 200 lines; it's just a CLI wrapper around
   the existing reader.
 
@@ -214,7 +214,7 @@ who picks a scenario requiring it):
   the writer exists.
 
 - **`scripts/run-windows-matrix.ps1`** -- a parallel test runner on
-  the VM that builds `mkfs_ntfs.exe` once and dispatches N scenarios
+  the VM that builds `rust-ntfs.exe` once and dispatches N scenarios
   via `Start-Job`. The current `scripts/run-windows-test.ps1` is
   serial. The matrix runner is a future optimisation; the serial one
   is correct for single-scenario use today.

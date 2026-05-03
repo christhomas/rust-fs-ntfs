@@ -11,39 +11,19 @@ readme = "README.md"
 name = "fs_ntfs"
 crate-type = ["staticlib", "rlib"]
 
-# Standalone CLI tool. Cross-platform — builds + runs identically on
+# Unified CLI — format / ls / touch / mkdir / write / rm / rmdir
+# subcommands. Cross-platform: builds and runs identically on
 # Linux/macOS/Windows because it only depends on this crate's own
-# pure-Rust format path. Distributed via Homebrew tap on macOS and
-# `cargo install` everywhere; the DiskJockey app does NOT bundle this
-# binary (App Store rules forbid bundling CLI tools), it routes through
-# FSKit's startFormat which calls the same format_filesystem() entry.
+# pure-Rust read/write paths. One binary so distribution (GitHub
+# Releases, Homebrew taps) ships a single artefact.
 #
-# Binary name uses underscore — Cargo's bin name field doesn't accept
-# dots. The Homebrew formula symlinks /usr/local/bin/mkfs.ntfs ->
-# mkfs_ntfs at install time so the user-visible command matches the
-# standard mkfs.ntfs CLI naming convention.
+# DiskJockey app does NOT bundle this binary (App Store rules forbid
+# bundling CLI tools); the desktop format flow routes through FSKit's
+# startFormat, which calls the same `format_filesystem()` entry point
+# the `format` subcommand uses.
 [[bin]]
-name = "mkfs_ntfs"
-path = "src/bin/mkfs_ntfs.rs"
-
-# Read-only enumerate of an NTFS image — wraps Filesystem::read_dir.
-# Used by the multi-agent test matrix's `mac:enumerate` operation
-# (see docs/multi-agent-test-protocol.md).
-[[bin]]
-name = "inspect_ntfs"
-path = "src/bin/inspect_ntfs.rs"
-
-# Mac-side write helper — wraps Filesystem::create_file/mkdir/
-# write_file_contents. Used by the test matrix's `mac:write` operation.
-[[bin]]
-name = "write_ntfs"
-path = "src/bin/write_ntfs.rs"
-
-# Mac-side delete helper — wraps Filesystem::unlink/rmdir. Used by the
-# test matrix's `mac:delete` operation.
-[[bin]]
-name = "delete_ntfs"
-path = "src/bin/delete_ntfs.rs"
+name = "rust-ntfs"
+path = "src/bin/rust_ntfs/main.rs"
 
 [dependencies]
 ntfs = { version = "0.4", default-features = false, features = ["std"] }
@@ -57,8 +37,8 @@ serde_json = "1"
 # test-matrix.json at runtime and emits one trial per
 # scenario, so the standard cargo test UI ("12 passed; 3 failed")
 # becomes the suite-level summary. On Windows the trial body shells
-# out to mkfs_ntfs / format.com / chkdsk; on non-Windows the trial
-# is reported as ignored.
+# out to `rust-ntfs format` / format.com / chkdsk; on non-Windows the
+# trial is reported as ignored.
 [[test]]
 name = "matrix"
 harness = false

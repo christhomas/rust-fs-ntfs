@@ -1,7 +1,7 @@
 # run-windows-test.ps1 -- local mirror of validate-mkfs-windows in CI.
 #
 # Designed for parity with `.github/workflows/ci.yml`'s validate-mkfs-windows
-# job: build mkfs_ntfs.exe, format an nfs.img, wrap in a GPT-partitioned
+# job: build rust-ntfs.exe, format an nfs.img, wrap in a GPT-partitioned
 # VHDX, mount, run chkdsk + a Microsoft format.com reference, dump every
 # diagnostic CI dumps, into ./diag/.
 #
@@ -52,12 +52,12 @@ $paramDump | Out-File -FilePath diag/params-received.txt -Encoding ASCII
 Write-Host "DEBUG-PARAMS: $paramDump"
 
 # --- Build ------------------------------------------------------------
-Write-Host "[1/6] Building mkfs_ntfs.exe ..."
+Write-Host "[1/6] Building rust-ntfs.exe ..."
 # Cargo writes informational "Compiling foo" lines to stderr, which under
 # $ErrorActionPreference=Stop becomes a fatal terminating error. Run the
 # build in a sub-scope where stderr is redirected to a file we capture
 # regardless of exit, and check $LASTEXITCODE explicitly.
-& cmd.exe /c "cargo build --release --bin mkfs_ntfs --quiet > diag\build.txt 2>&1"
+& cmd.exe /c "cargo build --release --bin rust-ntfs --quiet > diag\build.txt 2>&1"
 if ($LASTEXITCODE -ne 0) {
     Copy-Item diag\build.txt diag\build-failed.txt
     Get-Content diag\build-failed.txt | Out-Host
@@ -69,10 +69,10 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "[2/6] Generating nfs.img and wrapping in VHDX ..."
 $rawSize = $VolumeSizeMb * 1MB
 fsutil file createnew nfs.img $rawSize | Out-Null
-./target/release/mkfs_ntfs.exe -L $Label -c $ClusterSize --serial deadbeefcafe1234 nfs.img |
+./target/release/rust-ntfs.exe format -L $Label -c $ClusterSize --serial deadbeefcafe1234 nfs.img |
     Tee-Object diag/mkfs-output.txt
 
-# Pre-wrap BPB dump (ground-truth view of mkfs_ntfs output).
+# Pre-wrap BPB dump (ground-truth view of rust-ntfs format output).
 $imgBytes = [System.IO.File]::ReadAllBytes("$pwd\nfs.img")
 $hex = ($imgBytes[0..63] | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
 "first 64 bytes of nfs.img:`n$hex" | Out-File diag/nfs-img-hex.txt

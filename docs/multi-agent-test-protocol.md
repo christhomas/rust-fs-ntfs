@@ -1,7 +1,7 @@
 # Multi-agent NTFS test protocol
 
 A protocol for running many parallel agent instances against a shared
-work list of NTFS test scenarios, each verifying our `mkfs_ntfs` and
+work list of NTFS test scenarios, each verifying our `rust-ntfs format` and
 `fs_ntfs` reader against Microsoft's `chkdsk` and Windows-native file
 operations on a real Windows ARM64 VM.
 
@@ -170,7 +170,7 @@ of files is used) × (volume parameters).
 
 | Host | What it can do today | What it needs |
 |---|---|---|
-| Mac: format | `mkfs_ntfs` CLI | already works |
+| Mac: format | `rust-ntfs format` CLI | already works |
 | Win: format | `format.com /FS:NTFS` | already works |
 | Mac: write | NOT YET -- needs writer plumbed in `fs_ntfs` | first agent that picks a Mac-write scenario scaffolds it |
 | Win: write | PowerShell file ops on mounted drive letter | already works |
@@ -260,11 +260,11 @@ and add coverage for any new bug we surface.
 
 ## Generating the fixtures
 
-For Half 1 (Mac writes), the scenario parameters drive `mkfs_ntfs`'s
+For Half 1 (Mac writes), the scenario parameters drive `rust-ntfs format`'s
 CLI directly:
 
 ```sh
-./mkfs_ntfs --volume-size 256MiB --cluster-size 4096 \
+./rust-ntfs format --volume-size 256MiB --cluster-size 4096 \
   --label "CITEST" --serial deadbeefcafe1234 nfs.img
 ```
 
@@ -274,7 +274,7 @@ publicly documented NTFS layout, add the smallest-possible parameter
 plumbing, run `cargo test`, document the addition).
 
 For "files written via our writer" scenarios, we need a Mac-side
-write capability. Currently `mkfs_ntfs` only formats; it doesn't
+write capability. Currently `rust-ntfs format` only formats; it doesn't
 write user files. **Treat that as a separate task** rather than
 blocking on it: the agent who picks the first "Mac writer" scenario
 either (a) finds we already have a write API (search for `write_file`
@@ -297,7 +297,7 @@ Two layers of parallelism:
 
 ### Layer 1 -- Multiple test scenarios per build (Windows-side)
 
-Build `mkfs_ntfs.exe` ONCE per source state. Then dispatch N scenarios
+Build `rust-ntfs.exe` ONCE per source state. Then dispatch N scenarios
 in parallel via PowerShell `Start-Job`, each with:
 
 - Its own `nfs-<scenario>.img`

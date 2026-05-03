@@ -5,7 +5,7 @@
 #   1. Tar the rust-fs-ntfs source dir (excluding target/, .git/, diag/)
 #      and stream it via SSH onto the Windows VM, untarring into the
 #      remote workdir.
-#   2. SSH in and run scripts/run-windows-test.ps1 — builds mkfs_ntfs.exe,
+#   2. SSH in and run scripts/run-windows-test.ps1 — builds rust-ntfs.exe,
 #      formats nfs.img, wraps in a GPT-partitioned VHDX, mounts, runs
 #      chkdsk + a Microsoft format.com reference, dumps diag/.
 #   3. Stream diag/ back to ./diag-local-<timestamp>/ on the Mac.

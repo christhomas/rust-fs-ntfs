@@ -1,22 +1,15 @@
-//! inspect_ntfs — read-only enumerate of an NTFS image.
+//! `rust-ntfs ls` — recursive read-only enumerate of an NTFS image.
 //!
 //! Used by the multi-agent test matrix's `mac:enumerate` operation:
-//! after `mkfs_ntfs` formats an image (or after Windows writes into one
-//! that we mounted), this binary walks the volume and prints a sorted
-//! line-per-file listing so the harness can `diff` against
+//! after a format / write, this walks the volume and prints a sorted
+//! line-per-file listing the harness can `diff` against
 //! `Get-ChildItem` output from the Windows side.
-//!
-//! Pure wrapper around `fs_ntfs::facade::Filesystem::read_dir` —
-//! recursive walk, depth-first, names sorted within each directory.
-//! Skips `.` / `..` to keep the output stable.
-//!
-//! Exit codes: 0 success, 1 failure.
 
 use fs_ntfs::facade::{FileType, Filesystem};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-Usage: inspect_ntfs [options] <image>
+Usage: rust-ntfs ls [options] <image>
 
 Options:
   -p, --path <p>   Subtree root to enumerate (default: /).
@@ -27,29 +20,29 @@ Output: one path per line, sorted, depth-first. Subdirectories
 descended in collation order. Skips '.' and '..'.
 ";
 
-fn main() -> ExitCode {
-    match run() {
+pub fn run(args: Vec<String>) -> ExitCode {
+    match run_inner(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
-            eprintln!("inspect_ntfs: {msg}");
+            eprintln!("rust-ntfs ls: {msg}");
             ExitCode::FAILURE
         }
     }
 }
 
-fn run() -> Result<(), String> {
+fn run_inner(args: Vec<String>) -> Result<(), String> {
     let mut image: Option<String> = None;
     let mut start_path = "/".to_string();
     let mut show_type = false;
-    let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
+    let mut iter = args.into_iter();
+    while let Some(a) = iter.next() {
         match a.as_str() {
             "-h" | "--help" => {
                 print!("{USAGE}");
                 return Ok(());
             }
             "-p" | "--path" => {
-                start_path = args
+                start_path = iter
                     .next()
                     .ok_or_else(|| format!("{a} requires a path argument"))?;
             }
@@ -74,14 +67,11 @@ fn run() -> Result<(), String> {
         let entries = fs
             .read_dir(&dir)
             .map_err(|e| format!("read_dir {dir}: {e}"))?;
-        // NTFS read_dir yields entries in collation order; sort
-        // explicitly so the output is stable across reader versions.
         let mut names: Vec<_> = entries
             .into_iter()
             .filter(|e| e.name != "." && e.name != "..")
             .collect();
         names.sort_by(|a, b| a.name.cmp(&b.name));
-        // Push subdirectories in reverse so the pop order is forward.
         for e in names.iter().rev() {
             if e.file_type == FileType::Directory {
                 let child = if dir == "/" {
