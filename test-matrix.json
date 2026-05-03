@@ -175,6 +175,16 @@
       "operation_sequence": "mac:format -> mac:touch(/scratch.txt) -> mac:write(/scratch.txt='temp') -> mac:rm(/scratch.txt) -> mac:enumerate(empty)",
       "note": "Pure-mac chain exercising the unlink path. After delete, only system files should remain."
     },
+    "mac-format-mac-write-win-repeat-mount-3-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "REPEAT3W"
+      },
+      "operation_sequence": "mac:format -> mac:touch(/persistent.txt) -> mac:write(/persistent.txt='hello') -> win:chkdsk(readonly) -> win:repeat-mount(3) -> win:chkdsk(readonly,/scan)",
+      "note": "Tier-3 repeat-mount with mac-side content. Verifies our writer's metadata stays valid across multiple dismount/remount cycles after we've added a file."
+    },
     "mac-format-mkdir-set-dirty-win-chkdsk": {
       "status": "pending",
       "volume_params": {
@@ -258,6 +268,26 @@
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
       "note": "Large clusters at large volume — MFT runs may compact differently and $Bitmap is denser."
+    },
+    "mac-format-win-repeat-mount-10-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "REPEAT10"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk(readonly) -> win:repeat-mount(10) -> win:chkdsk(readonly,/scan)",
+      "note": "Same as repeat-mount-5 but ×10 cycles. If our writer leaves a slowly-degrading state, this surfaces it past the 5-cycle ceiling."
+    },
+    "mac-format-win-repeat-mount-5-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "REPEAT5"
+      },
+      "operation_sequence": "mac:format -> win:chkdsk(readonly) -> win:repeat-mount(5) -> win:chkdsk(readonly,/scan)",
+      "note": "Tier-3 repeat-mount. After initial chkdsk, dismount/remount × 5 with chkdsk between each cycle. Catches bugs where the volume only goes inconsistent after multiple clean dismounts (e.g. $LogFile state ntfs.sys tolerates once but rejects on the third mount)."
     },
     "mac-format-win-write-deep-nesting-win-chkdsk": {
       "status": "pending",

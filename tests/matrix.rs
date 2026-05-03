@@ -193,11 +193,15 @@ fn is_runnable(sequence: &str) -> bool {
         }
     }
 
-    // Win suffix: only chkdsk / enumerate are handled by the existing
-    // PowerShell flow; reject anything else (write/delete/modify/etc.
-    // need a richer PS dispatcher that doesn't ship yet).
+    // Win suffix: chkdsk / enumerate are handled by the existing PS
+    // flow; repeat-mount is folded in via -RemountCycles. Reject
+    // anything else (write/delete/modify/etc. need a richer PS
+    // dispatcher that doesn't ship yet).
     for op in win_suffix {
-        if !op.starts_with("win:chkdsk") && !op.starts_with("win:enumerate") {
+        if !op.starts_with("win:chkdsk")
+            && !op.starts_with("win:enumerate")
+            && !op.starts_with("win:repeat-mount")
+        {
             return false;
         }
     }
@@ -326,7 +330,7 @@ fn run_scenario_inner(
     // Mixed sequences: split into mac-prefix and win-suffix at the
     // first `win:` op. Run every mac op through the rust-ntfs CLI;
     // hand the formatted image off to scripts/run-scenario.ps1 for
-    // the win-suffix (VHDX wrap/mount/chkdsk).
+    // the win-suffix (VHDX wrap/mount/chkdsk + optional repeat-mount).
     let ops: Vec<&str> = scn
         .operation_sequence
         .split("->")
@@ -337,7 +341,20 @@ fn run_scenario_inner(
         .iter()
         .position(|op| op.starts_with("win:"))
         .unwrap_or(ops.len());
-    let mac_prefix = &ops[..win_idx];
+    let (mac_prefix, win_suffix) = ops.split_at(win_idx);
+
+    // Tier-3 repeat-mount: scenarios encode the cycle count via
+    // `win:repeat-mount(N)`. The PS script accepts -RemountCycles N;
+    // pull the count out here and forward it.
+    let remount_cycles: i32 = win_suffix
+        .iter()
+        .filter_map(|op| {
+            op.strip_prefix("win:repeat-mount")
+                .and_then(|tail| tail.trim().strip_prefix('('))
+                .and_then(|t| t.strip_suffix(')'))
+                .and_then(|n| n.trim().parse::<i32>().ok())
+        })
+        .sum();
 
     let bin = rust_ntfs_path();
     for (i, raw) in mac_prefix.iter().enumerate() {
@@ -375,6 +392,7 @@ fn run_scenario_inner(
         .args(["-Label", &scn.volume_params.label])
         .args(["-ClusterSize", &scn.volume_params.cluster_size.to_string()])
         .args(["-VolumeSizeMb", &scn.volume_params.size_mib.to_string()])
+        .args(["-RemountCycles", &remount_cycles.to_string()])
         .output()
         .map_err(|e| ScenarioFailure::Errored(format!("spawn run-scenario.ps1: {e}")))?;
 

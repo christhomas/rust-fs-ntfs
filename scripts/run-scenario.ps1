@@ -37,7 +37,12 @@ param(
     [Parameter(Mandatory=$true)] [string]$Diag,
     [Parameter(Mandatory=$true)] [AllowEmptyString()] [string]$Label,
     [Parameter(Mandatory=$true)] [int]$ClusterSize,
-    [Parameter(Mandatory=$true)] [int]$VolumeSizeMb
+    [Parameter(Mandatory=$true)] [int]$VolumeSizeMb,
+    # Tier-3: after the initial mount + chkdsk, dismount/remount this
+    # many extra times, running chkdsk between each cycle. Catches
+    # bugs where the volume only goes inconsistent after multiple
+    # clean dismounts. Default 0 = no extra cycles, behaves as before.
+    [int]$RemountCycles = 0
 )
 
 $ErrorActionPreference = 'Continue'
@@ -57,6 +62,30 @@ foreach ($v in @($Vhdx, $ReferenceVhdx)) {
     } catch { }
 }
 Remove-Item -LiteralPath $Vhdx, $ReferenceVhdx -Force -EA SilentlyContinue
+
+# Also wipe stale VHDX/.img files from prior scenarios in this run
+# — they accumulate on the VM's C: drive and the largest scenarios
+# (1 GiB volume + 128 MiB wrapper) fail with "SetEndOfFile error: 112"
+# (ERROR_DISK_FULL) once the cumulative total fills available space.
+# Don't touch the current scenario's files (we're about to write
+# them) and don't touch the matrix workspace itself.
+$matrixWorkdir = Split-Path $Vhdx -Parent
+if ($matrixWorkdir) {
+    $keepNames = @((Split-Path $Vhdx -Leaf), (Split-Path $ReferenceVhdx -Leaf), (Split-Path $Img -Leaf))
+    Get-ChildItem -Path $matrixWorkdir -Filter '*.vhdx' -EA SilentlyContinue |
+        Where-Object { $_.Name -notin $keepNames } |
+        ForEach-Object {
+            try {
+                Get-DiskImage -ImagePath $_.FullName -EA SilentlyContinue |
+                    Where-Object Attached |
+                    Dismount-DiskImage -EA SilentlyContinue | Out-Null
+            } catch { }
+            Remove-Item -LiteralPath $_.FullName -Force -EA SilentlyContinue
+        }
+    Get-ChildItem -Path $matrixWorkdir -Filter 'nfs-*.img' -EA SilentlyContinue |
+        Where-Object { $_.Name -notin $keepNames } |
+        Remove-Item -Force -EA SilentlyContinue
+}
 
 try {
     # ── Stage A: wrap our nfs.img into a GPT-partitioned VHDX ────────
@@ -414,6 +443,49 @@ try {
         -RedirectStandardError "$Diag\chkdsk-scan-stderr.txt"
     $scan = $proc2.ExitCode
     "$scan" | Out-File "$Diag\chkdsk-scan-exit.txt" -Encoding ASCII
+
+    # ── Stage E1.5: repeat-mount cycles (Tier-3) ───────────────────────
+    # Dismount and remount the wrapper VHDX `$RemountCycles` extra times,
+    # running a read-only chkdsk after each cycle. Catches bugs where
+    # the volume only becomes inconsistent after multiple clean
+    # dismounts (e.g. our writer leaves a $LogFile state that ntfs.sys
+    # tolerates once but rejects on the third remount).
+    #
+    # The verdict for the scenario is still the initial $ro / $scan from
+    # above; the per-cycle chkdsk exit codes land at
+    #   $Diag\remount-cycle-NN-chkdsk-exit.txt
+    # so an automated fix-loop can spot the cycle where things broke.
+    # If any per-cycle chkdsk returns non-zero we update $ro to the
+    # worst observed code so the scenario fails.
+    if ($RemountCycles -gt 0) {
+        for ($i = 1; $i -le $RemountCycles; $i++) {
+            Dismount-DiskImage -ImagePath $Vhdx -EA SilentlyContinue | Out-Null
+            Start-Sleep -Seconds 1
+            Mount-DiskImage -ImagePath $Vhdx | Out-Null
+            Start-Sleep -Seconds 2
+            # Drive letter may have changed across remount; re-fetch.
+            $vhd2 = Get-DiskImage -ImagePath $Vhdx
+            $part2 = Get-Partition -DiskNumber $vhd2.Number |
+                Where-Object { $_.DriveLetter } | Select-Object -First 1
+            if (-not $part2) {
+                "remount cycle ${i}: no drive letter assigned" |
+                    Out-File "$Diag\remount-cycle-$('{0:D2}' -f $i)-error.txt" -Encoding ASCII
+                continue
+            }
+            $cycleLetter = $part2.DriveLetter
+            $procC = Start-Process -FilePath chkdsk.exe -ArgumentList "${cycleLetter}:" `
+                -NoNewWindow -PassThru -Wait `
+                -RedirectStandardOutput "$Diag\remount-cycle-$('{0:D2}' -f $i)-chkdsk.txt" `
+                -RedirectStandardError "$Diag\remount-cycle-$('{0:D2}' -f $i)-chkdsk-stderr.txt"
+            "$($procC.ExitCode)" | Out-File "$Diag\remount-cycle-$('{0:D2}' -f $i)-chkdsk-exit.txt" -Encoding ASCII
+            if ($procC.ExitCode -gt $ro) {
+                $ro = $procC.ExitCode
+            }
+        }
+        # Refresh exit-code marker so the test verdict reflects worst
+        # observed across all cycles.
+        "$ro" | Out-File "$Diag\chkdsk-readonly-exit.txt" -Encoding ASCII
+    }
 
     # ── Stage E2: chkdsk /F + dump the modified volume bytes ───────────
     # If /scan returns non-zero, /F often makes it pass — and what /F
