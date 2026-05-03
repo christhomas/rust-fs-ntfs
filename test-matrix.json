@@ -145,6 +145,36 @@
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/mac-only-pass3",
       "note": "Pure-Mac flow (mac:format -> mac:enumerate via inspect_ntfs CLI). 11 system entries indexed, 0 user-visible. Verified on c5fe branch."
     },
+    "mac-format-mac-mkdir-mac-touch-mac-enumerate": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "MACMKDIR"
+      },
+      "operation_sequence": "mac:format -> mac:mkdir(/docs) -> mac:touch(/docs/notes.txt) -> mac:enumerate(/docs + /docs/notes.txt)",
+      "note": "Pure-mac chain with nested directory creation. Catches bugs in parent-pointer setup that the flat-only scenarios miss."
+    },
+    "mac-format-mac-touch-mac-write-mac-enumerate": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "MACONLY"
+      },
+      "operation_sequence": "mac:format -> mac:touch(/tiny.txt) -> mac:write(/tiny.txt='hello world') -> mac:enumerate(tiny.txt)",
+      "note": "Pure-mac chain. Exercises rust-ntfs format/touch/write/ls end-to-end without leaving the Mac. Runs on every host."
+    },
+    "mac-format-mac-write-mac-rm-mac-enumerate-empty": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "MACDEL"
+      },
+      "operation_sequence": "mac:format -> mac:touch(/scratch.txt) -> mac:write(/scratch.txt='temp') -> mac:rm(/scratch.txt) -> mac:enumerate(empty)",
+      "note": "Pure-mac chain exercising the unlink path. After delete, only system files should remain."
+    },
     "mac-format-small-64mib": {
       "status": "passed-to-frs60f-ceiling-agent-8a29-2026-05-02",
       "volume_params": {
