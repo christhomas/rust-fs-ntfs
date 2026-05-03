@@ -112,14 +112,13 @@ try {
     if ($part.Size -lt $rawSize) { throw "partition smaller than raw image" }
 
     $rawPath = "\\.\PhysicalDrive$($disk.Number)"
-    # Volumes ≥ 2 GiB need streaming because [System.IO.File]::ReadAllBytes
-    # is hard-capped at 2 GiB. Volumes < 2 GiB do a bulk write because
-    # raw-disk WriteFile rejects chunked writes here with
-    // "Access to the path is denied." (alignment / FILE_FLAG_NO_BUFFERING).
-    # TODO: streaming write to a raw PhysicalDrive — needs investigation.
+    # Volumes >= 2 GiB cannot be loaded by ReadAllBytes (PS hard cap)
+    # and chunked Write to a raw PhysicalDrive returns
+    # "Access to the path is denied." here. Skip with a clear message.
+    # TODO: streaming write to a raw PhysicalDrive needs investigation.
     $imgLen = (Get-Item $Img).Length
     if ($imgLen -gt 2GB) {
-        throw "image $Img is $imgLen bytes — PS ReadAllBytes / chunked-WriteFile both fail past 2 GiB; this scenario needs further work"
+        throw "image too large for current PS write path: $imgLen bytes (>2 GiB)"
     }
     $ourBytes = [System.IO.File]::ReadAllBytes($Img)
     $fs = [System.IO.File]::Open($rawPath, [System.IO.FileMode]::Open,
@@ -685,6 +684,17 @@ try {
     # ── Stage G: emit verdict markers for the Rust harness ────────────
     Write-Output "RO_EXIT=$ro"
     Write-Output "SCAN_EXIT=$scan"
+    # §5.11 — surface Stage E2's chkdsk /F + post-/F /scan exits when
+    # they ran, so the matrix verdict can promote / require them per
+    # scenario's verdict_shape (clean | repair-ok | repair-required).
+    if (Test-Path "$Diag\chkdsk-fix-exit.txt") {
+        $fxExit = (Get-Content -Raw "$Diag\chkdsk-fix-exit.txt").Trim()
+        if ($fxExit) { Write-Output "FIX_EXIT=$fxExit" }
+    }
+    if (Test-Path "$Diag\chkdsk-scan-post-fix-exit.txt") {
+        $sfx = (Get-Content -Raw "$Diag\chkdsk-scan-post-fix-exit.txt").Trim()
+        if ($sfx) { Write-Output "POSTFIX_SCAN_EXIT=$sfx" }
+    }
 } finally {
     foreach ($v in @($Vhdx, $ReferenceVhdx)) {
         try {

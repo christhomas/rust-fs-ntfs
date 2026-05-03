@@ -42,8 +42,29 @@ struct Scenario {
     /// mount, before chkdsk. Absence means no win-side writes.
     #[serde(default)]
     fixture_files: Vec<FixtureFile>,
+    /// Verdict shape — controls how chkdsk /F (Stage E2) interacts
+    /// with pass/fail. Defaults to `Clean` for backwards compat with
+    /// legacy scenarios.
+    ///
+    /// - `clean` — must pass without /F running at all.
+    /// - `repair-ok` — passes whether or not /F ran, as long as
+    ///   post-/F /scan is clean if it did.
+    /// - `repair-required` — /F MUST run AND post-/F /scan must
+    ///   exit 0. Used by dirty-volume Tier-3 scenarios where /F
+    ///   doing real work is the test contract.
+    #[serde(default)]
+    verdict_shape: VerdictShape,
     // Other fields (status, evidence_link, _attempts, ...) are
     // intentionally ignored — they're agent bookkeeping, not test input.
+}
+
+#[derive(Deserialize, Clone, Copy, Default, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+enum VerdictShape {
+    #[default]
+    Clean,
+    RepairOk,
+    RepairRequired,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -474,8 +495,38 @@ fn run_scenario_inner(
     //             technical debt, not a real corruption.
     //   * Any other exit code = real corruption, fail.
     let scan_ok = matches!(scan, 0 | 11 | 13);
-    if !(ro == 0 && scan_ok) {
-        return Err(ScenarioFailure::ChkdskFail { ro, scan });
+    let fix_exit = parse_marker(&stdout, "FIX_EXIT=");
+    let postfix_scan_exit = parse_marker(&stdout, "POSTFIX_SCAN_EXIT=");
+
+    // Per-shape verdict logic. Default (Clean) preserves the existing
+    // chkdsk-must-pass contract; RepairOk widens to "fine if /F
+    // succeeded"; RepairRequired flips it: /F MUST run and the
+    // post-/F /scan MUST exit 0.
+    match scn.verdict_shape {
+        VerdictShape::Clean => {
+            if !(ro == 0 && scan_ok) {
+                return Err(ScenarioFailure::ChkdskFail { ro, scan });
+            }
+        }
+        VerdictShape::RepairOk => {
+            let pre_clean = ro == 0 && scan_ok;
+            let post_clean = matches!(fix_exit, Some(0))
+                && matches!(postfix_scan_exit, Some(0) | Some(11) | Some(13));
+            if !(pre_clean || post_clean) {
+                return Err(ScenarioFailure::ChkdskFail { ro, scan });
+            }
+        }
+        VerdictShape::RepairRequired => {
+            // /F must have actually run (Stage E2 only runs when
+            // pre-/F /scan returned non-zero) AND succeeded, AND
+            // post-/F /scan must exit 0.
+            let f_ran = fix_exit.is_some();
+            let f_ok = matches!(fix_exit, Some(0));
+            let post_ok = matches!(postfix_scan_exit, Some(0));
+            if !(f_ran && f_ok && post_ok) {
+                return Err(ScenarioFailure::ChkdskFail { ro, scan });
+            }
+        }
     }
 
     // Post-Windows mac ops: any mac:* ops AFTER the first win: op run

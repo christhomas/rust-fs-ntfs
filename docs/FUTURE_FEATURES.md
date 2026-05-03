@@ -548,38 +548,24 @@ once" — the pre-write chkdsk is silently dropped.
 machinery + Rust step-plan generator + a couple of new scenarios
 that prove the per-step verdict shape.
 
-### §5.11 Test-matrix `chkdsk /F` repair-lane verdict
+### §5.11 Test-matrix `chkdsk /F` repair-lane verdict (resolved)
 
-**Status**: simplification; PS Stage E2 runs `chkdsk /F` when
-`/scan` returns non-zero, dumps the post-/F MFT/boot for byte-diff
-analysis, and runs `/scan` again — but the post-/F exit codes do
-not feed into the matrix verdict. Today the verdict is always the
-pre-/F `(ro, scan)` pair.
+PS Stage G now emits `FIX_EXIT=<n>` and `POSTFIX_SCAN_EXIT=<n>`
+markers when Stage E2 ran. The matrix runner parses them and
+applies one of three shapes per scenario, declared via the new
+optional `verdict_shape` field in `test-matrix.json`:
 
-**What's known / desired**:
+| Shape | Pass condition |
+|---|---|
+| `clean` (default) | `ro==0` AND `scan` ∈ {0, 11, 13}. Same as before. |
+| `repair-ok` | `clean` passes OR `FIX_EXIT==0` AND `POSTFIX_SCAN_EXIT` ∈ {0, 11, 13}. |
+| `repair-required` | `FIX_EXIT==0` AND `POSTFIX_SCAN_EXIT==0`. /F must have run AND repaired AND post-/F /scan must be perfectly clean. |
 
-- Some test scenarios *require* `/F` to repair successfully
-  (Tier-3 dirty-volume scenarios are a natural fit). Today they
-  share the same verdict shape as scenarios that should pass
-  without `/F` running at all.
-- Useful additional markers: `FIX_EXIT=<n>` and
-  `POSTFIX_SCAN_EXIT=<n>` from PS, parsed alongside `RO_EXIT` /
-  `SCAN_EXIT` into `ScenarioResult`.
-
-**Productive next moves**:
-
-1. Emit `FIX_EXIT` / `POSTFIX_SCAN_EXIT` from PS Stage G when
-   Stage E2 ran. Extend `ScenarioResult` with two `Option<i32>`
-   fields.
-2. Add a `verdict_shape` field to scenarios in `test-matrix.json`:
-   `clean` (must pass without /F) | `repair-ok` (allowed to pass
-   only after /F) | `repair-required` (must trigger /F and the
-   post-/F /scan must exit 0).
-3. The runner picks pass/fail per shape. Default `clean` keeps
-   today's behaviour for every existing scenario.
-
-**Effort estimate**: small (~3-4 h). Mostly contained in
-`tests/matrix.rs` plus the two new PS markers.
+Tier-3 dirty-volume scenarios (`mac-format-set-dirty-win-chkdsk`
+and friends) are tagged `verdict_shape: "repair-required"` so they
+fail unless chkdsk genuinely detects + repairs the dirty bit.
+Existing scenarios continue to use the default `clean` shape with
+no behavioural change.
 
 ---
 
