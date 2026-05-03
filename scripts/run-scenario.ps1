@@ -42,7 +42,16 @@ param(
     # many extra times, running chkdsk between each cycle. Catches
     # bugs where the volume only goes inconsistent after multiple
     # clean dismounts. Default 0 = no extra cycles, behaves as before.
-    [int]$RemountCycles = 0
+    [int]$RemountCycles = 0,
+    # Optional path to a JSON file describing fixture files to create
+    # on the mounted volume after mount, before chkdsk. Schema:
+    #   [
+    #     {"name": "tiny.txt", "content": "hello world"},
+    #     {"name": "big.bin", "size_bytes": 4096, "content_pattern": "zeros"}
+    #   ]
+    # Empty array / missing file = no win-side writes (the default for
+    # legacy scenarios).
+    [string]$FixturesJson = ""
 )
 
 $ErrorActionPreference = 'Continue'
@@ -157,6 +166,50 @@ try {
             "$volumeGuid" | Out-File "$Diag\volume-guid.txt" -Encoding ASCII
         }
     } catch { }
+
+    # ── Stage B2: apply win-side fixtures (Tier-2 win:write support) ───
+    # Fixtures populate files on the mounted volume before the chkdsk
+    # pass, so chkdsk validates the post-write state. Schema declared in
+    # the param-block header. Empty array / missing file is the no-op
+    # path (legacy mac:format -> win:chkdsk* scenarios).
+    if ($FixturesJson -and (Test-Path $FixturesJson)) {
+        try {
+            $fixtures = Get-Content -Raw $FixturesJson | ConvertFrom-Json
+            $applied = New-Object System.Collections.Generic.List[string]
+            foreach ($fx in @($fixtures)) {
+                $dest = "${letter}:\$($fx.name)"
+                if ($null -ne $fx.content) {
+                    # Inline UTF-8 content. -NoNewline so the bytes match
+                    # the declared content exactly (no trailing CRLF).
+                    Set-Content -LiteralPath $dest -Value $fx.content -NoNewline -Encoding UTF8
+                    $applied.Add("text $($fx.name) ($([System.Text.Encoding]::UTF8.GetByteCount($fx.content)) B)")
+                } elseif ($null -ne $fx.size_bytes) {
+                    $n = [int]$fx.size_bytes
+                    $pat = if ($fx.content_pattern) { "$($fx.content_pattern)" } else { "zeros" }
+                    $buf = New-Object byte[] $n
+                    switch ($pat) {
+                        "zeros"        { } # already zeroed
+                        "ones"         { for ($i = 0; $i -lt $n; $i++) { $buf[$i] = 0xFF } }
+                        "incrementing" { for ($i = 0; $i -lt $n; $i++) { $buf[$i] = [byte]($i -band 0xFF) } }
+                        "random"       {
+                            $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+                            $rng.GetBytes($buf)
+                            $rng.Dispose()
+                        }
+                        default        { throw "unknown content_pattern: $pat" }
+                    }
+                    [System.IO.File]::WriteAllBytes($dest, $buf)
+                    $applied.Add("bytes $($fx.name) ($n B, $pat)")
+                } else {
+                    throw "fixture $($fx.name) has neither 'content' nor 'size_bytes'"
+                }
+            }
+            $applied -join "`n" | Out-File "$Diag\fixtures-applied.txt" -Encoding UTF8
+        } catch {
+            "fixture application failed: $_" | Out-File "$Diag\fixtures-error.txt" -Encoding UTF8
+            throw
+        }
+    }
 
     # ── Stage C: dump our boot sector + MFT records (byte-diff input) ──
     $bps = [System.BitConverter]::ToUInt16($ourBytes, 0x0B)

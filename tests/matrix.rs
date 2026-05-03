@@ -38,8 +38,26 @@ struct WorkList {
 struct Scenario {
     volume_params: VolumeParams,
     operation_sequence: String,
+    /// Optional fixture-file recipe applied by run-scenario.ps1 after
+    /// mount, before chkdsk. Absence means no win-side writes.
+    #[serde(default)]
+    fixture_files: Vec<FixtureFile>,
     // Other fields (status, evidence_link, _attempts, ...) are
     // intentionally ignored — they're agent bookkeeping, not test input.
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+struct FixtureFile {
+    name: String,
+    /// Inline UTF-8 content. Set OR `size_bytes`+`content_pattern`,
+    /// not both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    size_bytes: Option<u64>,
+    /// One of: "zeros", "ones", "incrementing", "random".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_pattern: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -193,14 +211,18 @@ fn is_runnable(sequence: &str) -> bool {
         }
     }
 
-    // Win suffix: chkdsk / enumerate are handled by the existing PS
-    // flow; repeat-mount is folded in via -RemountCycles. Reject
-    // anything else (write/delete/modify/etc. need a richer PS
-    // dispatcher that doesn't ship yet).
+    // Win suffix: chkdsk / enumerate / repeat-mount are handled
+    // directly. win:write / win:delete are folded in via the
+    // FixturesJson PS parameter (the file recipe lives in
+    // scenario.fixture_files). Reject anything else.
     for op in win_suffix {
         if !op.starts_with("win:chkdsk")
             && !op.starts_with("win:enumerate")
             && !op.starts_with("win:repeat-mount")
+            && !op.starts_with("win:write")
+            && !op.starts_with("win:delete")
+            && !op.starts_with("win:dismount")
+            && !op.starts_with("win:remount")
         {
             return false;
         }
@@ -356,6 +378,15 @@ fn run_scenario_inner(
         })
         .sum();
 
+    // win:write fixtures: serialise scenario.fixture_files to JSON for
+    // the PS script to apply after mount. Empty array if the scenario
+    // doesn't declare any.
+    let fixtures_path = diag.join("fixtures.json");
+    let _ = std::fs::write(
+        &fixtures_path,
+        serde_json::to_string_pretty(&scn.fixture_files).unwrap_or_else(|_| "[]".into()),
+    );
+
     let bin = rust_ntfs_path();
     for (i, raw) in mac_prefix.iter().enumerate() {
         run_one_mac_op(raw, &bin, img, diag, i + 1, scn).map_err(|e| {
@@ -393,6 +424,7 @@ fn run_scenario_inner(
         .args(["-ClusterSize", &scn.volume_params.cluster_size.to_string()])
         .args(["-VolumeSizeMb", &scn.volume_params.size_mib.to_string()])
         .args(["-RemountCycles", &remount_cycles.to_string()])
+        .args(["-FixturesJson", &fixtures_path.display().to_string()])
         .output()
         .map_err(|e| ScenarioFailure::Errored(format!("spawn run-scenario.ps1: {e}")))?;
 
