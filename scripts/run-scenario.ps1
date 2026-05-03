@@ -128,6 +128,11 @@ try {
         $fs.Write($ourBytes, 0, $ourBytes.Length)
         $fs.Flush($true)
     } finally { $fs.Close() }
+    # NOTE: $ourBytes is intentionally kept alive past this point —
+    # Stages C/D byte-diff dump small slices (boot, MFT, $LogFile,
+    # $AttrDef) out of it. It IS released after Stage D before the
+    # chkdsk passes, so the multi-hundred-MB peak doesn't persist
+    # through the rest of the scenario.
     Dismount-DiskImage -ImagePath $Vhdx | Out-Null
 
     # ── Stage B: re-mount; Windows recognises the populated partition ─
@@ -208,6 +213,11 @@ try {
                     }
                     [System.IO.File]::WriteAllBytes($dest, $buf)
                     $applied.Add("bytes $($fx.name) ($n B, $pat)")
+                    # Free the per-fixture buffer immediately. A 4 MiB
+                    # fixture isn't huge alone, but a scenario with 256
+                    # of them adds up; better to release each before
+                    # the next allocates.
+                    $buf = $null
                 } else {
                     throw "fixture $($fx.name) has neither 'content' nor 'size_bytes'"
                 }
@@ -467,6 +477,20 @@ try {
         }
     } finally { $refsh.Close() }
 
+    # Byte-diff dumps from Stages C/D are done. Release the
+    # multi-hundred-MB byte arrays before chkdsk + repeat-mount +
+    # post-extract run so they don't compound into
+    # System.OutOfMemoryException on the Windows-ARM64 VM.
+    $ourBytes = $null
+    $refBoot = $null
+    $refMft = $null
+    $refMft64 = $null
+    $logBuf = $null
+    $adBuf = $null
+    [System.GC]::Collect()
+    [System.GC]::WaitForPendingFinalizers()
+    [System.GC]::Collect()
+
     # ── Stage E1: control — also chkdsk the REFERENCE volume ──────────
     # Hypothesis to test: maybe chkdsk /scan exits 13 against any
     # fresh-formatted volume (including Microsoft's own format.com
@@ -670,6 +694,10 @@ try {
                         $remaining -= $got
                     }
                     $dstFs.Flush($true)
+                    # Drop the 16 MiB streaming buffer before falling
+                    # through to the dispose chain — no need to hold it
+                    # while finalizers run.
+                    $bf = $null
                 } finally {
                     $dstFs.Close()
                     $srcFs.Close()
