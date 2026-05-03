@@ -175,6 +175,26 @@
       "operation_sequence": "mac:format -> mac:touch(/scratch.txt) -> mac:write(/scratch.txt='temp') -> mac:rm(/scratch.txt) -> mac:enumerate(empty)",
       "note": "Pure-mac chain exercising the unlink path. After delete, only system files should remain."
     },
+    "mac-format-mkdir-set-dirty-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "DIRTY3"
+      },
+      "operation_sequence": "mac:format -> mac:mkdir(/data) -> mac:touch(/data/file.txt) -> mac:set-dirty -> win:chkdsk(readonly,/scan)",
+      "note": "Tier-3 dirty volume with directory + nested file. Stresses the parent-pointer / $I30 invariants the chkdsk dirty-bit branch would walk."
+    },
+    "mac-format-set-dirty-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "DIRTY1"
+      },
+      "operation_sequence": "mac:format -> mac:set-dirty -> win:chkdsk(readonly,/scan)",
+      "note": "Tier-3 dirty-volume injection. Mac formats then explicitly sets VOLUME_IS_DIRTY. Windows-side chkdsk must detect the dirty bit and either repair or report it. Clean baseline for chkdsk's dirty-volume code path."
+    },
     "mac-format-small-64mib": {
       "status": "passed-to-frs60f-ceiling-agent-8a29-2026-05-02",
       "volume_params": {
@@ -406,6 +426,16 @@
       "_note": "depends on Mac-side enumerate CLI",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
       "note": "Operation sequence needs the chkdsk-clean state iter15+ has to deliver. mac:enumerate itself is plumbed via the new inspect_ntfs CLI on c5fe branch."
+    },
+    "mac-format-write-set-dirty-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "cluster_size": 4096,
+        "label": "DIRTY2"
+      },
+      "operation_sequence": "mac:format -> mac:touch(/staged.txt) -> mac:write(/staged.txt='partial') -> mac:set-dirty -> win:chkdsk(readonly,/scan)",
+      "note": "Tier-3 dirty-volume + content. Simulates a half-completed write followed by a crash (dirty-bit set without our writer issuing a clean dismount). chkdsk must keep our partial-write file readable, not orphan or truncate it."
     },
     "win-format-mac-enumerate-empty": {
       "status": "pending",

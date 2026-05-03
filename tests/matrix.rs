@@ -143,27 +143,65 @@ fn main() {
     conclusion.exit();
 }
 
-// Two runnable shapes today:
+// Three runnable shapes today:
 //   1. Pure-mac chains: every op is mac:* (format/touch/mkdir/write/rm/
-//      rmdir/enumerate). Dispatched directly via the rust-ntfs binary,
+//      rmdir/enumerate/set-dirty). Dispatched via the rust-ntfs binary,
 //      no Windows VHDX involvement.
-//   2. Legacy phase-1: `mac:format -> win:chkdsk*` — the original
-//      shape, dispatched via scripts/run-scenario.ps1.
-// Anything else (win:format, win:write, mixed mac/win mid-sequence)
-// is reported as ignored until the win-side dispatcher grows to
-// match.
+//   2. Mac-prefix + win-chkdsk-suffix: leading mac: ops are dispatched
+//      by us; the trailing win:chkdsk*/win:enumerate ops are handled
+//      by scripts/run-scenario.ps1 on a Windows host.
+//   3. Legacy phase-1 (`mac:format -> win:chkdsk*`) — a special case
+//      of (2).
+// Anything else (win:format, win:write/delete/modify, mac ops AFTER a
+// win: op) is reported as ignored until the win-side dispatcher grows
+// to handle the additional verbs.
 fn is_runnable(sequence: &str) -> bool {
     let s = sequence.trim();
     if is_pure_mac_chain(s) {
-        // Pure-mac chains run on any host (the rust-ntfs binary builds
-        // and runs everywhere). No `cfg!(target_os = "windows")` gate.
         return true;
     }
-    if !s.starts_with("mac:format") {
+    let ops: Vec<&str> = s
+        .split("->")
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .collect();
+    let win_idx = ops
+        .iter()
+        .position(|op| op.starts_with("win:"))
+        .unwrap_or(ops.len());
+    let (mac_prefix, win_suffix) = ops.split_at(win_idx);
+
+    // Mac prefix: must begin with mac:format; every verb known to the
+    // dispatcher.
+    if mac_prefix.is_empty() || !mac_prefix[0].starts_with("mac:format") {
         return false;
     }
-    let blockers = [":write", ":delete", ":modify", "mac:enumerate"];
-    !blockers.iter().any(|b| s.contains(b))
+    let known_mac = [
+        "mac:format",
+        "mac:mkdir",
+        "mac:touch",
+        "mac:write",
+        "mac:rm",
+        "mac:rmdir",
+        "mac:enumerate",
+        "mac:set-dirty",
+    ];
+    for op in mac_prefix {
+        let verb = op.split('(').next().unwrap_or(op).trim();
+        if !known_mac.contains(&verb) {
+            return false;
+        }
+    }
+
+    // Win suffix: only chkdsk / enumerate are handled by the existing
+    // PowerShell flow; reject anything else (write/delete/modify/etc.
+    // need a richer PS dispatcher that doesn't ship yet).
+    for op in win_suffix {
+        if !op.starts_with("win:chkdsk") && !op.starts_with("win:enumerate") {
+            return false;
+        }
+    }
+    true
 }
 
 fn is_pure_mac_chain(sequence: &str) -> bool {
@@ -285,29 +323,35 @@ fn run_scenario_inner(
         return Ok((0, 0));
     }
 
-    // 2. Format with our rust-ntfs binary's `format` subcommand.
+    // Mixed sequences: split into mac-prefix and win-suffix at the
+    // first `win:` op. Run every mac op through the rust-ntfs CLI;
+    // hand the formatted image off to scripts/run-scenario.ps1 for
+    // the win-suffix (VHDX wrap/mount/chkdsk).
+    let ops: Vec<&str> = scn
+        .operation_sequence
+        .split("->")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let win_idx = ops
+        .iter()
+        .position(|op| op.starts_with("win:"))
+        .unwrap_or(ops.len());
+    let mac_prefix = &ops[..win_idx];
+
     let bin = rust_ntfs_path();
-    let out = Command::new(&bin)
-        .arg("format")
-        .args([
-            "-L",
-            &scn.volume_params.label,
-            "-c",
-            &scn.volume_params.cluster_size.to_string(),
-            "--serial",
-            "deadbeefcafe1234",
-        ])
-        .arg(img)
-        .output()
-        .map_err(|e| ScenarioFailure::Errored(format!("spawn rust-ntfs format: {e}")))?;
-    let _ = std::fs::write(diag.join("mkfs-stdout.txt"), &out.stdout);
-    let _ = std::fs::write(diag.join("mkfs-stderr.txt"), &out.stderr);
-    if !out.status.success() {
-        return Err(ScenarioFailure::Errored(format!(
-            "rust-ntfs format failed (exit {:?}): {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
+    for (i, raw) in mac_prefix.iter().enumerate() {
+        run_one_mac_op(raw, &bin, img, diag, i + 1, scn).map_err(|e| {
+            ScenarioFailure::Errored(format!(
+                "mac-prefix step {} ({raw}): {}",
+                i + 1,
+                match e {
+                    ScenarioFailure::Errored(m) => m,
+                    ScenarioFailure::ChkdskFail { .. } =>
+                        "unexpected chkdsk failure in mac-prefix path".into(),
+                }
+            ))
+        })?;
     }
 
     // 3-5. Wrap → mount → reference-format → chkdsk → event-log.
@@ -617,6 +661,13 @@ fn run_one_mac_op(
             diag,
             step,
             "ls",
+        ),
+        "mac:set-dirty" => spawn(
+            bin,
+            &["set-dirty", &img.display().to_string()],
+            diag,
+            step,
+            "set-dirty",
         ),
         other => Err(err(format!("unknown mac-op verb: {other}"))),
     }
