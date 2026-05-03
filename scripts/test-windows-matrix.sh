@@ -81,15 +81,29 @@ tar --exclude='./target' --exclude='./.git' --exclude='./diag' \
 # because VHDX mounts share global drive-letter state on Windows.
 # (libtest-mimic doesn't fail-fast by default; every scenario runs and
 # is reported regardless of others' results — that's the whole point.)
+#
+# --verbose is also forwarded as MATRIX_VERBOSE=1 in the remote env, so
+# the test binary engages the per-step tree output even if a future
+# argv-handling change in libtest-mimic ate the flag at the test side.
 EXTRA_ARGS=""
+VERBOSE_ENV_PREFIX=""
+for arg in "${TEST_ARGS[@]}"; do
+    if [[ "$arg" == "--verbose" ]]; then
+        VERBOSE_ENV_PREFIX="\$env:MATRIX_VERBOSE='1'; "
+        echo "[run]  --verbose detected — engaging per-step tree on remote"
+    fi
+done
 if [[ ${#TEST_ARGS[@]} -gt 0 ]]; then
     EXTRA_ARGS=$(printf ' %q' "${TEST_ARGS[@]}")
 fi
 
+REMOTE_CMD="Set-Location '${VM_WORKDIR_PS}'; \$env:RUSTUP_TOOLCHAIN='stable-aarch64-pc-windows-gnullvm'; \$env:PATH=\"\$env:USERPROFILE\\.cargo\\bin;C:\\Program Files\\Cloudbase Solutions\\QEMU\\bin;\$env:PATH\"; ${VERBOSE_ENV_PREFIX}cargo test --release --test matrix -- --test-threads=1${EXTRA_ARGS}"
+
 echo "[run]  cargo test --release --test matrix on ${VM_HOST}"
+echo "[run]  remote: cargo test --release --test matrix -- --test-threads=1${EXTRA_ARGS}"
 echo
 set +e
-ssh ${SSH_OPTS} "${VM_HOST}" "Set-Location '${VM_WORKDIR_PS}'; \$env:RUSTUP_TOOLCHAIN='stable-aarch64-pc-windows-gnullvm'; \$env:PATH=\"\$env:USERPROFILE\\.cargo\\bin;C:\\Program Files\\Cloudbase Solutions\\QEMU\\bin;\$env:PATH\"; cargo test --release --test matrix -- --test-threads=1${EXTRA_ARGS}"
+ssh ${SSH_OPTS} "${VM_HOST}" "${REMOTE_CMD}"
 RUN_EXIT=$?
 set -e
 
