@@ -89,7 +89,7 @@ jobs:
   # chkdsk's error text tells us exactly which on-disk structure is
   # wrong.
   validate-mkfs-windows:
-    name: validate mkfs_ntfs (Windows chkdsk)
+    name: validate rust-ntfs format (Windows chkdsk)
     runs-on: windows-latest
     if: >-
       startsWith(github.ref, 'refs/tags/v') ||
@@ -103,8 +103,8 @@ jobs:
       - name: Install qemu-img via choco
         shell: pwsh
         run: choco install qemu-img -y --no-progress
-      - name: Build mkfs_ntfs (Windows)
-        run: cargo build --release --bin mkfs_ntfs
+      - name: Build rust-ntfs (Windows)
+        run: cargo build --release --bin rust-ntfs
       - name: Generate raw image and wrap in GPT-partitioned VHDX
         shell: pwsh
         run: |
@@ -116,10 +116,10 @@ jobs:
           # /scan headroom and still runs in seconds.
           $rawSize = 256MB
           fsutil file createnew nfs.img $rawSize
-          ./target/release/mkfs_ntfs.exe -L CITEST --serial deadbeefcafe1234 nfs.img
+          ./target/release/rust-ntfs.exe format -L CITEST --serial deadbeefcafe1234 nfs.img
 
           # Dump the first 64 bytes of nfs.img BEFORE we wrap/write to the
-          # VHDX. This is the ground-truth view of what mkfs_ntfs produced.
+          # VHDX. This is the ground-truth view of what rust-ntfs format produced.
           # If this is correct but the post-remount read is wrong, the bug
           # is in the VHDX/PhysicalDrive layer, not mkfs_ntfs. If it's
           # already wrong here, mkfs_ntfs itself produced a bad boot sector.

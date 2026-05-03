@@ -1,0 +1,172 @@
+name: Release
+
+# Cuts a GitHub Release on `v*` tag pushes. Each platform-target builds
+# `rust-ntfs` from source on a runner of that OS/arch, packages it, and
+# uploads the archive + a SHA-256 manifest to the Release.
+#
+# Targets:
+#   - aarch64-apple-darwin       (macOS Apple Silicon)
+#   - x86_64-apple-darwin        (macOS Intel)
+#   - x86_64-unknown-linux-gnu   (Linux x64)
+#   - aarch64-unknown-linux-gnu  (Linux ARM64; native runner — no QEMU)
+#   - x86_64-pc-windows-msvc     (Windows x64)
+#   - aarch64-pc-windows-gnullvm (Windows ARM64; matches dev VM toolchain)
+#
+# Trigger only on tag pushes — keeps `main` builds light and avoids
+# accidental releases.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.1.3)"
+        required: true
+
+permissions:
+  contents: write  # Required to create / update GitHub Releases.
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            archive: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            archive: zip
+          - target: aarch64-pc-windows-gnullvm
+            runner: windows-11-arm
+            archive: zip
+            toolchain: stable-aarch64-pc-windows-gnullvm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          # Per-target toolchain override (gnullvm for Win-ARM64); else
+          # pin to rust-toolchain.toml's channel for reproducibility.
+          toolchain: ${{ matrix.toolchain || '1.94.1' }}
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build rust-ntfs
+        run: cargo build --release --bin rust-ntfs --target ${{ matrix.target }}
+
+      - name: Resolve binary path / version
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+              bin="target/${{ matrix.target }}/release/rust-ntfs.exe"
+          else
+              bin="target/${{ matrix.target }}/release/rust-ntfs"
+          fi
+          echo "bin=${bin}" >> "$GITHUB_OUTPUT"
+
+          # Tag-name resolution: workflow_dispatch picks from input,
+          # tag-push picks from refs/tags/<name>.
+          if [[ -n "${{ inputs.tag }}" ]]; then
+              tag="${{ inputs.tag }}"
+          else
+              tag="${GITHUB_REF##*/}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Package archive
+        id: pkg
+        shell: bash
+        run: |
+          stage="rust-ntfs-${{ steps.meta.outputs.tag }}-${{ matrix.target }}"
+          mkdir -p "$stage"
+          cp "${{ steps.meta.outputs.bin }}" "$stage/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$stage/" 2>/dev/null || true
+
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+              archive="${stage}.zip"
+              # PowerShell's Compress-Archive available on all Windows
+              # runners; preserves directory structure.
+              7z a -r "$archive" "$stage" >/dev/null
+          else
+              archive="${stage}.tar.gz"
+              tar -czf "$archive" "$stage"
+          fi
+
+          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute SHA-256
+        id: hash
+        shell: bash
+        run: |
+          if command -v sha256sum >/dev/null; then
+              sha=$(sha256sum "${{ steps.pkg.outputs.archive }}" | awk '{print $1}')
+          else
+              sha=$(shasum -a 256 "${{ steps.pkg.outputs.archive }}" | awk '{print $1}')
+          fi
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "${sha}  ${{ steps.pkg.outputs.archive }}" > "${{ steps.pkg.outputs.archive }}.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-ntfs-${{ matrix.target }}
+          path: |
+            ${{ steps.pkg.outputs.archive }}
+            ${{ steps.pkg.outputs.archive }}.sha256
+
+  release:
+    name: publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Resolve tag
+        id: meta
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+              echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+              echo "tag=${GITHUB_REF##*/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: rust-ntfs ${{ steps.meta.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
