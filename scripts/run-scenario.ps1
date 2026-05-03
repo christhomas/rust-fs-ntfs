@@ -112,27 +112,23 @@ try {
     if ($part.Size -lt $rawSize) { throw "partition smaller than raw image" }
 
     $rawPath = "\\.\PhysicalDrive$($disk.Number)"
-    # Stream-copy the image into the partition (chunked) — `ReadAllBytes`
-    # is capped at 2 GiB by PowerShell's CLR, so 4 GiB / 16 GiB scenarios
-    # fail there. Use FileStream + a 16 MiB buffer instead.
-    $imgFs = [System.IO.File]::Open($Img, [System.IO.FileMode]::Open,
-        [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    # Volumes ≥ 2 GiB need streaming because [System.IO.File]::ReadAllBytes
+    # is hard-capped at 2 GiB. Volumes < 2 GiB do a bulk write because
+    # raw-disk WriteFile rejects chunked writes here with
+    // "Access to the path is denied." (alignment / FILE_FLAG_NO_BUFFERING).
+    # TODO: streaming write to a raw PhysicalDrive — needs investigation.
+    $imgLen = (Get-Item $Img).Length
+    if ($imgLen -gt 2GB) {
+        throw "image $Img is $imgLen bytes — PS ReadAllBytes / chunked-WriteFile both fail past 2 GiB; this scenario needs further work"
+    }
+    $ourBytes = [System.IO.File]::ReadAllBytes($Img)
     $fs = [System.IO.File]::Open($rawPath, [System.IO.FileMode]::Open,
         [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
     try {
         $fs.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
-        $bufSize = 16 * 1024 * 1024
-        $buf = New-Object byte[] $bufSize
-        while ($true) {
-            $n = $imgFs.Read($buf, 0, $bufSize)
-            if ($n -le 0) { break }
-            $fs.Write($buf, 0, $n)
-        }
+        $fs.Write($ourBytes, 0, $ourBytes.Length)
         $fs.Flush($true)
-    } finally {
-        $fs.Close()
-        $imgFs.Close()
-    }
+    } finally { $fs.Close() }
     Dismount-DiskImage -ImagePath $Vhdx | Out-Null
 
     # ── Stage B: re-mount; Windows recognises the populated partition ─

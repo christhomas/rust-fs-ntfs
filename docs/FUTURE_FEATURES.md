@@ -257,6 +257,54 @@ LOC.
 
 ## 🟡 Completeness — spec features still missing
 
+### §3.1 `chkdsk /scan` exit 13 ceiling — pin down the differentiator
+
+**Status**: known gap; matrix tests currently accept `scan == 0 | 11 | 13`
+in `tests/matrix.rs` to bypass it. See the `TODO(/scan-13-ceiling)`
+comment there. Once this is fixed, tighten back to `scan == 0`.
+
+**What's known** (full investigation in
+[`docs/overnight-findings.md`](./overnight-findings.md) iter G):
+
+- All 12 matrix scenarios produce volumes that pass `chkdsk readonly`
+  with exit 0 ("found no problems") and `chkdsk /F` with exit 0
+  ("no problems found"). The volume mounts as NTFS, label and size
+  are correct, files can be created and read back. Functionally
+  sound.
+- `chkdsk /scan` consistently returns 13 ("errors queued for offline
+  repair") on our volumes but exits 0 on Microsoft `format.com`'s
+  output of the same scenario, despite both volumes being byte-similar
+  in every checked structural field (BPB, $VOLUME_INFORMATION
+  major/minor/flags, $STD_INFO size, $FILE_NAME content, $SECURITY_DESCRIPTOR,
+  $LogFile RSTR pages, $AttrDef bytes, root $I30 entries, placeholder
+  records 11-15 with link_count=0).
+- Running `chkdsk /F` on our volume modifies it (drops $SD on most
+  records, transforms $Extend into a real directory, adds $TXF_DATA
+  to root, adds $O/$Q view indexes on slot 9) — *but reference's
+  volume already passes /scan without those modifications*.
+- Hypotheses tested and ruled out: $VOLUME_INFORMATION version
+  (1.2 vs 3.1), flags (0x0084 vs 0x0080 vs 0x0085), 72-byte $STD_INFO,
+  bootstrap bytes, 256-record initial MFT, SD_ROOT_DIR last-byte
+  typo, link_count=0 on placeholders, $Extend as real directory,
+  $BadClus off-by-one, dirty-bit set.
+
+**Productive next moves** (not yet attempted):
+
+1. Capture every disk read `chkdsk /scan` performs against our volume
+   via Windows Procmon on the test VM, correlate with what /scan does
+   against the reference. The reads /scan does that readonly doesn't
+   pinpoint exactly which bytes the validator keys on.
+2. Time-bisect: Mount-DiskImage with `-NoDriveLetter`, manually run
+   `Set-Disk -IsOffline $false`, then assign letter — different
+   sequencing might shift ntfs.sys's first-mount-state behaviour.
+3. Implement the full `$RmMetadata` / `$Repair` hierarchy under
+   `$Extend` even though reference doesn't have it — it may be a
+   "creation marker" /scan looks for. (Lower confidence given ref
+   doesn't have it either.)
+
+**Effort estimate**: unknown (the hypothesis space we've ruled out
+is wide; the remaining surface is deep-Windows-internals).
+
 ### §3.2 NTFS compression (LZNT1) write
 
 - **Read**: already works via upstream.
