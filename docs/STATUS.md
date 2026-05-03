@@ -59,6 +59,51 @@ All functions and types prefixed `fs_ntfs_` / `FsNtfs…`. Declared in
 | `fs_ntfs_dir_open/next/close(fs, path)` | Streaming directory iterator. One entry at a time; `_next` returns NULL when exhausted. |
 | `fs_ntfs_read_file(fs, path, offset, length, buf)` | Pread-style data read. Returns bytes read or -1 on error. |
 | `fs_ntfs_readlink(fs, path, buf, cap)` | Reparse-point / symlink target. See limitations below. |
+| `fs_ntfs_read_object_id(image, path, out_buf)` | Read the 16-byte `$OBJECT_ID` GUID when present. |
+| `fs_ntfs_free_clusters(image)` / `fs_ntfs_mft_free_records(image)` | Volume-stat probes. |
+
+### Writes
+
+All path-based ops below also have a handle-based `_h` sibling
+(e.g. `fs_ntfs_create_file_h`) that operates against an open
+`FsNtfsHandle` so the volume stays mounted through the callback
+adapter. Outstanding limits — overflowed-index parents and a full
+MFT — are tracked in [`FUTURE_FEATURES.md`](FUTURE_FEATURES.md).
+
+| Function | Role |
+|---|---|
+| `fs_ntfs_set_times(image, path, …)` | Patch the four NT timestamps in `$STANDARD_INFORMATION`. Per-field nullable; only updates SI, not the parent index `$FILE_NAME` copy (matches Windows). |
+| `fs_ntfs_set_file_attributes(image, path, add, remove)` | Flip `FILE_ATTRIBUTE_*` bits per MS-FSCC 2.6. `add`/`remove` overlap is rejected. |
+| `fs_ntfs_write_file(image, path, offset, buf, len)` | In-place write into existing non-resident `$DATA`. Refuses extension past EOF, compressed streams, sparse holes. |
+| `fs_ntfs_write_resident_contents(image, path, data, len)` | Replace a file's resident `$DATA`. Refuses non-resident streams. |
+| `fs_ntfs_write_file_contents(image, path, data, len)` | High-level dispatcher: tries resident, auto-promotes to non-resident on capacity error. |
+| `fs_ntfs_truncate(image, path, new_size)` | Shrink/grow a non-resident `$DATA`. |
+| `fs_ntfs_grow(image, path, new_size)` | Append clusters to a non-resident `$DATA`; new bytes read as zero. |
+| `fs_ntfs_create_file(image, parent, basename)` | Synthesize a fresh MFT record + insert into parent's `$INDEX_ROOT`. |
+| `fs_ntfs_mkdir(image, parent, basename)` | Same as `create_file` but emits an empty `$INDEX_ROOT:$I30` and no `$DATA`. |
+| `fs_ntfs_unlink(image, path)` | Remove file: parent index entry + truncate-to-0 + IN_USE clear + `$MFT:$Bitmap` free. |
+| `fs_ntfs_rmdir(image, path)` | Delete an empty directory. Refuses non-empty/overflowed dirs. |
+| `fs_ntfs_rename(image, old_path, new_basename)` | Rename within current parent (same- or different-UTF-16-length). |
+| `fs_ntfs_rename_same_length(image, old_path, new_basename)` | Fast path when UTF-16 length is unchanged — patches index entry + `$FILE_NAME` directly. |
+| `fs_ntfs_link(image, existing, new_parent, new_basename)` | Hard link: extra `$FILE_NAME` + parent index insert + link-count bump. |
+| `fs_ntfs_write_named_stream(image, path, stream_name, data)` | Upsert a named `$DATA` (ADS); promotes to non-resident when needed. |
+| `fs_ntfs_delete_named_stream(image, path, stream_name)` | Remove a named `$DATA` attribute. |
+| `fs_ntfs_write_reparse_point(image, path, tag, data)` | Upsert resident `$REPARSE_POINT` and set `FILE_ATTRIBUTE_REPARSE_POINT`. |
+| `fs_ntfs_remove_reparse_point(image, path)` | Reverse of above. |
+| `fs_ntfs_create_symlink(image, parent, basename, target, relative)` | `create_file` + reparse-point with `IO_REPARSE_TAG_SYMLINK`. |
+| `fs_ntfs_write_ea(image, path, name, value)` | Upsert an extended attribute. |
+| `fs_ntfs_remove_ea(image, path, name)` | Remove an extended attribute. |
+
+### Recovery / volume tools
+
+| Function | Role |
+|---|---|
+| `fs_ntfs_is_dirty(image)` / `fs_ntfs_is_dirty_with_callbacks(cfg)` | Probe `VOLUME_IS_DIRTY` without modifying. |
+| `fs_ntfs_clear_dirty(image)` | Clear `VOLUME_IS_DIRTY` in `$Volume/$VOLUME_INFORMATION`. Returns 1 (cleared), 0 (already clean), -1 (error). |
+| `fs_ntfs_reset_logfile(image)` | Overwrite `$LogFile` with `0xFF` — the format-level "no pending transactions" signal. |
+| `fs_ntfs_fsck(image, *logfile_bytes, *dirty_cleared)` | Both above; `NULL` out-params accepted. |
+| `fs_ntfs_fsck_with_callbacks(cfg, …)` | Same as `fsck` but goes through the block-device callback adapter (sandbox-safe). |
+| `fs_ntfs_mkfs(cfg)` | Format a volume from scratch via the callback adapter. |
 
 ### Data types
 
@@ -121,20 +166,38 @@ next step — `crate-type = ["staticlib", "rlib"]` permits it.
 
 ### Not implemented in this crate (would require code here)
 
-- **Writes of any kind.** All APIs are read-only. Upstream `ntfs` does
+<!-- - **Writes of any kind.** All APIs are read-only. Upstream `ntfs` does
   not expose mutating operations at all in 0.4, so this isn't a small
   addition.
+COMMENTED OUT: emphatically wrong now. The crate ships a full
+write surface (mkfs + W0/W1/W2/W3) implemented locally without
+waiting for upstream `ntfs`. See include/fs_ntfs.h "In-place
+writes" / "Filesystem creation" sections and the Write-path test
+table above. -->
 - **Alternate Data Streams (ADS).** NTFS files can have named data
   streams (`file.txt:stream_name`). The read-file API only reads the
   default unnamed data attribute. An API extension along the lines of
   `fs_ntfs_read_stream(fs, path, stream_name, …)` would be the
   idiomatic way to surface this.
-- **Extended attributes / `$EA`.** Not surfaced.
+  <!-- Partial-stale: the read side of this is still accurate
+  (no fs_ntfs_read_stream / fs_ntfs_list_streams). The WRITE side
+  is now shipped — fs_ntfs_write_named_stream /
+  fs_ntfs_delete_named_stream at include/fs_ntfs.h:407, 414. -->
+<!-- - **Extended attributes / `$EA`.** Not surfaced.
+COMMENTED OUT: write side shipped — fs_ntfs_write_ea /
+fs_ntfs_remove_ea at include/fs_ntfs.h:364, 373. A read-side
+fs_ntfs_read_ea / list_ea is still missing; track that under a new
+limitation entry if it matters. -->
 - **Per-file NTFS permissions / ACLs.** Stat returns a simplified POSIX
   mode; native NTFS ACLs are ignored.
-- **Reparse points / symlink target resolution.** `fs_ntfs_readlink`
+<!-- - **Reparse points / symlink target resolution.** `fs_ntfs_readlink`
   exists but only handles trivial symlink reparse-point tags; junctions
   and mount points need specialised handling that isn't implemented.
+COMMENTED OUT: shipped. src/lib.rs:985+ decodes both
+SymbolicLinkReparseBuffer and MountPointReparseBuffer (junctions);
+fill_attr at src/lib.rs:484-499 dispatches the tag correctly.
+tests/readlink.rs covers it. WOF / LX / AppExecLink / dedup tags
+still fall through (see Phase 3 #14 for WOF decompression). -->
 - **Sparse files.** Data reads will zero-fill holes correctly (upstream
   handles that), but there is no API to enumerate sparse ranges / use
   `SEEK_HOLE`/`SEEK_DATA`.
@@ -155,7 +218,7 @@ next step — `crate-type = ["staticlib", "rlib"]` permits it.
 
 ### Crate-level items that are sloppy and worth cleaning up
 
-- ~~`best_file_name_str` in `src/lib.rs` carries a drive-by
+<!-- - ~~`best_file_name_str` in `src/lib.rs` carries a drive-by
   `#[allow(dead_code)]`.~~ Deleted (§4.5). Dir iterator already
   skips DOS-namespace entries at the index level, so the function
   was unused. Files with only a DOS `$FILE_NAME` (exceedingly rare
@@ -166,18 +229,49 @@ next step — `crate-type = ["staticlib", "rlib"]` permits it.
   `cargo clippy --all-targets` now compiles; only cosmetic warnings
   remain (useless_format, manual_div_ceil, etc.) — enabling
   `-D warnings` is fine once those are cleaned up.
+COMMENTED OUT: best_file_name_str already deleted (resolved); the
+Clippy entry conflates two states — the crate-level `allow` is in
+src/lib.rs:12 but `.github/workflows/ci.yml` still has the clippy
+step commented out, so the CI gate is NOT actually re-enabled. The
+real outstanding work lives in Phase 2 #7 below; keeping the
+half-true "Resolved" claim here is misleading. -->
 - `fs_ntfs_read_file` copies through an intermediate buffer; direct
   scatter-read into the caller's buffer is doable but wasn't
   implemented.
-- Thread-local `last_error` is single-string; some consumers would
+<!-- - Thread-local `last_error` is single-string; some consumers would
   benefit from a structured errno companion (`fs_ntfs_last_errno()`)
   matching the pattern in `fs-ext4`.
+COMMENTED OUT: shipped. `fs_ntfs_last_errno()` is in
+include/fs_ntfs.h:177 and src/lib.rs:132. tests/errno_companion.rs
+covers it. -->
+
+**Outstanding (Phase 2 #7 still open):** the CI clippy step is still
+commented out in `.github/workflows/ci.yml` ("clippy deferred…
+Re-enable once resolved"). The crate-level `#![allow(...)]` lines
+in `src/lib.rs` are in place; what remains is flipping the CI step
+back on with `-D warnings`.
 
 ## Test coverage
 
-193 integration tests across 31 test files. See
+<!-- 193 integration tests across 31 test files. See
 [Test infrastructure](#test-infrastructure) above for the fixture
 layout; all 138 pass locally and in CI.
+COMMENTED OUT: counts are stale and internally inconsistent (193 vs
+138). `tests/` now has ~56 .rs files including capi_*, mkfs_*,
+facade, errno_companion, corruption_fuzz, object_id, path_dots,
+readdir_dots, readlink, upcase, volume_stats, write_link,
+write_root_ops, write_ea, write_ads_promote, etc. that aren't
+itemised in the tables below. Re-derive with `cargo test` before
+quoting numbers. -->
+See [Test infrastructure](#test-infrastructure) above for the
+fixture layout. The Read- and Write-path tables below cover the
+original suites; the post-W3 additions (capi_link, capi_remove,
+capi_rename, capi_reparse, capi_create, capi_ea,
+capi_fsck_callbacks, capi_write_variants, mkfs_roundtrip,
+mkfs_bin_smoke, facade, errno_companion, corruption_fuzz,
+object_id, path_dots, readdir_dots, readlink, upcase, volume_stats,
+write_link, write_root_ops, write_ea, write_ads_promote, …) are
+not yet itemised.
 
 **Read path** (43 tests, unchanged from the initial testsuite work):
 
@@ -225,12 +319,265 @@ Coverage gap: see the last paragraph in
 [Test infrastructure](#test-infrastructure) — tests drive the upstream
 `ntfs` crate, not the `fs_ntfs_*` C ABI.
 
+## Implemented write phases
+
+The W-plan tracked the read-only-to-read-write rollout in five
+phases (W0 → W4). W0–W4 are shipped; W2.6 (MFT self-growth) and
+W3.2/3.3 (B+ tree insert / delete on overflowed `$INDEX_ALLOCATION`)
+are the two outstanding pieces, tracked in
+[`FUTURE_FEATURES.md`](FUTURE_FEATURES.md). W5 (`$LogFile`
+journaling) was intentionally skipped — `fs_ntfs_fsck` is the
+recovery path instead.
+
+### Phase W0 — volume recovery (✅ shipped)
+
+Three C-ABI functions in `src/fsck.rs`:
+
+| Symbol | Behaviour |
+|---|---|
+| `fs_ntfs_clear_dirty(path) -> c_int` | Clears `VOLUME_IS_DIRTY` in `$Volume/$VOLUME_INFORMATION`. Returns 1 (cleared), 0 (already clean), -1 (error). |
+| `fs_ntfs_reset_logfile(path) -> i64` | Overwrites `$LogFile` with `0xFF` — the NTFS format-level "no pending transactions" signal. Returns bytes written. |
+| `fs_ntfs_fsck(path, *logfile_bytes, *dirty_cleared) -> c_int` | Runs both; `NULL` out-params are accepted. |
+
+Tests: `tests/fsck.rs` (7) + `tests/capi_fsck.rs` (8).
+
+Notable finding during implementation: upstream's
+`NtfsResidentAttributeValue::data_position()` returns the *attribute
+header* start, not the resident *data* start — we read `value_offset`
+(u16 at header +0x14) ourselves to locate the actual data.
+
+### Phase W1 — in-place writes (✅ shipped)
+
+"Easy" writes: bytes that already exist on disk at known sizes. No
+attribute resize, no cluster allocation, no index mutation. Introduces
+the MFT-record USA-fixup RMW machinery that every W1+ phase builds on.
+
+#### W1.1 — MFT-record RMW primitive
+
+`src/mft_io.rs`:
+
+- `read_boot_params(path)` — pulls `bytes_per_sector`, `cluster_size`,
+  MFT LCN, `file_record_size` from the boot sector (offsets per Windows Internals 7th ed.).
+- `read_mft_record(path, n)` — reads record `n`, applies USA fixup
+  (validates FILE magic + USN across every 512-byte sector), returns
+  clean bytes.
+- `update_mft_record(path, n, |rec| Ok(()))` — the core primitive.
+  Caller's mutator receives post-fixup bytes, USN is bumped (skipping
+  `0` because some drivers treat it as uninitialized), re-applied to
+  sector-ends, record is `fsync`'d.
+- `apply_fixup_on_read` / `apply_fixup_on_write` exposed for in-memory
+  synthesis in tests.
+
+**Safety gates:**
+
+- Refuses to write to records whose `IN_USE` flag (0x0001 at +0x16) is
+  clear — prevents accidental corruption of free MFT entries.
+- Read fixup rejects torn writes (any sector-end pair not matching USN).
+- Read fixup rejects non-`FILE` records.
+
+9 tests: boot-param extraction, `$Volume` record sanity, identity
+round-trip byte-preservation (modulo USN bump), upstream-parses-after-
+RMW, in-memory synthesis round-trip, torn-write detection, magic check,
+free-record refusal, mutator error propagation.
+
+#### W1.2 — `set_times`
+
+`src/write.rs::set_times(path, file_path, FileTimes)` and
+`set_times_by_record_number(...)`.
+
+Patches the four u64 NT-time fields (creation / modification /
+mft_record_modification / access, at offsets 0/8/16/24 of
+`$STANDARD_INFORMATION`'s resident value). Only modifies SI; the
+duplicate `$FILE_NAME` times in the parent dir's index are left stale
+— matches Windows semantics (Windows only updates the FN copy on
+rename/create).
+
+6 tests: all-four round-trip, selective single-field writes preserve
+others, remount round-trip, nested path, missing-path rejection,
+upstream mounts the post-write image.
+
+#### W1.3 — `set_file_attributes`
+
+`src/write.rs::set_file_attributes(path, file_path, FileAttributesChange)`
+and `set_file_attributes_by_record_number(...)`.
+
+Flips bits in `$STANDARD_INFORMATION.file_attributes` (u32 at +0x20).
+`add` / `remove` overlap is rejected. Bit values match Windows
+`FILE_ATTRIBUTE_*` per MS-FSCC 2.6.
+
+6 tests: add-bit, remove-bit, multiple-in-one-call, overlap-rejection,
+remount survival, isolation from unrelated files.
+
+#### W1.4 — `write_at` for existing non-resident data
+
+`src/write.rs::write_at{,_io,_by_record_number,_by_record_number_io}`.
+Walks the non-resident `$DATA` mapping-pairs, locates the disk byte
+address for `offset`, and writes through `BlockIo`. Refuses
+extension past `value_length`, compressed streams, and sparse holes.
+Tests in `tests/write_content.rs`.
+
+#### W1 C-ABI surface
+
+`fs_ntfs_set_times`, `fs_ntfs_set_file_attributes`, `fs_ntfs_write_file`
+all live in `src/lib.rs`. Driven by `tests/capi_write_w1.rs`,
+`tests/capi_write_content.rs`, and friends.
+
+### Phase W2 — attribute mutation (W2.6 outstanding)
+
+**Shipped:**
+
+- **W2.1 resident attribute resize.** `src/attr_resize.rs`:
+  `resize_resident_value` / `set_resident_value`. Shifts subsequent
+  attributes inside the MFT record, zero-fills the released range,
+  updates `bytes_used`. Rejects grows past `bytes_allocated`. 8 tests
+  using volume-label rename as the vehicle (same-length / shrink /
+  grow / zero-length / round-trip / huge-grow rejection /
+  preserves-subsequent-attributes / low-level in-memory primitive).
+- **W2.3 `$Bitmap` cluster allocator.** `src/bitmap.rs`:
+  `locate_bitmap`, `find_free_run`, `allocate`, `free`, `is_allocated`.
+  10 tests.
+- **W2.4 data-run encoder.** `data_runs::encode_runs` (inverse of
+  `decode_runs`). Round-trip tested for sparse, negative deltas, large
+  LCNs, multi-run lists. 9 additional tests.
+- **W2.5 truncate (shrink).** `write::truncate{,_by_record_number}`
+  and `fs_ntfs_truncate`. Trims runs, frees clusters in `$Bitmap`,
+  updates `allocated_length` / `data_length` / `initialized_length` /
+  `last_vcn`. MFT-first, bitmap-second ordering. 11 tests (7 Rust-
+  layer + 4 C-ABI).
+- **W2.5 grow (non-resident).** `write::grow_nonresident{,_by_record_number}`
+  and `fs_ntfs_grow`. Allocates a single contiguous free run, extends
+  the last data run or appends a new one, updates lengths. Undoes the
+  bitmap allocation if the new mapping-pairs don't fit in the attr
+  header. New bytes read as zero via `initialized_length`. 5 tests.
+
+**W2 C-ABI surface (✅ shipped).** `fs_ntfs_truncate` (shrink + grow),
+`fs_ntfs_grow`, `fs_ntfs_write_file` all live in `src/lib.rs`. Cluster
+allocator and attribute-resize remain internal as planned.
+
+W2.2 (resident → non-resident promotion) is also shipped, surfaced
+via `write::promote_resident_data_to_nonresident` and
+`promote_attribute_to_nonresident` and used by the
+`write_file_contents` dispatcher.
+
+### Phase W3 — create / delete / mkdir / rmdir / rename (W3.2/3.3 outstanding)
+
+**Shipped:**
+
+- `rename_same_length` — same-UTF-16-length rename. Patches the parent's
+  index entry AND each `$FILE_NAME` attribute on the file's record.
+  Dispatches between resident `$INDEX_ROOT` and `$INDEX_ALLOCATION`
+  INDX-block scans (incl. root-dir case which NTFS formatter always overflows).
+- `unlink` — removes a file: parent index entry removal + truncate-to-0
+  + IN_USE clear + `$MFT:$Bitmap` free. Refuses directories.
+- `create_file` — new MFT record built from scratch (FILE header +
+  USA + `$SI` + `$FILE_NAME` + empty `$DATA` + end marker), inserted
+  into parent's resident `$INDEX_ROOT`. Auto-rolls-back on any failure
+  step. Refuses parents whose index has overflowed (waits for B+-tree
+  insert).
+- `mkdir` — parallel of create_file but emits a directory record with
+  an empty `$INDEX_ROOT:$I30` (single LAST sentinel entry) and no
+  `$DATA`.
+- `rmdir` — deletes an empty directory. Verifies emptiness via the
+  `$INDEX_ROOT`'s first-entry LAST bit; refuses non-empty and
+  overflowed dirs.
+- `write_resident_contents` — replaces a file's resident `$DATA`.
+- `promote_resident_data_to_nonresident` — allocates clusters, builds
+  a non-resident `$DATA` attribute, swaps it into the MFT record.
+- `write_file_contents` — high-level dispatcher: tries resident, falls
+  back to promotion on capacity error.
+- `idx_block` module — INDX block read/update with USA fixup; underpins
+  the `$INDEX_ALLOCATION` walks.
+- `mft_bitmap` module — `$MFT:$Bitmap` allocator (resident or
+  non-resident).
+- `record_build` module — synthesizers for fresh FILE records
+  (regular + directory) and non-resident `$DATA` attribute blobs.
+- `attr_resize::replace_attribute` — swap an attribute's entire body
+  (used for resident→non-resident promotion).
+
+C-ABI additions: `fs_ntfs_rename_same_length`, `fs_ntfs_unlink`,
+`fs_ntfs_create_file`, `fs_ntfs_mkdir`, `fs_ntfs_rmdir`,
+`fs_ntfs_write_resident_contents`, `fs_ntfs_write_file_contents`.
+
+### Phase W4 — ADS / reparse points / xattrs (✅ shipped)
+
+#### W4.1 — Named `$DATA` streams
+
+- `write::write_named_stream_resident(image, path, stream_name, data)` —
+  upsert a resident named `$DATA`. New streams get a fresh attribute
+  id; existing streams are replaced via `attr_resize::set_resident_value`.
+- `write::delete_named_stream(image, path, stream_name)` — remove a
+  named stream attribute from the record.
+- Helpers: `attr_resize::insert_attribute_before_end` (locates
+  `0xFFFFFFFF` by walking the chain, shifts it forward, inserts a new
+  attribute) and `allocate_attribute_id` (bumps the record's
+  `next_attr_id`).
+
+C-ABI: `fs_ntfs_write_named_stream`, `fs_ntfs_delete_named_stream`.
+
+MVP limitation: the resident-only path was the original W4.1 MVP;
+non-resident named streams are now handled by `write_named_stream`
+via the standard promotion machinery.
+
+#### W4.2 — Reparse points + symlinks
+
+- `write::write_reparse_point(image, path, tag, data)` — upsert a
+  resident `$REPARSE_POINT` and set `FILE_ATTRIBUTE_REPARSE_POINT`.
+- `write::remove_reparse_point(image, path)` — reverse.
+- `write::create_symlink(image, parent, basename, target, relative)` —
+  create_file + write_reparse_point with `IO_REPARSE_TAG_SYMLINK`
+  data. Rolls back the file create on failure.
+- Helpers: `record_build::build_resident_reparse_point_attribute`,
+  `build_symlink_reparse_data` (SymbolicLinkReparseBuffer per
+  MS-FSCC 2.1.2.4), `reparse_tag` module with common tag constants
+  (SYMLINK / MOUNT_POINT / WOF / LX_SYMLINK / APPEXECLINK).
+
+C-ABI: `fs_ntfs_write_reparse_point`, `fs_ntfs_remove_reparse_point`,
+`fs_ntfs_create_symlink`.
+
+#### W4.3 — Extended attributes
+
+`src/ea_io.rs` (encode/decode/upsert/remove + `$EA_INFORMATION`
+synthesis) plus `src/write.rs::write_ea` / `remove_ea` / `list_eas`.
+C-ABI: `fs_ntfs_write_ea`, `fs_ntfs_remove_ea`. Tests in
+`tests/write_ea.rs` and `tests/capi_ea.rs`.
+
+#### Bonus shipped (not originally in the W-plan)
+
+- **Hardlinks.** `write::link` + `fs_ntfs_link`: adds an extra
+  `$FILE_NAME` to the target record and inserts the entry into the
+  new parent's index, bumping the hard-link count.
+- **Object ID read.** `write::read_object_id` + `fs_ntfs_read_object_id`
+  pulls the 16-byte `$OBJECT_ID` GUID when present.
+- **Mkfs.** `fs_ntfs_mkfs` formats a fresh volume through the
+  block-device callback adapter (see `src/mkfs.rs`).
+- **Upcase-table collation (full Unicode).** `src/upcase.rs` ships a
+  canonical 64 KiB `$UpCase` table plus a runtime loader that pulls
+  the volume's actual `$UpCase` from MFT record 10 when it differs.
+  `compare_names` folds each UTF-16 code unit through the table and
+  compares; both `insert_entry_into_index_root_with_collation` and
+  the INDX-block insert path consume it. Closes the silent
+  data-loss path on non-ASCII filenames (`café`, CJK, emoji) where
+  insertion sort previously diverged from Windows' binary search.
+  Tests in `tests/upcase.rs`.
+- **Volume-scale corruption tests.** `tests/corruption_fuzz.rs`
+  exercises bit-flipped images and asserts no panics. Backed by
+  `_corrupt_*.img` fixtures in `test-disks/`.
+
+---
+
 ## Suggested upgrade order (for a future agent)
 
 Revised after the test-infrastructure work and
 [Documentation cross-check](#documentation-cross-check) landed. The
 cross-check surfaced correctness bugs that outrank any new-feature
 work — fix those first.
+
+<!--
+COMMENTED OUT 2026-05-02: this entry has been promoted into the new
+"## Implemented write phases" section above (which also covers
+W1/W2/W3/W4). Kept here as a historical pointer so anyone looking
+for "Phase W0" inside "Suggested upgrade order" — its original home
+— still finds the trail.
 
 ### Phase W0 — volume recovery (✅ shipped)
 
@@ -241,7 +588,7 @@ volumes that lost their mount handle without a clean unmount.
   `$Volume/$VOLUME_INFORMATION`. Returns `1` (cleared), `0` (already
   clean), `-1` (error).
 - `fs_ntfs_reset_logfile(path)` — overwrite `$LogFile` with `0xFF`, the
-  format-level "no pending transactions" pattern documented at Flatcap.
+  format-level "no pending transactions" pattern documented in Windows Internals 7th ed.
   Returns bytes written or `-1`.
 - `fs_ntfs_fsck(path, *logfile_bytes, *dirty_cleared)` — both above,
   with optional out-params. `NULL` out-params accepted.
@@ -256,6 +603,7 @@ what Windows/NTFS driver are designed to accept).
 C-ABI) — each exercises a different failure mode (dirty flag set,
 corrupted log-first-page, combined). Dirty state is synthesized in
 the test via upstream-only APIs, independent of the code under test.
+-->
 
 ### Phase 1 — correctness fixes (block new features until done)
 
@@ -265,75 +613,154 @@ against is named in brackets.
 1. **Widen timestamps to 64-bit seconds + nanoseconds.** Covers the
    Y2038 / wraparound / 100 ns-precision loss bugs in one ABI break.
    `[basic]` + a new fixture with a pre-1970 `touch -d` file.
-2. **Fix junction / WOF / reparse-point type dispatch.** Read
+<!-- 2. **Fix junction / WOF / reparse-point type dispatch.** Read
    `$REPARSE_POINT.tag`; only `IO_REPARSE_TAG_SYMLINK` maps to symlink.
    Ship alongside the `fs_ntfs_readlink` implementation so both land
    together. Needs a new fixture (junction via `ln -T` on an
    NTFS driver-mounted volume).
-3. **Replace seek-by-reading with `NtfsAttributeValue::seek`** in
+COMMENTED OUT: shipped. src/lib.rs:484-499 reads the 4-byte tag
+from $REPARSE_POINT and dispatches: SYMLINK (0xA000000C) →
+FS_NTFS_FT_SYMLINK, MOUNT_POINT (0xA0000003) → FS_NTFS_FT_JUNCTION
+(new enum value at include/fs_ntfs.h:31), other tags fall through
+to the underlying file/dir type. fs_ntfs_readlink also fully
+decodes both SymbolicLinkReparseBuffer and MountPointReparseBuffer
+(src/lib.rs:985+). tests/readlink.rs covers it. -->
+<!-- 3. **Replace seek-by-reading with `NtfsAttributeValue::seek`** in
    `fs_ntfs_read_file`. `[large-file]` — add a test that reads at a
    multi-MiB offset and times out on quadratic behavior.
-4. **Normalize path-traversal handling.** Skip `.`; resolve `..` via
+COMMENTED OUT: shipped. src/lib.rs:956 calls
+`data_value.seek(&mut bridge.reader, SeekFrom::Start(offset))` via
+NtfsReadSeek. The old skip-by-read loop is gone. -->
+<!-- 4. **Normalize path-traversal handling.** Skip `.`; resolve `..` via
    `parent_directory_reference`. Add a capi test that `/a/./b` and
    `/a/../b` resolve correctly.
+COMMENTED OUT: shipped. tests/path_dots.rs exercises `.` / `..`
+component handling in path resolution. -->
 5. **Handle ADS-only files and widen the dirent name buffer** —
    conceptually one PR: widen `fs_ntfs_dirent_t::name` to 1024 bytes,
    and make `fs_ntfs_read_file` fall back to WOF's `WofCompressedData`
    (or at minimum not error with a zero-length result). `[ads]` +
    `[unicode]` regressions, plus a new 90-character CJK fixture.
+   <!-- Status: still outstanding. include/fs_ntfs.h:53 still has
+   `name[256]`; no WOF fallback in src/lib.rs read path. -->
+
+**Phase 1 status:** items 2/3/4 shipped; items 1 and 5 still
+outstanding.
 
 ### Phase 2 — coverage + reliability scaffolding
 
-6. **`capi_*` tests.** Parallel suite that drives the shipped
+<!-- 6. **`capi_*` tests.** Parallel suite that drives the shipped
    `fs_ntfs_*` C ABI (not upstream `ntfs` directly). Closes the
    reliability gap flagged under [Test infrastructure](#test-infrastructure).
    Same fixtures, tests link the `rlib` half of the crate and call the
    `extern "C" fn`s with `CString` paths / raw-pointer out-params.
+COMMENTED OUT: shipped. tests/ contains capi_ads, capi_create,
+capi_ea, capi_fsck, capi_fsck_callbacks, capi_link, capi_remove,
+capi_rename, capi_reparse, capi_write_content, capi_write_truncate,
+capi_write_variants, capi_write_w1 — all driving the `fs_ntfs_*`
+C ABI directly. -->
 7. **Re-enable `clippy -D warnings` in CI.** Resolve the
    `not_unsafe_ptr_arg_deref` lints (mark FFI entries `unsafe extern "C"`
    or allow the lint at the boundary). Without this gate, regressions
    go uncaught.
+   <!-- Status: still outstanding. The crate-level
+   `#![allow(clippy::not_unsafe_ptr_arg_deref)]` exists at
+   src/lib.rs:12, but `.github/workflows/ci.yml` still has the
+   `cargo clippy` step commented out ("clippy deferred… Re-enable
+   once resolved"). Flip the CI step on. -->
 8. **Dirty-volume state surface.** Add `fs_ntfs_volume_info_t::is_dirty`
    + optional `metadata_consistent` from an MFT-mirror cross-check.
    Requires a fresh fixture with `$Volume` dirty bit set (either force
    via NTFS formatter options, or a file attribute tools-style flag via NTFS driver).
+   <!-- Partial: standalone `fs_ntfs_is_dirty(path)` and
+   `fs_ntfs_is_dirty_with_callbacks(cfg)` shipped (header lines
+   193, 289). The struct field
+   `fs_ntfs_volume_info_t::is_dirty` and the mirror cross-check
+   `metadata_consistent` are still missing. -->
+
+**Phase 2 status:** item 6 shipped; items 7 (CI flip) and 8
+(struct-field surface + mirror cross-check) still outstanding.
 
 ### Phase 3 — new features
 
 9. **Lazy directory iteration.** Stop materializing entire indexes in
    `dir_open`; retain the iterator. `[manyfiles]` regression + a new
    ≥100k-entry fixture (32 MiB image easily holds it).
+   <!-- Status: still outstanding. src/lib.rs:825-862 still pushes
+   every entry into a `Vec<FsNtfsDirent>` inside `fs_ntfs_dir_open`
+   before returning the iterator. -->
 10. **ADS read API.** `fs_ntfs_read_stream(fs, path, stream_name, …)` +
     `fs_ntfs_list_streams(…)`. The `ntfs-ads.img` fixture + Rust-layer
     tests already exist; add the C surface + a `capi_ads.rs`.
-11. **Structured errno companion.** `fs_ntfs_last_errno()` returning
+    <!-- Partial: capi_ads.rs exists, and the WRITE side is shipped
+    (fs_ntfs_write_named_stream / fs_ntfs_delete_named_stream at
+    include/fs_ntfs.h:407, 414). The READ-side
+    fs_ntfs_read_stream / fs_ntfs_list_streams C surface is still
+    missing. -->
+<!-- 11. **Structured errno companion.** `fs_ntfs_last_errno()` returning
     POSIX errno. Mirrors `fs_ext4_last_errno()`.
+COMMENTED OUT: shipped. include/fs_ntfs.h:177 declares
+`fs_ntfs_last_errno()`; src/lib.rs:132 implements it; also
+`fs_ntfs_clear_last_error()` at h:182 / lib.rs:139.
+tests/errno_companion.rs covers it. -->
 12. **POSIX mode from `FILE_ATTRIBUTE_READONLY` + extensions.** Minimal
     derivation first (drop write bits, set exec for `.exe`/`.bat`/etc);
     full `$SECURITY_DESCRIPTOR` parsing later.
-13. **Synthesize `.` / `..` in `dir_open`.** One-liner once parent-ref
+    <!-- Status: still outstanding. -->
+<!-- 13. **Synthesize `.` / `..` in `dir_open`.** One-liner once parent-ref
     lookup exists.
+COMMENTED OUT: shipped. src/lib.rs:807-828 synthesises both
+entries at the head of every `fs_ntfs_dir_open` listing,
+resolving `..` via `parent_record_number_of`.
+tests/readdir_dots.rs covers it. -->
 14. **WOF decompression.** Parse `IO_REPARSE_TAG_WOF` data; decompress
     `WofCompressedData` via `ms-compress` or similar. Needed for
     correctness on modern Win10/11 volumes. Probably biggest single
     engineering task in the list.
+    <!-- Status: still outstanding. src/lib.rs:492 acknowledges WOF
+    explicitly ("WOF / LX_SYMLINK / APPEXECLINK / dedup etc. — leave
+    file_type at whatever it was") but no decompression path. -->
+
+**Phase 3 status:** items 11 and 13 shipped; 9, 10 (read-side),
+12, 14 still outstanding.
 
 ### Phase 4 — polish
 
-15. ~~**Wire up or delete `best_file_name_str`.**~~ Deleted.
+<!-- 15. ~~**Wire up or delete `best_file_name_str`.**~~ Deleted.
+COMMENTED OUT: already crossed out as deleted; nothing further to
+track. -->
 16. **Universal release builds on tag push.** Release workflow was
     cloned from fs-ext4; verify it produces
     `libfs_ntfs-v0.1.0-macos-universal.tar.gz` on a tag.
-17. **Rust-native facade.** Thin idiomatic wrapper around the C ABI
+    <!-- Status: unverified — `.github/workflows/` only contains
+    ci.yml; if a release.yml ever existed it isn't here now. Either
+    a tag-push job was never wired up, or it lives in a different
+    repo. Confirm before assuming this is shipped. -->
+<!-- 17. **Rust-native facade.** Thin idiomatic wrapper around the C ABI
     (`Filesystem::mount(path) -> Result<Filesystem>`, `File::read`).
-18. **Writes.** Only attempt after upstream `ntfs` supports writes,
+COMMENTED OUT: shipped. tests/facade.rs exercises the
+Rust-native facade. -->
+<!-- 18. **Writes.** Only attempt after upstream `ntfs` supports writes,
     or after forking. Not a near-term goal.
+COMMENTED OUT: emphatically shipped — the entire write surface
+(W0/W1/W2/W3) was added in this crate without waiting for upstream.
+include/fs_ntfs.h now exports mkfs, set_times, set_file_attributes,
+create_file, mkdir, rmdir, unlink, rename / rename_same_length,
+truncate, grow, write_file, write_file_contents,
+write_resident_contents, write_named_stream / delete_named_stream,
+write_reparse_point / remove_reparse_point, create_symlink,
+write_ea / remove_ea, link, read_object_id, plus handle-based `_h`
+siblings. See the "Write path" tests table above. -->
+
+**Phase 4 status:** items 15, 17, 18 shipped; item 16 (universal
+release builds) needs verification — no release workflow file
+present.
 
 ## Documentation cross-check
 
 Cross-check against
 [MS-FSCC](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/),
-[Flatcap Linux-NTFS project docs](https://flatcap.github.io/linux-ntfs/ntfs/),
+Windows Internals 7th ed. ch. "NTFS On-Disk Structure",
 and the [upstream `ntfs` 0.4 API](https://docs.rs/ntfs/0.4/ntfs/).
 Findings below are in addition to the items already listed under
 [Known limitations](#known-limitations).
@@ -360,7 +787,7 @@ convert as `(ts / 10_000_000) as i64 - EPOCH_DIFF` + `((ts % 10_000_000) * 100) 
 #### `fs_ntfs_dirent_t::name[256]` silently truncates legal NTFS names
 **Location:** `include/fs_ntfs.h:52`, `src/lib.rs:148-153`, `src/lib.rs:566-576`
 **Spec:** `$FILE_NAME` stores up to 255 UTF-16 code units
-([Flatcap $FILE_NAME](https://flatcap.github.io/linux-ntfs/ntfs/attributes/file_name.html)).
+(MS-FSCC §2.4.4 / Windows Internals 7th ed.).
 Worst-case UTF-8 encoding is 255 × 4 = **1020 bytes** plus NUL.
 **Code:** `name[256]`; copy capped at 255 bytes with no error signal.
 **Why it matters:** A file with non-BMP names (emoji, rare CJK) or long
@@ -371,7 +798,7 @@ path** hit by any FSKit enumeration of user profile / OneDrive dirs.
 **Fix:** Widen to `name[1024]` (other NTFS implementations uses this), or return
 variable-length with a caller-owned buffer.
 
-#### Junctions / mount points / WOF files mis-reported as symlinks
+<!-- #### Junctions / mount points / WOF files mis-reported as symlinks
 **Location:** `src/lib.rs:309-320`
 **Spec:** `FILE_ATTRIBUTE_REPARSE_POINT` only says "some reparse point".
 The *tag* decides semantics
@@ -392,11 +819,17 @@ broken. `find(1)`/`fts(3)` follow-vs-not-follow behavior flips.
 only map `IO_REPARSE_TAG_SYMLINK` → `FS_NTFS_FT_SYMLINK`.
 Junctions → transparent directory or a new `FS_NTFS_FT_JUNCTION`.
 Everything else → the underlying file/dir type.
+COMMENTED OUT: fixed. src/lib.rs:484-499 reads the 4-byte tag and
+dispatches; FS_NTFS_FT_JUNCTION (=8) added at include/fs_ntfs.h:31;
+WOF / LX_SYMLINK / AppExecLink / dedup tags fall through to the
+underlying file/dir type. WOF *decompression* is still outstanding
+(see Phase 3 #14 and the "WOF" entry under correctness risks
+below) but the type-dispatch bug itself is closed. -->
 
-#### Path traversal: `..` and `.` looked up literally
+<!-- #### Path traversal: `..` and `.` looked up literally
 **Location:** `src/lib.rs:212-228`
 **Spec:** NTFS `$INDEX_ALLOCATION` does **not** store `.` / `..`
-entries ([Flatcap Concepts — Directory](https://flatcap.github.io/linux-ntfs/ntfs/concepts/directory.html));
+entries (per Windows Internals 7th ed. ch. "NTFS On-Disk Structure");
 parent comes from `$FILE_NAME.parent_directory_reference`. POSIX
 drivers are expected to synthesize.
 **Code:** `for component in path.split('/')` hands every component to
@@ -408,8 +841,10 @@ that hand us composed paths fail. The fact that `../../secret`
 *happens* to miss is luck, not defense.
 **Fix:** Skip `.` components; for `..`, walk to parent via the current
 file's `$FILE_NAME.parent_directory_reference`.
+COMMENTED OUT: fixed. tests/path_dots.rs locks in
+`.` / `..` handling in path resolution. -->
 
-#### Seek-by-reading in `fs_ntfs_read_file`
+<!-- #### Seek-by-reading in `fs_ntfs_read_file`
 **Location:** `src/lib.rs:672-687`
 **Spec:** Upstream `NtfsAttributeValue` implements `NtfsReadSeek` with
 a real O(n_runs) `seek()`
@@ -423,6 +858,10 @@ O(1) pread into O(offset); makes the bridge unusable for
 random-access workloads (video scrubbing, VM disk images, DB files).
 **Fix:** `data_value.seek(&mut reader, SeekFrom::Start(offset))` via
 `NtfsReadSeek`, then read.
+COMMENTED OUT: fixed. src/lib.rs:956 now does
+`data_value.seek(&mut bridge.reader, SeekFrom::Start(offset))`. -->
+
+
 
 ### Correctness risks
 
@@ -430,7 +869,7 @@ random-access workloads (video scrubbing, VM disk images, DB files).
 **Location:** `src/lib.rs:221-224`
 **Spec:** A file with a DOS shortname has two `$FILE_NAME` entries
 — one per namespace
-([Flatcap Filename Namespaces](https://flatcap.github.io/linux-ntfs/ntfs/concepts/filename_namespace.html)).
+(per Windows Internals 7th ed. ch. "NTFS On-Disk Structure").
 `find()` does not filter by namespace.
 **Code:** Accepts whatever namespace matches.
 **Why it matters:** `/PROGRA~1/...` resolves to `/Program Files/...`.
@@ -459,7 +898,7 @@ when the case-sensitive bit is set.
 **Location:** `src/lib.rs:641-651`, `include/fs_ntfs.h:133-134`
 **Spec:** A file can have zero or more `$DATA` attributes; the unnamed
 one is conventionally "the data" but isn't required
-([Flatcap $DATA](https://flatcap.github.io/linux-ntfs/ntfs/attributes/data.html)).
+(per Windows Internals 7th ed.).
 Some MAPI/Outlook artifacts, WOF-compressed files, and encryption
 placeholders have only named streams.
 **Code:** Hard-requires the unnamed `$DATA`; errors if absent. `attr.size`
@@ -505,7 +944,7 @@ and advance on `dir_next` (some lifetime plumbing required).
 **Spec:** `$Volume`'s `$VOLUME_INFORMATION.flags` has `VOLUME_IS_DIRTY`
 (0x0001). Clients SHOULD cross-check `$MFT` against `$MFTMirr` (first 4
 entries) on mount
-([Flatcap $MFTMirr](https://flatcap.github.io/linux-ntfs/ntfs/files/mftmirr.html)).
+(per Windows Internals 7th ed.).
 **Code:** Parses boot sector + upcase table; no dirty check, no mirror
 cross-check, no `$LogFile` replay.
 **Why it matters:** On a laptop force-rebooted / suspended, the MFT can
@@ -517,6 +956,15 @@ minimum surface the state.
 `$Volume`/`$VOLUME_INFORMATION.flags`. Optionally add
 `metadata_consistent` after comparing the first 4 MFT entries with
 their mirror.
+<!-- PARTIAL: dirty-state probe is now reachable via standalone
+`fs_ntfs_is_dirty(path)` (header:193) and
+`fs_ntfs_is_dirty_with_callbacks(cfg)` (header:289). What still
+matches this finding: the bit is NOT exposed as a field on
+`fs_ntfs_volume_info_t` (so a normal mount + get_volume_info
+caller can't see it), and there is no MFT/MFTMirr cross-check or
+`metadata_consistent` companion. Leave the entry; only the
+"no dirty check at all" line is obsolete. -->
+
 
 #### `unsafe impl Send for CallbackReader` claims more than it can guarantee
 **Location:** `src/lib.rs:50-52`
@@ -538,7 +986,7 @@ helper for confined contexts.
 **Location:** `src/lib.rs:272-278`
 **Spec:** NTFS stores a Windows NT security descriptor (owner SID,
 group SID, DACL, SACL) in `$SECURITY_DESCRIPTOR` / `$Secure:$SDS`
-([Flatcap $SECURITY_DESCRIPTOR](https://flatcap.github.io/linux-ntfs/ntfs/attributes/security_descriptor.html));
+(per Windows Internals 7th ed. ch. "NTFS Security");
 NTFS driver derives POSIX mode by mapping the DACL against a `UserMapping`
 file.
 **Code:** Hard-codes `0o40755` / `0o100644`.
@@ -551,7 +999,7 @@ OR-in executable bits for common extensions (`.exe`, `.bat`, `.cmd`,
 `.com`, `.ps1`).
 **Fix full:** Parse `$SECURITY_DESCRIPTOR` + user-mapping config.
 
-#### `fs_ntfs_readlink` stub — no reparse-point readback at all
+<!-- #### `fs_ntfs_readlink` stub — no reparse-point readback at all
 **Location:** `src/lib.rs:708-717`
 **Spec:** `$REPARSE_POINT` stores tag + data.
 `IO_REPARSE_TAG_SYMLINK` → `SymbolicLinkReparseBuffer`
@@ -567,6 +1015,11 @@ mis-typing bug above, every such entry is an unresolvable broken
 symlink to callers.
 **Fix:** Read `$REPARSE_POINT`; first 4 bytes = tag; decode `PrintName`;
 strip `\??\` prefix; translate `C:\...` → `/...` for the caller.
+COMMENTED OUT: shipped. src/lib.rs:985+ implements full
+`fs_ntfs_readlink`: walks attributes, finds `$REPARSE_POINT`,
+decodes tag, dispatches to decode_symlink_print_name /
+decode_mount_point_print_name. tests/readlink.rs covers it. -->
+
 
 #### No Unicode-normalization contract documented
 **Location:** `src/lib.rs:236-261`, `src/lib.rs:565`, `include/fs_ntfs.h` (silent)
@@ -582,7 +1035,7 @@ upcase-folding, and that callers must pre-normalize to whatever form
 the file was stored as (which they cannot know). Long-term: accept a
 normalization-mode flag at mount.
 
-#### `.` and `..` not synthesized in directory listings
+<!-- #### `.` and `..` not synthesized in directory listings
 **Location:** `src/lib.rs:545-582`
 **Spec:** POSIX `readdir(3)` expects `.` and `..`; NTFS indexes don't
 store them.
@@ -592,6 +1045,12 @@ store them.
 **Fix:** Prepend synthesized entries in `dir_open`:
 `{name=".", frn=dir.frn}`, `{name="..", frn=parent.frn}` where parent
 comes from the dir's `$FILE_NAME.parent_directory_reference`.
+COMMENTED OUT: shipped. src/lib.rs:807-828 prepends both entries
+in every `fs_ntfs_dir_open` listing; parent FRN comes from
+`parent_record_number_of` (which reads
+`$FILE_NAME.parent_directory_reference`). tests/readdir_dots.rs
+covers it. -->
+
 
 ## How this crate is consumed today
 

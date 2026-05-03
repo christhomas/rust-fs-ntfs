@@ -10,10 +10,9 @@
 //!   LCN cluster_count/2 — $MFTMirr (single cluster)
 //!   LCN cluster_count-1 — backup boot sector
 //!
-//! References (no GPL code consulted):
-//! * [Flatcap Boot Sector](https://flatcap.github.io/linux-ntfs/ntfs/files/boot.html)
-//! * [Flatcap $MFT layout](https://flatcap.github.io/linux-ntfs/ntfs/files/mft.html)
-//! * MS-FSCC (system files + attributes)
+//! References (no GPL code consulted): NTFS boot sector / BPB and
+//! $MFT layout per Windows Internals 7th ed. ch. "NTFS On-Disk
+//! Structure"; MS-FSCC for system files and attribute definitions.
 
 use crate::block_io::BlockIo;
 use crate::data_runs::{encode_runs, DataRun};
@@ -115,8 +114,41 @@ const SD_ROOT_DIR: &[u8] = &[
     0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x21, 0x02, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x01, 0x05, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x05, 0x15, 0x00, 0x00, 0x00, 0xf0, 0x6f, 0xdf, 0x48, 0xa0, 0xe4, 0x9f, 0x24,
-    0xea, 0x7d, 0xcc, 0x65, 0x01, 0x02, 0x03, 0x00,
+    0xea, 0x7d, 0xcc, 0x65, 0x01, 0x02, 0x00,
+    0x00, // last 4 bytes are
+          // SubAuthority for the user/group owner SID; matrix byte-diff
+          // showed reference uses 0x00010200 (RID 513 = "Domain Users")
+          // while our hardcoded 0x00010203 was a transcription error.
+          // Fix doesn't affect chkdsk readonly (which already passes) but
+          // brings the byte-diff to zero on this 1 byte.
 ];
+
+// ---------------------------------------------------------------------------
+// $LogFile canonical content — first 12 KiB.
+//
+// Bytes captured from a Microsoft `format.com /FS:NTFS` reference run on a
+// 256 MiB / 4 KiB-cluster volume (diag
+// `test-diagnostics/run-20260502-154836/mac-format-label-empty/
+// reference-logfile.bin`, SHA-256 0a1d770715ee987934fcdfd6691507c96912b708d79b1bb8e1ce9408ce2ae368).
+//
+// Layout of the captured 12 KiB:
+//   * page 0 (offset 0x0000)  — log-restart page (RSTR magic, USA-protected,
+//                               restart area at offset 0x30, current_lsn
+//                               0x104408, single client "NTFS" at offset 0x90)
+//   * page 1 (offset 0x1000)  — paired log-restart page (RSTR magic, slightly
+//                               newer current_lsn 0x10634B; ntfs.sys picks
+//                               the higher one as authoritative)
+//   * page 2 (offset 0x2000)  — single RCRD record page (RCRD magic, USA at
+//                               0x28, lsn matches restart's current_lsn)
+//
+// `format.com`'s output past offset 0x3000 is all-0xFF; the canonical bytes
+// stop at 12 KiB so the rest of the log can be filled by the existing
+// 0xFF sweep in `format_filesystem`.
+//
+// References: MS-FSCC (system files / log structure), Windows Internals
+// 7th ed. ch. "NTFS Logging" (RSTR / RCRD page taxonomy). No GPL'd
+// NTFS reimplementations consulted.
+const LOGFILE_CANONICAL_12K: &[u8] = include_bytes!("logfile-canonical-12k.bin");
 
 /// Pick the canonical SD blob for a given system MFT record.
 fn sd_for_system_record(rec_num: u32) -> &'static [u8] {
@@ -149,6 +181,8 @@ mod rec {
     pub const BADCLUS: u32 = 8;
     pub const SECURE: u32 = 9;
     pub const UPCASE: u32 = 10;
+    #[allow(dead_code)] // Reserved slot; matches Microsoft's reference layout.
+    pub const EXTEND: u32 = 11;
     // Records 11..15 are reserved (no $FILE_NAME, not in root $I30).
     // Microsoft format.com leaves these as in-use placeholder records;
     // we leave them zero-bytes — see the iter14-v2 block in
@@ -187,7 +221,15 @@ pub fn format_filesystem(
     }
 
     // Layout planning ------------------------------------------------------
-    let mft_lcn: u64 = 4;
+    // mft_lcn must sit past the cluster region $Boot's $DATA claims
+    // (8 KiB conventional). At 4 KiB cluster that's 2 clusters and our
+    // historic mft_lcn=4 leaves a 2-cluster gap; at 1 KiB cluster the
+    // 8 KiB boot spans 8 clusters and a hardcoded 4 puts MFT *inside*
+    // $Boot's $DATA mapping — chkdsk reports `Corrupt master file
+    // table. CHKDSK aborted` (matrix run-20260503-024058 cluster-1k
+    // and cluster-512). Cap to max(4, boot_clusters).
+    let boot_clusters_for_layout: u64 = 8192u64.div_ceil(cluster_size as u64);
+    let mft_lcn: u64 = boot_clusters_for_layout.max(4);
     let mft_clusters: u64 = (mft_record_size as u64 * 64)
         .div_ceil(cluster_size as u64)
         .max(1);
@@ -197,7 +239,20 @@ pub fn format_filesystem(
     }
 
     let logfile_lcn = mft_lcn + mft_clusters;
-    let logfile_clusters: u64 = (64 * 1024u64).div_ceil(cluster_size as u64);
+    // $LogFile sized at 0x3B0000 (3866624 bytes / ~3.78 MiB). The
+    // value MUST match the `file_size` field encoded inside the
+    // baked LOGFILE_CANONICAL_12K restart pages — ntfs.sys reads
+    // restart-area.file_size at mount and chkdsk compares it to
+    // the on-disk allocated length. With our previous 1 MiB sizing,
+    // chkdsk reported "CHKDSK is adjusting the size of the log file"
+    // because the restart area declared 3866624 but the file was
+    // 1048576. Aligning the two clears the warning.
+    //
+    // 0x3B0000 is what Microsoft's format.com produced for our
+    // 256 MiB / 4 KiB-cluster reference; for cluster sizes other
+    // than 4 KiB the value rounds up to the nearest cluster.
+    const LOGFILE_TARGET_BYTES: u64 = 0x3B_0000;
+    let logfile_clusters: u64 = LOGFILE_TARGET_BYTES.div_ceil(cluster_size as u64);
 
     let bitmap_lcn = logfile_lcn + logfile_clusters;
     let bitmap_bytes: u64 = cluster_count.div_ceil(8);
@@ -207,13 +262,36 @@ pub fn format_filesystem(
     let upcase_bytes: u64 = 128 * 1024;
     let upcase_clusters: u64 = upcase_bytes.div_ceil(cluster_size as u64);
 
+    // $AttrDef placement was historically computed in the rec 4 block
+    // (`attrdef_lcn = upcase_lcn + upcase_clusters`). Moving it into
+    // layout planning so $MFT's bitmap can be placed immediately
+    // after — otherwise both end up at the same LCN and $AttrDef's
+    // write clobbers the $MFT bitmap cluster.
+    let attrdef_lcn = upcase_lcn + upcase_clusters;
+    let attrdef_clusters: u64 = (15 * 160u64).div_ceil(cluster_size as u64).max(1);
+
+    // $MFT's own $BITMAP attribute is non-resident on Microsoft's
+    // reference output (per-record byte-diff: ref ships an attribute
+    // header pointing at a single cluster of bitmap data; our previous
+    // code shipped a 32-byte resident attribute, leaving the on-disk
+    // record 40 bytes shorter than the reference). After fixing
+    // $LogFile, ntfs.sys advances past the log read but then trips
+    // Event ID 55 ("MFT contains a corrupted file record") while
+    // parsing $MFT's record itself. Diag write-smoke-20260502-161433.
+    //
+    // Allocate one cluster immediately after $AttrDef to hold the
+    // bitmap bytes (only mft_records_capacity/8 bytes used; rest of
+    // the cluster is zero-padded — same shape as Microsoft's output).
+    let mft_bitmap_lcn = attrdef_lcn + attrdef_clusters;
+    let mft_bitmap_clusters: u64 = 1;
+
     let mftmirr_lcn = cluster_count / 2;
     // Mirror records 0..3 (4 records). Round up in case record_size > cluster_size.
     let mftmirr_clusters: u64 = (4 * mft_record_size as u64).div_ceil(cluster_size as u64);
 
     let backup_boot_lcn = cluster_count - 1;
 
-    let last_used_lcn = upcase_lcn + upcase_clusters;
+    let last_used_lcn = mft_bitmap_lcn + mft_bitmap_clusters;
     if last_used_lcn >= mftmirr_lcn || mftmirr_lcn + mftmirr_clusters >= backup_boot_lcn {
         return Err("volume too small for chosen layout".to_string());
     }
@@ -251,9 +329,26 @@ pub fn format_filesystem(
     let backup_boot_byte_offset = volume_bytes - bytes_per_sector as u64;
     dev.write_all_at(backup_boot_byte_offset, &boot)?;
 
-    // 2. $LogFile — fill with 0xFF (RSTR-less; chkdsk reinits on mount).
+    // 2. $LogFile — write 12 KiB of canonical RSTR + RCRD pages
+    // captured byte-for-byte from a Microsoft `format.com` reference
+    // run (diag run-20260502-154836). Pages 0/1 are paired log-restart
+    // pages (RSTR magic, USA-protected, declaring "log clean / no
+    // replay"); page 2 is a single sentinel RCRD record. The remaining
+    // 1 MiB - 12 KiB is filled with 0xFF, matching what `format.com`
+    // produces on a fresh volume.
+    //
+    // ntfs.sys reads the restart pages at mount, picks the one with
+    // the higher current_lsn, validates the client array, and decides
+    // whether the volume needs replay. Without these pages the read
+    // fails internally and surfaces as Event ID 55 ("corruption
+    // discovered, exact nature unknown") plus ERROR_NO_SYSTEM_RESOURCES
+    // on every subsequent write.
     let log_size_bytes = logfile_clusters * cluster_size as u64;
-    write_filled(dev, logfile_lcn * cluster_size as u64, log_size_bytes, 0xFF)?;
+    let logfile_off = logfile_lcn * cluster_size as u64;
+    dev.write_all_at(logfile_off, LOGFILE_CANONICAL_12K)?;
+    let pad_off = logfile_off + LOGFILE_CANONICAL_12K.len() as u64;
+    let pad_len = log_size_bytes - LOGFILE_CANONICAL_12K.len() as u64;
+    write_filled(dev, pad_off, pad_len, 0xFF)?;
 
     // 3. $UpCase data -----------------------------------------------------
     let upcase_data = upcase::generate_upcase_table();
@@ -286,11 +381,19 @@ pub fn format_filesystem(
         }
         Ok(())
     };
-    allocate(0, 1)?; // boot
+    // $Boot's MFT record claims a 2-cluster $DATA (covering 8192
+    // bytes of boot region per Microsoft convention) at LCN 0..1.
+    // Both clusters must be marked allocated so chkdsk doesn't
+    // report `Found 0x1 clusters allocated to file "$Boot" at
+    // offset "0x1" marked as free` (smoke diag run-20260502-174506).
+    let boot_clusters_bitmap: u64 = 8192u64.div_ceil(cluster_size as u64);
+    allocate(0, boot_clusters_bitmap)?;
     allocate(mft_lcn, mft_clusters)?;
     allocate(logfile_lcn, logfile_clusters)?;
     allocate(bitmap_lcn, bitmap_clusters)?;
     allocate(upcase_lcn, upcase_clusters)?;
+    allocate(attrdef_lcn, attrdef_clusters)?;
+    allocate(mft_bitmap_lcn, mft_bitmap_clusters)?;
     allocate(mftmirr_lcn, mftmirr_clusters)?;
     allocate(backup_boot_lcn, 1)?;
     // Trailing bits past `cluster_count` (within the final byte) must be
@@ -341,25 +444,38 @@ pub fn format_filesystem(
             &mp,
         )?;
         let bitmap_value_size = mft_records_capacity.div_ceil(8) as usize;
-        let mft_bitmap_value = make_mft_internal_bitmap(
-            bitmap_value_size,
-            &[
-                rec::MFT,
-                rec::MFTMIRR,
-                rec::LOGFILE,
-                rec::VOLUME,
-                rec::ATTRDEF,
-                rec::ROOT,
-                rec::BITMAP,
-                rec::BOOT,
-                rec::BADCLUS,
-                rec::SECURE,
-                rec::UPCASE,
-                // rec::EXTEND (11) deliberately omitted — see iter14-v2
-                // block at the rec 11 slot.
-            ],
-        );
-        let bitmap_attr = build_resident_unnamed(0xB0, 4, &mft_bitmap_value);
+        // Slots 0..10 are the canonical system files; slots 11..15 are
+        // the reserved-slot placeholders (see build_reserved_placeholder).
+        // All 16 slots ship IN_USE in Microsoft's reference output, so
+        // mark all 16 bits set.
+        let mut allocated: Vec<u32> = (0u32..=10u32).collect();
+        for slot in 11..mft_records_capacity.min(16) as u32 {
+            allocated.push(slot);
+        }
+        let mft_bitmap_value = make_mft_internal_bitmap(bitmap_value_size, &allocated);
+        // Reference's $MFT $BITMAP is non-resident: 1 cluster allocated,
+        // first N bytes carry the bitmap, rest is zero-padded. Match
+        // that shape — see the mft_bitmap_lcn comment up top for why.
+        let mft_bitmap_cluster_off = mft_bitmap_lcn * cluster_size as u64;
+        let mut bitmap_cluster = vec![0u8; cluster_size as usize];
+        bitmap_cluster[..bitmap_value_size].copy_from_slice(&mft_bitmap_value);
+        dev.write_all_at(mft_bitmap_cluster_off, &bitmap_cluster)?;
+        let bitmap_runs = vec![DataRun {
+            starting_vcn: 0,
+            length: mft_bitmap_clusters,
+            lcn: Some(mft_bitmap_lcn),
+        }];
+        let bitmap_mp = encode_runs(&bitmap_runs)?;
+        let bitmap_attr = build_nonresident_attribute(
+            0xB0,
+            None,
+            4,
+            bitmap_value_size as u64,
+            mft_bitmap_clusters * cluster_size as u64,
+            bitmap_value_size as u64,
+            (mft_bitmap_clusters as i64) - 1,
+            &bitmap_mp,
+        )?;
         // $MFT $FILE_NAME tracks the MFT's $DATA size — the bytes
         // backing the MFT as a file. mft_clusters * cluster_size is
         // exactly what build_nonresident_data_attribute uses above.
@@ -448,11 +564,19 @@ pub fn format_filesystem(
         let volume_name_attr = build_resident_unnamed(ATTR_VOLUME_NAME, 3, &volume_name_value);
 
         // $VOLUME_INFORMATION value: reserved(8) + major(1) + minor(1) + flags(2)
+        //
+        // Microsoft `format.com` stamps `major=1, minor=2, flags=0x0084`
+        // (UPGRADE_ON_MOUNT | MODIFIED_BY_CHKDSK) on every fresh-format
+        // output — verified across multiple sizes in matrix runs
+        // run-20260503-015932 and run-20260503-024058. Match this
+        // byte-for-byte. Reference's volume passes `chkdsk /scan` with
+        // these values; flagging v3.1 directly causes chkdsk readonly
+        // to flag corruption (ntfs.sys does not expect a fully-upgraded
+        // volume from a fresh format).
         let mut vi = vec![0u8; 12];
-        vi[8] = 3;
-        vi[9] = 1;
-        // flags = 0 (clean)
-        vi[10..12].copy_from_slice(&0u16.to_le_bytes());
+        vi[8] = 1;
+        vi[9] = 2;
+        vi[10..12].copy_from_slice(&0x0084u16.to_le_bytes());
         let volume_info_attr = build_resident_unnamed(ATTR_VOLUME_INFORMATION, 4, &vi);
 
         // Empty $DATA at attr_id=5 to satisfy callers that look one up.
@@ -474,27 +598,22 @@ pub fn format_filesystem(
         sys_entries.push((rec::VOLUME, "$Volume", false, 0, 0));
     }
 
-    // record 4: $AttrDef (canonical 2560-byte table)
+    // record 4: $AttrDef (canonical NTFS 3.1, 2400 bytes / 15 entries)
     {
         let attrdef_blob = build_attrdef_table();
-        // Always non-resident at 2560 bytes (well over the resident
-        // ceiling for our 1024/4096 record sizes).
-        let attrdef_clusters = (attrdef_blob.len() as u64).div_ceil(cluster_size as u64);
-        // Allocate clusters at the tail of the early-allocation region.
-        let attrdef_lcn = upcase_lcn + upcase_clusters;
-        // Mark allocated in our in-memory bitmap and rewrite.
-        for c in attrdef_lcn..attrdef_lcn + attrdef_clusters {
-            let byte = (c / 8) as usize;
-            let bit = (c % 8) as u8;
-            bitmap[byte] |= 1u8 << bit;
-        }
+        // Sanity: the layout-planning attrdef_clusters must be at
+        // least as big as the actual blob; if build_attrdef_table is
+        // ever extended past 1 cluster, planning needs to know.
+        debug_assert!(
+            attrdef_blob.len() as u64 <= attrdef_clusters * cluster_size as u64,
+            "attrdef_clusters too small for blob of {} bytes",
+            attrdef_blob.len()
+        );
         // Write attrdef bytes (zero-pad to cluster boundary).
         let mut padded = attrdef_blob.clone();
         let pad_to = (attrdef_clusters * cluster_size as u64) as usize;
         padded.resize(pad_to, 0);
         dev.write_all_at(attrdef_lcn * cluster_size as u64, &padded)?;
-        // Re-write bitmap to capture the late allocation.
-        dev.write_all_at(bitmap_lcn * cluster_size as u64, &bitmap)?;
 
         let runs = vec![DataRun {
             starting_vcn: 0,
@@ -613,10 +732,18 @@ pub fn format_filesystem(
     {
         let empty_data = build_resident_unnamed(ATTR_DATA, 3, &[]);
 
-        // Named $Bad: sparse run covering all clusters (lcn=None).
+        // Named $Bad: sparse run covering the *data* portion of the
+        // volume — all clusters EXCEPT the last (which holds the
+        // backup boot sector and is excluded by NTFS convention).
+        // Microsoft `format.com` uses length = cluster_count - 1
+        // (matrix run-20260503-072644 reference: 94191 clusters in
+        // bitmap, $Bad covers 94191; ours pre-fix covered 65536 on a
+        // 65535-cluster volume, off by one). The mismatch caused
+        // chkdsk /scan to flag the volume needing offline /F.
+        let bad_clusters = cluster_count - 1;
         let bad_runs = vec![DataRun {
             starting_vcn: 0,
-            length: cluster_count,
+            length: bad_clusters,
             lcn: None,
         }];
         let bad_mp = encode_runs(&bad_runs)?;
@@ -624,10 +751,10 @@ pub fn format_filesystem(
             ATTR_DATA,
             Some("$Bad"),
             4,
-            cluster_count * cluster_size as u64,
-            cluster_count * cluster_size as u64,
+            bad_clusters * cluster_size as u64,
+            bad_clusters * cluster_size as u64,
             0,
-            (cluster_count as i64) - 1,
+            (bad_clusters as i64) - 1,
             &bad_mp,
         )?;
         // $BadClus's unnamed $DATA is empty (resident, zero bytes); the
@@ -653,18 +780,30 @@ pub fn format_filesystem(
     // it — the per-file SD pointer in $STANDARD_INFORMATION is what
     // governs ACL semantics, and we set it to 0 (default DACL).
     {
+        // Microsoft modern format.com names slot 9 `$Quota` (NTFS 3.x
+        // convention: $Quota is the slot-9 system file; $Secure lives
+        // under \$Extend on the volume). chkdsk validates this name
+        // explicitly at non-4K cluster sizes and reports
+        // `Deleting invalid system file name $Secure (9) in directory 5.
+        //  Repairing invalid system file name $Quota (9)`
+        // when the slot carries the legacy NTFS 1.x name (matrix
+        // run-20260503-024058 cluster-8k / cluster-64k).
+        //
+        // The IS_VIEW_INDEX flag applies to both $Quota and $Secure
+        // — both host named view indexes in modern NTFS — so keep
+        // the flag-setting branch in build_system_record unchanged.
         let empty_data = build_resident_unnamed(ATTR_DATA, 3, &[]);
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::SECURE,
-            "$Secure",
+            "$Quota",
             false,
             0,
             0,
             &[empty_data],
         )?;
         place_record(&mut mft_buf, rs, rec::SECURE, rec_bytes)?;
-        sys_entries.push((rec::SECURE, "$Secure", false, 0, 0));
+        sys_entries.push((rec::SECURE, "$Quota", false, 0, 0));
     }
 
     // record 10: $UpCase
@@ -734,15 +873,28 @@ pub fn format_filesystem(
         for &(rec_num, name, is_dir, alloc, real) in &sys_entries {
             // sequence_number = max(1, rec_num) per iter11 byte-diff.
             let seq: u16 = if rec_num == 0 { 1 } else { rec_num as u16 };
-            let stream = build_file_name_stream(
-                parent_ref,
-                mft_record_layout.nt_time,
-                name,
-                is_dir,
-                true,
-                alloc,
-                real,
-            )?;
+            // Microsoft's reference root $I30 ships skeleton streams
+            // (parent_ref + name only; timestamps + sizes + fa zeroed)
+            // for every system entry EXCEPT $MFT, which keeps its
+            // populated values. Byte-corroboration:
+            // run-20260503-011545/mac-format-label-empty/reference-mft-16recs.bin
+            // — entries 0..4,6..10 carry zeros at offsets 0x08..0x40
+            // of the stream; entry 5 ($MFT) keeps the populated form.
+            // Diverging from this triggers Event ID 55 "$I30:$INDEX_ROOT
+            // corrupt" on rec 5 (chkdsk /scan exit 13).
+            let stream = if rec_num == rec::MFT {
+                build_file_name_stream(
+                    parent_ref,
+                    mft_record_layout.nt_time,
+                    name,
+                    is_dir,
+                    true,
+                    alloc,
+                    real,
+                )?
+            } else {
+                build_skeleton_fn_stream(parent_ref, name)?
+            };
             let entry =
                 build_index_entry(encode_file_reference(rec_num as u64, seq), &stream, false);
             entries_blob.extend_from_slice(&entry);
@@ -750,7 +902,8 @@ pub fn format_filesystem(
         // LAST sentinel terminates the inline index.
         entries_blob.extend_from_slice(&build_index_entry(0, &[], true));
 
-        let index_root = build_populated_index_root_attr(3, index_block_size, &entries_blob);
+        let index_root =
+            build_populated_index_root_attr(3, index_block_size, cluster_size, &entries_blob);
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::ROOT,
@@ -763,9 +916,17 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::ROOT, rec_bytes)?;
     }
 
-    // 12..15 reserved — leave free in $MFT:$Bitmap (handled above) and
-    // the record bytes zero. NTFS treats records with no FILE magic and
-    // IN_USE clear as available.
+    // 11..15 reserved-slot placeholders (matches Microsoft format.com
+    // exactly — slot 11 left as a placeholder, NOT transformed into a
+    // real $Extend directory: matrix run-20260503-072644 confirmed
+    // reference's first 64 MFT records have no records past slot 15
+    // and rec 11 is just the 304-byte placeholder. /F's transformation
+    // of rec 11 is post-format chkdsk drift, not what fresh-formatted
+    // volumes ship.)
+    for slot in 11..mft_records_capacity.min(16) as u32 {
+        let rec_bytes = build_reserved_placeholder(&mft_record_layout, slot)?;
+        place_record(&mut mft_buf, rs, slot, rec_bytes)?;
+    }
 
     // 6. Write $MFT to disk + mirror first 4 records ----------------------
     dev.write_all_at(mft_lcn * cluster_size as u64, &mft_buf)?;
@@ -864,15 +1025,29 @@ fn build_boot_sector(
     b[0x48..0x50].copy_from_slice(&serial.to_le_bytes());
     // 0x50..0x54: checksum = 0 (not validated by major drivers).
 
-    // Bootstrap area + boot signature.
-    b[0x54] = 0xFA; // CLI
-    b[0x55] = 0xEB; // JMP $-1
-    b[0x56] = 0xFE;
-    // The rest of 0x57..0x1FE stays 0.
+    // Bootstrap area: bake Microsoft `format.com`'s NTFS bootloader
+    // bytes verbatim from a reference run (matrix
+    // run-20260503-043500/mac-format-label-empty/reference-boot.bin
+    // bytes 0x54..0x1FE, 426 bytes). Without this, byte 0x1FE..0x1FF
+    // is the standard 0x55AA boot signature but the rest is zero,
+    // which differs from what Microsoft writes — and may cause some
+    // ntfs.sys / chkdsk validators to flag the volume as
+    // not-format.com-produced.
+    b[0x54..0x54 + BOOT_BOOTSTRAP.len()].copy_from_slice(BOOT_BOOTSTRAP);
     b[0x1FE] = 0x55;
     b[0x1FF] = 0xAA;
     Ok(b)
 }
+
+/// 426 bytes of bootstrap code captured byte-for-byte from a Microsoft
+/// `format.com /FS:NTFS` reference run (NT 5+ "BOOTMGR is missing"
+/// loader). Resides at boot sector offset 0x54..0x1FE.
+///
+/// The volume isn't booted from BIOS in our pipeline, so the executable
+/// content is irrelevant for runtime. We bake it because some chkdsk
+/// passes may do a "is this format.com output?" check that includes
+/// these bytes.
+const BOOT_BOOTSTRAP: &[u8] = include_bytes!("boot-bootstrap.bin");
 
 // ---------------------------------------------------------------------------
 // MFT record builder (system files)
@@ -1034,6 +1209,73 @@ fn build_system_record(
     Ok(rec)
 }
 
+/// Build a 304-byte FILE-magic placeholder for one of the reserved
+/// MFT slots (11..15). Microsoft `format.com` writes one of these per
+/// reserved slot, in IN_USE state, with `$STD_INFO + $SD + empty $DATA`
+/// — no `$FILE_NAME`, not in any directory index. ntfs.sys validates
+/// this layout at mount; raw-zero slots cause Event ID 55 even though
+/// chkdsk Stage 1+2 walks them as "free".
+fn build_reserved_placeholder(layout: &MftLayout, record_number: u32) -> Result<Vec<u8>, String> {
+    let rs = layout.record_size;
+    let bps = layout.bytes_per_sector;
+    if rs < 512 || !rs.is_multiple_of(bps as usize) {
+        return Err(format!("invalid record_size {rs}"));
+    }
+
+    let mut rec = vec![0u8; rs];
+    rec[0..4].copy_from_slice(FILE_MAGIC);
+    rec[REC_OFF_USA_OFFSET..REC_OFF_USA_OFFSET + 2]
+        .copy_from_slice(&(USA_OFFSET as u16).to_le_bytes());
+    let sectors = rs / bps as usize;
+    rec[REC_OFF_USA_COUNT..REC_OFF_USA_COUNT + 2]
+        .copy_from_slice(&((sectors + 1) as u16).to_le_bytes());
+    let attrs_offset = align8(USA_OFFSET + 2 + sectors * 2);
+    rec[REC_OFF_LSN..REC_OFF_LSN + 8].copy_from_slice(&0u64.to_le_bytes());
+    rec[REC_OFF_SEQ..REC_OFF_SEQ + 2].copy_from_slice(&(record_number as u16).to_le_bytes());
+    // link_count = 0: these placeholders have no $FILE_NAME and are
+    // therefore not linked from any directory. Microsoft's reference
+    // sets link_count=0 here; ours previously set 1, which `chkdsk /F`
+    // detected as inconsistent (post-/F dump shows link_count cleared
+    // to 0 on slots 12-15) and which `chkdsk /scan` reports via
+    // exit 13 ("found problems that must be fixed offline").
+    // Diag: run-20260503-075833 reference rec 11-15 link_count=0
+    // vs our pre-fix link_count=1.
+    rec[REC_OFF_LINK_COUNT..REC_OFF_LINK_COUNT + 2].copy_from_slice(&0u16.to_le_bytes());
+    rec[REC_OFF_ATTRS_OFFSET..REC_OFF_ATTRS_OFFSET + 2]
+        .copy_from_slice(&(attrs_offset as u16).to_le_bytes());
+    rec[REC_OFF_FLAGS..REC_OFF_FLAGS + 2].copy_from_slice(&0x0001u16.to_le_bytes()); // IN_USE
+    rec[REC_OFF_BYTES_ALLOCATED..REC_OFF_BYTES_ALLOCATED + 4]
+        .copy_from_slice(&(rs as u32).to_le_bytes());
+    rec[REC_OFF_BASE_FILE_REF..REC_OFF_BASE_FILE_REF + 8].copy_from_slice(&0u64.to_le_bytes());
+    // Reference uses next_attr_id=3 on these placeholders (matches the
+    // attr_ids 0/1/2 below).
+    rec[REC_OFF_NEXT_ATTR_ID..REC_OFF_NEXT_ATTR_ID + 2].copy_from_slice(&3u16.to_le_bytes());
+    rec[REC_OFF_MFT_REC_NUM..REC_OFF_MFT_REC_NUM + 4].copy_from_slice(&record_number.to_le_bytes());
+    rec[USA_OFFSET..USA_OFFSET + 2].copy_from_slice(&1u16.to_le_bytes());
+
+    let mut cursor = attrs_offset;
+    cursor = write_standard_information(&mut rec, cursor, 0, layout.nt_time, false, true);
+
+    // $SECURITY_DESCRIPTOR — SD_SYSFILE_RW per byte-diff with reference's
+    // rec 11..15 (run-20260502-170839/reference-mft-16recs.bin).
+    let sd_attr = build_resident_unnamed(ATTR_SECURITY_DESCRIPTOR, 1, SD_SYSFILE_RW);
+    rec[cursor..cursor + sd_attr.len()].copy_from_slice(&sd_attr);
+    cursor += sd_attr.len();
+
+    // Empty resident $DATA — header (16) + value_length(0) + value_offset(0x18)
+    // + indexed_flag(0) + padding(1) = 24 bytes total.
+    let data_attr = build_resident_unnamed(ATTR_DATA, 2, &[]);
+    rec[cursor..cursor + data_attr.len()].copy_from_slice(&data_attr);
+    cursor += data_attr.len();
+
+    rec[cursor..cursor + 4].copy_from_slice(&ATTR_END_MARKER.to_le_bytes());
+    cursor += 8;
+    rec[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4].copy_from_slice(&(cursor as u32).to_le_bytes());
+
+    apply_fixup_on_write(&mut rec, bps)?;
+    Ok(rec)
+}
+
 fn place_record(
     mft_buf: &mut [u8],
     record_size: usize,
@@ -1079,6 +1321,11 @@ fn write_standard_information(
     //
     // For non-system files we preserve the 72-byte form (modern user
     // files ship NTFS 3.x extended fields).
+    // System records: 48-byte NTFS 1.x $STANDARD_INFORMATION value
+    // (matches Microsoft `format.com` reference output on v1.2-stamped
+    // fresh volumes). Regular files: 72-byte NTFS 3.x form. The 48-byte
+    // form gets rewritten to 72 by ntfs.sys / chkdsk when the
+    // UPGRADE_ON_MOUNT flag in $VOLUME_INFORMATION fires.
     let value_size = if is_system { 48usize } else { 72usize };
     let header_size = 24usize;
     let attr_length = align8(header_size + value_size);
@@ -1170,12 +1417,24 @@ fn write_file_name(
     rec[v + 32..v + 40].copy_from_slice(&nt_time.to_le_bytes());
     rec[v + 40..v + 48].copy_from_slice(&data_alloc.to_le_bytes());
     rec[v + 48..v + 56].copy_from_slice(&data_real.to_le_bytes());
-    let mut fa: u32 = 0x20;
+    // file_attributes: HIDDEN|SYSTEM (0x06) for system records, ARCHIVE
+    // (0x20) for regular files. The DIRECTORY bit (0x10000000) is OR'd
+    // on for any directory (including the root, which is both system
+    // AND a directory).
+    //
+    // Byte-corroboration (run-20260503-011545/mac-format-label-empty,
+    // rec 5 in-record $FILE_NAME):
+    //   reference bytes 0xE0..0xE3: 06 00 00 10  (= 0x10000006)
+    //   ours pre-fix:                06 00 00 00  (= 0x00000006)
+    //
+    // Without the DIRECTORY bit on the root's in-record FN, ntfs.sys
+    // reports `$I30:$INDEX_ROOT corrupt` against rec 5 (Event ID 55
+    // with file reference 0x5000000000005, "corrupted index attribute
+    // is :$I30:$INDEX_ROOT"). chkdsk readonly tolerates it but /scan
+    // queues offline repair (exit 13).
+    let mut fa: u32 = if is_system { 0x06 } else { 0x20 };
     if is_dir {
         fa |= 0x10000000;
-    }
-    if is_system {
-        fa |= 0x06;
     }
     rec[v + 56..v + 60].copy_from_slice(&fa.to_le_bytes());
     rec[v + 60..v + 64].copy_from_slice(&0u32.to_le_bytes());
@@ -1239,15 +1498,42 @@ fn build_file_name_stream(
     buf[32..40].copy_from_slice(&nt_time.to_le_bytes());
     buf[40..48].copy_from_slice(&data_alloc.to_le_bytes());
     buf[48..56].copy_from_slice(&data_real.to_le_bytes());
-    let mut fa: u32 = 0x20;
+    // Same convention as write_file_name above (system → 0x06, regular
+    // → 0x20, plus 0x10000000 for any directory).
+    let mut fa: u32 = if is_system { 0x06 } else { 0x20 };
     if is_dir {
         fa |= 0x10000000;
     }
-    if is_system {
-        fa |= 0x06;
-    }
     buf[56..60].copy_from_slice(&fa.to_le_bytes());
     buf[60..64].copy_from_slice(&0u32.to_le_bytes());
+    buf[64] = utf16.len() as u8;
+    buf[65] = NAMESPACE_WIN32_DOS;
+    for (i, c) in utf16.iter().enumerate() {
+        let off = 66 + i * 2;
+        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    }
+    Ok(buf)
+}
+
+/// "Skeleton" `$FILE_NAME` stream for a system metafile entry in the
+/// root `$I30`. Microsoft `format.com` zeros every numeric field
+/// (timestamps, alloc/real sizes, file_attributes, ea/reparse) on
+/// the embedded FN of system entries, keeping only `parent_reference`
+/// and the name. The in-record FN on the system file itself stays
+/// fully populated; the divergence is specific to the index entry.
+///
+/// Byte-corroboration: run-20260503-011545/mac-format-label-empty,
+/// reference-mft-16recs.bin rec 5 entries 0..4,6..10. See
+/// `docs/overnight-findings.md` iter A.
+fn build_skeleton_fn_stream(parent_reference: u64, name: &str) -> Result<Vec<u8>, String> {
+    let utf16: Vec<u16> = name.encode_utf16().collect();
+    if utf16.is_empty() || utf16.len() > 255 {
+        return Err(format!("invalid name length {}", utf16.len()));
+    }
+    let key_fixed = 0x42usize;
+    let mut buf = vec![0u8; key_fixed + utf16.len() * 2];
+    buf[0..8].copy_from_slice(&parent_reference.to_le_bytes());
+    // Bytes 0x08..0x40 left zero — that's the whole point.
     buf[64] = utf16.len() as u8;
     buf[65] = NAMESPACE_WIN32_DOS;
     for (i, c) in utf16.iter().enumerate() {
@@ -1277,9 +1563,19 @@ fn build_index_entry(file_reference: u64, stream: &[u8], is_last: bool) -> Vec<u
 
 /// Build a populated `$INDEX_ROOT` `$I30` attribute. `entries_blob` must
 /// already contain pre-sorted `INDEX_ENTRY`s terminated by a LAST sentinel.
+///
+/// `cluster_size` is required to encode the `clusters_per_index_block`
+/// byte at value-offset 0x0C. Microsoft's INDEX_ROOT carries a *signed*
+/// power-of-2 representation of `index_block_size / cluster_size`:
+/// when `index_block_size >= cluster_size` it's the positive quotient;
+/// when `cluster_size > index_block_size` it's `-(log2(index_block_size))`.
+/// chkdsk validates this against the boot-sector cpib at 0x44 and
+/// reports `Corrupt master file table` on any mismatch (matrix run
+/// `mac-format-cluster-512` / `cluster-1k`, run-20260503-011545).
 fn build_populated_index_root_attr(
     attr_id: u16,
     index_block_size: u32,
+    cluster_size: u32,
     entries_blob: &[u8],
 ) -> Vec<u8> {
     let common_header = 16usize;
@@ -1314,7 +1610,27 @@ fn build_populated_index_root_attr(
     buf[v..v + 4].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
     buf[v + 4..v + 8].copy_from_slice(&COLLATION_FILE_NAME.to_le_bytes());
     buf[v + 8..v + 12].copy_from_slice(&index_block_size.to_le_bytes());
-    buf[v + 12] = 1;
+    // clusters_per_index_block byte at INDEX_ROOT body offset 0x0C.
+    //
+    // Microsoft's encoding (corroborated against `format.com` reference
+    // dumps for 512 / 1024 / 4096 / 8192 cluster sizes in matrix run
+    // run-20260503-030521):
+    //   cluster_size <= index_block_size:
+    //       cpib = index_block_size / cluster_size  (e.g. 8/4/1)
+    //   cluster_size  >  index_block_size:
+    //       cpib = index_block_size / 512           (sectors-per-block)
+    //
+    // This is DIFFERENT from boot.cpib at 0x44, which uses signed-
+    // negative-log2 in the second branch (e.g. cluster=8192 →
+    // boot.cpib = -log2(4096) = -12 = 0xF4 vs INDEX_ROOT.cpib = 8).
+    // chkdsk Stage 2 reports `Error detected in index $I30 for file 5`
+    // when these byte forms diverge from reference.
+    let cpib_byte: u8 = if cluster_size <= index_block_size {
+        (index_block_size / cluster_size) as u8
+    } else {
+        (index_block_size / 512) as u8
+    };
+    buf[v + 12] = cpib_byte;
 
     let ih = v + 16;
     buf[ih..ih + 4].copy_from_slice(&16u32.to_le_bytes());
@@ -1366,9 +1682,10 @@ fn make_mft_internal_bitmap(size_bytes: usize, used_records: &[u32]) -> Vec<u8> 
 // ---------------------------------------------------------------------------
 
 /// Build the canonical NTFS 3.1 $AttrDef table. 20 entries × 160 bytes
-/// + 1 zero-terminator entry = 2560 bytes total. Format per Flatcap
-///   /MS-FSCC: 64-byte UTF-16 name + u32 type + u32 display_rule + u32
-///   collation + u32 flags + u64 min_size + u64 max_size.
+/// + 1 zero-terminator entry = 2560 bytes total. Format per
+///   MS-FSCC and Windows Internals 7th ed.: 64-byte UTF-16 name +
+///   u32 type + u32 display_rule + u32 collation + u32 flags +
+///   u64 min_size + u64 max_size.
 fn build_attrdef_table() -> Vec<u8> {
     struct Entry {
         name: &'static str,
@@ -1382,6 +1699,19 @@ fn build_attrdef_table() -> Vec<u8> {
     const NONRES: u32 = 0x80;
     const INDEXED: u32 = 0x02;
     const NEG1: i64 = -1;
+    // Entry contents byte-corroborated against Microsoft `format.com`'s
+    // 2400-byte $AttrDef cluster (diag run-20260502-165809). Microsoft
+    // ships the **NTFS 1.x legacy names** in $AttrDef even on modern
+    // 3.1 volumes (`$VOLUME_VERSION` for type 0x40 — not `$OBJECT_ID`;
+    // `$SYMBOLIC_LINK` for type 0xC0 — not `$REPARSE_POINT`). The
+    // attribute *type* used at runtime hasn't changed (0x40 still
+    // means object-id, 0xC0 still means reparse-point), but the
+    // $AttrDef name field is fossilised to the original NTFS 1.x
+    // labels. ntfs.sys cross-checks this table at mount.
+    //
+    // No `$LOGGED_UTILITY_STREAM` entry — Microsoft's reference table
+    // stops at $EA. Trailing 160-byte zero entry IS present (entry 14
+    // is all zeros) — the iteration below appends it.
     let entries = [
         Entry {
             name: "$STANDARD_INFORMATION",
@@ -1389,7 +1719,7 @@ fn build_attrdef_table() -> Vec<u8> {
             collation: 0,
             flags: RESIDENT,
             min_size: 48,
-            max_size: 72,
+            max_size: 48, // ref uses min=max=48 (NTFS 1.x form)
         },
         Entry {
             name: "$ATTRIBUTE_LIST",
@@ -1402,18 +1732,18 @@ fn build_attrdef_table() -> Vec<u8> {
         Entry {
             name: "$FILE_NAME",
             type_code: 0x30,
-            collation: 1,
+            collation: 0, // ref has 0 here, not COLLATION_FILE_NAME (1)
             flags: RESIDENT | INDEXED,
             min_size: 68,
             max_size: 578,
         },
         Entry {
-            name: "$OBJECT_ID",
+            name: "$VOLUME_VERSION", // legacy name; type 0x40 = $OBJECT_ID at runtime
             type_code: 0x40,
             collation: 0,
             flags: RESIDENT,
-            min_size: 0,
-            max_size: 256,
+            min_size: 8,
+            max_size: 8,
         },
         Entry {
             name: "$SECURITY_DESCRIPTOR",
@@ -1467,17 +1797,17 @@ fn build_attrdef_table() -> Vec<u8> {
             name: "$BITMAP",
             type_code: 0xB0,
             collation: 0,
-            flags: 0,
+            flags: NONRES, // ref has 0x80, not 0
             min_size: 0,
             max_size: NEG1,
         },
         Entry {
-            name: "$REPARSE_POINT",
+            name: "$SYMBOLIC_LINK", // legacy name; type 0xC0 = $REPARSE_POINT
             type_code: 0xC0,
             collation: 0,
-            flags: 0,
+            flags: NONRES,
             min_size: 0,
-            max_size: 16384,
+            max_size: NEG1,
         },
         Entry {
             name: "$EA_INFORMATION",
@@ -1495,24 +1825,11 @@ fn build_attrdef_table() -> Vec<u8> {
             min_size: 0,
             max_size: 65536,
         },
-        Entry {
-            name: "$PROPERTY_SET",
-            type_code: 0xF0,
-            collation: 0,
-            flags: 0,
-            min_size: 0,
-            max_size: NEG1,
-        },
-        Entry {
-            name: "$LOGGED_UTILITY_STREAM",
-            type_code: 0x100,
-            collation: 0,
-            flags: 0,
-            min_size: 0,
-            max_size: 65536,
-        },
     ];
-    let mut out = Vec::with_capacity(160 * entries.len());
+    // Reference's $AttrDef from `format.com` is exactly 15 × 160 = 2400
+    // bytes: 14 active entries + one 160-byte all-zeros terminator
+    // (entry 14). We append the terminator after the iteration.
+    let mut out = Vec::with_capacity(160 * (entries.len() + 1));
     for e in &entries {
         let mut buf = [0u8; 160];
         let name_utf16: Vec<u16> = e.name.encode_utf16().collect();
@@ -1520,21 +1837,15 @@ fn build_attrdef_table() -> Vec<u8> {
             let off = i * 2;
             buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
         }
-        // 0x80: type
         buf[0x80..0x84].copy_from_slice(&e.type_code.to_le_bytes());
-        // 0x84: display rule
         buf[0x84..0x88].copy_from_slice(&0u32.to_le_bytes());
-        // 0x88: collation
         buf[0x88..0x8C].copy_from_slice(&e.collation.to_le_bytes());
-        // 0x8C: flags
         buf[0x8C..0x90].copy_from_slice(&e.flags.to_le_bytes());
-        // 0x90: min_size (i64)
         buf[0x90..0x98].copy_from_slice(&e.min_size.to_le_bytes());
-        // 0x98: max_size (i64; -1 ⇒ all-ones)
         buf[0x98..0xA0].copy_from_slice(&e.max_size.to_le_bytes());
         out.extend_from_slice(&buf);
     }
-    // Trailing zero entry (some tools key on it; harmless).
+    // Trailing 160-byte zero entry — present in reference (entry 14).
     out.extend(std::iter::repeat_n(0u8, 160));
     out
 }

@@ -23,12 +23,22 @@ test-disks/*.img
 # (scripts/test-windows-local.sh) writes per-iteration diag dirs to
 # $TMPDIR by default, but if anything ends up in-tree we don't want
 # it committed.
-diag*
+tmp/
+docs/archive
 *.vhdx
 nfs.img
+nfs-*.img
+
+# Matrix test diagnostics — pulled from the Windows VM by
+# scripts/test-windows-matrix.sh into test-diagnostics/run-<ts>/.
+# Contains binary MFT dumps, chkdsk transcripts, NTFS event log;
+# all reproducible from a re-run, none worth committing.
+test-diagnostics/
+diag/
 
 # SSH key file for the test VM, used when ssh-agent is broken
 # (consumed via SSH_OPTS in scripts/test-windows-local.sh — see header).
 # Lives at the repo root only; never commit.
 /privatekey
 /privatekey.*
+.test-env

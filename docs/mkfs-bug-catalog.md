@@ -1,5 +1,9 @@
 # mkfs_ntfs bug catalog — discoveries, fixes, evidence, references
 
+> **PROCESSED** into [`chkdsk-improvement-findings.md`](./chkdsk-improvement-findings.md) on 2026-05-02. Content below preserved verbatim within an HTML comment for audit; nothing deleted.
+
+<!-- BEGIN-PROCESSED-INTO-chkdsk-improvement-findings
+
 A consolidated reference for everything the multi-agent test matrix
 has surfaced about `mkfs_ntfs`. Per-bug entries cover:
 
@@ -816,3 +820,6 @@ When in doubt: dump the bytes, diff against `format.com`. The
 methodology in [chkdsk-findings.md](./chkdsk-findings.md) and
 [multi-agent-test-protocol.md](./multi-agent-test-protocol.md) is
 the runbook.
+
+END-PROCESSED-INTO-chkdsk-improvement-findings -->
+

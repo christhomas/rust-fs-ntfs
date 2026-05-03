@@ -4,8 +4,8 @@
 //! `mapping_pairs_offset` and runs until the first 0x00 byte (or the
 //! attribute's length).
 //!
-//! Reference (no GPL code consulted):
-//! [Flatcap Data Runs](https://flatcap.github.io/linux-ntfs/ntfs/concepts/data_runs.html).
+//! Reference (no GPL code consulted): NTFS data-run / mapping-pair
+//! encoding per Windows Internals 7th ed. ch. "NTFS On-Disk Structure".
 //!
 //! Run-list encoding:
 //!   byte 0     header = (lcn_bytes << 4) | length_bytes
@@ -141,7 +141,17 @@ pub fn encode_runs(runs: &[DataRun]) -> Result<Vec<u8>, String> {
             return Err(format!("run {i} has zero length"));
         }
 
-        let length_bytes = unsigned_bytes_needed(r.length);
+        // NTFS encodes mapping-pair length as a *signed* value (so the
+        // high bit must always be 0 to keep it non-negative). 0x8000
+        // (= 32768) fits in 2 unsigned bytes but reads as -32768 when
+        // sign-extended; use the signed-byte calculation so we emit
+        // 3 bytes (00 00 80) instead of 2 (00 80). The bug surfaced as
+        // Event ID 55 "MFT contains a corrupted file record" against
+        // $BadClus on a 128 MiB / 4 KiB-cluster volume (smoke diag
+        // write-smoke-20260502-175747).
+        let length_signed = i64::try_from(r.length)
+            .map_err(|_| format!("run length {} exceeds i63 range", r.length))?;
+        let length_bytes = signed_bytes_needed(length_signed);
         let (lcn_bytes, lcn_field) = match r.lcn {
             None => (0usize, 0i64),
             Some(abs) => {
@@ -168,14 +178,6 @@ pub fn encode_runs(runs: &[DataRun]) -> Result<Vec<u8>, String> {
     }
     out.push(0x00);
     Ok(out)
-}
-
-fn unsigned_bytes_needed(n: u64) -> usize {
-    if n == 0 {
-        return 1;
-    }
-    let bits = 64 - n.leading_zeros() as usize;
-    bits.div_ceil(8)
 }
 
 fn signed_bytes_needed(n: i64) -> usize {
