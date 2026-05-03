@@ -1,6 +1,27 @@
 //! Low-level MFT-record read-modify-write with Update Sequence Array (USA)
 //! fixup. Primary primitive for any write that touches an MFT record.
 //!
+//! # Concurrency contract
+//!
+//! [`update_mft_record`] is **not safe under concurrent writers** to
+//! the same image. The function reads the record, applies USA fixup,
+//! calls the mutator, re-applies fixup, and writes back — any external
+//! write that lands between the read and the write tears the update
+//! and silently corrupts the volume.
+//!
+//! Callers MUST arrange that nobody else writes to the image during
+//! the call:
+//!   - **Single-process**: fs-ntfs doesn't spawn threads internally,
+//!     so a single mount-and-mutate call from one thread is safe.
+//!   - **Multi-process / external writers** (Windows mounting the
+//!     same volume, a second fs-ntfs caller, an upstream NTFS driver):
+//!     UB. The image must be quiesced (unmounted everywhere else)
+//!     before any mutation here.
+//!
+//! Advisory file locking is **deliberately not** added — it can't
+//! prevent external concurrency anyway, so it would only catch
+//! in-process races we don't produce.
+//!
 //! References (no GPL code consulted): Multi-sector update sequence
 //! ("fixup"), boot sector / BPB layout, and FILE_RECORD_SEGMENT_HEADER
 //! per Windows Internals 7th ed. ch. "NTFS On-Disk Structure" and

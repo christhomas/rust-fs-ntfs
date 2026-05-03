@@ -156,8 +156,30 @@ struct CallbackReader {
     position: u64,
 }
 
-// Safety: The context pointer is managed by the caller (Swift/FSKit) and
-// is valid for the lifetime of the mount. FSKit guarantees serial access.
+// Safety contract for `unsafe impl Send`:
+//
+// `context: *mut c_void` is an opaque pointer the caller (Swift /
+// FSKit, Go, C, …) hands to `fs_ntfs_mount_with_callbacks` and gets
+// back unchanged on every read invocation. The pointer's lifetime
+// MUST cover the mount: i.e. the caller MUST NOT free the pointee
+// until `fs_ntfs_umount` returns.
+//
+// What FSKit's serialisation actually guarantees:
+//   - Per-volume callback serialisation. Two callbacks against the
+//     same handle never run concurrently. This is what makes a raw
+//     pointer safe to dereference from inside `read_fn` without
+//     synchronisation around `position`.
+//
+// What it does NOT guarantee, and what callers must arrange:
+//   - **Thread-confined contexts** (e.g. an `@MainActor`-bound Swift
+//     `FSBlockDeviceResource` that requires drop on the main
+//     thread): if the consumer's `context` points at a
+//     thread-confined object, the consumer MUST wrap that object in
+//     a thread-safe shell (e.g. an `Arc` or a Sendable proxy)
+//     before passing the pointer here. fs_ntfs may drop the
+//     handle on any thread.
+//   - **Re-entrancy**: the read callback must not call back into
+//     fs_ntfs against the same handle.
 unsafe impl Send for CallbackReader {}
 
 impl Read for CallbackReader {

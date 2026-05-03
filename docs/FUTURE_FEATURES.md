@@ -627,21 +627,19 @@ doesn't sit in the hot path of consumers that don't subscribe to
 trace level. Today's lifecycle-only instrumentation is enough for
 "why did mount/fsck happen?" debugging on FSKit reports.
 
-### §6.5 `Send` safety contract for `CallbackReader` context pointer
+### §6.5 `Send` safety contract for `CallbackReader` context pointer (resolved)
 
-**Today**: `unsafe impl Send for CallbackReader {}` at
-`src/lib.rs:159-161` carries a generic two-line Safety comment
-("context pointer is managed by the caller… FSKit guarantees serial
-access").
+The `unsafe impl Send for CallbackReader` block in `src/lib.rs` now
+spells out:
 
-**Problem**: FSKit serialises *callbacks* per volume — that
-guarantees mutex-free aliasing, not thread-binding of the handle.
-If the Swift caller's `context` refers to a thread-confined object
-(e.g. an `@MainActor`-bound `FSBlockDeviceResource` that enforces
-main-thread drop), transferring drop to another thread silently
-violates that invariant. Papered-over unsafety; unlikely to bite
-today but worth tightening before a confined-context consumer hits
-it.
+  - **What FSKit's per-volume callback serialisation actually
+    guarantees** (mutex-free aliasing of `position` from inside
+    `read_fn`).
+  - **What it does NOT guarantee** that callers MUST arrange:
+    thread-confined contexts (`@MainActor`-bound
+    `FSBlockDeviceResource`, etc.) need a Sendable wrapper because
+    fs_ntfs may drop the handle on any thread; and the read
+    callback must not re-enter fs_ntfs against the same handle.
 
 **Fix**: expand the Safety comment to spell out the contract the
 Swift caller must uphold for their `context` pointer (Send-safe,
@@ -650,26 +648,20 @@ drop-on-any-thread). ~10 lines of Rust prose. No code change. The
 the original review is **deferred** — docs-only is the chosen fix.
 Migrated from code-review-2026-04-19 §3.
 
-### §6.6 Concurrency contract on `update_mft_record`
+### §6.6 Concurrency contract on `update_mft_record` (resolved)
 
-**Today**: `update_mft_record` (`src/mft_io.rs:271-289`) reads a
-record, applies USA fixup, calls the mutator, re-applies fixup,
-writes back. The docstring covers the IN_USE rejection invariant
-but says nothing about concurrent writers.
+`src/mft_io.rs` now carries a top-level "Concurrency contract"
+doc-block stating:
 
-**Problem**: an external concurrent writer (Windows / NTFS driver,
-or a second fs-ntfs caller against the same image) can interleave
-between read and write, causing torn updates. fs-ntfs doesn't spawn
-threads internally, advisory locks can't prevent external
-concurrency anyway, and Cargo test workers each get their own
-`_xxx.img` copy — but the contract is undocumented.
-
-**Fix**: add a module-level doc comment stating that concurrent
-writers to the same image are UB; callers must mount the image
-read-only or serialise externally. ~5 lines of Rust prose. No code
-change. The "advisory file locking" alternative from the original
-review is **rejected** — can't prevent external Windows concurrency
-even if held. Migrated from code-review-2026-04-19 §7.
+  - `update_mft_record` is NOT safe under concurrent writers to the
+    same image (the read-mutate-write window can be torn).
+  - Single-process, single-thread usage is safe (the crate doesn't
+    spawn threads internally).
+  - Multi-process or external writers (Windows mounting the same
+    volume, an upstream NTFS driver, a second fs-ntfs caller) is UB
+    — quiesce the image first.
+  - Advisory file locking is deliberately not added (can't prevent
+    external concurrency anyway).
 
 ---
 
