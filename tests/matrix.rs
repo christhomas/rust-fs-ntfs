@@ -37,99 +37,383 @@ static MOUNT_LOCK: Mutex<()> = Mutex::new(());
 // libtest-mimic's stderr capture is disabled (args.nocapture = true) so
 // the lines actually reach the terminal as the trial runs.
 static VERBOSE: AtomicBool = AtomicBool::new(false);
+// True when we're writing to a TTY and NO_COLOR isn't set: lets us
+// emit ANSI green/red on the OK/FAIL tokens without polluting piped
+// output with escape sequences. Set once in main().
+static USE_COLOR: AtomicBool = AtomicBool::new(false);
 
-// Per-trial verbose context. Tracks how many steps have been emitted so
-// the ASCII connector flips to `└──` for the final step.
+fn green(s: &str) -> String {
+    if USE_COLOR.load(Ordering::Relaxed) {
+        format!("\x1b[32m{s}\x1b[0m")
+    } else {
+        s.to_string()
+    }
+}
+
+fn red(s: &str) -> String {
+    if USE_COLOR.load(Ordering::Relaxed) {
+        format!("\x1b[31m{s}\x1b[0m")
+    } else {
+        s.to_string()
+    }
+}
+
+// Char-aware padding so non-ASCII labels don't break column alignment.
+// (Rust's `{:<width$}` format spec uses byte length, which mis-counts
+// any multi-byte char.)
+fn pad_right(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n >= max {
+        s.to_string()
+    } else {
+        let mut out = String::with_capacity(s.len() + (max - n));
+        out.push_str(s);
+        for _ in 0..(max - n) {
+            out.push(' ');
+        }
+        out
+    }
+}
+
+fn pad_left(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n >= max {
+        s.to_string()
+    } else {
+        let mut out = String::with_capacity(s.len() + (max - n));
+        for _ in 0..(max - n) {
+            out.push(' ');
+        }
+        out.push_str(s);
+        out
+    }
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else if max < 3 {
+        s.chars().take(max).collect()
+    } else {
+        let head: String = s.chars().take(max - 3).collect();
+        format!("{head}...")
+    }
+}
+
+fn format_duration(ms: u128) -> String {
+    if ms < 10_000 {
+        format!("{ms}ms")
+    } else if ms < 600_000 {
+        format!("{:.1}s", (ms as f64) / 1000.0)
+    } else {
+        let mins = ms / 60_000;
+        let rem_secs = (ms % 60_000) / 1000;
+        format!("{mins}m{rem_secs:02}s")
+    }
+}
+
+// Per-trial verbose context. Two persistent artifacts get written into
+// the scenario's diag dir on every run, regardless of --verbose:
+//
+//   events.jsonl       — one structured event per line. Producer-side
+//                        contract for any UI process (lipgloss table,
+//                        web dashboard, etc.) — `t` field discriminates
+//                        scenario_started, step_started, step_finished,
+//                        ps_run_started, ps_run_finished, scenario_finished.
+//   runner-output.txt  — literal tee of the terminal-style table the
+//                        runner would print under --verbose. Lets a UI
+//                        (or `cat` post-mortem) reproduce the human
+//                        view without re-running the test.
+//
+// --verbose only controls whether the same lines also flow to stderr in
+// real time. Files always get written.
+//
+// Display style: a loose ASCII table. Header printed once per scenario,
+// then one row per step as it completes (so the user watches rows fill
+// in live). PS-streamed output (under --verbose) appears between rows
+// indented; row borders are deliberately omitted so the streamed lines
+// don't shred the table visual.
+const IDX_W: usize = 3;
+const DESC_W: usize = 64;
+const STATUS_W: usize = 6;
+const TIME_W: usize = 8;
+
 struct Verbose {
-    enabled: bool,
+    show_terminal: bool,
     step_idx: usize,
     total: usize,
+    started: std::time::Instant,
+    step_started_at: Option<std::time::Instant>,
+    events_file: Option<std::fs::File>,
+    runner_output_file: Option<std::fs::File>,
 }
 
 impl Verbose {
-    fn new(scn: &Scenario) -> Self {
+    fn new(scn: &Scenario, diag: &Path) -> Self {
+        use std::fs::OpenOptions;
         let total = scn
             .operation_sequence
             .split("->")
             .filter(|s| !s.trim().is_empty())
             .count();
+        let events_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(diag.join("events.jsonl"))
+            .ok();
+        let runner_output_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(diag.join("runner-output.txt"))
+            .ok();
         Self {
-            enabled: VERBOSE.load(Ordering::Relaxed),
+            show_terminal: VERBOSE.load(Ordering::Relaxed),
             step_idx: 0,
             total,
+            started: std::time::Instant::now(),
+            step_started_at: None,
+            events_file,
+            runner_output_file,
         }
     }
 
-    fn header(&self, name: &str, summary: &str) {
-        if !self.enabled {
-            return;
-        }
-        eprintln!();
-        eprintln!("• {name}");
-        eprintln!("  scenario: {summary}");
+    fn elapsed_ms(&self) -> u128 {
+        self.started.elapsed().as_millis()
     }
 
-    fn connector(&self) -> &'static str {
-        if self.step_idx + 1 == self.total {
-            "└──"
-        } else {
-            "├──"
-        }
-    }
-
-    // Step kicks off: print description, no newline, flush so the user
-    // sees it before the actual work begins.
-    fn step_start(&self, description: &str) {
-        if !self.enabled {
-            return;
-        }
+    fn emit_event(&mut self, ev: serde_json::Value) {
         use std::io::Write;
-        let c = self.connector();
-        eprint!("  {c} we are testing: {description} ... ");
-        let _ = std::io::stderr().flush();
+        if let Some(f) = self.events_file.as_mut() {
+            let _ = writeln!(f, "{}", ev);
+            let _ = f.flush();
+        }
     }
 
-    fn step_ok(&mut self) {
-        if self.enabled {
-            eprintln!("OK");
+    // Write a chunk and append a newline. Use `terminal_text` if you want
+    // the terminal copy to differ from the file copy (e.g. ANSI-coloured
+    // OK/FAIL on the terminal but plain text in the file).
+    fn emit_line(&mut self, text: &str) {
+        use std::io::Write;
+        if self.show_terminal {
+            eprintln!("{text}");
         }
-        self.step_idx += 1;
+        if let Some(f) = self.runner_output_file.as_mut() {
+            let _ = writeln!(f, "{text}");
+            let _ = f.flush();
+        }
     }
 
-    fn step_fail(&mut self, reason: &str) {
-        if self.enabled {
-            eprintln!("FAIL ({reason})");
+    fn emit_split_line(&mut self, terminal_text: &str, file_text: &str) {
+        use std::io::Write;
+        if self.show_terminal {
+            eprintln!("{terminal_text}");
         }
+        if let Some(f) = self.runner_output_file.as_mut() {
+            let _ = writeln!(f, "{file_text}");
+            let _ = f.flush();
+        }
+    }
+
+    fn header(&mut self, name: &str, summary: &str) {
+        // Blank-line padding for the terminal only — keep runner-output.txt
+        // tight (no spurious leading blank).
+        if self.show_terminal {
+            eprintln!();
+        }
+        self.emit_line(&format!("• {name}"));
+        self.emit_line(&format!("  scenario: {summary}"));
+        // Table header: column titles + a divider row. Same layout used
+        // for every row below so the column edges line up.
+        self.emit_line(&format!(
+            "  {idx}  {desc}  {status}  {time}",
+            idx = pad_right("#", IDX_W),
+            desc = pad_right("subtask", DESC_W),
+            status = pad_right("status", STATUS_W),
+            time = pad_left("time", TIME_W),
+        ));
+        self.emit_line(&format!(
+            "  {idx}  {desc}  {status}  {time}",
+            idx = "-".repeat(IDX_W),
+            desc = "-".repeat(DESC_W),
+            status = "-".repeat(STATUS_W),
+            time = "-".repeat(TIME_W),
+        ));
+        self.emit_event(serde_json::json!({
+            "t": "scenario_started",
+            "name": name,
+            "summary": summary,
+            "total_steps": self.total,
+            "elapsed_ms": self.elapsed_ms(),
+        }));
+    }
+
+    fn step_start(&mut self, description: &str) {
+        // Table mode: rows are emitted only when the step completes
+        // (need status + duration). Just record the start for the
+        // events stream and stash the timestamp so step_ok / step_fail
+        // can compute duration. No terminal output yet — the row will
+        // appear after the work is done.
+        self.step_started_at = Some(std::time::Instant::now());
+        self.emit_event(serde_json::json!({
+            "t": "step_started",
+            "step_idx": self.step_idx,
+            "total_steps": self.total,
+            "description": description,
+            "elapsed_ms": self.elapsed_ms(),
+        }));
+    }
+
+    fn write_row(
+        &mut self,
+        description: &str,
+        status_term: &str,
+        status_file: &str,
+        time_text: &str,
+        detail: Option<&str>,
+    ) {
+        let idx = format!("{}", self.step_idx + 1);
+        let idx_padded = pad_left(&idx, IDX_W);
+        let desc_padded = pad_right(&truncate_str(description, DESC_W), DESC_W);
+        let status_term_padded = pad_right(status_term, STATUS_W);
+        let status_file_padded = pad_right(status_file, STATUS_W);
+        let time_padded = pad_left(time_text, TIME_W);
+        // Detail is the right-most column and intentionally has no
+        // fixed width — it carries variable-length info like chkdsk
+        // markers ("ro=0 scan=11 fix=0 post=11") that would either get
+        // truncated or waste a lot of horizontal space if forced to a
+        // column. Empty when None so non-chkdsk rows stay tight.
+        let detail_str = detail.unwrap_or("");
+        let term = format!(
+            "  {idx_padded}  {desc_padded}  {status_term_padded}  {time_padded}  {detail_str}"
+        );
+        let file = format!(
+            "  {idx_padded}  {desc_padded}  {status_file_padded}  {time_padded}  {detail_str}"
+        );
+        // Strip trailing whitespace so empty-detail rows don't pad out
+        // to detail's nonexistent fixed width.
+        let term = term.trim_end().to_string();
+        let file = file.trim_end().to_string();
+        self.emit_split_line(&term, &file);
+    }
+
+    fn write_continuation(&mut self, prefix: &str, text: &str) {
+        // Indent under the description column so reason lines visually
+        // hang off the row above.
+        let pad = " ".repeat(2 + IDX_W + 2);
+        self.emit_line(&format!("{pad}{prefix}: {text}"));
+    }
+
+    fn step_ok(&mut self, description: &str) {
+        let dur_ms = self
+            .step_started_at
+            .map(|t| t.elapsed().as_millis())
+            .unwrap_or(0);
+        let dur_text = format_duration(dur_ms);
+        self.write_row(description, &green("OK"), "OK", &dur_text, None);
+        self.emit_event(serde_json::json!({
+            "t": "step_finished",
+            "step_idx": self.step_idx,
+            "status": "pass",
+            "duration_ms": dur_ms,
+            "elapsed_ms": self.elapsed_ms(),
+        }));
         self.step_idx += 1;
+        self.step_started_at = None;
+    }
+
+    fn step_fail(&mut self, description: &str, reason: &str) {
+        let dur_ms = self
+            .step_started_at
+            .map(|t| t.elapsed().as_millis())
+            .unwrap_or(0);
+        let dur_text = format_duration(dur_ms);
+        self.write_row(description, &red("FAIL"), "FAIL", &dur_text, None);
+        self.write_continuation("reason", reason);
+        self.emit_event(serde_json::json!({
+            "t": "step_finished",
+            "step_idx": self.step_idx,
+            "status": "fail",
+            "reason": reason,
+            "duration_ms": dur_ms,
+            "elapsed_ms": self.elapsed_ms(),
+        }));
+        self.step_idx += 1;
+        self.step_started_at = None;
     }
 
     // For batched ops (e.g. win:* verbs handled in one PS invocation)
-    // there's no live time gap between description and result, so we
-    // emit both halves on a single eprintln.
+    // there's no individual time measurement, so duration shows "—".
     fn step_inline_ok(&mut self, description: &str) {
-        if self.enabled {
-            let c = self.connector();
-            eprintln!("  {c} we are testing: {description} ... OK");
-        }
+        self.emit_event(serde_json::json!({
+            "t": "step_started",
+            "step_idx": self.step_idx,
+            "total_steps": self.total,
+            "description": description,
+            "elapsed_ms": self.elapsed_ms(),
+        }));
+        self.write_row(description, &green("OK"), "OK", "—", None);
+        self.emit_event(serde_json::json!({
+            "t": "step_finished",
+            "step_idx": self.step_idx,
+            "status": "pass",
+            "duration_ms": null,
+            "elapsed_ms": self.elapsed_ms(),
+        }));
         self.step_idx += 1;
     }
 
     fn step_inline_fail(&mut self, description: &str, reason: &str) {
-        if self.enabled {
-            let c = self.connector();
-            eprintln!("  {c} we are testing: {description} ... FAIL ({reason})");
-        }
+        self.emit_event(serde_json::json!({
+            "t": "step_started",
+            "step_idx": self.step_idx,
+            "total_steps": self.total,
+            "description": description,
+            "elapsed_ms": self.elapsed_ms(),
+        }));
+        self.write_row(description, &red("FAIL"), "FAIL", "—", None);
+        self.write_continuation("reason", reason);
+        self.emit_event(serde_json::json!({
+            "t": "step_finished",
+            "step_idx": self.step_idx,
+            "status": "fail",
+            "reason": reason,
+            "duration_ms": null,
+            "elapsed_ms": self.elapsed_ms(),
+        }));
         self.step_idx += 1;
     }
 
-    fn footer(&self, status: &str, detail: Option<&str>) {
-        if !self.enabled {
-            return;
-        }
-        match detail {
-            Some(d) => eprintln!("  => {status} ({d})"),
-            None => eprintln!("  => {status}"),
-        }
+    fn ps_run_started(&mut self, remount_cycles: i32, fixture_count: usize) {
+        self.emit_event(serde_json::json!({
+            "t": "ps_run_started",
+            "remount_cycles": remount_cycles,
+            "fixture_count": fixture_count,
+            "elapsed_ms": self.elapsed_ms(),
+        }));
+    }
+
+    fn ps_run_finished(&mut self, exit_code: Option<i32>) {
+        self.emit_event(serde_json::json!({
+            "t": "ps_run_finished",
+            "exit_code": exit_code,
+            "elapsed_ms": self.elapsed_ms(),
+        }));
+    }
+
+    fn footer(&mut self, status: &str, detail: Option<&str>) {
+        let line = match detail {
+            Some(d) => format!("  => {status} ({d})"),
+            None => format!("  => {status}"),
+        };
+        self.emit_line(&line);
+        self.emit_event(serde_json::json!({
+            "t": "scenario_finished",
+            "status": status,
+            "detail": detail,
+            "elapsed_ms": self.elapsed_ms(),
+        }));
     }
 }
 
@@ -247,15 +531,21 @@ fn main() {
             VERBOSE.store(true, Ordering::Relaxed);
         }
     }
-
-    let mut args = Arguments::from_iter(argv);
-    if VERBOSE.load(Ordering::Relaxed) {
-        // Force libtest-mimic to stream stderr from trial bodies so the
-        // per-scenario tree we print from run_scenario actually reaches
-        // the terminal (otherwise libtest-mimic buffers and only emits
-        // captured output for failing trials).
-        args.nocapture = true;
+    // Color the OK/FAIL tokens only when stderr is a real terminal and
+    // the standard NO_COLOR opt-out isn't set. SSH-pipe-to-cat or CI
+    // log capture both correctly fall through to plain text.
+    {
+        use std::io::IsTerminal;
+        let on = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+        USE_COLOR.store(on, Ordering::Relaxed);
     }
+
+    let args = Arguments::from_iter(argv);
+    // libtest-mimic 0.7 explicitly does NOT capture stdout/stderr from
+    // trial bodies (see crate docs), so anything we eprintln! flows
+    // straight through to the terminal. The PS subprocess is the only
+    // remaining source of multi-minute silence — it's tee'd line by
+    // line in run_scenario_inner so the user keeps seeing progress.
 
     let worklist_path = workspace_root().join("test-matrix.json");
     let raw = std::fs::read_to_string(&worklist_path)
@@ -425,7 +715,7 @@ fn run_scenario(name: &str, scn: &Scenario) -> Result<(), Failed> {
     let _ = std::fs::remove_file(&vhdx);
     let _ = std::fs::remove_file(&reference_vhdx);
 
-    let mut v = Verbose::new(scn);
+    let mut v = Verbose::new(scn, &diag);
     v.header(name, &scenario_summary(scn));
 
     let outcome = run_scenario_inner(
@@ -571,10 +861,10 @@ fn run_scenario_inner(
         let desc = describe_op(raw, scn);
         v.step_start(&desc);
         match run_one_mac_op(raw, &bin, img, diag, i + 1, scn) {
-            Ok(()) => v.step_ok(),
+            Ok(()) => v.step_ok(&desc),
             Err(e) => {
                 let reason = scenario_failure_msg(&e);
-                v.step_fail(&reason);
+                v.step_fail(&desc, &reason);
                 return Err(ScenarioFailure::Errored(format!(
                     "mac-prefix step {} ({raw}): {reason}",
                     i + 1
@@ -586,9 +876,17 @@ fn run_scenario_inner(
     // 3-5. Wrap → mount → reference-format → chkdsk → event-log.
     // Serialised across trials because Windows drive-letter assignment
     // is process-global. See scripts/run-scenario.ps1 for details.
+    //
+    // Streaming model: spawn the PS child with piped stdout/stderr, then
+    // tee both streams in background threads — every line gets echoed to
+    // our stderr (indented under the scenario tree) when verbose is on,
+    // AND collected into a buffer for marker parsing + diag dump. This
+    // replaces a `.output()` that previously sat silent for minutes
+    // during repeat-mount cycles, leaving the user staring at idle disks
+    // in the VM with no terminal feedback.
     let _guard = MOUNT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let ps_script = workdir.join("scripts/run-scenario.ps1");
-    let out = Command::new("powershell")
+    let mut child = Command::new("powershell")
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -606,16 +904,51 @@ fn run_scenario_inner(
         .args(["-VolumeSizeMb", &scn.volume_params.size_mib.to_string()])
         .args(["-RemountCycles", &remount_cycles.to_string()])
         .args(["-FixturesJson", &fixtures_path.display().to_string()])
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| ScenarioFailure::Errored(format!("spawn run-scenario.ps1: {e}")))?;
 
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    v.ps_run_started(remount_cycles, scn.fixture_files.len());
+
+    let verbose_now = VERBOSE.load(Ordering::Relaxed);
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    // Each tee thread opens its own append-mode handle on
+    // runner-output.txt. POSIX-style O_APPEND keeps the line writes
+    // atomic-up-to-PIPE_BUF, so the two streams interleave per-line
+    // without a Mutex.
+    let runner_output_path = diag.join("runner-output.txt");
+    let p1 = runner_output_path.clone();
+    let p2 = runner_output_path.clone();
+    let stdout_thread = std::thread::spawn(move || tee_stream(stdout_pipe, verbose_now, p1));
+    let stderr_thread = std::thread::spawn(move || tee_stream(stderr_pipe, verbose_now, p2));
+
+    let status = child
+        .wait()
+        .map_err(|e| ScenarioFailure::Errored(format!("wait run-scenario.ps1: {e}")))?;
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
     let _ = std::fs::write(diag.join("ps-stdout.txt"), &stdout);
     let _ = std::fs::write(diag.join("ps-stderr.txt"), &stderr);
+    v.ps_run_finished(status.code());
 
-    if !out.status.success() {
-        let reason = format!("run-scenario.ps1 exit {:?}", out.status.code());
+    // Synthesise a fake `out.status` shape so the rest of the function
+    // doesn't need to change (it used `out.status.success()` and
+    // `out.status.code()`).
+    struct PsStatus(std::process::ExitStatus);
+    impl PsStatus {
+        fn success(&self) -> bool {
+            self.0.success()
+        }
+        fn code(&self) -> Option<i32> {
+            self.0.code()
+        }
+    }
+    let out = PsStatus(status);
+
+    if !out.success() {
+        let reason = format!("run-scenario.ps1 exit {:?}", out.code());
         for raw in &ops[win_idx..] {
             if raw.starts_with("win:") {
                 v.step_inline_fail(&describe_op(raw, scn), &reason);
@@ -732,10 +1065,10 @@ fn run_scenario_inner(
             let desc = describe_op(raw, scn);
             v.step_start(&desc);
             match run_one_mac_op(raw, &bin, &post_img, diag, 100 + i + 1, scn) {
-                Ok(()) => v.step_ok(),
+                Ok(()) => v.step_ok(&desc),
                 Err(e) => {
                     let reason = scenario_failure_msg(&e);
-                    v.step_fail(&reason);
+                    v.step_fail(&desc, &reason);
                     return Err(ScenarioFailure::Errored(format!(
                         "post-win mac step {} ({raw}): {reason}",
                         i + 1
@@ -746,6 +1079,50 @@ fn run_scenario_inner(
     }
 
     Ok((ro, scan))
+}
+
+// Read a child-process pipe line by line. Each line is:
+//   1. echoed to our stderr (indented to slot under the verbose tree)
+//      when verbose is on,
+//   2. appended to the scenario's runner-output.txt with the same
+//      indent — multiple tee_stream threads can write concurrently
+//      because each opens its own O_APPEND handle and individual line
+//      writes are atomic up to PIPE_BUF on every supported OS,
+//   3. accumulated into the returned String for diag-file dumps and
+//      RO_EXIT/SCAN_EXIT marker parsing on the main thread.
+// Returns empty string if the pipe was already consumed.
+fn tee_stream<R: std::io::Read + Send + 'static>(
+    reader: Option<R>,
+    verbose: bool,
+    runner_output_path: PathBuf,
+) -> String {
+    use std::fs::OpenOptions;
+    use std::io::{BufRead, Write};
+    let Some(reader) = reader else {
+        return String::new();
+    };
+    let mut buf = String::new();
+    let bufread = std::io::BufReader::new(reader);
+    let mut output_file = OpenOptions::new()
+        .append(true)
+        .open(&runner_output_path)
+        .ok();
+    for line in bufread.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        if verbose {
+            eprintln!("       {line}");
+        }
+        if let Some(f) = output_file.as_mut() {
+            let _ = writeln!(f, "       {line}");
+            let _ = f.flush();
+        }
+        buf.push_str(&line);
+        buf.push('\n');
+    }
+    buf
 }
 
 fn parse_marker(s: &str, prefix: &str) -> Option<i32> {
@@ -877,10 +1254,10 @@ fn run_mac_ops(
         let desc = describe_op(raw, scn);
         v.step_start(&desc);
         match run_one_mac_op(raw, &bin, img, diag, step, scn) {
-            Ok(()) => v.step_ok(),
+            Ok(()) => v.step_ok(&desc),
             Err(e) => {
                 let reason = scenario_failure_msg(&e);
-                v.step_fail(&reason);
+                v.step_fail(&desc, &reason);
                 return Err(ScenarioFailure::Errored(format!(
                     "step {step} ({raw}): {reason}"
                 )));
