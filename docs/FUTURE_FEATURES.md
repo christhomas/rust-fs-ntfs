@@ -411,10 +411,22 @@ panics, OOB reads, and infinite loops, not Result::Err shapes.
 seed corpora alongside as `corpus/<target>/{seed1,seed2,…}` once
 crash-replicating inputs surface.
 
-### §5.3 Criterion benchmarks
+### §5.3 Criterion benchmarks (resolved for byte-decoders)
 
-`bench/write_at_1gb.rs`, `bench/create_many.rs`. Detects performance
-regressions as we refactor.
+`benches/byte_decoders.rs` covers the three byte-decoders the fuzz
+harness already targets (`data_runs::decode_runs`,
+`ea_io::decode`, `attr_io::iter_attributes`). Each input is
+hand-constructed in-memory to exercise a realistic shape — single
+run, eight-run zigzag, sparse-then-data; single small EA, sixteen
+short EAs; minimal three-attr MFT record.
+
+Run with `cargo bench --bench byte_decoders`. Reports under
+`target/criterion/<group>/<id>/report/index.html`.
+
+Future: `bench/write_at_1gb.rs` / `bench/create_many.rs` would
+exercise the higher-level mutation paths but need a writable
+in-memory `BlockIo` adapter that doesn't ship yet — added when the
+write surface stabilises further.
 
 ### §5.4 CI matrix expansion (partly resolved)
 

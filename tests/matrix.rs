@@ -22,12 +22,42 @@ use libtest_mimic::{Arguments, Failed, Trial};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 // VHDX mount uses Windows-global state (drive letters, disk numbers).
 // Serialise mount/chkdsk/dismount across trials. mkfs runs in parallel
 // because each scenario gets a distinct .img path.
 static MOUNT_LOCK: Mutex<()> = Mutex::new(());
+
+// --verbose / MATRIX_VERBOSE=1 toggles the ASCII per-step tree report
+// printed after libtest-mimic finishes. We collect step outcomes per
+// scenario into VERBOSE_TRACES and emit the whole tree in one pass at
+// the end of main() so libtest-mimic's own progress lines and the
+// scenario trees never interleave.
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+static VERBOSE_TRACES: Mutex<Vec<VerboseTrace>> = Mutex::new(Vec::new());
+
+#[derive(Clone)]
+struct StepOutcome {
+    op: String,
+    description: String,
+    status: StepStatus,
+}
+
+#[derive(Clone)]
+enum StepStatus {
+    Pass,
+    Fail(String),
+}
+
+struct VerboseTrace {
+    name: String,
+    scenario_summary: String,
+    steps: Vec<StepOutcome>,
+    final_status: &'static str,
+    final_detail: Option<String>,
+}
 
 #[derive(Deserialize)]
 struct WorkList {
@@ -124,7 +154,27 @@ struct RunManifest {
 }
 
 fn main() {
-    let args = Arguments::from_args();
+    // Strip our custom --verbose flag before libtest-mimic parses argv
+    // (clap inside libtest-mimic would otherwise reject the unknown
+    // flag). MATRIX_VERBOSE=1 in the env is an equivalent toggle for
+    // CI / wrapper scripts that don't want to fight argv ordering.
+    let mut argv: Vec<String> = std::env::args().collect();
+    let mut idx = 1;
+    while idx < argv.len() {
+        if argv[idx] == "--verbose" {
+            VERBOSE.store(true, Ordering::Relaxed);
+            argv.remove(idx);
+        } else {
+            idx += 1;
+        }
+    }
+    if let Ok(v) = std::env::var("MATRIX_VERBOSE") {
+        if v == "1" || v.eq_ignore_ascii_case("true") {
+            VERBOSE.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let args = Arguments::from_iter(argv);
 
     let worklist_path = workspace_root().join("test-matrix.json");
     let raw = std::fs::read_to_string(&worklist_path)
@@ -177,6 +227,16 @@ fn main() {
     // joins all threads before returning the Conclusion).
     if !args.list {
         let _ = aggregate_results();
+    }
+
+    if VERBOSE.load(Ordering::Relaxed) && !args.list {
+        let mut traces = VERBOSE_TRACES.lock().unwrap_or_else(|p| p.into_inner());
+        traces.sort_by(|a, b| a.name.cmp(&b.name));
+        eprintln!();
+        eprintln!("=== verbose subtask trace ===");
+        for t in traces.iter() {
+            print_verbose_tree(t);
+        }
     }
 
     conclusion.exit();
@@ -294,8 +354,38 @@ fn run_scenario(name: &str, scn: &Scenario) -> Result<(), Failed> {
     let _ = std::fs::remove_file(&vhdx);
     let _ = std::fs::remove_file(&reference_vhdx);
 
-    let outcome = run_scenario_inner(name, scn, &workdir, &diag, &img, &vhdx, &reference_vhdx);
+    let mut outcomes: Vec<StepOutcome> = Vec::new();
+    let outcome = run_scenario_inner(
+        name,
+        scn,
+        &workdir,
+        &diag,
+        &img,
+        &vhdx,
+        &reference_vhdx,
+        &mut outcomes,
+    );
     let elapsed = started.elapsed().as_secs_f64();
+
+    if VERBOSE.load(Ordering::Relaxed) {
+        let (final_status, final_detail) = match &outcome {
+            Ok((ro, scan)) => ("passed", Some(format!("ro={ro} scan={scan}"))),
+            Err(ScenarioFailure::ChkdskFail { ro, scan }) => {
+                ("failed", Some(format!("ro={ro} scan={scan}")))
+            }
+            Err(ScenarioFailure::Errored(m)) => ("errored", Some(m.clone())),
+        };
+        let trace = VerboseTrace {
+            name: name.to_string(),
+            scenario_summary: scenario_summary(scn),
+            steps: outcomes,
+            final_status,
+            final_detail,
+        };
+        if let Ok(mut g) = VERBOSE_TRACES.lock() {
+            g.push(trace);
+        }
+    }
 
     // Always write result.json — pass, fail, or error all share the
     // same on-disk schema so the aggregator doesn't need special cases.
@@ -350,6 +440,7 @@ enum ScenarioFailure {
     Errored(String),
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_scenario_inner(
     _name: &str,
     scn: &Scenario,
@@ -358,6 +449,7 @@ fn run_scenario_inner(
     img: &Path,
     vhdx: &Path,
     reference_vhdx: &Path,
+    outcomes: &mut Vec<StepOutcome>,
 ) -> Result<(i32, i32), ScenarioFailure> {
     // 1. Allocate blank raw image.
     let f_img = std::fs::File::create(img)
@@ -371,7 +463,7 @@ fn run_scenario_inner(
     // and skip the VHDX/PowerShell leg entirely. Returns (0, 0) on
     // success so the existing chkdsk-shaped result schema still fits.
     if is_pure_mac_chain(&scn.operation_sequence) {
-        run_mac_ops(scn, img, diag)?;
+        run_mac_ops(scn, img, diag, outcomes)?;
         return Ok((0, 0));
     }
 
@@ -415,17 +507,26 @@ fn run_scenario_inner(
 
     let bin = rust_ntfs_path();
     for (i, raw) in mac_prefix.iter().enumerate() {
-        run_one_mac_op(raw, &bin, img, diag, i + 1, scn).map_err(|e| {
-            ScenarioFailure::Errored(format!(
-                "mac-prefix step {} ({raw}): {}",
-                i + 1,
-                match e {
-                    ScenarioFailure::Errored(m) => m,
-                    ScenarioFailure::ChkdskFail { .. } =>
-                        "unexpected chkdsk failure in mac-prefix path".into(),
-                }
-            ))
-        })?;
+        let desc = describe_op(raw, scn);
+        match run_one_mac_op(raw, &bin, img, diag, i + 1, scn) {
+            Ok(()) => outcomes.push(StepOutcome {
+                op: (*raw).to_string(),
+                description: desc,
+                status: StepStatus::Pass,
+            }),
+            Err(e) => {
+                let reason = scenario_failure_msg(&e);
+                outcomes.push(StepOutcome {
+                    op: (*raw).to_string(),
+                    description: desc,
+                    status: StepStatus::Fail(reason.clone()),
+                });
+                return Err(ScenarioFailure::Errored(format!(
+                    "mac-prefix step {} ({raw}): {reason}",
+                    i + 1
+                )));
+            }
+        }
     }
 
     // 3-5. Wrap → mount → reference-format → chkdsk → event-log.
@@ -460,9 +561,18 @@ fn run_scenario_inner(
     let _ = std::fs::write(diag.join("ps-stderr.txt"), &stderr);
 
     if !out.status.success() {
+        let reason = format!("run-scenario.ps1 failed (exit {:?})", out.status.code());
+        for raw in &ops[win_idx..] {
+            if raw.starts_with("win:") {
+                outcomes.push(StepOutcome {
+                    op: (*raw).to_string(),
+                    description: describe_op(raw, scn),
+                    status: StepStatus::Fail(reason.clone()),
+                });
+            }
+        }
         return Err(ScenarioFailure::Errored(format!(
-            "run-scenario.ps1 failed (exit {:?}): {}",
-            out.status.code(),
+            "{reason}: {}",
             stderr.trim()
         )));
     }
@@ -502,19 +612,13 @@ fn run_scenario_inner(
     // chkdsk-must-pass contract; RepairOk widens to "fine if /F
     // succeeded"; RepairRequired flips it: /F MUST run and the
     // post-/F /scan MUST exit 0.
-    match scn.verdict_shape {
-        VerdictShape::Clean => {
-            if !(ro == 0 && scan_ok) {
-                return Err(ScenarioFailure::ChkdskFail { ro, scan });
-            }
-        }
+    let scenario_passed = match scn.verdict_shape {
+        VerdictShape::Clean => ro == 0 && scan_ok,
         VerdictShape::RepairOk => {
             let pre_clean = ro == 0 && scan_ok;
             let post_clean = matches!(fix_exit, Some(0))
                 && matches!(postfix_scan_exit, Some(0) | Some(11) | Some(13));
-            if !(pre_clean || post_clean) {
-                return Err(ScenarioFailure::ChkdskFail { ro, scan });
-            }
+            pre_clean || post_clean
         }
         VerdictShape::RepairRequired => {
             // /F must have actually run (Stage E2 only runs when
@@ -523,10 +627,37 @@ fn run_scenario_inner(
             let f_ran = fix_exit.is_some();
             let f_ok = matches!(fix_exit, Some(0));
             let post_ok = matches!(postfix_scan_exit, Some(0));
-            if !(f_ran && f_ok && post_ok) {
-                return Err(ScenarioFailure::ChkdskFail { ro, scan });
-            }
+            f_ran && f_ok && post_ok
         }
+    };
+
+    // Record outcomes for every win:* op in the suffix. PS runs the
+    // win ops as a single batch, so non-chkdsk verbs (repeat-mount,
+    // enumerate, dismount, remount, write, delete) inherit "Pass" from
+    // PS exiting 0; chkdsk verbs gate on the per-shape verdict above.
+    for raw in &ops[win_idx..] {
+        if !raw.starts_with("win:") {
+            continue;
+        }
+        let desc = describe_op(raw, scn);
+        let status = if raw.starts_with("win:chkdsk") {
+            if scenario_passed {
+                StepStatus::Pass
+            } else {
+                StepStatus::Fail(format!("ro={ro} scan={scan}"))
+            }
+        } else {
+            StepStatus::Pass
+        };
+        outcomes.push(StepOutcome {
+            op: (*raw).to_string(),
+            description: desc,
+            status,
+        });
+    }
+
+    if !scenario_passed {
+        return Err(ScenarioFailure::ChkdskFail { ro, scan });
     }
 
     // Post-Windows mac ops: any mac:* ops AFTER the first win: op run
@@ -534,8 +665,9 @@ fn run_scenario_inner(
     // script (suffix `.post.img`). The PS script writes the post image
     // before its final dismount; if it isn't present, treat as an
     // infrastructure error rather than silently passing.
-    let mac_suffix: Vec<&&str> = ops[win_idx..]
+    let mac_suffix: Vec<&str> = ops[win_idx..]
         .iter()
+        .copied()
         .filter(|op| op.starts_with("mac:"))
         .collect();
     if !mac_suffix.is_empty() {
@@ -552,17 +684,26 @@ fn run_scenario_inner(
             )));
         }
         for (i, raw) in mac_suffix.iter().enumerate() {
-            run_one_mac_op(raw, &bin, &post_img, diag, 100 + i + 1, scn).map_err(|e| {
-                ScenarioFailure::Errored(format!(
-                    "post-win mac step {} ({raw}): {}",
-                    i + 1,
-                    match e {
-                        ScenarioFailure::Errored(m) => m,
-                        ScenarioFailure::ChkdskFail { .. } =>
-                            "unexpected chkdsk failure in post-win mac path".into(),
-                    }
-                ))
-            })?;
+            let desc = describe_op(raw, scn);
+            match run_one_mac_op(raw, &bin, &post_img, diag, 100 + i + 1, scn) {
+                Ok(()) => outcomes.push(StepOutcome {
+                    op: (*raw).to_string(),
+                    description: desc,
+                    status: StepStatus::Pass,
+                }),
+                Err(e) => {
+                    let reason = scenario_failure_msg(&e);
+                    outcomes.push(StepOutcome {
+                        op: (*raw).to_string(),
+                        description: desc,
+                        status: StepStatus::Fail(reason.clone()),
+                    });
+                    return Err(ScenarioFailure::Errored(format!(
+                        "post-win mac step {} ({raw}): {reason}",
+                        i + 1
+                    )));
+                }
+            }
         }
     }
 
@@ -682,7 +823,12 @@ fn f<S: Into<String>>(msg: S) -> Failed {
 // Each op's stdout/stderr is captured to diag/<op-N>-*.txt so a
 // post-mortem agent can reconstruct what happened.
 
-fn run_mac_ops(scn: &Scenario, img: &Path, diag: &Path) -> Result<(), ScenarioFailure> {
+fn run_mac_ops(
+    scn: &Scenario,
+    img: &Path,
+    diag: &Path,
+    outcomes: &mut Vec<StepOutcome>,
+) -> Result<(), ScenarioFailure> {
     let bin = rust_ntfs_path();
     let mut step = 0usize;
     for raw in scn.operation_sequence.split("->").map(str::trim) {
@@ -690,16 +836,25 @@ fn run_mac_ops(scn: &Scenario, img: &Path, diag: &Path) -> Result<(), ScenarioFa
             continue;
         }
         step += 1;
-        run_one_mac_op(raw, &bin, img, diag, step, scn).map_err(|e| {
-            ScenarioFailure::Errored(format!(
-                "step {step} ({raw}): {}",
-                match e {
-                    ScenarioFailure::Errored(m) => m,
-                    ScenarioFailure::ChkdskFail { .. } =>
-                        "unexpected chkdsk failure in mac-only path".into(),
-                }
-            ))
-        })?;
+        let desc = describe_op(raw, scn);
+        match run_one_mac_op(raw, &bin, img, diag, step, scn) {
+            Ok(()) => outcomes.push(StepOutcome {
+                op: raw.to_string(),
+                description: desc,
+                status: StepStatus::Pass,
+            }),
+            Err(e) => {
+                let reason = scenario_failure_msg(&e);
+                outcomes.push(StepOutcome {
+                    op: raw.to_string(),
+                    description: desc,
+                    status: StepStatus::Fail(reason.clone()),
+                });
+                return Err(ScenarioFailure::Errored(format!(
+                    "step {step} ({raw}): {reason}"
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -871,4 +1026,112 @@ fn spawn(
 
 fn err<S: Into<String>>(msg: S) -> ScenarioFailure {
     ScenarioFailure::Errored(msg.into())
+}
+
+// ---------------------------------------------------------------------------
+// --verbose tree report
+// ---------------------------------------------------------------------------
+
+fn scenario_failure_msg(e: &ScenarioFailure) -> String {
+    match e {
+        ScenarioFailure::Errored(m) => m.clone(),
+        ScenarioFailure::ChkdskFail { ro, scan } => {
+            format!("chkdsk ro={ro} scan={scan}")
+        }
+    }
+}
+
+fn scenario_summary(scn: &Scenario) -> String {
+    format!(
+        "{}MiB / cluster={}B / label='{}'",
+        scn.volume_params.size_mib,
+        scn.volume_params.cluster_size,
+        if scn.volume_params.label.is_empty() {
+            "(empty)"
+        } else {
+            scn.volume_params.label.as_str()
+        },
+    )
+}
+
+// Human-readable description of an op, parameterised by scenario so the
+// reader can see *what* is being tested in *which* scenario context
+// (e.g. the volume size/cluster behind a `mac:format`, or the cycle
+// count behind a `win:repeat-mount(N)`).
+fn describe_op(raw: &str, scn: &Scenario) -> String {
+    let (verb, arg) = split_op(raw);
+    match verb {
+        "mac:format" => format!(
+            "format {}MiB volume, {}B clusters, label '{}' via rust-ntfs",
+            scn.volume_params.size_mib, scn.volume_params.cluster_size, scn.volume_params.label,
+        ),
+        "mac:mkdir" => format!("create directory {}", arg.unwrap_or("?")),
+        "mac:touch" => format!("create empty file {}", arg.unwrap_or("?")),
+        "mac:write" => match arg.and_then(|a| a.split_once('=')) {
+            Some((path, content)) => {
+                let trimmed = content.trim().trim_matches(['"', '\'']);
+                format!("write {:?} to {}", trimmed, path.trim())
+            }
+            None => format!("write {}", arg.unwrap_or("?")),
+        },
+        "mac:rm" => format!("remove file {}", arg.unwrap_or("?")),
+        "mac:rmdir" => format!("remove empty directory {}", arg.unwrap_or("?")),
+        "mac:enumerate" => "list volume contents via rust-ntfs ls".into(),
+        "mac:set-dirty" => "mark volume dirty (test helper)".into(),
+        "win:repeat-mount" => match arg {
+            Some(n) => format!("{n}x dismount/remount cycle on Windows"),
+            None => "dismount/remount cycle on Windows".into(),
+        },
+        "win:chkdsk" => {
+            let v = match scn.verdict_shape {
+                VerdictShape::Clean => "clean",
+                VerdictShape::RepairOk => "repair-ok",
+                VerdictShape::RepairRequired => "repair-required",
+            };
+            format!("chkdsk readonly + /scan via ntfs.sys (verdict: {v})")
+        }
+        "win:enumerate" => "enumerate volume tree under Windows".into(),
+        "win:write" => match arg {
+            Some(a) => format!("Windows write: {a}"),
+            None => "Windows write".into(),
+        },
+        "win:delete" => match arg {
+            Some(a) => format!("Windows delete: {a}"),
+            None => "Windows delete".into(),
+        },
+        "win:dismount" => "dismount Windows volume".into(),
+        "win:remount" => "remount Windows volume".into(),
+        other => format!("{other} (no description)"),
+    }
+}
+
+fn print_verbose_tree(t: &VerboseTrace) {
+    eprintln!();
+    eprintln!("{}", t.name);
+    eprintln!("  scenario: {}", t.scenario_summary);
+    if t.steps.is_empty() {
+        eprintln!("  (no subtask outcomes recorded)");
+    } else {
+        let max_op = t.steps.iter().map(|s| s.op.len()).max().unwrap_or(0);
+        let n = t.steps.len();
+        for (i, step) in t.steps.iter().enumerate() {
+            let connector = if i + 1 == n { "└──" } else { "├──" };
+            let (sym, suffix) = match &step.status {
+                StepStatus::Pass => ("[PASS]", String::new()),
+                StepStatus::Fail(reason) => ("[FAIL]", format!("  ({reason})")),
+            };
+            let op_padded = format!("{:<width$}", step.op, width = max_op);
+            let desc_text = &step.description;
+            eprintln!("  {connector} {op_padded}  {sym}  {desc_text}{suffix}");
+        }
+    }
+    let arrow = match t.final_status {
+        "passed" => "=> PASSED",
+        "failed" => "=> FAILED",
+        _ => "=> ERRORED",
+    };
+    match &t.final_detail {
+        Some(d) => eprintln!("  {arrow} ({d})"),
+        None => eprintln!("  {arrow}"),
+    }
 }

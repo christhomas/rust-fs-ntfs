@@ -1025,29 +1025,18 @@ fn build_boot_sector(
     b[0x48..0x50].copy_from_slice(&serial.to_le_bytes());
     // 0x50..0x54: checksum = 0 (not validated by major drivers).
 
-    // Bootstrap area: bake Microsoft `format.com`'s NTFS bootloader
-    // bytes verbatim from a reference run (matrix
-    // run-20260503-043500/mac-format-label-empty/reference-boot.bin
-    // bytes 0x54..0x1FE, 426 bytes). Without this, byte 0x1FE..0x1FF
-    // is the standard 0x55AA boot signature but the rest is zero,
-    // which differs from what Microsoft writes — and may cause some
-    // ntfs.sys / chkdsk validators to flag the volume as
-    // not-format.com-produced.
-    b[0x54..0x54 + BOOT_BOOTSTRAP.len()].copy_from_slice(BOOT_BOOTSTRAP);
+    // Bootstrap area: minimal halt loop (CLI; JMP $-1) so a stray
+    // BIOS boot from this volume doesn't run garbage. The volume is
+    // mounted, never executed; ntfs.sys / chkdsk don't validate
+    // bootstrap code.
+    b[0x54] = 0xFA; // CLI
+    b[0x55] = 0xEB; // JMP $-1
+    b[0x56] = 0xFE;
+    // 0x57..0x1FE stay zero.
     b[0x1FE] = 0x55;
     b[0x1FF] = 0xAA;
     Ok(b)
 }
-
-/// 426 bytes of bootstrap code captured byte-for-byte from a Microsoft
-/// `format.com /FS:NTFS` reference run (NT 5+ "BOOTMGR is missing"
-/// loader). Resides at boot sector offset 0x54..0x1FE.
-///
-/// The volume isn't booted from BIOS in our pipeline, so the executable
-/// content is irrelevant for runtime. We bake it because some chkdsk
-/// passes may do a "is this format.com output?" check that includes
-/// these bytes.
-const BOOT_BOOTSTRAP: &[u8] = include_bytes!("boot-bootstrap.bin");
 
 // ---------------------------------------------------------------------------
 // MFT record builder (system files)

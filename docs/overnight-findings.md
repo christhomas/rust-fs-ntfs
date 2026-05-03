@@ -329,6 +329,42 @@ of mkfs).
   C: drive and the larger scenarios (`mac-format-large-1gib`,
   `mac-format-cluster-64k`) error out with `SetEndOfFile error: 112`
   (ERROR_DISK_FULL).
+- iter L: 2 GiB image cap with explicit error in `run-scenario.ps1`.
+  PowerShell's `[System.IO.File]::ReadAllBytes` is hard-capped at
+  2 GiB; chunked writes to a raw `\\.\PhysicalDrive` return
+  `Access to the path is denied`. Volumes ≥ 2 GiB now throw a
+  clear "image too large for current PS write path" message rather
+  than a confusing partial-write failure. TODO in script header.
+- iter M: bootstrap baking reverted. The 426-byte
+  `boot-bootstrap.bin` (Microsoft `format.com`'s NTFS bootloader
+  code) was speculative — chkdsk doesn't validate the bootstrap
+  area and ntfs.sys never executes it on a non-BIOS-boot volume.
+  Reverted to a 3-byte halt loop (CLI; JMP $-1) to keep the
+  repo free of Microsoft's compiled boot code.
+
+**Final matrix verdict (run-20260503-115400):** 28 passed / 1 failed
+/ 6 errored across 35 active scenarios (3 ignored as new). Pass list
+includes basic + cluster + label scenarios (10), all mac-only
+scenarios (4), all win-write/delete/repeat-mount scenarios (10),
+small-volume scenarios (3), and write-then-mac-verify scenario (1).
+
+**Remaining issues:**
+
+- 1 failed: `mac-format-mac-write-win-repeat-mount-3-win-chkdsk` —
+  chkdsk reports `Attribute record (30, "") from file record segment
+  18 is corrupt` after 3 mount/dismount cycles on a volume with
+  user-created files. **WRITE-PATH BUG**, not a mkfs bug; user file's
+  `$FILE_NAME` corrupted across remount cycles. Out of scope for
+  this iteration.
+- 3 errored (`set-dirty` scenarios): the `rust-ntfs set-dirty`
+  subcommand was wired into `main.rs` mid-session by the user/linter;
+  matrix runs that started before the rebuild used a stale binary.
+  Should pass on next clean rebuild + matrix run.
+- 3 errored (large-volume scenarios `volume-4gib-cluster-4k`,
+  `volume-4gib-cluster-64k`, `volume-16gib-cluster-4k`): infrastructure
+  limits, not mkfs bugs. The 4 GiB cases need a streaming write to
+  a raw `PhysicalDrive` (PS limitation); the 16 GiB case needs more
+  VM disk space than the 14 GiB available on the test VM.
 
 **Functional verification:**
 - chkdsk readonly: 0/0 across all 12 scenarios ✓

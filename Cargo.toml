@@ -32,6 +32,7 @@ ntfs = { version = "0.4", default-features = false, features = ["std"] }
 libtest-mimic = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+criterion = { version = "0.5", default-features = false, features = ["plotters", "cargo_bench_support"] }
 
 # Data-driven NTFS matrix runner. Loads scenarios from
 # test-matrix.json at runtime and emits one trial per
@@ -41,6 +42,14 @@ serde_json = "1"
 # trial is reported as ignored.
 [[test]]
 name = "matrix"
+harness = false
+
+# Criterion benchmarks for the three byte-decoders most likely to
+# regress as the crate evolves. Run with `cargo bench`; not part of
+# CI (criterion needs warm-up samples that don't fit in the per-PR
+# budget).
+[[bench]]
+name = "byte_decoders"
 harness = false
 
 [profile.release]
