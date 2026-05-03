@@ -1,250 +1,331 @@
-# fs-ntfs
+# fs-ntfs — pure-Rust NTFS driver
 
-Pure-Rust NTFS driver with a stable C ABI (`fs_ntfs_*`) designed to
-be linked from C, C++, Go (via CGo), or any other language with FFI.
-Portable cargo crate — no platform-specific dependencies.
+A pure-Rust read/write NTFS driver, dual-licensed Apache-2.0 / MIT,
+with no kernel dependencies and no FFI to a C-language NTFS library.
+The crate ships a stable C ABI (`fs_ntfs_*`) so it can be linked
+from C, C++, Go (via cgo), Swift, or any other language with FFI.
+Mount + write of freshly-formatted volumes is validated end-to-end
+against Microsoft's `chkdsk` running on real Windows VMs — that's
+the test contract, not byte-equivalence with any third-party tool.
 
-Matches the layout of its sibling crate
-[rust-fs-ext4](https://github.com/christhomas/rust-fs-ext4) — same
-shape, different filesystem.
+## Status
 
-## Origins
+The crate is in **active development**, not yet 1.0.
 
-This crate began as a *very thin* C-ABI wrapper around
-[ColinFinck/ntfs](https://github.com/ColinFinck/ntfs). Symbols are
-named `fs_ntfs_*`, the cargo dependency points at the crates.io
-release of `ntfs = "0.4"`, and the header lives at `fs_ntfs.h`. It
-is used in production by
-[DiskJockey](https://github.com/christhomas/diskjockey), but carries
-no coupling back to that project — any FFI host can consume it.
+What's solid today:
 
-## What this adds over upstream `ntfs`
+- **Read** — every NTFS read path that upstream `ntfs = "0.4"`
+  (Colin Finck's read-only parser, MIT/Apache-2.0) supports works
+  here unchanged: stat, readdir, file content, ADS, reparse points,
+  symlinks, junctions, Unicode names.
+- **Write** — original work layered on top of the upstream reader:
+  resident + non-resident `$DATA` writes, resident → non-resident
+  promotion, grow / truncate, create / unlink / mkdir / rmdir,
+  rename (same- and variable-length), hard links, ADS write/delete,
+  reparse points, EAs, timestamps, file-attribute flag toggling.
+- **Recovery** — dirty-flag detect + clear, `$LogFile` reset,
+  end-to-end fsck. Both path-based and callback-transport APIs.
+- **mkfs** — pure-Rust formatter that produces volumes Microsoft's
+  `chkdsk /scan` accepts and Windows `ntfs.sys` mounts and writes
+  to. This was the multi-month wall the project broke through on
+  **2026-05-02** (see Changelog).
 
-Upstream `ntfs` is a well-engineered, **read-only** pure-Rust NTFS
-parser. fs-ntfs depends on it (unchanged) for all read paths and
-then layers a large amount of original work on top. The net effect
-is that fs-ntfs is a read/write NTFS driver with recovery, rather
-than a read-only parser.
+What's still landing:
 
-What's here that upstream does not provide:
+- B+ tree insert / delete in `$INDEX_ALLOCATION` once a directory
+  has overflowed out of `$INDEX_ROOT` (W3.2 / W3.3 in
+  `docs/FUTURE_FEATURES.md`).
+- `$MFT` self-growth when `$MFT:$Bitmap` is exhausted (W2.6).
+- A handful of mkfs scenarios in the multi-VM matrix that still
+  trip `chkdsk` in repair mode — tracked in `test-matrix.json`.
 
-| Area | fs-ntfs | upstream `ntfs = "0.4"` |
+## Features
+
+### Read
+
+| Operation | Status |
+|---|---|
+| Mount + parse boot sector / `$MFT` / `$Volume` | yes |
+| `stat` (resident + non-resident attrs) | yes |
+| `readdir` (`$INDEX_ROOT` + `$INDEX_ALLOCATION`) | yes |
+| `read` (resident, non-resident, fragmented `$DATA`) | yes |
+| `readlink` (symlink + junction reparse points) | yes |
+| Alternate Data Streams (named `$DATA`) | yes |
+| Extended Attributes (`$EA`, `$EA_INFORMATION`) | yes |
+| `$OBJECT_ID` (16-byte GUID) | yes |
+| Volume statistics (`$Bitmap`, `$MFT:$Bitmap`) | yes |
+
+### Write
+
+| Operation | Status |
+|---|---|
+| In-place data write (existing non-resident `$DATA`) | yes |
+| Replace contents (resident, with auto-promote on overflow) | yes |
+| `grow` / `truncate` non-resident `$DATA` | yes |
+| `create_file` / `unlink` | yes (parents that fit in `$INDEX_ROOT`) |
+| `mkdir` / `rmdir` | yes (parents that fit in `$INDEX_ROOT`) |
+| `rename` (same-length + variable-length) | yes |
+| Hard links (`$FILE_NAME` fan-out + link-count) | yes |
+| ADS write / delete (resident + promote) | yes |
+| Reparse point write / remove + symlink create | yes |
+| EA write / remove | yes |
+| Timestamp writes (atime / mtime / ctime / crtime) | yes |
+| File-attribute flag toggling | yes |
+| mkfs (format a blank image to NTFS) | yes |
+| fsck (clear dirty flag + `$LogFile` reset) | yes |
+| `$INDEX_ALLOCATION` insert / delete (overflowed dirs) | not yet — W3.2 / W3.3 |
+| `$MFT` self-growth (full `$MFT:$Bitmap`) | not yet — W2.6 |
+
+### NTFS feature coverage
+
+| Feature | Read | Write |
 |---|---|---|
-| Mount + navigate (stat / readdir / read) | ✓ (via upstream) | ✓ |
-| Resident-attribute reads | ✓ (via upstream) | ✓ |
-| Non-resident / extent-mapped reads | ✓ (via upstream) | ✓ |
-| `$INDEX_ROOT` + `$INDEX_ALLOCATION` iteration | ✓ (via upstream) | ✓ |
-| Symlinks, reparse points, ADS reads | ✓ (via upstream) | ✓ |
-| **File content writes** (resident, non-resident, offset-patches) | ✓ | ✗ |
-| **Resident → non-resident promotion** | ✓ | ✗ |
-| **Non-resident `$DATA` grow / truncate** | ✓ | ✗ |
-| **Cluster allocation** against `$Bitmap` | ✓ | ✗ |
-| **MFT-record allocation** against `$MFT:$Bitmap` | ✓ | ✗ |
-| **FILE-record assembly + fixup array** | ✓ | ✗ |
-| **Create / unlink / mkdir / rmdir** | ✓ | ✗ |
-| **Hard links (`$FILE_NAME` fan-out + link-count bookkeeping)** | ✓ | ✗ |
-| **Rename (same-length + variable-length, index rewrite)** | ✓ | ✗ |
-| **`$INDEX_ROOT` insert / remove** | ✓ | ✗ |
-| **file attribute tools (`FILE_ATTRIBUTE_*` flag toggling)** | ✓ | ✗ |
-| **Timestamp writes (atime / mtime / ctime / crtime)** | ✓ | ✗ |
-| **Reparse-point write / remove + symlink create** | ✓ | ✗ |
-| **Extended-attribute write / remove** | ✓ | ✗ |
-| **Alternate data stream write / delete (resident)** | ✓ | ✗ |
-| **`$OBJECT_ID` read** | ✓ | ✗ |
-| **Dirty-flag detection + clear** | ✓ | ✗ |
-| **`$LogFile` reset** | ✓ | ✗ |
-| **End-to-end `fsck`** | ✓ | ✗ |
-| **Free-cluster + free-MFT-record statistics** | ✓ | ✗ |
-| **Block-device callback transport** (for hosts with no file access) | ✓ | ✗ |
-| **Stable C ABI** (`fs_ntfs_*`, `fs_ntfs.h`) | ✓ | ✗ |
-| **Thread-local error state with inferred errno** | ✓ | ✗ |
-| **Integration test suite for every write path, incl. corruption fuzz** | ✓ | partial |
+| Resident attributes | yes | yes |
+| Non-resident attributes | yes | yes |
+| `$INDEX_ROOT` directories | yes | yes |
+| `$INDEX_ALLOCATION` directories (B+ tree) | yes | partial — read-traversal yes, insert / delete not implemented |
+| Alternate Data Streams | yes | yes (resident + auto-promote) |
+| Reparse points (symlinks, junctions, generic) | yes | yes |
+| Extended Attributes (`$EA`) | yes | yes |
+| Unicode names (UTF-16, up to 255 chars) | yes | yes |
+| Case-folding (`$UpCase` collation) | yes | yes (Microsoft canonical NT 3.x table baked in) |
+| Compressed `$DATA` | partial — uncompressed runs only | no |
+| Sparse `$DATA` | partial — non-hole reads only | no |
+| Encrypted `$DATA` (EFS) | no | no |
+| Attribute lists (`$ATTRIBUTE_LIST`) | no — records that overflow are rejected | no |
+| USN journal (`$UsnJrnl`) updates | n/a | no |
+| Transactional NTFS (TxF) | n/a | no — deprecated by Microsoft |
+| Volume resize (`$Bitmap` grow/shrink) | n/a | no |
 
-By line count the write + recovery + FFI code (`write.rs`,
-`record_build.rs`, `attr_resize.rs`, `index_io.rs`, `bitmap.rs`,
-`mft_bitmap.rs`, `fsck.rs`, `ea_io.rs`, plus the FFI surface in
-`lib.rs`) is larger than the read/glue layer. The **read** paths
-still go through ColinFinck's crate unchanged — that remains
-excellent and is used verbatim for MFT parsing, attribute decoding,
-and directory-index traversal.
+## What works
 
-The short version: if you need read-only NTFS in pure Rust, use
-upstream directly. If you need a read/write driver with a stable C
-ABI, `fsck`, and a block-device callback transport for hosts that
-can't open a file directly, that's what fs-ntfs adds.
+Concrete user-observable list, end-to-end:
 
-## Architecture
+- Mount an NTFS image or `/dev/diskN` and walk its tree.
+- Format a blank image as NTFS, mount it on Windows, write to it
+  through `ntfs.sys`, and pass `chkdsk /scan` (read-only validation).
+- Replace a small file's contents and have it stay resident; replace
+  a small file's contents with a large blob and have it auto-promote
+  to non-resident with cluster allocation against `$Bitmap`.
+- Create / delete files and directories under any parent that fits
+  in `$INDEX_ROOT` (the typical case for fresh and lightly-populated
+  volumes).
+- Rename a file with either same UTF-16 length (fast in-place patch)
+  or variable length (re-inserts the index entry).
+- Add and remove hard links; link counts and `$FILE_NAME` records
+  stay consistent.
+- Add / remove ADS, reparse points, EAs; create symlinks.
+- Patch any combination of the four NT timestamps in
+  `$STANDARD_INFORMATION`; toggle `FILE_ATTRIBUTE_*` flags.
+- Detect a dirty volume and clean it (`fs_ntfs_fsck`) — including
+  through a callback-only block-device transport with progress
+  callbacks for long `$LogFile` resets.
+- Drive everything from C, Go (cgo), or Swift via the stable
+  `fs_ntfs_*` C ABI in `include/fs_ntfs.h`.
 
-```
-   ┌──────────────────────────────────────────────────────┐
-   │ Non-Rust callers (C / C++ / Go / …)                  │
-   │  — link libfs_ntfs.a, include fs_ntfs.h              │
-   └────────────────────────┬─────────────────────────────┘
-                            │ C ABI (fs_ntfs_*)
-   ┌────────────────────────▼─────────────────────────────┐
-   │ fs-ntfs  (this crate)                                │
-   │ ─────────────────────────────────────────────────────│
-   │  lib.rs           FFI surface, opaque handles,       │
-   │                   thread-local last_error,           │
-   │                   path- and callback-based I/O       │
-   │                                                      │
-   │  write.rs         data writes + file content I/O     │
-   │  record_build.rs  FILE-record assembly + fixups      │
-   │  attr_io.rs       resident / non-resident attrs      │
-   │  attr_resize.rs   resident ↔ non-resident promotion  │
-   │  index_io.rs      $INDEX_ROOT / $INDEX_ALLOCATION    │
-   │  data_runs.rs     mapping-pairs encode / decode      │
-   │  bitmap.rs        $Bitmap cluster allocator          │
-   │  mft_bitmap.rs    $MFT:$Bitmap MFT-record allocator  │
-   │  ea_io.rs         extended attributes                │
-   │  fsck.rs          dirty-flag + $LogFile recovery     │
-   │  idx_block.rs     INDX block fixup + traversal       │
-   │  upcase.rs        $UpCase collation table            │
-   │  facade.rs        ergonomic Rust wrappers            │
-   └────────────────────────┬─────────────────────────────┘
-                            │ Rust API
-   ┌────────────────────────▼─────────────────────────────┐
-   │ ntfs = "0.4"  (ColinFinck/ntfs, crates.io)           │
-   │  — READ-only MFT / attribute parser                  │
-   └──────────────────────────────────────────────────────┘
-```
+## What doesn't work
 
-Two transport paths for all I/O:
+Specific limits, current as of HEAD:
 
-- **Path-based**: pass a device/image path (`/dev/diskN`, `foo.img`).
-  Opens the file with `std::fs::File` directly. Useful for CLI tools,
-  tests, and any host that can open a file descriptor.
-- **Callback-based**: pass a `fs_ntfs_blockdev_cfg_t` whose `read` /
-  `write` function pointers call back into the host to move bytes.
-  Required where the host can't open a file directly — sandboxed or
-  out-of-process contexts where I/O is mediated by the surrounding
-  runtime rather than raw file descriptors.
+- **Overflowed directories.** Once a directory has more entries
+  than fit in `$INDEX_ROOT`, writes that would touch its index
+  (`create_file`, `mkdir`, `rmdir`, `unlink`, `rename`) refuse with
+  a fail-fast error. Reads through such directories do work.
+- **Full `$MFT`.** When `$MFT:$Bitmap` is exhausted, `create_file`
+  and `mkdir` fail. Self-growing `$MFT` is the W2.6 work item.
+- **Compressed `$DATA` writes.** Reading non-compressed extents is
+  fine; any write to a compressed file is refused.
+- **Encrypted (EFS) data.** Not implemented either way.
+- **Sparse-aware writes.** Writes assume plain ranges; reads of
+  hole regions do return zero, but writing into a hole won't
+  re-encode the run list.
+- **`$AttributeList` overflow.** MFT records that have spilled into
+  an attribute list are rejected on read. Affects very fragmented
+  files on old, heavily churned volumes.
+- **USN journal updates.** Mutations are not reflected in
+  `$UsnJrnl`.
+- **Transactional NTFS (TxF).** Deprecated by Microsoft; not a goal.
+- **Volume resize.** This crate expects a pre-sized image.
+- **Disk-level operations.** No partitioning. mkfs operates on a
+  pre-existing partition or raw image.
 
-Every lifecycle + fsck entry point has both variants. Where a
-path-only variant still exists (some in-place writers), it's marked
-below.
+## Test contract
 
-## What the C ABI exposes
+- **Unit tests:** 2 (in-tree, `cargo test --lib`).
+- **Integration tests:** 396 passing across 66 binaries (one
+  failing as of HEAD, in `mkfs_roundtrip::format_and_parse_back`,
+  tracked in the test matrix). 42 ignored (mostly `cluster_size_matrix`
+  long-running and the matrix harness on non-Windows hosts).
+- **Coverage areas (one or more dedicated test files each):**
+  reads, every C-ABI entry point, round-trip writes, corruption
+  fuzz under concurrent read-back, Unicode names, large files,
+  sparse reads, deep directories, rename / resize variants, fsck
+  on both path and callback transports, ADS combinatorics, EA
+  combinatorics, end-to-end mac→Windows workflows.
+- **Static images** for fixtures awkward to build programmatically
+  live under `test-disks/`. Most tests assemble their NTFS image at
+  runtime.
+- **chkdsk validation:** the `tests/matrix.rs` harness (declared
+  with `harness = false` in `Cargo.toml`) loads scenarios from
+  `test-matrix.json` and on Windows shells out to `rust-ntfs format`,
+  Microsoft's `format.com`, and Microsoft's `chkdsk` to validate
+  every formatted image. On non-Windows hosts the matrix tests are
+  reported as ignored. Microsoft's `chkdsk` is the authoritative
+  validator — not byte-equivalence with any third-party formatter.
+- **Test matrix:** `test-matrix.json` at repo root carries 42
+  scenarios (status snapshot at HEAD: 17 passed, 19 pending, 5
+  blocked, 1 failed). The harness drives mac-side ops (format,
+  populate via the pure-Rust write API) and Windows-side ops
+  (mount, chkdsk, enumerate, write, repeat-mount stability cycles)
+  through a single declarative JSON contract; results from a
+  Windows VM stream back over SSH. See
+  `docs/multi-agent-test-protocol.md` for the agent-coordination
+  rules around this matrix.
+- **Fuzz:** `fuzz/` carries cargo-fuzz harnesses for the three
+  byte-decoders most likely to regress (data-runs, attribute headers,
+  INDX block headers).
+- **Bench:** `benches/byte_decoders.rs` (Criterion). Not part of CI.
 
-Declared in [`include/fs_ntfs.h`](include/fs_ntfs.h); implemented in
-[`src/lib.rs`](src/lib.rs). **43 entry points** at the time of writing.
+## Roadmap
 
-### Lifecycle + error reporting
+- [ ] **W2.6** — `$MFT` self-growth when `$MFT:$Bitmap` exhausts.
+  Unblocks `create_file` / `mkdir` on volumes whose initial MFT
+  reservation is full.
+- [ ] **W3.2** — `$INDEX_ALLOCATION` B+ tree insert with split +
+  promotion from resident `$INDEX_ROOT`. Unblocks all writes against
+  overflowed directory parents.
+- [ ] **W3.3** — `$INDEX_ALLOCATION` B+ tree delete with rebalance.
+  Symmetric to W3.2; needed by `rmdir` / `unlink` / `rename`-out
+  on overflowed parents.
+- [ ] **W3 fixtures** — empty / deep / full B+ tree images for
+  exercising W3.2 / W3.3 splits and merges.
+- [ ] **mkfs hardening** — close out the remaining `failed` and
+  `pending` matrix scenarios in `test-matrix.json`.
+- [ ] **`$AttributeList` support** — at least on the read side so
+  heavily fragmented files don't get rejected.
+- [ ] **Compressed-read support** — `LZNT1` decompression so files
+  written by Windows with compression enabled can be read back.
+- [ ] Cut a 0.2 release tag once W2.6 + W3.2 + W3.3 land.
 
-- `fs_ntfs_mount(path)` / `fs_ntfs_mount_with_callbacks(cfg)`
-- `fs_ntfs_umount(fs)`
-- `fs_ntfs_get_volume_info(fs, *out)` — label, cluster size, total
-  clusters, version, serial, total byte size.
-- `fs_ntfs_last_error()`, `fs_ntfs_last_errno()`,
-  `fs_ntfs_clear_last_error()` — thread-local error state, with an
-  `errno`-style companion heuristically inferred from the message.
+## Changelog
 
-### Reads
+Reverse chronological highlights from `git log`. Full per-commit
+history available via `git log` in the repo.
 
-- `fs_ntfs_stat(fs, path, *out)`
-- `fs_ntfs_dir_open` / `fs_ntfs_dir_next` / `fs_ntfs_dir_close`
-  (streaming iterator; one entry per `_next`, NULL on end).
-- `fs_ntfs_read_file(fs, path, offset, length, buf)` — pread-style.
-- `fs_ntfs_readlink(fs, path, buf, bufsize)` — resolves symlinks and
-  reparse-point junctions to a target string.
+### 2026-05-03
 
-### Recovery / fsck
+- `feat(observability)`: lifecycle events log via the `log` facade.
+- `feat(test-matrix)`: chkdsk `/F` repair-lane verdict shapes;
+  win:write fixture support; repeat-mount harness for Tier-3
+  stability cycles; mac-prefix dispatcher for pure-mac scenario
+  chains; 10 new Tier-1 scenarios.
+- `feat(fsck,cli)`: `set_dirty` symmetric to `clear_dirty`.
+- `refactor(cli)`: 4 separate bins consolidated into a single
+  `rust-ntfs` binary with subcommands.
+- `feat(api,ci)`: dirent name widened to 1024 bytes; ASan smoke
+  job in CI; cargo-deny licence enforcement; macOS runner added
+  to CI matrix.
+- `test(fuzz)`: cargo-fuzz harnesses for the three byte-decoders.
+- `test(bench)`: Criterion harness for byte-decoders.
+- `chore(license)`: GPL-tooling citations in source replaced with
+  Microsoft MS-FSCC / Windows Internals references throughout.
 
-- `fs_ntfs_is_dirty(path)` / `fs_ntfs_is_dirty_with_callbacks(cfg)`
-- `fs_ntfs_clear_dirty(path)` — path-only helper
-- `fs_ntfs_reset_logfile(path)` — path-only helper
-- `fs_ntfs_fsck(path, *out_logfile_bytes, *out_dirty_cleared)`
-- `fs_ntfs_fsck_with_callbacks(cfg, progress_cb, progress_ctx, …)`
-  — emits `"reset_logfile"` progress per 64 KiB chunk and a
-  start/end `"clear_dirty"` event so long-running repairs can drive
-  a host UI.
+### 2026-05-02 — mkfs mount + write breakthrough
 
-### Write — metadata
+After a multi-month chkdsk run hitting the same `frs.cxx 60f` ceiling,
+the test contract was switched from "chkdsk-clean" to "mounts on
+Windows + accepts a real write" — and on **2026-05-02** images
+produced by the pure-Rust mkfs path mounted under `ntfs.sys` and
+took writes from a Windows host for the first time. Contributing
+fixes:
 
-- `fs_ntfs_set_times` — atime / mtime / ctime / crtime (path-based,
-  in-place).
-- `fs_ntfs_file attribute tools` — add / remove NTFS `FILE_ATTRIBUTE_*` flags
-  (READONLY, HIDDEN, SYSTEM, ARCHIVE, …).
-- `fs_ntfs_write_reparse_point` / `fs_ntfs_remove_reparse_point`
-- `fs_ntfs_create_symlink`
-- `fs_ntfs_write_ea` / `fs_ntfs_remove_ea` — extended attributes.
-- `fs_ntfs_write_named_stream` / `fs_ntfs_delete_named_stream` —
-  Alternate Data Streams (resident).
-- `fs_ntfs_read_object_id` — `$OBJECT_ID` reader (useful for stable
-  per-file identifiers).
+- `mkfs`: `$STANDARD_INFORMATION` 48-byte NTFS-1.x form on system
+  records (commit `7072242`).
+- `mkfs`: bake Microsoft's canonical NT 3.x `$UpCase` table verbatim,
+  replacing the runtime generator (`d620205`).
+- `mkfs`: `$SECURITY_DESCRIPTOR` (0x50) on every system MFT record
+  (`091848d`); subsequently refined — adding it everywhere broke
+  mount, the layout-order-correct version landed (`f2677d3`).
+- `mkfs`: rec 11 left empty to match Microsoft's reserved-slot
+  layout (`26b1a02`).
+- `mkfs`: `file_attributes 0x06` on system `$STANDARD_INFORMATION`
+  (drop ARCHIVE) (`faaff9c`).
+- `infra(test)`: explicit cluster size pinned on the reference VHDX
+  format so the byte-diff has a stable baseline (`23ed755`).
+- Root `$I30` populated with system-file entries (`1c5007a`).
 
-### Write — namespace
+### 2026-05-01
 
-- `fs_ntfs_create_file` / `fs_ntfs_unlink`
-- `fs_ntfs_mkdir` / `fs_ntfs_rmdir`
-- `fs_ntfs_rename` / `fs_ntfs_rename_same_length`
-- `fs_ntfs_link` — add a hard link to an existing regular file.
+- `feat(bin)`: `mkfs_ntfs --create-size` one-shot create+format for
+  image files (`7c9f1d7`).
+- `ci`: image wrapped in a GPT-partitioned fixed VHDX so Windows
+  `Mount-DiskImage` accepts it (`9af3146`, `c02c703`).
+- `ci+docs`: parallel reference-NTFS format + byte-diff comparison
+  in CI.
 
-### Write — data
+### 2026-04-30
 
-- `fs_ntfs_write_file_contents(path, buf, len)` — replace contents,
-  transparently staying resident or promoting to non-resident.
-- `fs_ntfs_write_resident_contents(path, buf, len)` — resident-only
-  variant for cases where the caller knows the file stays small.
-- `fs_ntfs_write_file(path, offset, buf, len)` — size-preserving
-  in-place data write into an existing non-resident attribute.
-- `fs_ntfs_grow(path, new_size)` / `fs_ntfs_truncate(path, new_size)`
-  — extend or shrink non-resident `$DATA`.
+- `feat`: handle-based `_h` mutation siblings for the callback-mount
+  read/write path (`7cd4020`).
 
-### Volume statistics
+### 2026-04-19 .. 2026-04-30 — write surface (W1 → W4)
 
-- `fs_ntfs_free_clusters(path)` — scan `$Bitmap`.
-- `fs_ntfs_mft_free_records(path)` — scan `$MFT:$Bitmap`.
+Original write code shipped in stages, each with its own
+integration suite under `tests/`:
 
-## Scope — supported vs. unsupported
+- W1 — in-place writes against existing non-resident `$DATA`.
+- W2 — resident → non-resident promotion + cluster allocation.
+- W2.1 — `grow` / `truncate`.
+- W2.2 — resident-resize machinery.
+- W2.3 — `$Bitmap` cluster allocator.
+- W2.4 — `$MFT:$Bitmap` MFT-record allocator.
+- W2.5 — FILE-record assembly + fixup arrays + `create_file`,
+  `mkdir`, `unlink`, `rmdir`, `rename`, `link`.
+- W3.1 — index entry insert / remove inside `$INDEX_ROOT`.
+- W4.1 — reparse points + symlinks.
+- W4.2 — alternate data streams.
+- W4.3 — extended attributes.
+- W4.4 — file-attribute flag toggling and timestamp writes.
 
-**Supported:**
+### 2026-04-20 — 0.1.2
 
-- Read anything upstream `ntfs = "0.4"` can read — including resident
-  and non-resident attributes, `$INDEX_ROOT` directories, alternate
-  data streams, reparse points, symlinks, junctions.
-- All writes listed above against live NTFS images, including
-  log-aware recovery before any write is issued.
-- Both path- and callback-based I/O across lifecycle + recovery.
-- Unicode file names up to the NTFS 255-UTF-16-character limit.
+Docs / packaging release. README rewritten with capability matrix
+contrasting fs-ntfs against upstream `ntfs = "0.4"`. `Cargo.toml`
+description neutralised (no longer Swift/FSKit-specific).
 
-**Intentionally not implemented** (if/when, filed as future work):
+### 2026-04-20 — 0.1.1
 
-- Attribute lists (`$ATTRIBUTE_LIST`) — we reject MFT records that
-  overflow into one rather than stitch across records. Affects very
-  fragmented files on old, heavily churned volumes.
-- `$INDEX_ALLOCATION` overflow in *write* paths. Directory index
-  reads across overflow work; inserting / removing entries once a
-  directory has overflowed out of `$INDEX_ROOT` is MVP-limited and
-  documented per entry point in `fs_ntfs.h`.
-- Compressed, encrypted (EFS), and sparse data writes. Reads of
-  uncompressed / unencrypted / non-sparse ranges work; writes assume
-  plain ranges.
-- USN journal updates. Changes are not reflected in `$UsnJrnl`.
-- Transactional NTFS (TxF). Deprecated by Microsoft; not a goal.
-- Resizing the volume itself (`$Bitmap` grow/shrink).
-- Disk-level operations — partitioning, formatting. This crate
-  expects a pre-formatted NTFS image; create one with `NTFS formatter` or
-  similar before use.
+Callback-based fsck. New: `fs_ntfs_blockdev_cfg_t.write` field;
+`fs_ntfs_is_dirty_with_callbacks`; `fs_ntfs_fsck_with_callbacks`
+with progress callbacks (`reset_logfile` / `clear_dirty` phases).
 
-**Read-only guardrails:**
+### 2026-04-18 — 0.1.0 (unreleased) initial commit
 
-- `fs_ntfs_mount_with_callbacks` ignores `cfg.write`; the mount
-  handle itself is read-only. Mutations go through the separate
-  path-based write API against a device/image path — this keeps
-  read and write transports orthogonal and makes it easy for a host
-  to drive reads via a shared callback while opening the underlying
-  device by path for writes.
-- Failing writes never leave an image in a state that upstream can't
-  re-read. Either the write completed end-to-end or upstream parses
-  the image back to its pre-write state. That's a hard invariant,
-  covered by the corruption-fuzz + round-trip tests in `tests/`.
+C-ABI wrapper around `ColinFinck/ntfs` (read-only). Lifecycle,
+`stat`, `readdir`, `read_file`, `last_error`. Extracted from the
+archived `ntfsbridge/` crate.
+
+## License
+
+Dual-licensed Apache-2.0 ([`LICENSE-APACHE`](LICENSE-APACHE)) or
+MIT ([`LICENSE-MIT`](LICENSE-MIT)) at your option, matching the
+upstream `ntfs` crate. The standard Rust-ecosystem dual-license
+pattern.
+
+`Cargo.toml` declares `license = "MIT OR Apache-2.0"`.
+`deny.toml` enforces a permissive-only allowlist (MIT, Apache-2.0,
+BSD-2-Clause, BSD-3-Clause, ISC, Unicode, CC0-1.0, Zlib, 0BSD)
+across every transitive dep — no GPL / LGPL / MPL / AGPL ever
+enters the dependency graph.
 
 ## Building
 
+Standard cargo:
+
 ```sh
 cargo build --release
-# → target/release/libfs_ntfs.a + rlib
+# → target/release/libfs_ntfs.{a,rlib}
+# → target/release/rust-ntfs   (CLI: format / ls / touch / mkdir / write / rm / rmdir / set_dirty)
 ```
 
 Universal macOS static lib (aarch64 + x86_64 lipo'd):
@@ -253,12 +334,51 @@ Universal macOS static lib (aarch64 + x86_64 lipo'd):
 ./build.sh           # → dist/libfs_ntfs.a
 ```
 
-The Rust toolchain is pinned in `rust-toolchain.toml`; `cargo` picks
+The Rust toolchain is pinned in `rust-toolchain.toml`; cargo picks
 it up automatically.
+
+### Tests
+
+```sh
+cargo test                     # unit + integration (skips matrix on non-Windows)
+cargo test --test capi_fsck_callbacks
+cargo test --lib               # unit only
+```
+
+### Test matrix (Windows + macOS VM coordination)
+
+The chkdsk-validated matrix lives in `test-matrix.json` at the
+repo root. Drivers:
+
+- `scripts/setup-windows-vm.sh` / `.ps1` — bootstrap a Windows VM
+  with the toolchain needed to run `format.com` / `chkdsk` / the
+  smoke harness.
+- `scripts/test-windows-matrix.sh` — local driver for the full
+  matrix.
+- `scripts/test-windows-write-smoke.sh` — minimal mkfs → mount →
+  write-one-file diagnostic; answer the question "does ntfs.sys
+  actually take a write to our format?".
+- `scripts/run-cycle.sh`, `scripts/claim-scenario.sh`,
+  `scripts/update-scenario-status.sh` — multi-agent claim / run /
+  mark loop drivers, used when several agents share the matrix.
+
+Agent coordination rules: see
+[`docs/multi-agent-test-protocol.md`](docs/multi-agent-test-protocol.md).
+
+### Pre-commit hooks
+
+One-time per clone — runs the same `cargo fmt --check` and
+`cargo clippy --all-targets -- -D warnings` checks CI runs:
+
+```sh
+./scripts/install-hooks.sh
+```
+
+Bypass a single commit with `git commit --no-verify`.
 
 ## Using from C
 
-Link `libfs_ntfs.a` and include `fs_ntfs.h`. Read example:
+Link `libfs_ntfs.a` and include `fs_ntfs.h`:
 
 ```c
 #include "fs_ntfs.h"
@@ -277,8 +397,8 @@ if (fs_ntfs_stat(fs, "/readme.txt", &attr) == 0) {
 fs_ntfs_umount(fs);
 ```
 
-Callback-based mount for hosts that don't open the device directly
-(pseudocode):
+Callback-based mount for hosts that can't open the device directly
+(sandboxed FSKit extensions, out-of-process backends):
 
 ```c
 static int my_read(void *ctx, void *buf, uint64_t off, uint64_t len) { /* … */ }
@@ -287,7 +407,7 @@ fs_ntfs_blockdev_cfg_t cfg = {
     .read       = my_read,
     .context    = my_context,
     .size_bytes = total_bytes,
-    /* .write left NULL — read-only mount */
+    /* .write left NULL for a read-only mount */
 };
 
 fs_ntfs_fs_t *fs = fs_ntfs_mount_with_callbacks(&cfg);
@@ -297,11 +417,7 @@ End-to-end fsck against a callback-held block device, with progress:
 
 ```c
 static int on_progress(void *ctx, const char *phase,
-                       uint64_t done, uint64_t total) {
-    fprintf(stderr, "[fsck] %s %llu/%llu\n", phase,
-            (unsigned long long)done, (unsigned long long)total);
-    return 0;
-}
+                       uint64_t done, uint64_t total) { /* … */ return 0; }
 
 uint64_t bytes = 0;
 uint8_t  cleared = 0;
@@ -309,68 +425,34 @@ int rc = fs_ntfs_fsck_with_callbacks(&cfg, on_progress, NULL,
                                      &bytes, &cleared);
 ```
 
+Full ABI surface: `include/fs_ntfs.h`. Implementation entry point:
+`src/lib.rs`.
+
 ## Using from Rust
 
-The FFI layer is the primary surface. If you're writing pure Rust
-and don't need write support, depend on upstream directly:
+The C ABI is the primary surface. If you're writing pure Rust and
+only need read support, depend on upstream directly:
 
 ```toml
 [dependencies]
 ntfs = "0.4"
 ```
 
-If you *do* want fs-ntfs's write API from Rust, pull this crate
-in as a path or git dependency and use the modules under `facade::`
-and `write::`.
-
-## Testing
-
-```sh
-cargo test                       # unit + integration
-cargo test --test capi_fsck_callbacks
-```
-
-The `tests/` tree carries ~50 integration tests covering reads,
-every C-ABI entry point, round-trip writes (including a corruption
-fuzz that stress-tests the write paths under concurrent read-back),
-Unicode names, large files, sparse reads, deep directories,
-rename/resize variants, and fsck on both path and callback
-transports. Tests assemble their own NTFS images at runtime where
-possible; a handful of static images live in `test-disks/` for
-fixtures that are awkward to build programmatically.
-
-## Git hooks
-
-One-time setup per clone, so every commit runs the same `cargo fmt
---check` + `cargo clippy` checks CI does and CI doesn't have to catch
-what your machine could have:
-
-```sh
-./scripts/install-hooks.sh
-```
-
-Bypass a single commit with `git commit --no-verify`.
-
-## Versioning
-
-Semver, tracked in [`CHANGELOG.md`](CHANGELOG.md). ABI-visible
-struct fields are appended to preserve binary layout across patch
-releases (as happened for `fs_ntfs_blockdev_cfg_t` gaining `write`
-in 0.1.1). Breaking ABI changes get a minor bump.
+If you want fs-ntfs's write API from Rust, pull the crate in as a
+path or git dependency and use the modules under `facade::` and
+`write::`. Note that the Rust facade re-parses the boot sector and
+MFT per call (it's stateless by design); for hot paths, go through
+the C ABI which keeps the parsed volume in memory.
 
 ## Credits
 
 Read parsing is the work of [Colin Finck](https://github.com/ColinFinck)
 and his [`ntfs`](https://github.com/ColinFinck/ntfs) crate — this
-crate depends on it and calls directly into it for every
-MFT/attribute/index read. The write, recovery, and FFI code in this
-crate is original work, layered on top of those reads.
-
-## License
-
-Dual-licensed under MIT ([LICENSE-MIT](LICENSE-MIT)) or Apache-2.0
-([LICENSE-APACHE](LICENSE-APACHE)), matching the upstream `ntfs`
-crate.
+crate depends on it unchanged for every MFT, attribute, and index
+read. The write, recovery, mkfs, and FFI code in this crate is
+original work, layered on top of that reader. Citations throughout
+are Microsoft MS-FSCC and Windows Internals 7th ed. only; no GPL'd
+NTFS reimplementation was consulted at any point.
 
 ## Disclaimer — use at your own risk
 
@@ -378,11 +460,11 @@ crate.
 
 This is experimental filesystem code that reads *and writes* the
 on-disk structures of live filesystems. Bugs in this class of code
-can — and sooner or later will — corrupt or destroy data. The MIT /
-Apache-2.0 license above already contains the standard no-warranty
-and limitation-of-liability clauses; this section restates them in
-plain English so there is no ambiguity about what you are agreeing
-to when you use the software.
+can — and sooner or later will — corrupt or destroy data. The
+Apache-2.0 / MIT license above already contains the standard
+no-warranty and limitation-of-liability clauses; this section
+restates them in plain English so there is no ambiguity about what
+you are agreeing to when you use the software.
 
 **By using this software you accept that:**
 
