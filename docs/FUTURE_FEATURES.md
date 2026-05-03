@@ -428,20 +428,28 @@ fixture-generation pipeline runs on macOS.
 `cargo +nightly test -Zsanitizer=address`. The crate's raw-byte
 buffer manipulations are the most likely spot for OOB reads/writes.
 
-### §5.7 Release pipeline verification
+### §5.7 Release pipeline (resolved)
 
-Tag-driven publication of `libfs_ntfs-vX.Y.Z-macos-universal.tar.gz`,
-cloned from fs-ext4 — a workflow may exist but has never been
-verified end-to-end. (STATUS.md Phase 4 #16 also flags that
-`.github/workflows/` currently only contains `ci.yml` — confirm
-whether a release.yml is intended to live here.)
+Tag-driven publication of `rust-ntfs` binaries lands via
+`.github/workflows/release.yml`, added in `0d89b60`. Six target
+triples (aarch64/x86_64-apple-darwin, x86_64/aarch64-unknown-linux-gnu,
+x86_64-pc-windows-msvc, aarch64-pc-windows-gnullvm) build on their
+native runners and attach tar.gz / zip + SHA-256 checksums to the
+GitHub Release. Pushing a `v*` tag (or running the workflow with a
+tag input) cuts a release.
 
-### §5.8 `cargo-deny` / licence hygiene
+End-to-end verification still pending — the first real tag push
+will exercise the workflow against actual GitHub runners. Until then,
+this is shipped-but-unverified.
 
-Since the crate is strict about no-GPL (per project policy),
-add a `cargo-deny` step in CI that asserts dependency licenses
-remain MIT / Apache / BSD. Catches accidental regressions. Pairs
-with the project-wide "no GPL/LGPL/AGPL" rule.
+### §5.8 `cargo-deny` / licence hygiene (resolved)
+
+Configured in `deny.toml`; CI step `cargo-deny check` runs in
+`.github/workflows/ci.yml` on every push / PR. Allowlist:
+MIT / Apache-2.0 (+LLVM exception) / BSD-2/3 / ISC / Unicode /
+Zlib / CC0 / 0BSD. Anything outside fails the build. Yanked
+versions and unknown registries also rejected. Pairs with the
+project-wide "no GPL/LGPL/AGPL" rule.
 
 ### §5.9 Test-matrix Stage A — 2 GiB raw-write cap
 

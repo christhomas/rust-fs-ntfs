@@ -39,6 +39,18 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo fmt --check
+
+      # cargo-deny — fail the build if any dep license drifts outside
+      # the MIT / Apache / BSD / ISC / Unicode / Zlib / CC0 / 0BSD
+      # allowlist in deny.toml, or if a yanked / advisory-flagged
+      # version creeps in. Pairs with the project's "no GPL/LGPL/AGPL"
+      # policy.
+      - name: cargo-deny check
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
       # clippy deferred: lib.rs FFI funcs need `unsafe` refactor before
       # `clippy -D warnings` can pass. Re-enable once resolved.
       #
