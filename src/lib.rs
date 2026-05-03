@@ -321,6 +321,13 @@ pub struct FsNtfsBlockdevCfg {
 pub struct FsNtfsDirIter {
     entries: Vec<FsNtfsDirent>,
     index: usize,
+    /// Number of index entries the iterator skipped during materialisation —
+    /// e.g. malformed entries on a dirty volume, DOS-only namespace names,
+    /// entries whose key failed to decode. Surfaced via
+    /// `fs_ntfs_dir_skipped`. Skip-on-error is the right default (one bad
+    /// entry shouldn't make a directory unreadable), but the caller has
+    /// no way to tell whether they got a complete listing without this.
+    skipped_count: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -823,6 +830,7 @@ pub extern "C" fn fs_ntfs_dir_open(
     };
 
     let mut entries = Vec::new();
+    let mut skipped_count: u64 = 0;
     // Synthesized entries for "." and ".."
     entries.push(make_dirent(current_record_number, 2, b"."));
     entries.push(make_dirent(parent_record_number, 2, b".."));
@@ -832,12 +840,18 @@ pub extern "C" fn fs_ntfs_dir_open(
     while let Some(entry_result) = iter.next(&mut bridge.reader) {
         let entry = match entry_result {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(_) => {
+                skipped_count = skipped_count.saturating_add(1);
+                continue;
+            }
         };
 
         let file_name = match entry.key() {
             Some(Ok(name)) => name,
-            _ => continue,
+            _ => {
+                skipped_count = skipped_count.saturating_add(1);
+                continue;
+            }
         };
 
         // Skip DOS-only names to avoid duplicates
@@ -861,8 +875,25 @@ pub extern "C" fn fs_ntfs_dir_open(
         entries.push(dirent);
     }
 
-    let iter = Box::new(FsNtfsDirIter { entries, index: 0 });
+    let iter = Box::new(FsNtfsDirIter {
+        entries,
+        index: 0,
+        skipped_count,
+    });
     Box::into_raw(iter)
+}
+
+/// How many index entries were silently skipped during the most recent
+/// `fs_ntfs_dir_open` materialisation of `iter`. Returns -1 on a NULL
+/// iterator. Skipped entries are typically corrupt rows on a dirty
+/// volume; a non-zero value means the listing is incomplete.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_dir_skipped(iter: *const FsNtfsDirIter) -> i64 {
+    if iter.is_null() {
+        return -1;
+    }
+    let it = unsafe { &*iter };
+    it.skipped_count as i64
 }
 
 #[unsafe(no_mangle)]

@@ -366,38 +366,27 @@ whichever the B-tree finds first. (STATUS.md cross-check
 
 ## 🟢 Polish — small but user-visible
 
-### §4.6 Diagnostic counter for skipped index entries
+### §4.6 Diagnostic counter for skipped index entries (resolved)
 
-**Today**: `fs_ntfs_dir_open` / `_next` walks `NtfsIndexEntries` and
-silently `continue`s on `Err` (`src/lib.rs` ~709-717). A malformed
-index entry on a dirty volume disappears from the listing with no
-trace.
+`fs_ntfs_dir_open` now records every silently-skipped entry
+(malformed rows, undecodable keys) in a `skipped_count: u64` field
+on `FsNtfsDirIter`. Callers query it via the new
+`fs_ntfs_dir_skipped(iter)` accessor — returns the count, or -1 on
+a NULL iterator. Skip-on-error behaviour is unchanged so a single
+bad entry still doesn't abort the listing.
 
-**Problem**: skip-on-error is the right default (one bad entry
-shouldn't make a directory unreadable during FSKit enumeration), but
-the caller has no way to tell whether they got a complete listing.
-Surfaces as "the file is missing" with no diagnostic trail.
+DOS-namespace dedup skips do NOT count (intentional dedup, not error).
+A non-zero skipped count means the listing is incomplete.
 
-**Fix**: keep the skip behavior, but add `skipped_count: u64` (and
-optionally `last_skip_reason: String`) to the iterator struct.
-Surface via a new `fs_ntfs_dir_skipped(iter)` accessor. ~30 LOC. No
-NTFS impact. Migrated from code-review-2026-04-19 §5.
+### §4.7 Header doc on `fs_ntfs_mount` referencing dirty-volume probe (resolved)
 
-### §4.7 Header doc on `fs_ntfs_mount` referencing dirty-volume probe
-
-**Today**: `fs_ntfs_mount` (`include/fs_ntfs.h:108-112`) is silent
-about how to handle dirty volumes. The standalone `fs_ntfs_is_dirty`
-probe shipped (former §4.4) but callers don't know to invoke it.
-
-**Problem**: the driver parses dirty volumes — it may return stale
-data but doesn't panic. Auto-warning on mount would change the
-quiet-by-default contract FSKit relies on. The remaining gap is
-discoverability.
-
-**Fix**: extend the doc comment on `fs_ntfs_mount` (and the
-`_with_callbacks` variant) to recommend calling `fs_ntfs_is_dirty`
-post-mount and dispatching appropriately. ~10 lines of header prose.
-No code change. Migrated from code-review-2026-04-19 §13.
+The doc comments on `fs_ntfs_mount` and `fs_ntfs_mount_with_callbacks`
+in `include/fs_ntfs.h` now describe the dirty-volume contract and
+recommend calling `fs_ntfs_is_dirty` (or
+`fs_ntfs_is_dirty_with_callbacks`) post-mount to detect possibly
+stale state. The driver still parses dirty volumes silently — the
+auto-warn / auto-refuse decision belongs to the caller per the
+quiet-by-default contract.
 
 ---
 

@@ -108,6 +108,19 @@ typedef struct {
 /*
  * Mount an NTFS filesystem from the given device/image path.
  * Returns NULL on failure. Read-only.
+ *
+ * Dirty-volume note: this driver parses dirty volumes (the
+ * VOLUME_IS_DIRTY flag is informational here, not a refusal). Stale
+ * data is possible if the volume hasn't been cleanly dismounted —
+ * a file mid-rename may surface with the old name pointing at the
+ * new file reference, etc.
+ *
+ * Callers that need to detect this should invoke `fs_ntfs_is_dirty`
+ * (or `fs_ntfs_is_dirty_with_callbacks`) AFTER a successful mount
+ * and decide policy themselves: refuse to surface the volume,
+ * surface read-only, or surface with a warning. The driver does NOT
+ * auto-warn or auto-refuse — the quiet-by-default contract FSKit
+ * relies on stays intact.
  */
 fs_ntfs_fs_t *fs_ntfs_mount(const char *device_path);
 
@@ -119,6 +132,9 @@ fs_ntfs_fs_t *fs_ntfs_mount(const char *device_path);
  * resulting handle is then accepted by the `_h` mutation entry points
  * (see "Handle-based mutation API" below). Pass NULL to mount
  * read-only — `_h` mutators will then fail with -1 / EINVAL.
+ *
+ * Dirty-volume note: same contract as `fs_ntfs_mount`. Use
+ * `fs_ntfs_is_dirty_with_callbacks` post-mount to decide policy.
  */
 fs_ntfs_fs_t *fs_ntfs_mount_with_callbacks(
     const fs_ntfs_blockdev_cfg_t *cfg);
@@ -151,6 +167,16 @@ fs_ntfs_dir_iter_t *fs_ntfs_dir_open(fs_ntfs_fs_t *fs,
                                               const char *path);
 
 const fs_ntfs_dirent_t *fs_ntfs_dir_next(fs_ntfs_dir_iter_t *iter);
+
+/*
+ * How many index entries were silently skipped while opening this
+ * iterator (e.g. malformed rows on a dirty volume). Returns -1 on a
+ * NULL iterator, otherwise a count. A non-zero value means the
+ * listing the caller is iterating is incomplete; common causes are
+ * dirty-volume metadata damage or upstream parser failures on rare
+ * NTFS shapes.
+ */
+int64_t fs_ntfs_dir_skipped(const fs_ntfs_dir_iter_t *iter);
 
 void fs_ntfs_dir_close(fs_ntfs_dir_iter_t *iter);
 
