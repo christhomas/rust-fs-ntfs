@@ -443,6 +443,114 @@ add a `cargo-deny` step in CI that asserts dependency licenses
 remain MIT / Apache / BSD. Catches accidental regressions. Pairs
 with the project-wide "no GPL/LGPL/AGPL" rule.
 
+### §5.9 Test-matrix Stage A — 2 GiB raw-write cap
+
+**Status**: known gap; `scripts/run-scenario.ps1` Stage A throws on
+images >2 GiB ("PS ReadAllBytes / chunked-WriteFile both fail past
+2 GiB; this scenario needs further work"). See the inline TODO in
+the same file.
+
+**What's known**:
+
+- `[System.IO.File]::ReadAllBytes` is hard-capped at 2 GiB by
+  PowerShell's CLR — no go for the 4 GiB / 16 GiB Tier-1 scenarios.
+- A chunked `FileStream` write to `\\.\PhysicalDrive$N` fails with
+  "Access to the path is denied." — likely alignment /
+  `FILE_FLAG_NO_BUFFERING` requirements that the chunked path
+  doesn't satisfy. The smaller-volume bulk path works because
+  Windows accepts the single `WriteFile` call as a whole-buffer
+  transfer.
+
+**Productive next moves**:
+
+1. Open the raw device with `CreateFile` + `FILE_FLAG_NO_BUFFERING`
+   and align both buffer + offset to the device's logical sector
+   size. Try a 16 MiB sector-aligned chunk loop.
+2. Skip the wrapper VHDX entirely for >2 GiB volumes — `qemu-img
+   convert -O vhdx -o subformat=fixed,partitioning=gpt` may produce
+   a partitioned VHDX directly without the raw-write step. Worth
+   a prototype.
+3. Use a temporary loop-mounted RAM disk on the VM to stage the
+   image, then `Move-Item` to the partition. Avoids the
+   PhysicalDrive write entirely.
+
+**Effort estimate**: small (~2-4 h) once one of the above is
+chosen and prototyped on the VM. Blocks Tier-1 scenarios
+`mac-format-volume-{4gib-cluster-4k,4gib-cluster-64k,16gib-cluster-4k}`.
+
+### §5.10 Test-matrix — op-by-op chkdsk interleaving
+
+**Status**: simplification; `scripts/run-scenario.ps1` Stage B2
+applies all `fixture_files` in one batch BEFORE the Stage E chkdsk
+pass. So an `operation_sequence` like
+
+  `mac:format -> win:chkdsk -> win:write(F1) -> win:chkdsk`
+
+collapses in practice to "format, mount, apply F1, run chkdsk
+once" — the pre-write chkdsk is silently dropped.
+
+**Why it matters**:
+
+- Loses the ability to assert "the format is clean BEFORE the
+  write, AND clean AFTER" in a single scenario. Today you'd need
+  two scenarios (one without the write, one with) to cover both
+  states.
+- Some scenarios encode a meaningful interleave (e.g. a chkdsk
+  between a write and a delete to verify the bitmap is consistent
+  at every step). Those collapse to a single end-of-run chkdsk.
+
+**Productive next moves**:
+
+1. Have `tests/matrix.rs` parse `operation_sequence` into a typed
+   list of step tokens (`Format`, `Write(path,data)`, `Chkdsk`,
+   `Delete(path)`, `Mount`, `Dismount`, …) and serialise the
+   typed list as a "step plan" JSON for the PS script.
+2. PS reads the step plan and executes each step in order, writing
+   per-step diag files (`step01-chkdsk-readonly-exit.txt`,
+   `step02-write.txt`, …). The verdict becomes "every chkdsk in
+   the plan exits clean", not "the single trailing chkdsk exits
+   clean".
+3. Keeps backward compatibility with today's flat
+   `fixture_files` shape by treating it as syntactic sugar for
+   "single Write step before the trailing chkdsk".
+
+**Effort estimate**: medium (~1 day). Touches the PS step
+machinery + Rust step-plan generator + a couple of new scenarios
+that prove the per-step verdict shape.
+
+### §5.11 Test-matrix `chkdsk /F` repair-lane verdict
+
+**Status**: simplification; PS Stage E2 runs `chkdsk /F` when
+`/scan` returns non-zero, dumps the post-/F MFT/boot for byte-diff
+analysis, and runs `/scan` again — but the post-/F exit codes do
+not feed into the matrix verdict. Today the verdict is always the
+pre-/F `(ro, scan)` pair.
+
+**What's known / desired**:
+
+- Some test scenarios *require* `/F` to repair successfully
+  (Tier-3 dirty-volume scenarios are a natural fit). Today they
+  share the same verdict shape as scenarios that should pass
+  without `/F` running at all.
+- Useful additional markers: `FIX_EXIT=<n>` and
+  `POSTFIX_SCAN_EXIT=<n>` from PS, parsed alongside `RO_EXIT` /
+  `SCAN_EXIT` into `ScenarioResult`.
+
+**Productive next moves**:
+
+1. Emit `FIX_EXIT` / `POSTFIX_SCAN_EXIT` from PS Stage G when
+   Stage E2 ran. Extend `ScenarioResult` with two `Option<i32>`
+   fields.
+2. Add a `verdict_shape` field to scenarios in `test-matrix.json`:
+   `clean` (must pass without /F) | `repair-ok` (allowed to pass
+   only after /F) | `repair-required` (must trigger /F and the
+   post-/F /scan must exit 0).
+3. The runner picks pass/fail per shape. Default `clean` keeps
+   today's behaviour for every existing scenario.
+
+**Effort estimate**: small (~3-4 h). Mostly contained in
+`tests/matrix.rs` plus the two new PS markers.
+
 ---
 
 ## 🧠 Observability + safety — invisible until they're not
