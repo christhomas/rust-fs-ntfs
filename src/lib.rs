@@ -572,6 +572,7 @@ pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle
         reader,
         source: Some(MountSource::Path(PathBuf::from(path))),
     });
+    log::info!(target: "fs_ntfs", "mount path={path}");
     Box::into_raw(bridge)
 }
 
@@ -690,6 +691,7 @@ fn handle_to_rw_io(handle: &FsNtfsHandle) -> Result<HandleIo, String> {
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_umount(fs: *mut FsNtfsHandle) {
     if !fs.is_null() {
+        log::info!(target: "fs_ntfs", "umount handle={fs:p}");
         unsafe {
             drop(Box::from_raw(fs));
         }

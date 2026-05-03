@@ -607,11 +607,25 @@ multi-record atomicity. A crash mid-create can leave:
 full-journaling alternative; intentionally skipped per the original
 W5 decision.)
 
-### §6.4 Tracing hooks
+### §6.4 Tracing hooks (resolved at lifecycle layer)
 
-A `tracing` subscriber or `log` call at attribute read / cluster
-alloc / bitmap flip so consumers can instrument real-world usage.
-Particularly useful for debugging FSKit reports.
+`log = "0.4"` added as a dep — the de-facto Rust facade. Consumers
+install whichever subscriber they want; the crate stays quiet by
+default until one is set.
+
+Instrumented today (info-level):
+
+  - `fs_ntfs_mount` — emits `mount path=<p>` on success.
+  - `fs_ntfs_umount` — emits `umount handle=<ptr>` on each free.
+  - `fsck::set_dirty` / `clear_dirty` / `fsck` — emit one entry per
+    call with the path; `fsck` also emits a done-line with the
+    report.
+
+Future: trace-level events at attribute read / cluster alloc /
+bitmap flip, gated behind a feature flag so the trace-call overhead
+doesn't sit in the hot path of consumers that don't subscribe to
+trace level. Today's lifecycle-only instrumentation is enough for
+"why did mount/fsck happen?" debugging on FSKit reports.
 
 ### §6.5 `Send` safety contract for `CallbackReader` context pointer
 

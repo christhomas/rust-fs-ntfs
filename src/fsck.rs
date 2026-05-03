@@ -209,7 +209,9 @@ pub fn is_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
 /// Returns `Ok(true)` if the flag was set and has been cleared,
 /// `Ok(false)` if the volume was already clean, `Err` otherwise.
 pub fn clear_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
-    let mut io = PathIo::open(path.as_ref())?;
+    let p = path.as_ref();
+    log::info!(target: "fs_ntfs::fsck", "clear_dirty path={}", p.display());
+    let mut io = PathIo::open(p)?;
     clear_dirty_io(&mut io)
 }
 
@@ -221,7 +223,9 @@ pub fn clear_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
 /// Returns `Ok(true)` if the flag was clear and has been set,
 /// `Ok(false)` if the volume was already dirty, `Err` otherwise.
 pub fn set_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
-    let mut io = PathIo::open(path.as_ref())?;
+    let p = path.as_ref();
+    log::info!(target: "fs_ntfs::fsck", "set_dirty path={}", p.display());
+    let mut io = PathIo::open(p)?;
     set_dirty_io(&mut io)
 }
 
@@ -238,8 +242,18 @@ pub fn reset_logfile(path: impl AsRef<Path>) -> Result<u64, String> {
 /// also resetting the log would leave Windows thinking "clean volume" but
 /// still finding stale log records on mount.
 pub fn fsck(path: impl AsRef<Path>) -> Result<FsckReport, String> {
-    let mut io = PathIo::open(path.as_ref())?;
-    fsck_io(&mut io, None)
+    let p = path.as_ref();
+    log::info!(target: "fs_ntfs::fsck", "fsck path={}", p.display());
+    let mut io = PathIo::open(p)?;
+    let report = fsck_io(&mut io, None);
+    if let Ok(r) = &report {
+        log::info!(
+            target: "fs_ntfs::fsck",
+            "fsck done dirty_cleared={} logfile_bytes={}",
+            r.dirty_cleared, r.logfile_bytes,
+        );
+    }
+    report
 }
 
 /// Summary of what [`fsck`] did.

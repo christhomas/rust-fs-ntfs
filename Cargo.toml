@@ -27,6 +27,11 @@ path = "src/bin/rust_ntfs/main.rs"
 
 [dependencies]
 ntfs = { version = "0.4", default-features = false, features = ["std"] }
+# `log` is the de-facto standard logging facade. Consumers (FSKit
+# extension, CLI, integration tests) install whichever subscriber
+# they want — `log` itself is a no-op until one is set, so the crate
+# stays quiet by default.
+log = "0.4"
 
 [dev-dependencies]
 libtest-mimic = "0.7"
