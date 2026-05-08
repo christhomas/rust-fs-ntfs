@@ -36,7 +36,7 @@ while true; do
     # `|| true` — claim-scenario.sh exits 1 when no pending scenarios
     # remain (normal end-of-loop signal), and we want stderr to come
     # through for genuine errors so they're visible.
-    NEXT="$(cd "${PARENT_REPO}" && bash vendor/harness/scripts/claim-scenario.sh "${SESSION}" || true)"
+    NEXT="$(cd "${PARENT_REPO}" && bash "${CLAIM_SCRIPT}" "${SESSION}" || true)"
     if [[ -z "${NEXT}" ]]; then
         echo "no more pending scenarios (or claim race exhausted)"
         break
@@ -89,7 +89,7 @@ print(json.dumps({
         # Best-effort: status updates are advisory; don't crash the
         # cycle on a transient race. Same policy as the completed-
         # status update at the bottom of the loop.
-        (cd "${PARENT_REPO}" && bash vendor/harness/scripts/update-scenario-status.sh "${NEXT}" "blocked-${BLOCKED_REASON}-${SUFFIX}") || true
+        (cd "${PARENT_REPO}" && bash "${UPDATE_SCRIPT}" "${NEXT}" "blocked-${BLOCKED_REASON}-${SUFFIX}") || true
         continue
     fi
 
@@ -135,7 +135,7 @@ print(json.dumps({
     fi
 
     echo "  -> ${STATUS} (readonly=${READONLY_EXIT} scan=${SCAN_EXIT} rc=${RC})"
-    (cd "${PARENT_REPO}" && bash vendor/harness/scripts/update-scenario-status.sh "${NEXT}" "${STATUS}" "${DIAG_PATH}") || true
+    (cd "${PARENT_REPO}" && bash "${UPDATE_SCRIPT}" "${NEXT}" "${STATUS}" "${DIAG_PATH}") || true
 done
 
 echo "cycle done"
