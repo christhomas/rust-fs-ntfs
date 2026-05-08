@@ -98,8 +98,13 @@ try {
     # Streaming via `Stream.CopyTo` with a 16 MiB buffer copies
     # arbitrary sizes with bounded memory.
     $rawPath = "\\.\PhysicalDrive$($disk.Number)"
+    # FileShare.Read on the source matches what `[IO.File]::ReadAllBytes`
+    # uses internally — denies write-sharing while we read. Without
+    # this, a concurrent scp retry or an incomplete `ship-to-vm`
+    # could overwrite the .img mid-copy and we'd write a torn image
+    # into the partition silently.
     $src = [System.IO.File]::Open($ImagePath, [System.IO.FileMode]::Open,
-        [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     try {
         $dst = [System.IO.File]::Open($rawPath, [System.IO.FileMode]::Open,
             [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
