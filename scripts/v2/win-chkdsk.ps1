@@ -91,18 +91,22 @@ try {
     }
 
     # Stream the .img bytes into the partition's offset on the raw
-    # disk. v1's run-scenario.ps1 used `[IO.File]::ReadAllBytes` here,
-    # which slurps the whole image into a single byte[] — fine for
-    # 32 MiB - 1 GiB volumes, but .NET arrays cap at ~2 GiB so the
-    # 4 GiB / 16 GiB scenarios in the matrix always errored out.
-    # Streaming via `Stream.CopyTo` with a 16 MiB buffer copies
-    # arbitrary sizes with bounded memory.
+    # disk. v1's run-scenario.ps1 used `[IO.File]::ReadAllBytes`
+    # here, which slurps the whole image into a single byte[] — fine
+    # for 32 MiB - 1 GiB volumes but .NET arrays cap at ~2 GiB so the
+    # 4 GiB / 16 GiB scenarios always OOMed.
+    #
+    # First attempt at streaming used `Stream.CopyTo($dst, 16MB)`,
+    # which errored on raw-disk writes with "Access to the path is
+    # denied." `Stream.CopyTo` has an internal optimisation path that
+    # doesn't play well with the special `\\.\PhysicalDriveN` handle.
+    # Explicit Read + Write loop sidesteps it: same chunk shape as
+    # before, just .NET FileStream.Write calls all the way down,
+    # which is what the original (working) Write(bytes,0,len) used.
     $rawPath = "\\.\PhysicalDrive$($disk.Number)"
-    # FileShare.Read on the source matches what `[IO.File]::ReadAllBytes`
-    # uses internally — denies write-sharing while we read. Without
-    # this, a concurrent scp retry or an incomplete `ship-to-vm`
-    # could overwrite the .img mid-copy and we'd write a torn image
-    # into the partition silently.
+    # FileShare.Read on the source matches `[IO.File]::ReadAllBytes`'s
+    # internal share — denies write-sharing during the copy so a
+    # concurrent scp retry can't produce a torn image.
     $src = [System.IO.File]::Open($ImagePath, [System.IO.FileMode]::Open,
         [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     try {
@@ -110,7 +114,25 @@ try {
             [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
         try {
             $dst.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
-            $src.CopyTo($dst, 16MB)
+            # Raw `\\.\PhysicalDriveN` writes require offset + length to be
+            # multiples of the physical sector size — a partial read at EOF
+            # (or any short read mid-stream) would otherwise hit
+            # `IOException: The parameter is incorrect`. Pad the trailing
+            # bytes with zeros up to the next sector boundary; only the
+            # `[n, aligned)` window needs clearing since `Read` rewrote
+            # `[0, n)` on this iteration.
+            $sectorSize = 512
+            $bufSize = 16MB
+            $buf = New-Object byte[] $bufSize
+            while ($true) {
+                $n = $src.Read($buf, 0, $bufSize)
+                if ($n -le 0) { break }
+                $aligned = [int][Math]::Ceiling($n / $sectorSize) * $sectorSize
+                if ($aligned -gt $n) {
+                    [Array]::Clear($buf, $n, $aligned - $n)
+                }
+                $dst.Write($buf, 0, $aligned)
+            }
             $dst.Flush($true)
         } finally { $dst.Close() }
     } finally { $src.Close() }
