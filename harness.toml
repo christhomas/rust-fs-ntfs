@@ -80,8 +80,17 @@ expect_exit = 0
 # Format an existing pre-sized image with the rust-ntfs formatter.
 # The serial is fixed across the matrix today; future scenarios may
 # parameterise it via {step.serial?}.
+#
+# `{scenario.volume_params.label}` is single-quoted so labels with
+# spaces (e.g. "Disk éclipse" in label-latin1) and the empty-string
+# label case survive the shell parse intact rather than splitting
+# into stray positional arguments. Same caveat as mac-write's
+# `{step.content}`: single-quotes don't escape literal `'` in the
+# label; matrix labels today are simple ASCII / Unicode without
+# embedded apostrophes so this is safe. If a label with `'` is ever
+# needed, switch to a file-based transport.
 host = "host"
-command = "{binary} format -L {scenario.volume_params.label} -c {scenario.volume_params.alloc_unit_size} --serial deadbeefcafe1234 {scenario.image}"
+command = "{binary} format -L '{scenario.volume_params.label}' -c {scenario.volume_params.alloc_unit_size} --serial deadbeefcafe1234 {scenario.image}"
 expect_exit = 0
 
 # ----- file/dir mutations -----
