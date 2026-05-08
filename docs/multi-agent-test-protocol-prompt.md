@@ -75,14 +75,13 @@ autonomous for the duration of the run.
    rename to avoid race:
 
    ```sh
-   bash scripts/claim-scenario.sh "$AGENT_SESSION"
+   bash harness/scripts/claim-scenario.sh "$AGENT_SESSION"
    # exits 0 with claimed scenario name on stdout, or non-zero if
    # nothing left to claim.
    ```
 
-   If `claim-scenario.sh` doesn't exist yet, you are likely the first
-   agent in this run. Bootstrap it as your iteration's task -- see
-   "Bootstrapping" below.
+   If the harness submodule isn't initialised, run
+   `git submodule update --init --recursive` first.
 
 5. **Run the scenario** end-to-end (see the work-list entry for the
    exact operation sequence). If a step fails, enter the
@@ -186,10 +185,10 @@ violates the "never delete other agents' work" rule -- in that case,
 restore from `git log` and proceed:
 
 ```sh
-[ -f test-matrix.json ]      || echo "MISSING: work-list"
-[ -x scripts/claim-scenario.sh ]        || echo "MISSING: claim helper"
-[ -x scripts/update-scenario-status.sh ] || echo "MISSING: status helper"
-[ -x scripts/test-windows-local.sh ]    || echo "MISSING: pipeline runner"
+[ -f test-matrix.json ]                          || echo "MISSING: work-list"
+[ -x harness/scripts/claim-scenario.sh ]         || echo "MISSING: harness submodule (run: git submodule update --init --recursive)"
+[ -x harness/scripts/update-scenario-status.sh ] || echo "MISSING: harness submodule"
+[ -x scripts/test-windows-local.sh ]             || echo "MISSING: pipeline runner"
 ```
 
 What does NOT yet exist (and may need to be scaffolded by the agent

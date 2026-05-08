@@ -358,9 +358,14 @@ repo root. Drivers:
 - `scripts/test-windows-write-smoke.sh` — minimal mkfs → mount →
   write-one-file diagnostic; answer the question "does ntfs.sys
   actually take a write to our format?".
-- `scripts/run-cycle.sh`, `scripts/claim-scenario.sh`,
-  `scripts/update-scenario-status.sh` — multi-agent claim / run /
-  mark loop drivers, used when several agents share the matrix.
+- `scripts/run-cycle.sh` — multi-agent claim / run / mark loop driver,
+  used when several agents share the matrix. Delegates the claim and
+  status-update steps to the shared harness (`harness/scripts/`).
+- `harness/scripts/claim-scenario.sh`,
+  `harness/scripts/update-scenario-status.sh`,
+  `harness/scripts/reset-non-passed.sh` — generic, FS-agnostic state
+  machine over `test-matrix.json`. Vendored from
+  `fs-test-harness`; consumed via the `harness/` submodule.
 
 Agent coordination rules: see
 [`docs/multi-agent-test-protocol.md`](docs/multi-agent-test-protocol.md).
