@@ -548,10 +548,10 @@ fn fill_attr(
                     attr.attributes = std_info.file_attributes().bits();
                 }
             }
-            Ok(NtfsAttributeType::Data) => {
-                if attribute.name().map(|n| n.is_empty()).unwrap_or(true) {
-                    attr.size = attribute.value_length();
-                }
+            Ok(NtfsAttributeType::Data)
+                if attribute.name().map(|n| n.is_empty()).unwrap_or(true) =>
+            {
+                attr.size = attribute.value_length();
             }
             Ok(NtfsAttributeType::ReparsePoint) => {
                 // Read the 32-bit reparse tag and dispatch. The
