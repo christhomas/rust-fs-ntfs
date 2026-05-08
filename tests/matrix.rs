@@ -472,7 +472,13 @@ struct FixtureFile {
 #[derive(Deserialize, Serialize, Clone)]
 struct VolumeParams {
     size_mib: u64,
-    cluster_size: u32,
+    /// Smallest addressable on-disk unit. Renamed from the NTFS-native
+    /// `cluster_size` to the cross-driver-friendly `alloc_unit_size`
+    /// per fs-test-harness's vocabulary convention; `cluster_size`
+    /// stays accepted as a serde alias during the v1->v2 migration so
+    /// any in-flight scenarios with the old name keep parsing.
+    #[serde(alias = "cluster_size")]
+    alloc_unit_size: u32,
     label: String,
 }
 
@@ -900,7 +906,10 @@ fn run_scenario_inner(
         .args(["-ReferenceVhdx", &reference_vhdx.display().to_string()])
         .args(["-Diag", &diag.display().to_string()])
         .args(["-Label", &scn.volume_params.label])
-        .args(["-ClusterSize", &scn.volume_params.cluster_size.to_string()])
+        .args([
+            "-ClusterSize",
+            &scn.volume_params.alloc_unit_size.to_string(),
+        ])
         .args(["-VolumeSizeMb", &scn.volume_params.size_mib.to_string()])
         .args(["-RemountCycles", &remount_cycles.to_string()])
         .args(["-FixturesJson", &fixtures_path.display().to_string()])
@@ -1284,7 +1293,7 @@ fn run_one_mac_op(
                 "-L",
                 &scn.volume_params.label,
                 "-c",
-                &scn.volume_params.cluster_size.to_string(),
+                &scn.volume_params.alloc_unit_size.to_string(),
                 "--serial",
                 "deadbeefcafe1234",
                 &img.display().to_string(),
@@ -1453,7 +1462,7 @@ fn scenario_summary(scn: &Scenario) -> String {
     format!(
         "{}MiB / cluster={}B / label='{}'",
         scn.volume_params.size_mib,
-        scn.volume_params.cluster_size,
+        scn.volume_params.alloc_unit_size,
         if scn.volume_params.label.is_empty() {
             "(empty)"
         } else {
@@ -1471,7 +1480,7 @@ fn describe_op(raw: &str, scn: &Scenario) -> String {
     match verb {
         "mac:format" => format!(
             "format {}MiB volume, {}B clusters, label '{}' via rust-ntfs",
-            scn.volume_params.size_mib, scn.volume_params.cluster_size, scn.volume_params.label,
+            scn.volume_params.size_mib, scn.volume_params.alloc_unit_size, scn.volume_params.label,
         ),
         "mac:mkdir" => format!("create directory {}", arg.unwrap_or("?")),
         "mac:touch" => format!("create empty file {}", arg.unwrap_or("?")),

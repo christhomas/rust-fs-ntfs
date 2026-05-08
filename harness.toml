@@ -1,0 +1,142 @@
+# harness.toml — fs-test-harness consumer config for rust-fs-ntfs.
+#
+# The harness scripts + Rust runner live at ./harness/, vendored from
+# https://github.com/antimatter-studios/fs-test-harness. Run
+# `git submodule update --init --recursive` after cloning.
+#
+# Phase 4 of the harness migration: this file declares mac-side
+# (host) op-templates only. Win-side ops are added in Phase 4c
+# alongside the cross-host scenarios. Until then, only the
+# pure-mac-chain scenarios in `test-matrix.json` translate cleanly
+# to v2; the rest stay v1 and continue running through
+# `tests/matrix.rs`.
+
+[project]
+name        = "rust-fs-ntfs"
+binary      = "target/release/rust-ntfs"
+matrix_path = "test-matrix.json"
+
+[vm]
+host           = "chris@192.168.213.145"
+ssh_key        = "privatekey"
+workdir        = "C:/Users/chris/dev/rust-fs-ntfs-matrix"
+rust_toolchain = "stable-aarch64-pc-windows-gnullvm"
+# Packages installed on first VM provisioning. Strictly the ones
+# needed for the v1 win-side flow today; v2 win-ops in Phase 4c
+# will revisit this list (and the qemu-img dependency in particular —
+# tracked as Phase 1e: replace VHDX wrap with am-img-vhd::create_fixed).
+packages = []
+
+# ============================================================
+# Mac-side (host) ops — Phase 4a
+# ============================================================
+#
+# Each op invokes a `rust-ntfs` subcommand against a pre-sized .img
+# file. The image lifecycle (create empty, format, write to, ...)
+# is expressed as ordered steps in the recipe; nothing is implicit.
+#
+# Substitution surface used here:
+#   {binary}                          -> the rust-ntfs binary
+#   {scenario.image}                  -> per-scenario image filename
+#   {scenario.volume_params.label}    -> "TINY", "CITEST", ...
+#   {scenario.volume_params.size_mib} -> 32, 256, 1024, ...
+#   {scenario.volume_params.alloc_unit_size}
+#                                     -> 512, 1024, 2048, 4096, 65536
+#                                        (renamed from `cluster_size`
+#                                         per harness vocabulary
+#                                         convention; see README's
+#                                         "Scenario field translations"
+#                                         section)
+#   {step.path}                       -> e.g. "/foo.txt"
+#   {step.parent} / {step.basename}   -> for ops whose CLI takes
+#                                        them split (mkdir / touch)
+#   {step.content}                    -> mac:write payload
+
+# ----- image lifecycle -----
+
+[ops.init-image]
+# Allocate an empty {scenario.volume_params.size_mib}-MiB file at
+# {scenario.image} on the host. Equivalent to what tests/matrix.rs
+# currently does inline before each mac:format step.
+host = "host"
+command = "dd if=/dev/zero of={scenario.image} bs=1m count={scenario.volume_params.size_mib} status=none"
+expect_exit = 0
+
+[ops.mac-format]
+# Format an existing pre-sized image with the rust-ntfs formatter.
+# The serial is fixed across the matrix today; future scenarios may
+# parameterise it via {step.serial?}.
+host = "host"
+command = "{binary} format -L {scenario.volume_params.label} -c {scenario.volume_params.alloc_unit_size} --serial deadbeefcafe1234 {scenario.image}"
+expect_exit = 0
+
+# ----- file/dir mutations -----
+
+[ops.mac-mkdir]
+# rust-ntfs mkdir takes (image, parent-dir, basename) — three args.
+# Scenarios provide step.parent and step.basename explicitly. The
+# operation_sequence -> recipe translator splits "/docs/notes" into
+# parent="/docs", basename="notes" automatically.
+host = "host"
+command = "{binary} mkdir {scenario.image} {step.parent} {step.basename}"
+expect_exit = 0
+
+[ops.mac-touch]
+# Same parent/basename split as mkdir.
+host = "host"
+command = "{binary} touch {scenario.image} {step.parent} {step.basename}"
+expect_exit = 0
+
+[ops.mac-write]
+# rust-ntfs write takes the full path and content via --content.
+host = "host"
+command = "{binary} write {scenario.image} {step.path} --content {step.content}"
+expect_exit = 0
+
+[ops.mac-rm]
+host = "host"
+command = "{binary} rm {scenario.image} {step.path}"
+expect_exit = 0
+
+[ops.mac-rmdir]
+host = "host"
+command = "{binary} rmdir {scenario.image} {step.path}"
+expect_exit = 0
+
+# ----- inspection / verification -----
+
+[ops.mac-enumerate]
+# `ls -t` walks the tree recursively. Today it ignores the path
+# argument and lists everything; scenarios with mac:enumerate(/foo)
+# in the v1 string will see an unfiltered listing in v2 — matches
+# what tests/matrix.rs does today (it doesn't pass the path either).
+host = "host"
+command = "{binary} ls -t {scenario.image}"
+expect_exit = 0
+
+[ops.mac-set-dirty]
+# Sets the volume-dirty flag in the image's $Volume attribute.
+# Used by dirty-volume scenarios that exercise chkdsk's repair
+# path on the Windows side.
+host = "host"
+command = "{binary} set-dirty {scenario.image}"
+expect_exit = 0
+
+# ============================================================
+# Win-side (vm) ops — Phase 4c (TODO)
+# ============================================================
+#
+# Will land in the next phase, alongside the cross-host scenario
+# translations. Outline of what's needed:
+#
+# [ops.ship-img-to-vm]   - already covered by built-in `ship-to-vm`
+# [ops.win-mount]        - VHDX wrap + Mount-VHD + drive-letter pick
+# [ops.win-unmount]
+# [ops.win-chkdsk]       - chkdsk Z: with mode flags from {step.modes?}
+# [ops.win-enumerate]    - dir Z:\ with expectations
+# [ops.win-repeat-mount] - repeat dismount+remount {step.count} times
+# [ops.win-write]        - write fixture files to the mounted volume
+#
+# The `qemu-img` VHDX wrap currently used by run-scenario.ps1 is the
+# Phase 1e replacement target (swap to am-img-vhd::create_fixed once
+# its CLI is wired into the consumer surface).
