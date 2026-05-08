@@ -65,11 +65,9 @@ fn stat_file_and_dir() {
                 assert!(si.creation_time().nt_timestamp() > 0);
                 saw_std_info = true;
             }
-            NtfsAttributeType::Data => {
-                if attr.name().map(|n| n.is_empty()).unwrap_or(true) {
-                    assert_eq!(attr.value_length(), 17, "hello.txt is 17 bytes");
-                    saw_data = true;
-                }
+            NtfsAttributeType::Data if attr.name().map(|n| n.is_empty()).unwrap_or(true) => {
+                assert_eq!(attr.value_length(), 17, "hello.txt is 17 bytes");
+                saw_data = true;
             }
             _ => {}
         }

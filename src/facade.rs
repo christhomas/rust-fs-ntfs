@@ -216,10 +216,8 @@ impl Filesystem {
                         attr.attributes = si.file_attributes().bits();
                     }
                 }
-                Ok(NtfsAttributeType::Data) => {
-                    if a.name().map(|n| n.is_empty()).unwrap_or(true) {
-                        attr.size = a.value_length();
-                    }
+                Ok(NtfsAttributeType::Data) if a.name().map(|n| n.is_empty()).unwrap_or(true) => {
+                    attr.size = a.value_length();
                 }
                 Ok(NtfsAttributeType::ReparsePoint) => {
                     if let Ok(mut v) = a.value(&mut reader) {

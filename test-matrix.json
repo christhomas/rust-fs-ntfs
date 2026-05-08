@@ -143,7 +143,19 @@
       "operation_sequence": "mac:format -> mac:enumerate(empty: only '.')",
       "_note": "depends on Mac-side enumerate CLI; first agent picking this scaffolds tests/matrix/inspect/",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/mac-only-pass3",
-      "note": "Pure-Mac flow (mac:format -> mac:enumerate via inspect_ntfs CLI). 11 system entries indexed, 0 user-visible. Verified on c5fe branch."
+      "note": "Pure-Mac flow (mac:format -> mac:enumerate via inspect_ntfs CLI). 11 system entries indexed, 0 user-visible. Verified on c5fe branch.",
+      "image": "nfs-mac-format-mac-enumerate-empty.img",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-enumerate"
+        }
+      ]
     },
     "mac-format-mac-mkdir-mac-touch-mac-enumerate": {
       "status": "pending",
@@ -153,7 +165,29 @@
         "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> mac:mkdir(/docs) -> mac:touch(/docs/notes.txt) -> mac:enumerate(/docs + /docs/notes.txt)",
-      "note": "Pure-mac chain with nested directory creation. Catches bugs in parent-pointer setup that the flat-only scenarios miss."
+      "note": "Pure-mac chain with nested directory creation. Catches bugs in parent-pointer setup that the flat-only scenarios miss.",
+      "image": "nfs-mac-format-mac-mkdir-mac-touch-mac-enumerate.img",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-mkdir",
+          "parent": "/",
+          "basename": "docs"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/docs",
+          "basename": "notes.txt"
+        },
+        {
+          "op": "mac-enumerate"
+        }
+      ]
     },
     "mac-format-mac-touch-mac-write-mac-enumerate": {
       "status": "pending",
@@ -163,7 +197,29 @@
         "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> mac:touch(/tiny.txt) -> mac:write(/tiny.txt='hello world') -> mac:enumerate(tiny.txt)",
-      "note": "Pure-mac chain. Exercises rust-ntfs format/touch/write/ls end-to-end without leaving the Mac. Runs on every host."
+      "note": "Pure-mac chain. Exercises rust-ntfs format/touch/write/ls end-to-end without leaving the Mac. Runs on every host.",
+      "image": "nfs-mac-format-mac-touch-mac-write-mac-enumerate.img",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "tiny.txt"
+        },
+        {
+          "op": "mac-write",
+          "path": "/tiny.txt",
+          "content": "hello world"
+        },
+        {
+          "op": "mac-enumerate"
+        }
+      ]
     },
     "mac-format-mac-write-mac-rm-mac-enumerate-empty": {
       "status": "pending",
@@ -173,7 +229,33 @@
         "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> mac:touch(/scratch.txt) -> mac:write(/scratch.txt='temp') -> mac:rm(/scratch.txt) -> mac:enumerate(empty)",
-      "note": "Pure-mac chain exercising the unlink path. After delete, only system files should remain."
+      "note": "Pure-mac chain exercising the unlink path. After delete, only system files should remain.",
+      "image": "nfs-mac-format-mac-write-mac-rm-mac-enumerate-empty.img",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "scratch.txt"
+        },
+        {
+          "op": "mac-write",
+          "path": "/scratch.txt",
+          "content": "temp"
+        },
+        {
+          "op": "mac-rm",
+          "path": "/scratch.txt"
+        },
+        {
+          "op": "mac-enumerate"
+        }
+      ]
     },
     "mac-format-mac-write-win-repeat-mount-3-win-chkdsk": {
       "status": "pending",
