@@ -114,12 +114,24 @@ try {
             [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
         try {
             $dst.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+            # Raw `\\.\PhysicalDriveN` writes require offset + length to be
+            # multiples of the physical sector size — a partial read at EOF
+            # (or any short read mid-stream) would otherwise hit
+            # `IOException: The parameter is incorrect`. Pad the trailing
+            # bytes with zeros up to the next sector boundary; only the
+            # `[n, aligned)` window needs clearing since `Read` rewrote
+            # `[0, n)` on this iteration.
+            $sectorSize = 512
             $bufSize = 16MB
             $buf = New-Object byte[] $bufSize
             while ($true) {
                 $n = $src.Read($buf, 0, $bufSize)
                 if ($n -le 0) { break }
-                $dst.Write($buf, 0, $n)
+                $aligned = [int][Math]::Ceiling($n / $sectorSize) * $sectorSize
+                if ($aligned -gt $n) {
+                    [Array]::Clear($buf, $n, $aligned - $n)
+                }
+                $dst.Write($buf, 0, $aligned)
             }
             $dst.Flush($true)
         } finally { $dst.Close() }
