@@ -144,20 +144,37 @@ command = "{binary} set-dirty {scenario.image}"
 expect_exit = 0
 
 # ============================================================
-# Win-side (vm) ops — Phase 4c (TODO)
+# Win-side (vm) ops — Phase 4c
 # ============================================================
 #
-# Will land in the next phase, alongside the cross-host scenario
-# translations. Outline of what's needed:
+# These dispatch via SSH to the Windows VM. Each step invokes a
+# focused PowerShell helper under `scripts/v2/` rather than the
+# legacy 734-LOC `scripts/run-scenario.ps1` driver — the harness's
+# v2 dispatcher gives us per-step granularity, so each op gets its
+# own small script.
 #
-# [ops.ship-img-to-vm]   - already covered by built-in `ship-to-vm`
-# [ops.win-mount]        - VHDX wrap + Mount-VHD + drive-letter pick
-# [ops.win-unmount]
-# [ops.win-chkdsk]       - chkdsk Z: with mode flags from {step.modes?}
-# [ops.win-enumerate]    - dir Z:\ with expectations
-# [ops.win-repeat-mount] - repeat dismount+remount {step.count} times
-# [ops.win-write]        - write fixture files to the mounted volume
+# The VHDX-wrap path inside `win-chkdsk.ps1` still uses qemu-img;
+# Phase 1e replaces that with `am-img-vhd::create_fixed`.
+
+[ops.win-chkdsk]
+# Wrap the .img into a VHDX, mount it on Windows, run chkdsk with
+# the requested modes (default `readonly`), capture diag, dismount.
 #
-# The `qemu-img` VHDX wrap currently used by run-scenario.ps1 is the
-# Phase 1e replacement target (swap to am-img-vhd::create_fixed once
-# its CLI is wired into the consumer surface).
+# Step fields:
+#   image_path  — vm-side absolute path to the .img (typically
+#                 `<vm.workdir>/<scenario.image>` after ship-to-vm)
+#   modes?      — comma-separated chkdsk-pass list, e.g.
+#                 "readonly,/scan". Empty => script default
+#   diag        — vm-side directory for chkdsk-*.txt + eventlog
+#
+# The script path is hardcoded against `vm.workdir` because the
+# harness's substitution surface doesn't (yet) carry `{vm.*}` tokens
+# from `[vm]`. When that lands, swap the literal for `{vm.workdir}`.
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-chkdsk.ps1' -ImagePath '{step.image_path}' -Modes '{step.modes?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+# Other win-side ops (win-enumerate, win-repeat-mount, win-write,
+# win-mount/win-unmount as separate ops, win-format) follow the same
+# shape and land alongside their first scenario consumer in
+# subsequent Phase 4c PRs.

@@ -311,7 +311,27 @@
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072454",
       "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
-      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
+      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step.",
+      "image": "nfs-mac-format-tiny-32mib.img",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-tiny-32mib.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-tiny-32mib.img",
+          "modes": "readonly,/scan",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-tiny-32mib"
+        }
+      ]
     },
     "mac-format-volume-16gib-cluster-4k": {
       "status": "pending",
