@@ -164,7 +164,7 @@ to look:
 | operation_sequence string (v1) | `recipe[]` array (v2) | The v1 arrow-string `mac:format -> win:chkdsk(readonly,/scan)` becomes a v2 recipe of typed steps with `host: "host" / "vm"` per step. |
 
 Cross-driver vocabulary index lives in
-[`harness/docs/vocabulary.md`](harness/docs/vocabulary.md);
+[`vendor/harness/docs/vocabulary.md`](vendor/harness/docs/vocabulary.md);
 contributor-facing translation rules + bloat-prevention conventions
 are documented there.
 
@@ -379,12 +379,12 @@ repo root. Drivers:
   actually take a write to our format?".
 - `scripts/run-cycle.sh` — multi-agent claim / run / mark loop driver,
   used when several agents share the matrix. Delegates the claim and
-  status-update steps to the shared harness (`harness/scripts/`).
-- `harness/scripts/claim-scenario.sh`,
-  `harness/scripts/update-scenario-status.sh`,
-  `harness/scripts/reset-non-passed.sh` — generic, FS-agnostic state
+  status-update steps to the shared harness (`vendor/harness/scripts/`).
+- `vendor/harness/scripts/claim-scenario.sh`,
+  `vendor/harness/scripts/update-scenario-status.sh`,
+  `vendor/harness/scripts/reset-non-passed.sh` — generic, FS-agnostic state
   machine over `test-matrix.json`. Vendored from
-  `fs-test-harness`; consumed via the `harness/` submodule.
+  `fs-test-harness`; consumed via the `vendor/harness/` submodule.
 
 Agent coordination rules: see
 [`docs/multi-agent-test-protocol.md`](docs/multi-agent-test-protocol.md).
