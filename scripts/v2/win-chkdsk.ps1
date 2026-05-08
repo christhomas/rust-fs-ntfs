@@ -116,19 +116,24 @@ try {
         $src = [System.IO.File]::Open($ImagePath, [System.IO.FileMode]::Open,
             [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
         try {
-            $dst = [System.IO.File]::Open($rawPath, [System.IO.FileMode]::Open,
-                [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+            # Catch wraps the entire `$dst` lifetime — the raw-disk
+            # `[IO.File]::Open`, the `Seek`, the read/write loop, and
+            # `Flush` — so any failure in this window sets `$writeFailed`
+            # before the outer finally hits Set-Disk. `$dst.Close()` in
+            # the inner finally only runs if `$dst` was assigned.
             try {
-                $dst.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
-                # Raw writes require offset + length to be multiples of the
-                # physical sector size; pad the trailing chunk's `[n, aligned)`
-                # window with zeros (Read rewrote `[0, n)` so only the pad
-                # region could be stale). `$disk.PhysicalSectorSize` returns
-                # 512 on legacy 512n media and 4096 on 4Kn drives.
-                $sectorSize = $disk.PhysicalSectorSize
-                $bufSize = 16MB
-                $buf = New-Object byte[] $bufSize
+                $dst = [System.IO.File]::Open($rawPath, [System.IO.FileMode]::Open,
+                    [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
                 try {
+                    $dst.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+                    # Raw writes require offset + length to be multiples of the
+                    # physical sector size; pad the trailing chunk's `[n, aligned)`
+                    # window with zeros (Read rewrote `[0, n)` so only the pad
+                    # region could be stale). `$disk.PhysicalSectorSize` returns
+                    # 512 on legacy 512n media and 4096 on 4Kn drives.
+                    $sectorSize = $disk.PhysicalSectorSize
+                    $bufSize = 16MB
+                    $buf = New-Object byte[] $bufSize
                     while ($true) {
                         $n = $src.Read($buf, 0, $bufSize)
                         if ($n -le 0) { break }
@@ -139,11 +144,11 @@ try {
                         $dst.Write($buf, 0, $aligned)
                     }
                     $dst.Flush($true)
-                } catch {
-                    $writeFailed = $true
-                    throw
-                }
-            } finally { $dst.Close() }
+                } finally { $dst.Close() }
+            } catch {
+                $writeFailed = $true
+                throw
+            }
         } finally { $src.Close() }
     } finally {
         # Bring the disk back online so ntfs.sys can mount the populated
