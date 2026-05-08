@@ -1,3 +1,3 @@
-[submodule "harness"]
-	path = harness
+[submodule "vendor/harness"]
+	path = vendor/harness
 	url = git@github.com:antimatter-studios/fs-test-harness.git
