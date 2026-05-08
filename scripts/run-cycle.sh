@@ -19,6 +19,13 @@ WORK_LIST_PARENT="${PARENT_REPO}/test-matrix.json"
 DIAG_BASE="${TMPDIR:-/tmp}/rust-fs-ntfs-diag/${SESSION}"
 mkdir -p "${DIAG_BASE}"
 
+# Fail fast if the harness submodule isn't initialised, rather than
+# silently looping forever with claim-scenario.sh missing.
+CLAIM_SCRIPT="${PARENT_REPO}/harness/scripts/claim-scenario.sh"
+UPDATE_SCRIPT="${PARENT_REPO}/harness/scripts/update-scenario-status.sh"
+[[ -x "${CLAIM_SCRIPT}" ]] || { echo "missing executable: ${CLAIM_SCRIPT} (run: git submodule update --init --recursive)" >&2; exit 1; }
+[[ -x "${UPDATE_SCRIPT}" ]] || { echo "missing executable: ${UPDATE_SCRIPT} (run: git submodule update --init --recursive)" >&2; exit 1; }
+
 SUFFIX="${SESSION}"
 if [[ -n "${CYCLE_TAG}" ]]; then
     SUFFIX="${CYCLE_TAG}-${SESSION}"
@@ -26,7 +33,10 @@ fi
 
 while true; do
     # Atomic claim against the parent submodule's shared work list.
-    NEXT="$(cd "${PARENT_REPO}" && bash harness/scripts/claim-scenario.sh "${SESSION}" 2>/dev/null || true)"
+    # `|| true` — claim-scenario.sh exits 1 when no pending scenarios
+    # remain (normal end-of-loop signal), and we want stderr to come
+    # through for genuine errors so they're visible.
+    NEXT="$(cd "${PARENT_REPO}" && bash harness/scripts/claim-scenario.sh "${SESSION}" || true)"
     if [[ -z "${NEXT}" ]]; then
         echo "no more pending scenarios (or claim race exhausted)"
         break
