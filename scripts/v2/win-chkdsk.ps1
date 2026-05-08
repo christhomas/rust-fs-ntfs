@@ -196,6 +196,10 @@ try {
     if ($passed) { exit 0 } else { exit 1 }
 
 } finally {
+    # Tear down the VHDX wrapper. Leftover wrappers from a crashed run
+    # would block a subsequent Mount-DiskImage with a drive-letter
+    # collision, plus they consume real bytes on the C: drive — not
+    # negligible for the 1GiB+ scenarios.
     foreach ($v in @($Vhdx)) {
         try {
             Get-DiskImage -ImagePath $v -EA SilentlyContinue |
@@ -204,4 +208,13 @@ try {
         } catch { }
     }
     Remove-Item -LiteralPath $Vhdx -Force -EA SilentlyContinue
+
+    # Drop the shipped .img too. The harness's `ship-to-vm` op puts it
+    # here at scenario start; without explicit cleanup we accumulate
+    # one image-sized file per scenario, which fills the C: drive
+    # within a single matrix run (a 16 GiB volume scenario alone is
+    # most of a 64 GiB VM disk). The Mac side keeps its own copy if
+    # post-mortem inspection is needed; the .vhdx wrapper cleanup
+    # already takes the actual disk-image artefacts with it.
+    Remove-Item -LiteralPath $ImagePath -Force -EA SilentlyContinue
 }
