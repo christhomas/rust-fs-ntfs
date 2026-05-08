@@ -120,8 +120,11 @@ try {
             # `IOException: The parameter is incorrect`. Pad the trailing
             # bytes with zeros up to the next sector boundary; only the
             # `[n, aligned)` window needs clearing since `Read` rewrote
-            # `[0, n)` on this iteration.
-            $sectorSize = 512
+            # `[0, n)` on this iteration. `Get-Disk.PhysicalSectorSize`
+            # returns 512 on legacy 512n media and 4096 on 4Kn drives;
+            # hard-coding 512 would re-trip the same `IOException` on the
+            # latter.
+            $sectorSize = $disk.PhysicalSectorSize
             $bufSize = 16MB
             $buf = New-Object byte[] $bufSize
             while ($true) {
