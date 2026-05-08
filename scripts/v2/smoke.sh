@@ -43,6 +43,11 @@ for arg in "$@"; do
             sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
             exit 0
             ;;
+        *)
+            echo "[smoke] unknown argument: ${arg}" >&2
+            echo "[smoke] use --help for usage" >&2
+            exit 2
+            ;;
     esac
 done
 
@@ -56,6 +61,10 @@ fi
 if [[ "${DO_SHIP}" == "1" ]]; then
     if [[ -z "${VM_HOST:-}" ]]; then
         echo "[smoke] VM_HOST unset; can't ship. Run scripts/setup-local.sh or set in .test-env." >&2
+        exit 2
+    fi
+    if [[ -z "${VM_WORKDIR:-}" ]]; then
+        echo "[smoke] VM_WORKDIR unset; can't ship. Run scripts/setup-local.sh or set in .test-env." >&2
         exit 2
     fi
     echo "[smoke] tar source -> ${VM_HOST}:${VM_WORKDIR}"
