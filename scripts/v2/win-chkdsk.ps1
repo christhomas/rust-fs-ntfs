@@ -98,47 +98,52 @@ try {
     # >2 GiB scenarios to avoid it. Setting the disk offline tells the
     # Volume Manager to release any volume-level holds; raw block-layer
     # writes via `\\.\PhysicalDriveN` still work while offline. The disk
-    # is brought back online below before the dismount/remount cycle so
-    # ntfs.sys can pick up the populated partition for chkdsk.
+    # is brought back online in this block's `finally` so it's restored
+    # even if the streaming throws — otherwise an exception here would
+    # leave the disk offline and the outer cleanup's `Dismount-DiskImage`
+    # behaviour against an offline VHD isn't guaranteed across Windows
+    # versions.
     Set-Disk -Number $disk.Number -IsOffline $true
-
-    # Stream the .img bytes into the partition's offset on the raw
-    # disk. v1's `[IO.File]::ReadAllBytes` capped at ~2 GiB (.NET
-    # `byte[]` length is Int32); chunked Read + Write avoids the cap.
-    $rawPath = "\\.\PhysicalDrive$($disk.Number)"
-    # FileShare.Read on the source matches `[IO.File]::ReadAllBytes`'s
-    # internal share — denies write-sharing during the copy so a
-    # concurrent scp retry can't produce a torn image.
-    $src = [System.IO.File]::Open($ImagePath, [System.IO.FileMode]::Open,
-        [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     try {
-        $dst = [System.IO.File]::Open($rawPath, [System.IO.FileMode]::Open,
-            [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+        # Stream the .img bytes into the partition's offset on the raw
+        # disk. v1's `[IO.File]::ReadAllBytes` capped at ~2 GiB (.NET
+        # `byte[]` length is Int32); chunked Read + Write avoids the cap.
+        $rawPath = "\\.\PhysicalDrive$($disk.Number)"
+        # FileShare.Read on the source matches `[IO.File]::ReadAllBytes`'s
+        # internal share — denies write-sharing during the copy so a
+        # concurrent scp retry can't produce a torn image.
+        $src = [System.IO.File]::Open($ImagePath, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
         try {
-            $dst.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
-            # Raw writes require offset + length to be multiples of the
-            # physical sector size; pad the trailing chunk's `[n, aligned)`
-            # window with zeros (Read rewrote `[0, n)` so only the pad
-            # region could be stale).
-            $sectorSize = $disk.PhysicalSectorSize
-            $bufSize = 16MB
-            $buf = New-Object byte[] $bufSize
-            while ($true) {
-                $n = $src.Read($buf, 0, $bufSize)
-                if ($n -le 0) { break }
-                $aligned = [int][Math]::Ceiling($n / $sectorSize) * $sectorSize
-                if ($aligned -gt $n) {
-                    [Array]::Clear($buf, $n, $aligned - $n)
+            $dst = [System.IO.File]::Open($rawPath, [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+            try {
+                $dst.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+                # Raw writes require offset + length to be multiples of the
+                # physical sector size; pad the trailing chunk's `[n, aligned)`
+                # window with zeros (Read rewrote `[0, n)` so only the pad
+                # region could be stale).
+                $sectorSize = $disk.PhysicalSectorSize
+                $bufSize = 16MB
+                $buf = New-Object byte[] $bufSize
+                while ($true) {
+                    $n = $src.Read($buf, 0, $bufSize)
+                    if ($n -le 0) { break }
+                    $aligned = [int][Math]::Ceiling($n / $sectorSize) * $sectorSize
+                    if ($aligned -gt $n) {
+                        [Array]::Clear($buf, $n, $aligned - $n)
+                    }
+                    $dst.Write($buf, 0, $aligned)
                 }
-                $dst.Write($buf, 0, $aligned)
-            }
-            $dst.Flush($true)
-        } finally { $dst.Close() }
-    } finally { $src.Close() }
-
-    # Bring the disk back online so ntfs.sys can mount the populated
-    # partition for chkdsk.
-    Set-Disk -Number $disk.Number -IsOffline $false
+                $dst.Flush($true)
+            } finally { $dst.Close() }
+        } finally { $src.Close() }
+    } finally {
+        # Bring the disk back online so ntfs.sys can mount the populated
+        # partition for chkdsk. `-EA SilentlyContinue` so a transient
+        # online failure doesn't mask the original exception (if any).
+        Set-Disk -Number $disk.Number -IsOffline $false -EA SilentlyContinue
+    }
 
     # Dismount + remount so ntfs.sys re-recognises the populated
     # partition and assigns a drive letter.
