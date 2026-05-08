@@ -90,55 +90,79 @@ try {
         throw "partition smaller than raw image ($($part.Size) < $rawSize)"
     }
 
-    # Stream the .img bytes into the partition's offset on the raw
-    # disk. v1's run-scenario.ps1 used `[IO.File]::ReadAllBytes`
-    # here, which slurps the whole image into a single byte[] — fine
-    # for 32 MiB - 1 GiB volumes but .NET arrays cap at ~2 GiB so the
-    # 4 GiB / 16 GiB scenarios always OOMed.
-    #
-    # First attempt at streaming used `Stream.CopyTo($dst, 16MB)`,
-    # which errored on raw-disk writes with "Access to the path is
-    # denied." `Stream.CopyTo` has an internal optimisation path that
-    # doesn't play well with the special `\\.\PhysicalDriveN` handle.
-    # Explicit Read + Write loop sidesteps it: same chunk shape as
-    # before, just .NET FileStream.Write calls all the way down,
-    # which is what the original (working) Write(bytes,0,len) used.
-    $rawPath = "\\.\PhysicalDrive$($disk.Number)"
-    # FileShare.Read on the source matches `[IO.File]::ReadAllBytes`'s
-    # internal share — denies write-sharing during the copy so a
-    # concurrent scp retry can't produce a torn image.
-    $src = [System.IO.File]::Open($ImagePath, [System.IO.FileMode]::Open,
-        [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    # Take the disk offline before opening the raw `\\.\PhysicalDriveN`
+    # handle. Without this, chunked writes to the raw handle return
+    # `Access to the path is denied.` once the volume layer auto-detects
+    # the new partition and locks it — v1's run-scenario.ps1 documents
+    # the same failure mode (lines 115-122) and explicitly skips
+    # >2 GiB scenarios to avoid it. Setting the disk offline tells the
+    # Volume Manager to release any volume-level holds; raw block-layer
+    # writes via `\\.\PhysicalDriveN` still work while offline. The disk
+    # is brought back online in this block's `finally` so it's restored
+    # even if the streaming throws — otherwise an exception here would
+    # leave the disk offline and the outer cleanup's `Dismount-DiskImage`
+    # behaviour against an offline VHD isn't guaranteed across Windows
+    # versions.
+    Set-Disk -Number $disk.Number -IsOffline $true
+    $writeFailed = $false
     try {
-        $dst = [System.IO.File]::Open($rawPath, [System.IO.FileMode]::Open,
-            [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+        # Stream the .img bytes into the partition's offset on the raw
+        # disk. v1's `[IO.File]::ReadAllBytes` capped at ~2 GiB (.NET
+        # `byte[]` length is Int32); chunked Read + Write avoids the cap.
+        $rawPath = "\\.\PhysicalDrive$($disk.Number)"
+        # FileShare.Read on the source matches `[IO.File]::ReadAllBytes`'s
+        # internal share — denies write-sharing during the copy so a
+        # concurrent scp retry can't produce a torn image.
+        $src = [System.IO.File]::Open($ImagePath, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
         try {
-            $dst.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
-            # Raw `\\.\PhysicalDriveN` writes require offset + length to be
-            # multiples of the physical sector size — a partial read at EOF
-            # (or any short read mid-stream) would otherwise hit
-            # `IOException: The parameter is incorrect`. Pad the trailing
-            # bytes with zeros up to the next sector boundary; only the
-            # `[n, aligned)` window needs clearing since `Read` rewrote
-            # `[0, n)` on this iteration. `Get-Disk.PhysicalSectorSize`
-            # returns 512 on legacy 512n media and 4096 on 4Kn drives;
-            # hard-coding 512 would re-trip the same `IOException` on the
-            # latter.
-            $sectorSize = $disk.PhysicalSectorSize
-            $bufSize = 16MB
-            $buf = New-Object byte[] $bufSize
-            while ($true) {
-                $n = $src.Read($buf, 0, $bufSize)
-                if ($n -le 0) { break }
-                $aligned = [int][Math]::Ceiling($n / $sectorSize) * $sectorSize
-                if ($aligned -gt $n) {
-                    [Array]::Clear($buf, $n, $aligned - $n)
-                }
-                $dst.Write($buf, 0, $aligned)
+            # Catch wraps the entire `$dst` lifetime — the raw-disk
+            # `[IO.File]::Open`, the `Seek`, the read/write loop, and
+            # `Flush` — so any failure in this window sets `$writeFailed`
+            # before the outer finally hits Set-Disk. `$dst.Close()` in
+            # the inner finally only runs if `$dst` was assigned.
+            try {
+                $dst = [System.IO.File]::Open($rawPath, [System.IO.FileMode]::Open,
+                    [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+                try {
+                    $dst.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+                    # Raw writes require offset + length to be multiples of the
+                    # physical sector size; pad the trailing chunk's `[n, aligned)`
+                    # window with zeros (Read rewrote `[0, n)` so only the pad
+                    # region could be stale). `$disk.PhysicalSectorSize` returns
+                    # 512 on legacy 512n media and 4096 on 4Kn drives.
+                    $sectorSize = $disk.PhysicalSectorSize
+                    $bufSize = 16MB
+                    $buf = New-Object byte[] $bufSize
+                    while ($true) {
+                        $n = $src.Read($buf, 0, $bufSize)
+                        if ($n -le 0) { break }
+                        $aligned = [int][Math]::Ceiling($n / $sectorSize) * $sectorSize
+                        if ($aligned -gt $n) {
+                            [Array]::Clear($buf, $n, $aligned - $n)
+                        }
+                        $dst.Write($buf, 0, $aligned)
+                    }
+                    $dst.Flush($true)
+                } finally { $dst.Close() }
+            } catch {
+                $writeFailed = $true
+                throw
             }
-            $dst.Flush($true)
-        } finally { $dst.Close() }
-    } finally { $src.Close() }
+        } finally { $src.Close() }
+    } finally {
+        # Bring the disk back online so ntfs.sys can mount the populated
+        # partition for chkdsk. If the streaming write itself failed,
+        # silence any restore error so the original write exception is
+        # what propagates. Otherwise let the restore fail loudly — a
+        # silent restore failure here would surface later as a
+        # cryptic `Dismount-DiskImage` / drive-letter error.
+        if ($writeFailed) {
+            Set-Disk -Number $disk.Number -IsOffline $false -EA SilentlyContinue
+        } else {
+            Set-Disk -Number $disk.Number -IsOffline $false -EA Stop
+        }
+    }
 
     # Dismount + remount so ntfs.sys re-recognises the populated
     # partition and assigns a drive letter.
