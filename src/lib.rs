@@ -41,6 +41,7 @@ pub mod block_io;
 pub mod data_runs;
 pub mod ea_io;
 pub mod facade;
+pub mod fs_core_bridge;
 pub mod fsck;
 pub mod idx_block;
 pub mod index_io;
@@ -223,12 +224,62 @@ impl Seek for CallbackReader {
 }
 
 // ---------------------------------------------------------------------------
+// fs-core-backed reader — drives reads through an Arc<dyn fs_core::BlockDevice>
+// ---------------------------------------------------------------------------
+
+/// Bridges any `fs_core::BlockDevice` into the `Read + Seek` shape ntfs
+/// needs. Used by `fs_ntfs_mount_with_fs_core_device` so callers can
+/// mount NTFS off a generic device handle (a qcow2 reader, a partition
+/// slice, etc.) without writing per-source glue.
+struct FsCoreReader {
+    inner: std::sync::Arc<dyn fs_core::BlockDevice>,
+    size: u64,
+    position: u64,
+}
+
+impl Read for FsCoreReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.position >= self.size {
+            return Ok(0);
+        }
+        let to_read = std::cmp::min(buf.len() as u64, self.size - self.position) as usize;
+        let slice = &mut buf[..to_read];
+        match fs_core::BlockRead::read_at(&self.inner, self.position, slice) {
+            Ok(()) => {
+                self.position += to_read as u64;
+                Ok(to_read)
+            }
+            Err(e) => Err(std::io::Error::other(format!("fs_core read: {e}"))),
+        }
+    }
+}
+
+impl Seek for FsCoreReader {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let new_pos = match pos {
+            SeekFrom::Start(p) => p as i64,
+            SeekFrom::End(p) => self.size as i64 + p,
+            SeekFrom::Current(p) => self.position as i64 + p,
+        };
+        if new_pos < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek before start",
+            ));
+        }
+        self.position = new_pos as u64;
+        Ok(self.position)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Bridge filesystem handle
 // ---------------------------------------------------------------------------
 
 enum ReaderKind {
     File(BufReader<File>),
     Callback(BufReader<CallbackReader>),
+    FsCore(BufReader<FsCoreReader>),
 }
 
 impl Read for ReaderKind {
@@ -236,6 +287,7 @@ impl Read for ReaderKind {
         match self {
             ReaderKind::File(r) => r.read(buf),
             ReaderKind::Callback(r) => r.read(buf),
+            ReaderKind::FsCore(r) => r.read(buf),
         }
     }
 }
@@ -245,6 +297,7 @@ impl Seek for ReaderKind {
         match self {
             ReaderKind::File(r) => r.seek(pos),
             ReaderKind::Callback(r) => r.seek(pos),
+            ReaderKind::FsCore(r) => r.seek(pos),
         }
     }
 }
@@ -639,6 +692,66 @@ pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) ->
             size: cfg.size_bytes,
         }),
     });
+    Box::into_raw(bridge)
+}
+
+/// Mount via an `FsCoreDevice` handle from a sister crate
+/// (`qcow2_open` from am-img-qcow2, `partitions_open_slice` from
+/// am-partitions, `fs_core_file_open` from am-fs-core).
+///
+/// Returns NULL on failure; consult `fs_ntfs_last_error()` for detail.
+///
+/// The handle's reference count is incremented internally; the caller
+/// still owns their `*FsCoreDevice` and frees it via
+/// `fs_core_device_close`. Closing the resulting `*FsNtfsHandle` via
+/// `fs_ntfs_umount` drops the mount's own reference.
+///
+/// This entry point currently provides **read-only** access — the
+/// handle's `source` is `None`, which causes any mutator API call
+/// (`fs_ntfs_unlink`, `fs_ntfs_mkdir`, etc.) to return EINVAL with
+/// `"handle has no recorded mount source"`. Read paths
+/// (`fs_ntfs_dir_open`, `fs_ntfs_read_file`, …) are unaffected. RW
+/// support over `FsCoreDevice` is a future enhancement.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_mount_with_fs_core_device(
+    handle: *mut fs_core::ffi::FsCoreDevice,
+) -> *mut FsNtfsHandle {
+    if handle.is_null() {
+        set_error("null fs_core handle");
+        return std::ptr::null_mut();
+    }
+
+    let inner = unsafe { (*handle).inner().clone() };
+    let size = fs_core::BlockRead::size_bytes(&inner);
+
+    let fs_core_reader = FsCoreReader {
+        inner,
+        size,
+        position: 0,
+    };
+    let mut reader = ReaderKind::FsCore(BufReader::new(fs_core_reader));
+
+    let mut ntfs = match Ntfs::new(&mut reader) {
+        Ok(n) => n,
+        Err(e) => {
+            set_error(&format!("ntfs init: {e}"));
+            return std::ptr::null_mut();
+        }
+    };
+
+    if let Err(e) = ntfs.read_upcase_table(&mut reader) {
+        set_error(&format!("upcase table: {e}"));
+        return std::ptr::null_mut();
+    }
+
+    let bridge = Box::new(FsNtfsHandle {
+        ntfs,
+        reader,
+        // No MountSource — mutator API returns EINVAL for fs-core mounts
+        // until an FsCore-aware MountSource variant is plumbed in.
+        source: None,
+    });
+    log::info!(target: "fs_ntfs", "mount via fs_core handle (size={size})");
     Box::into_raw(bridge)
 }
 

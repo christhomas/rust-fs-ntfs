@@ -154,6 +154,27 @@ fs_ntfs_fs_t *fs_ntfs_mount_with_callbacks(
     const fs_ntfs_blockdev_cfg_t *cfg);
 
 /*
+ * Mount via an FsCoreDevice handle from a sister crate
+ * (`qcow2_open` from am-img-qcow2, `partitions_open_slice` from
+ * am-partitions, `fs_core_file_open` from am-fs-core).
+ *
+ * Read-only at present — mutator API calls (`fs_ntfs_unlink`,
+ * `fs_ntfs_mkdir`, etc.) return EINVAL with "handle has no recorded
+ * mount source". RW support over FsCoreDevice handles is planned.
+ *
+ * The handle's reference count is incremented internally; the caller
+ * still owns their *FsCoreDevice and frees it via
+ * `fs_core_device_close`. Closing the resulting handle via
+ * `fs_ntfs_umount` drops the mount's own reference.
+ *
+ * Forward declared FsCoreDevice — full definition in `fs_core.h`.
+ *
+ * Returns NULL on failure; use fs_ntfs_last_error() for detail.
+ */
+struct FsCoreDevice;
+fs_ntfs_fs_t *fs_ntfs_mount_with_fs_core_device(struct FsCoreDevice *handle);
+
+/*
  * Unmount and free all resources.
  */
 void fs_ntfs_umount(fs_ntfs_fs_t *fs);
