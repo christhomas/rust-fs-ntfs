@@ -83,7 +83,10 @@ print(json.dumps({
 
     if [[ -n "${BLOCKED_REASON}" ]]; then
         echo "  -> blocked-${BLOCKED_REASON}"
-        (cd "${PARENT_REPO}" && bash harness/scripts/update-scenario-status.sh "${NEXT}" "blocked-${BLOCKED_REASON}-${SUFFIX}")
+        # Best-effort: status updates are advisory; don't crash the
+        # cycle on a transient race. Same policy as the completed-
+        # status update at the bottom of the loop.
+        (cd "${PARENT_REPO}" && bash harness/scripts/update-scenario-status.sh "${NEXT}" "blocked-${BLOCKED_REASON}-${SUFFIX}") || true
         continue
     fi
 
