@@ -17,6 +17,20 @@ binary      = "target/release/rust-ntfs"
 matrix_path = "test-matrix.json"
 
 [vm]
+# CONTRIBUTORS: the values below are the maintainer's local VM
+# settings, committed for convenience (matches the same pattern in
+# antimatter-studios/ext4-win-driver's harness.toml). Override
+# before running the matrix:
+#
+#   1. Edit `host` / `ssh_key` / `workdir` to point at your own
+#      Windows-ARM64 VM, OR
+#   2. Run `bash harness/scripts/setup-local.sh` to get prompted for
+#      your settings — the script writes a gitignored `.test-env`
+#      that overrides this section at runtime without touching
+#      tracked config.
+#
+# Per-developer overrides via `.test-env` are the recommended path;
+# editing the tracked file is fine for forks.
 host           = "chris@192.168.213.145"
 ssh_key        = "privatekey"
 workdir        = "C:/Users/chris/dev/rust-fs-ntfs-matrix"
@@ -89,8 +103,15 @@ expect_exit = 0
 
 [ops.mac-write]
 # rust-ntfs write takes the full path and content via --content.
+# `{step.content}` is single-quoted so payloads with spaces (e.g.
+# the `mac-touch-write-enumerate` scenario's "hello world") survive
+# the shell parse intact rather than splitting into stray positional
+# arguments. Single-quotes don't escape literal single quotes in the
+# content; matrix payloads today are simple ASCII so this is safe.
+# When write content grows to include `'`, swap to a file-based
+# transport (write content to a temp file, pass the path).
 host = "host"
-command = "{binary} write {scenario.image} {step.path} --content {step.content}"
+command = "{binary} write {scenario.image} {step.path} --content '{step.content}'"
 expect_exit = 0
 
 [ops.mac-rm]
