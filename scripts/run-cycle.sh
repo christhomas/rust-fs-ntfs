@@ -26,7 +26,7 @@ fi
 
 while true; do
     # Atomic claim against the parent submodule's shared work list.
-    NEXT="$(cd "${PARENT_REPO}" && bash scripts/claim-scenario.sh "${SESSION}" 2>/dev/null || true)"
+    NEXT="$(cd "${PARENT_REPO}" && bash harness/scripts/claim-scenario.sh "${SESSION}" 2>/dev/null || true)"
     if [[ -z "${NEXT}" ]]; then
         echo "no more pending scenarios (or claim race exhausted)"
         break
@@ -73,7 +73,7 @@ print(json.dumps({
 
     if [[ -n "${BLOCKED_REASON}" ]]; then
         echo "  -> blocked-${BLOCKED_REASON}"
-        (cd "${PARENT_REPO}" && bash scripts/update-scenario-status.sh "${NEXT}" "blocked-${BLOCKED_REASON}-${SUFFIX}")
+        (cd "${PARENT_REPO}" && bash harness/scripts/update-scenario-status.sh "${NEXT}" "blocked-${BLOCKED_REASON}-${SUFFIX}")
         continue
     fi
 
@@ -119,7 +119,7 @@ print(json.dumps({
     fi
 
     echo "  -> ${STATUS} (readonly=${READONLY_EXIT} scan=${SCAN_EXIT} rc=${RC})"
-    (cd "${PARENT_REPO}" && bash scripts/update-scenario-status.sh "${NEXT}" "${STATUS}" "${DIAG_PATH}") || true
+    (cd "${PARENT_REPO}" && bash harness/scripts/update-scenario-status.sh "${NEXT}" "${STATUS}" "${DIAG_PATH}") || true
 done
 
 echo "cycle done"
