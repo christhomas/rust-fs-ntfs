@@ -149,6 +149,25 @@ Specific limits, current as of HEAD:
 - **Disk-level operations.** No partitioning. mkfs operates on a
   pre-existing partition or raw image.
 
+## Scenario field translations (NTFS ↔ harness)
+
+The test matrix uses harness-level generic field names rather than
+NTFS-native terminology, so the same scenario shape composes with
+sibling fs-* drivers. If you came here looking for an NTFS-native
+name and can't find it in `test-matrix.json`, this table is where
+to look:
+
+| NTFS-native name | Harness name      | Notes |
+|------------------|-------------------|-------|
+| `cluster_size`   | `alloc_unit_size` | Same concept, generic name. Valid: 512, 1024, 2048, 4096, ..., 65536. The legacy `cluster_size` key is still accepted as a serde alias during the v1->v2 transition. |
+| chkdsk verdict   | `verdict_shape`   | Mapped to `clean` / `repair-ok` / `repair-required`. |
+| operation_sequence string (v1) | `recipe[]` array (v2) | The v1 arrow-string `mac:format -> win:chkdsk(readonly,/scan)` becomes a v2 recipe of typed steps with `host: "host" / "vm"` per step. |
+
+Cross-driver vocabulary index lives in
+[`harness/docs/vocabulary.md`](harness/docs/vocabulary.md);
+contributor-facing translation rules + bloat-prevention conventions
+are documented there.
+
 ## Test contract
 
 - **Unit tests:** 2 (in-tree, `cargo test --lib`).

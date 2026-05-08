@@ -6,13 +6,13 @@
       "status": "failed-iter14-v3-rec11-empty-confirms-not-extend-cause-frs-cxx-60f-iter15-needs-secure-view-indexes-agent-5442",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "CITEST"
+        "label": "CITEST",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan) -> win:enumerate(empty)",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
-      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 — bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step.",
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
+      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step.",
       "_prior_status": "passed-to-frs60f-ceiling-agent-c6a1-2026-05-02",
       "_attempts": [
         {
@@ -33,112 +33,112 @@
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 1024,
-        "label": "C1K"
+        "label": "C1K",
+        "alloc_unit_size": 1024
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-cluster-512": {
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 512,
-        "label": "C512"
+        "label": "C512",
+        "alloc_unit_size": 512
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-cluster-64k": {
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 1024,
-        "cluster_size": 65536,
-        "label": "C64K"
+        "label": "C64K",
+        "alloc_unit_size": 65536
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-cluster-8k": {
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 8192,
-        "label": "C8K"
+        "label": "C8K",
+        "alloc_unit_size": 8192
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-label-32chars": {
       "status": "passed-to-frs60f-ceiling-agent-8a29-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+        "label": "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
-      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 — bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
+      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-label-cjk": {
       "status": "passed-to-frs60f-ceiling-agent-8a29-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "日本語ラベル"
+        "label": "\u65e5\u672c\u8a9e\u30e9\u30d9\u30eb",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
-      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 — bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
+      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-label-empty": {
       "status": "passed-to-frs60f-ceiling-agent-fixture-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": ""
+        "label": "",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
       "evidence_link": "vendor/rust-fs-ntfs/test-diagnostics/run-20260502-140029/mac-format-label-empty",
       "_prior_status": "passed-to-frs60f-ceiling-agent-8a29-2026-05-02",
-      "note": "Empirically confirmed at the frs.cxx:60f ceiling (run-20260502-140029, ro=3 scan=11, same upcase + frs.cxx assert as the other 11 scenarios). chkdsk-readonly line 4 is blank where labelled scenarios print 'Volume label is X' — empty label propagates through mkfs_ntfs cleanly, no label-specific bug. Earlier run-20260502-132455 had errored at PowerShell param binding ('Cannot bind argument to parameter Label because it is an empty string'); fixed in scripts/run-scenario.ps1 by adding [AllowEmptyString()] to $Label. $Label is param-only — never read in script body — so the fix has zero behavioural effect beyond unblocking empty-string scenarios."
+      "note": "Empirically confirmed at the frs.cxx:60f ceiling (run-20260502-140029, ro=3 scan=11, same upcase + frs.cxx assert as the other 11 scenarios). chkdsk-readonly line 4 is blank where labelled scenarios print 'Volume label is X' \u2014 empty label propagates through mkfs_ntfs cleanly, no label-specific bug. Earlier run-20260502-132455 had errored at PowerShell param binding ('Cannot bind argument to parameter Label because it is an empty string'); fixed in scripts/run-scenario.ps1 by adding [AllowEmptyString()] to $Label. $Label is param-only \u2014 never read in script body \u2014 so the fix has zero behavioural effect beyond unblocking empty-string scenarios."
     },
     "mac-format-label-latin1": {
       "status": "passed-to-frs60f-ceiling-agent-8a29-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "Disk éclipse"
+        "label": "Disk \u00e9clipse",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
-      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 — bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
+      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-large-1gib": {
       "status": "passed-to-frs60f-ceiling-agent-8a29-2026-05-02",
       "volume_params": {
         "size_mib": 1024,
-        "cluster_size": 4096,
-        "label": "ONE_GIB"
+        "label": "ONE_GIB",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
-      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 — bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
+      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-mac-enumerate-empty": {
       "status": "passed-with-system-files-visible-agent-c6a1-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "MENUM"
+        "label": "MENUM",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> mac:enumerate(empty: only '.')",
       "_note": "depends on Mac-side enumerate CLI; first agent picking this scaffolds tests/matrix/inspect/",
@@ -149,8 +149,8 @@
       "status": "pending",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "MACMKDIR"
+        "label": "MACMKDIR",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> mac:mkdir(/docs) -> mac:touch(/docs/notes.txt) -> mac:enumerate(/docs + /docs/notes.txt)",
       "note": "Pure-mac chain with nested directory creation. Catches bugs in parent-pointer setup that the flat-only scenarios miss."
@@ -159,8 +159,8 @@
       "status": "pending",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "MACONLY"
+        "label": "MACONLY",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> mac:touch(/tiny.txt) -> mac:write(/tiny.txt='hello world') -> mac:enumerate(tiny.txt)",
       "note": "Pure-mac chain. Exercises rust-ntfs format/touch/write/ls end-to-end without leaving the Mac. Runs on every host."
@@ -169,8 +169,8 @@
       "status": "pending",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "MACDEL"
+        "label": "MACDEL",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> mac:touch(/scratch.txt) -> mac:write(/scratch.txt='temp') -> mac:rm(/scratch.txt) -> mac:enumerate(empty)",
       "note": "Pure-mac chain exercising the unlink path. After delete, only system files should remain."
@@ -179,8 +179,8 @@
       "status": "pending",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "REPEAT3W"
+        "label": "REPEAT3W",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> mac:touch(/persistent.txt) -> mac:write(/persistent.txt='hello') -> win:chkdsk(readonly) -> win:repeat-mount(3) -> win:chkdsk(readonly,/scan)",
       "note": "Tier-3 repeat-mount with mac-side content. Verifies our writer's metadata stays valid across multiple dismount/remount cycles after we've added a file."
@@ -189,8 +189,8 @@
       "status": "pending",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "DIRTY3"
+        "label": "DIRTY3",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> mac:mkdir(/data) -> mac:touch(/data/file.txt) -> mac:set-dirty -> win:chkdsk(readonly,/scan)",
       "note": "Tier-3 dirty volume with directory + nested file. Stresses the parent-pointer / $I30 invariants the chkdsk dirty-bit branch would walk.",
@@ -200,8 +200,8 @@
       "status": "pending",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "DIRTY1"
+        "label": "DIRTY1",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> mac:set-dirty -> win:chkdsk(readonly,/scan)",
       "note": "Tier-3 dirty-volume injection. Mac formats then explicitly sets VOLUME_IS_DIRTY. Windows-side chkdsk must detect the dirty bit and either repair or report it. Clean baseline for chkdsk's dirty-volume code path.",
@@ -211,32 +211,32 @@
       "status": "passed-to-frs60f-ceiling-agent-8a29-2026-05-02",
       "volume_params": {
         "size_mib": 64,
-        "cluster_size": 4096,
-        "label": "SMALL"
+        "label": "SMALL",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
-      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 — bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
+      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-tiny-32mib": {
       "status": "passed-to-frs60f-ceiling-agent-8a29-2026-05-02",
       "volume_params": {
         "size_mib": 32,
-        "cluster_size": 4096,
-        "label": "TINY"
+        "label": "TINY",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072454",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
-      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 — bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
+      "progress_notes": "iter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-volume-16gib-cluster-4k": {
       "status": "pending",
       "volume_params": {
         "size_mib": 16384,
-        "cluster_size": 4096,
-        "label": "SIXTEEN_GIB"
+        "label": "SIXTEEN_GIB",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
       "note": "Forces non-trivial MFT growth past the initial $MFT extent. $Bitmap also non-trivially sized."
@@ -245,18 +245,18 @@
       "status": "pending",
       "volume_params": {
         "size_mib": 32,
-        "cluster_size": 512,
-        "label": "TINY_512"
+        "label": "TINY_512",
+        "alloc_unit_size": 512
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
-      "note": "Smallest viable + smallest cluster — stresses runlist packing and minimum-size $MFT layout."
+      "note": "Smallest viable + smallest cluster \u2014 stresses runlist packing and minimum-size $MFT layout."
     },
     "mac-format-volume-4gib-cluster-4k": {
       "status": "pending",
       "volume_params": {
         "size_mib": 4096,
-        "cluster_size": 4096,
-        "label": "FOUR_GIB_4K"
+        "label": "FOUR_GIB_4K",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
       "note": "Crosses the 32-bit LBA boundary. Surfaces sign / overflow bugs anywhere we treat sector or cluster counts as i32."
@@ -265,38 +265,38 @@
       "status": "pending",
       "volume_params": {
         "size_mib": 4096,
-        "cluster_size": 65536,
-        "label": "FOUR_GIB_64K"
+        "label": "FOUR_GIB_64K",
+        "alloc_unit_size": 65536
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly,/scan)",
-      "note": "Large clusters at large volume — MFT runs may compact differently and $Bitmap is denser."
+      "note": "Large clusters at large volume \u2014 MFT runs may compact differently and $Bitmap is denser."
     },
     "mac-format-win-repeat-mount-10-win-chkdsk": {
       "status": "pending",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "REPEAT10"
+        "label": "REPEAT10",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly) -> win:repeat-mount(10) -> win:chkdsk(readonly,/scan)",
-      "note": "Same as repeat-mount-5 but ×10 cycles. If our writer leaves a slowly-degrading state, this surfaces it past the 5-cycle ceiling."
+      "note": "Same as repeat-mount-5 but \u00d710 cycles. If our writer leaves a slowly-degrading state, this surfaces it past the 5-cycle ceiling."
     },
     "mac-format-win-repeat-mount-5-win-chkdsk": {
       "status": "pending",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "REPEAT5"
+        "label": "REPEAT5",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly) -> win:repeat-mount(5) -> win:chkdsk(readonly,/scan)",
-      "note": "Tier-3 repeat-mount. After initial chkdsk, dismount/remount × 5 with chkdsk between each cycle. Catches bugs where the volume only goes inconsistent after multiple clean dismounts (e.g. $LogFile state ntfs.sys tolerates once but rejects on the third mount)."
+      "note": "Tier-3 repeat-mount. After initial chkdsk, dismount/remount \u00d7 5 with chkdsk between each cycle. Catches bugs where the volume only goes inconsistent after multiple clean dismounts (e.g. $LogFile state ntfs.sys tolerates once but rejects on the third mount)."
     },
     "mac-format-win-write-deep-nesting-win-chkdsk": {
       "status": "pending",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "DEEP"
+        "label": "DEEP",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk -> win:mkdir(8-level nested path) -> win:write(leaf.txt='hello') -> win:chkdsk -> win:enumerate(8 dirs + 1 file)",
       "note": "Deep parent-pointer chain. Each $FILE_NAME's parent reference must point at the right MFT record; broken pointers surface as 'orphan' under chkdsk Stage 2."
@@ -305,8 +305,8 @@
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "WRLARGE"
+        "label": "WRLARGE",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk -> win:write(big.bin=4MiB) -> win:chkdsk -> win:enumerate(big.bin)",
       "fixture_files": [
@@ -317,14 +317,14 @@
         }
       ],
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-mac-enumerate": {
       "status": "blocked-on-windows-write-resource-error-frs60f-agent-c6a1-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "RTRIP"
+        "label": "RTRIP",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:write(F1,F2) -> mac:enumerate(F1,F2)",
       "_note": "depends on Mac-side enumerate CLI",
@@ -335,19 +335,19 @@
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "MANY"
+        "label": "MANY",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk -> win:write(256 files of 16 bytes) -> win:chkdsk -> win:enumerate(all)",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-many-win-delete-half-win-chkdsk": {
       "status": "pending",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "CHURN"
+        "label": "CHURN",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk -> win:write(256 files x 16 bytes) -> win:delete(every other) -> win:chkdsk -> win:enumerate(128 remain)",
       "note": "$Bitmap free-then-reuse and $I30 entry-removal churn. If our writer leaves dangling free-bitmap state, chkdsk after delete catches it."
@@ -356,8 +356,8 @@
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "WRMED"
+        "label": "WRMED",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk -> win:write(medium.bin=4KB) -> win:chkdsk -> win:enumerate(medium.bin)",
       "fixture_files": [
@@ -368,14 +368,14 @@
         }
       ],
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-modify-win-chkdsk": {
       "status": "pending",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "MODIFY"
+        "label": "MODIFY",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk -> win:write(big.bin=4MiB random) -> win:modify(big.bin offset=1MiB len=4KiB) -> win:chkdsk -> win:read(big.bin) verifies modified bytes",
       "fixture_files": [
@@ -391,8 +391,8 @@
       "status": "pending",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "REMOUNT"
+        "label": "REMOUNT",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk -> win:write(tiny.txt='hello') -> win:dismount -> win:remount -> win:chkdsk -> win:enumerate(tiny.txt)",
       "fixture_files": [
@@ -407,8 +407,8 @@
       "status": "pending",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "RENAME"
+        "label": "RENAME",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk -> win:write(a.txt='hello') -> win:rename(a.txt -> b.txt) -> win:chkdsk -> win:enumerate(b.txt only)",
       "fixture_files": [
@@ -417,25 +417,25 @@
           "content": "hello"
         }
       ],
-      "note": "Same-parent rename — catches bugs where the old $FILE_NAME isn't fully retired or the parent $I30 isn't kept consistent."
+      "note": "Same-parent rename \u2014 catches bugs where the old $FILE_NAME isn't fully retired or the parent $I30 isn't kept consistent."
     },
     "mac-format-win-write-then-delete": {
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "WRDEL"
+        "label": "WRDEL",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:write(F1,F2,F3) -> win:delete(F2) -> win:chkdsk -> win:enumerate(F1,F3)",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-tiny": {
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "WRTINY"
+        "label": "WRTINY",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk -> win:write(tiny.txt='hello world') -> win:chkdsk -> win:enumerate(tiny.txt)",
       "fixture_files": [
@@ -445,14 +445,14 @@
         }
       ],
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072454",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-win-delete-mac-verify-empty": {
       "status": "blocked-on-windows-write-resource-error-frs60f-agent-c6a1-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "DELRT"
+        "label": "DELRT",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:write(F1,F2,F3) -> win:delete(all) -> mac:enumerate(empty)",
       "_note": "depends on Mac-side enumerate CLI",
@@ -463,8 +463,8 @@
       "status": "pending",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "DIRTY2"
+        "label": "DIRTY2",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> mac:touch(/staged.txt) -> mac:write(/staged.txt='partial') -> mac:set-dirty -> win:chkdsk(readonly,/scan)",
       "note": "Tier-3 dirty-volume + content. Simulates a half-completed write followed by a crash (dirty-bit set without our writer issuing a clean dismount). chkdsk must keep our partial-write file readable, not orphan or truncate it.",
@@ -474,18 +474,18 @@
       "status": "pending",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "WINFMT"
+        "label": "WINFMT",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "win:format -> mac:enumerate(empty: only system files)",
-      "note": "Pure reader test on Microsoft-canonical format. If our reader chokes here it's a reader bug, not a writer bug — orthogonal axis to all the mac:format scenarios."
+      "note": "Pure reader test on Microsoft-canonical format. If our reader chokes here it's a reader bug, not a writer bug \u2014 orthogonal axis to all the mac:format scenarios."
     },
     "win-format-win-write-mac-delete-win-verify": {
       "status": "blocked-needs-winformat-mode-runner-refactor-agent-c6a1-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "MACDEL"
+        "label": "MACDEL",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "win:format -> win:write(F1,F2) -> mac:delete(F1) -> win:chkdsk -> win:enumerate(F2)",
       "_note": "depends on Mac-side deleter",
@@ -496,8 +496,8 @@
       "status": "blocked-needs-winformat-mode-runner-refactor-agent-c6a1-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "WINREF"
+        "label": "WINREF",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "win:format -> win:write(F1,F2) -> mac:enumerate(F1,F2)",
       "_note": "Microsoft format.com is the canonical reference; this proves our reader handles Microsoft-format output",
@@ -508,8 +508,8 @@
       "status": "blocked-needs-winformat-mode-runner-refactor-agent-c6a1-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "cluster_size": 4096,
-        "label": "INTERMIX"
+        "label": "INTERMIX",
+        "alloc_unit_size": 4096
       },
       "operation_sequence": "win:format -> win:write(F1) -> mac:write(F2) -> win:chkdsk -> win:enumerate(F1,F2)",
       "_note": "depends on Mac-side writer; first agent scaffolds it or marks blocked-on-writer",
@@ -521,25 +521,25 @@
   "_consolidated_at": "2026-05-02 ~07:45 local",
   "_source_branch": "agent/agent-c5fe-2026-05-02",
   "_source_diag_root": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02",
-  "_iter13_commit": "1c5007a — populate root $I30 with system-file entries",
-  "_iter14_v2_commit": "f2677d3 — embed default $SECURITY_DESCRIPTOR on root (reference layout order)",
+  "_iter13_commit": "1c5007a \u2014 populate root $I30 with system-file entries",
+  "_iter14_v2_commit": "f2677d3 \u2014 embed default $SECURITY_DESCRIPTOR on root (reference layout order)",
   "_progress_summary": {
     "updated_by": "agent-8a29-2026-05-02",
     "updated_at_iso": "2026-05-02T05:??Z",
     "fixes_landed_on_branches_not_main": [
-      "iter13 root-$I30 populated with system-file entries (eliminates orphan-recovery cascade) — three independent implementations: agent-8a29 commit 6e203b9, agent-c6a1 commit 7e87e87, RootIndexEntry variant on local main HEAD",
-      "iter15 BPB.NumberSectors = volume_sectors-1 — agent-840e commit 41e601e",
-      "fs_ntfs_inspect Mac-side enumerate CLI — agent-840e commit 044735c",
-      "run-windows-test.ps1 -ClusterSize parameter — agent-840e commit 48fb998",
-      "test-windows-local.sh forwards VOL_SIZE_MB / LABEL / WRAPPER_SIZE_MB env vars — agent-8a29 commit 3f01d96",
-      "iter14 $SECURITY_DESCRIPTOR (0x50) on every system record — agent/agent-8a29-2026-05-02 commit c0fde08",
-      "iter15 FILE-magic placeholders in unused MFT slots — agent/agent-8a29-2026-05-02 commit 4ee3bad",
-      "iter16 canonical NT 3.x $UpCase table (src/upcase-canonical.bin + include_bytes! in src/upcase.rs) — agent/agent-8a29-2026-05-02 commit 06d53b4",
-      "iter17 $STANDARD_INFORMATION 48-byte NTFS 1.x form on system records — agent/agent-8a29-2026-05-02 commit 3fd37b7"
+      "iter13 root-$I30 populated with system-file entries (eliminates orphan-recovery cascade) \u2014 three independent implementations: agent-8a29 commit 6e203b9, agent-c6a1 commit 7e87e87, RootIndexEntry variant on local main HEAD",
+      "iter15 BPB.NumberSectors = volume_sectors-1 \u2014 agent-840e commit 41e601e",
+      "fs_ntfs_inspect Mac-side enumerate CLI \u2014 agent-840e commit 044735c",
+      "run-windows-test.ps1 -ClusterSize parameter \u2014 agent-840e commit 48fb998",
+      "test-windows-local.sh forwards VOL_SIZE_MB / LABEL / WRAPPER_SIZE_MB env vars \u2014 agent-8a29 commit 3f01d96",
+      "iter14 $SECURITY_DESCRIPTOR (0x50) on every system record \u2014 agent/agent-8a29-2026-05-02 commit c0fde08",
+      "iter15 FILE-magic placeholders in unused MFT slots \u2014 agent/agent-8a29-2026-05-02 commit 4ee3bad",
+      "iter16 canonical NT 3.x $UpCase table (src/upcase-canonical.bin + include_bytes! in src/upcase.rs) \u2014 agent/agent-8a29-2026-05-02 commit 06d53b4",
+      "iter17 $STANDARD_INFORMATION 48-byte NTFS 1.x form on system records \u2014 agent/agent-8a29-2026-05-02 commit 3fd37b7"
     ],
     "unfixed_blockers_to_clean_chkdsk": [
-      "src/upcase.rs generates a non-canonical mapping (chars::to_uppercase()) — chkdsk wants the exact NT 3.x table bytes. Falls back to its built-in table at runtime; warning is non-fatal but blocks \"exit 0\".",
-      "frs.cxx:1551 internal assert during chkdsk Stage 2 unindexed-file scan — likely the missing $SECURITY_DESCRIPTOR (0x50) attribute on every system MFT record (reference has 104-byte SD on each; ours has none). Confirmed via byte-diff against format.com reference."
+      "src/upcase.rs generates a non-canonical mapping (chars::to_uppercase()) \u2014 chkdsk wants the exact NT 3.x table bytes. Falls back to its built-in table at runtime; warning is non-fatal but blocks \"exit 0\".",
+      "frs.cxx:1551 internal assert during chkdsk Stage 2 unindexed-file scan \u2014 likely the missing $SECURITY_DESCRIPTOR (0x50) attribute on every system MFT record (reference has 104-byte SD on each; ours has none). Confirmed via byte-diff against format.com reference."
     ],
     "still_blocked_on_scaffolding": {
       "mac-side writer (write/modify files into mounted volume from Mac)": "blocks all win-format-* scenarios that need a Mac-write leg, plus mac-write-then-win-verify scenarios",
@@ -547,29 +547,29 @@
       "win fixture runner (PowerShell ops to write fixture files into the mounted drive letter)": "blocks mac-format-win-write-* scenarios",
       "win-format runner (format.com /FS:NTFS as the canonical formatter for half-2 scenarios)": "blocks win-format-* scenarios"
     },
-    "how_to_read_status_strings": "failed-orphan-fixed-by-iter13-trailing-frs60f+upcase-* = iter13 worked but two pre-existing chkdsk issues block the \"exit 0\" criterion. These are NOT regressions and NOT new bugs — they are the next iterations.",
+    "how_to_read_status_strings": "failed-orphan-fixed-by-iter13-trailing-frs60f+upcase-* = iter13 worked but two pre-existing chkdsk issues block the \"exit 0\" criterion. These are NOT regressions and NOT new bugs \u2014 they are the next iterations.",
     "session_ceiling_note": "After iter13-iter17, every system MFT record I can produce a byte-diff for is byte-identical to the format.com reference at the structural and content level. chkdsk verdict is unchanged from iter13: bad-upcase warning + frs.cxx 60f assert. The remaining symptoms are not byte-diffable from per-record dumps alone. Productive next moves require disk-read tracing (Procmon) or dumping additional system file content ($LogFile, $AttrDef, $MFT:$Bitmap) for byte-diff. The pipeline currently dumps only MFT records and boot sectors."
   },
-  "_iter15_commit": "54dda31 — drop $Extend at rec 11; cross-apply c6a1 BPB fixes (backup boot last sector + NumberSectors=N-1)",
+  "_iter15_commit": "54dda31 \u2014 drop $Extend at rec 11; cross-apply c6a1 BPB fixes (backup boot last sector + NumberSectors=N-1)",
   "_ceiling": "post-Stage-2 reconnect-scan: An unspecified error occurred (frs.cxx:60f). Stage 1 + Stage 2 verify clean.",
   "_next_iter": "iter16+: $Secure view-index attrs ($SDS/$SDH/$SII) or $LogFile RSTR invariants.",
   "_findings_log": {
     "iter11": {
       "fix": "bytes_used = end_marker_offset + 8 (4-byte type + 4-byte length, not just 4)",
-      "targeted": "\"First free byte offset corrected\" — eliminated",
-      "commit_or_branch": "landed on local main (pre-session) — f5dac2b",
+      "targeted": "\"First free byte offset corrected\" \u2014 eliminated",
+      "commit_or_branch": "landed on local main (pre-session) \u2014 f5dac2b",
       "impact_on_chkdsk": "previously hidden errors became visible in subsequent stages"
     },
     "iter12": {
       "fix": "MFT_RECORD_IS_VIEW_INDEX (0x08) flag on $Secure (rec 9)",
-      "targeted": "\"Flags for file record segment 9 are incorrect\" — eliminated",
-      "commit_or_branch": "landed on local main (pre-session) — ab75545",
+      "targeted": "\"Flags for file record segment 9 are incorrect\" \u2014 eliminated",
+      "commit_or_branch": "landed on local main (pre-session) \u2014 ab75545",
       "impact_on_chkdsk": "revealed deeper Stage 2/3 errors hidden behind rec-9 stop"
     },
     "iter13": {
       "fix": "root $I30 populated with 12 system-file entries sorted per COLLATION_FILE_NAME",
-      "targeted": "\"Detected orphaned file $X (N)\" cascade (10 messages) — ELIMINATED across all 8 verified scenarios",
-      "commit_or_branch": "agent/agent-8a29-2026-05-02 commit 6e203b9 — also independently arrived at by agent-c6a1 (commit 7e87e87) and as RootIndexEntry on local main HEAD",
+      "targeted": "\"Detected orphaned file $X (N)\" cascade (10 messages) \u2014 ELIMINATED across all 8 verified scenarios",
+      "commit_or_branch": "agent/agent-8a29-2026-05-02 commit 6e203b9 \u2014 also independently arrived at by agent-c6a1 (commit 7e87e87) and as RootIndexEntry on local main HEAD",
       "evidence": "$TMPDIR/rust-fs-ntfs-diag/agent-8a29-2026-05-02/iter-20260502-024137 (pre) vs iter-20260502-030328 (post)",
       "impact_on_chkdsk": "orphan messages gone; trailing frs.cxx 60f assert now exposed as the next blocker"
     },
@@ -590,15 +590,15 @@
     "iter16": {
       "fix": "Microsoft canonical NT 3.x $UpCase table baked in (replaces char::to_uppercase generator that diverged at 327 BMP code points)",
       "targeted": "\"Read-only chkdsk found bad on-disk uppercase table - using system table\" warning + (hypothesis) frs.cxx 60f assert",
-      "commit_or_branch": "agent/agent-8a29-2026-05-02 commit 06d53b4 (added src/upcase-canonical.bin SHA256 41c26bc7…)",
-      "evidence": "extracted via fsutil queryextents + raw \\\\.\\F: read on a format.com reference VHDX. 327 BMP code points differ between modern Unicode and NT canonical (e.g. U+00B5 MICRO SIGN: modern → 0x039C, NT preserves 0x00B5).",
-      "result": "on-disk $UpCase verified byte-identical to reference (SHA matches). chkdsk warning UNCHANGED — implies the check keys on more than table content (possibly $UpCase MFT record attr layout, or chkdsk caches an earlier check decision)."
+      "commit_or_branch": "agent/agent-8a29-2026-05-02 commit 06d53b4 (added src/upcase-canonical.bin SHA256 41c26bc7\u2026)",
+      "evidence": "extracted via fsutil queryextents + raw \\\\.\\F: read on a format.com reference VHDX. 327 BMP code points differ between modern Unicode and NT canonical (e.g. U+00B5 MICRO SIGN: modern \u2192 0x039C, NT preserves 0x00B5).",
+      "result": "on-disk $UpCase verified byte-identical to reference (SHA matches). chkdsk warning UNCHANGED \u2014 implies the check keys on more than table content (possibly $UpCase MFT record attr layout, or chkdsk caches an earlier check decision)."
     },
     "iter17": {
       "fix": "$STANDARD_INFORMATION 48-byte NTFS 1.x form on every system MFT record (was 72-byte NTFS 3.x form)",
       "targeted": "same warning + frs.cxx 60f assert",
       "commit_or_branch": "agent/agent-8a29-2026-05-02 commit 3fd37b7",
-      "evidence": "reference ships 48-byte $STD_INFO on every system file (rec 0/1/2/3/4/6/7/8/9/10/11); ours had 72-byte form with extension fields zero-padded. 24-byte per-record divergence — single remaining systematic byte-diff after iter16.",
+      "evidence": "reference ships 48-byte $STD_INFO on every system file (rec 0/1/2/3/4/6/7/8/9/10/11); ours had 72-byte form with extension fields zero-padded. 24-byte per-record divergence \u2014 single remaining systematic byte-diff after iter16.",
       "result": "on-disk verified: all 12 system records now content_size=48. chkdsk verdict UNCHANGED. Cause is no longer byte-diffable from per-record dumps alone."
     }
   },
@@ -610,23 +610,23 @@
       "next_step_no_longer_byte_diffable": "capture every disk read chkdsk performs (Windows Procmon or equivalent) and correlate with what we wrote vs reference at those exact offsets. Reveals which specific bytes chkdsk uses for the \"bad upcase\" decision."
     },
     {
-      "symptom": "\"An unspecified error occurred (6672732e637878 60f)\" — frs.cxx:1551 internal assert",
+      "symptom": "\"An unspecified error occurred (6672732e637878 60f)\" \u2014 frs.cxx:1551 internal assert",
       "severity": "fatal (chkdsk exit 11 on /scan)",
       "iter13_through_iter17_ruled_out": "NOT caused by missing root $I30 entries (iter13), missing SD (iter14), raw-zero MFT slots (iter15), non-canonical $UpCase content (iter16), or $STD_INFO size (iter17). Five evidence-corroborated layout fixes did not affect this assert. Strong indication cause is not in per-record system-file MFT layout.",
       "remaining_byte_diffable_candidates": [
-        "$LogFile content (we fill 0xFF; reference initialises with proper RSTR-led records) — needs runner patch to dump",
-        "$AttrDef blob byte-for-byte (we emit hand-rolled canonical NTFS 3.1 table; reference may differ) — needs runner patch to dump",
-        "$MFT:$Bitmap non-resident value byte-for-byte — needs runner patch to dump",
+        "$LogFile content (we fill 0xFF; reference initialises with proper RSTR-led records) \u2014 needs runner patch to dump",
+        "$AttrDef blob byte-for-byte (we emit hand-rolled canonical NTFS 3.1 table; reference may differ) \u2014 needs runner patch to dump",
+        "$MFT:$Bitmap non-resident value byte-for-byte \u2014 needs runner patch to dump",
         "$Volume $VOLUME_INFORMATION flags (we set clean=0; not corroborated)"
       ]
     }
   ],
   "_documentation_locations": {
-    "per_iteration_findings_log": "docs/chkdsk-findings.md (on each agent's branch — iter11/12 on local main; iter13/14/15 on agent/agent-8a29-2026-05-02)",
+    "per_iteration_findings_log": "docs/chkdsk-findings.md (on each agent's branch \u2014 iter11/12 on local main; iter13/14/15 on agent/agent-8a29-2026-05-02)",
     "agent_session_reports": "tests/matrix/agent-reports/<session>.md (untracked in main; one per agent)",
     "commit_messages_with_evidence": "each iter's commit cites byte-diff diag dir + spec citation + result",
     "this_shared_work_list": "_findings_log + _unfixed_blockers + _progress_summary blocks above. Updated by agents at the end of each iteration that touches a tracked scenario."
   },
-  "_iter16_attempt": "4cf548d — tried SD on every system rec (byte-identical to ref); REVERTED, broke mount with Event 55. SYSTEM_SECURITY_DESCRIPTOR const kept under #[allow(dead_code)] for iter17 redo.",
+  "_iter16_attempt": "4cf548d \u2014 tried SD on every system rec (byte-identical to ref); REVERTED, broke mount with Event 55. SYSTEM_SECURITY_DESCRIPTOR const kept under #[allow(dead_code)] for iter17 redo.",
   "_iter17_candidates": "1) pair SD-on-every-rec with security_id!=0 OR populated $Secure ($SDS/$SDH/$SII); 2) $LogFile RSTR header; 3) canonical $UpCase bytes (Bug B from iter6)."
 }

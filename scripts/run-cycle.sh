@@ -53,7 +53,10 @@ import sys
 print(json.dumps({
     'op_seq': e.get('operation_sequence',''),
     'size_mib': e.get('volume_params',{}).get('size_mib', 256),
-    'cluster_size': e.get('volume_params',{}).get('cluster_size', 4096),
+    # alloc_unit_size is the harness-vocabulary name; cluster_size is
+    # accepted as a legacy fallback during the v1->v2 migration.
+    'cluster_size': e.get('volume_params',{}).get('alloc_unit_size',
+                          e.get('volume_params',{}).get('cluster_size', 4096)),
     'label': e.get('volume_params',{}).get('label', 'CITEST'),
 }))
 ")"
