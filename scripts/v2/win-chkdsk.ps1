@@ -90,19 +90,21 @@ try {
         throw "partition smaller than raw image ($($part.Size) < $rawSize)"
     }
 
+    # Take the disk offline before opening the raw `\\.\PhysicalDriveN`
+    # handle. Without this, chunked writes to the raw handle return
+    # `Access to the path is denied.` once the volume layer auto-detects
+    # the new partition and locks it — v1's run-scenario.ps1 documents
+    # the same failure mode (lines 115-122) and explicitly skips
+    # >2 GiB scenarios to avoid it. Setting the disk offline tells the
+    # Volume Manager to release any volume-level holds; raw block-layer
+    # writes via `\\.\PhysicalDriveN` still work while offline. The disk
+    # is brought back online below before the dismount/remount cycle so
+    # ntfs.sys can pick up the populated partition for chkdsk.
+    Set-Disk -Number $disk.Number -IsOffline $true
+
     # Stream the .img bytes into the partition's offset on the raw
-    # disk. v1's run-scenario.ps1 used `[IO.File]::ReadAllBytes`
-    # here, which slurps the whole image into a single byte[] — fine
-    # for 32 MiB - 1 GiB volumes but .NET arrays cap at ~2 GiB so the
-    # 4 GiB / 16 GiB scenarios always OOMed.
-    #
-    # First attempt at streaming used `Stream.CopyTo($dst, 16MB)`,
-    # which errored on raw-disk writes with "Access to the path is
-    # denied." `Stream.CopyTo` has an internal optimisation path that
-    # doesn't play well with the special `\\.\PhysicalDriveN` handle.
-    # Explicit Read + Write loop sidesteps it: same chunk shape as
-    # before, just .NET FileStream.Write calls all the way down,
-    # which is what the original (working) Write(bytes,0,len) used.
+    # disk. v1's `[IO.File]::ReadAllBytes` capped at ~2 GiB (.NET
+    # `byte[]` length is Int32); chunked Read + Write avoids the cap.
     $rawPath = "\\.\PhysicalDrive$($disk.Number)"
     # FileShare.Read on the source matches `[IO.File]::ReadAllBytes`'s
     # internal share — denies write-sharing during the copy so a
@@ -114,14 +116,11 @@ try {
             [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
         try {
             $dst.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
-            # Raw `\\.\PhysicalDriveN` writes require offset + length to be
-            # multiples of the physical sector size — a partial read at EOF
-            # (or any short read mid-stream) would otherwise hit
-            # `IOException: The parameter is incorrect`. Pad the trailing
-            # bytes with zeros up to the next sector boundary; only the
-            # `[n, aligned)` window needs clearing since `Read` rewrote
-            # `[0, n)` on this iteration.
-            $sectorSize = 512
+            # Raw writes require offset + length to be multiples of the
+            # physical sector size; pad the trailing chunk's `[n, aligned)`
+            # window with zeros (Read rewrote `[0, n)` so only the pad
+            # region could be stale).
+            $sectorSize = $disk.PhysicalSectorSize
             $bufSize = 16MB
             $buf = New-Object byte[] $bufSize
             while ($true) {
@@ -136,6 +135,10 @@ try {
             $dst.Flush($true)
         } finally { $dst.Close() }
     } finally { $src.Close() }
+
+    # Bring the disk back online so ntfs.sys can mount the populated
+    # partition for chkdsk.
+    Set-Disk -Number $disk.Number -IsOffline $false
 
     # Dismount + remount so ntfs.sys re-recognises the populated
     # partition and assigns a drive letter.
