@@ -123,7 +123,8 @@ try {
                 # Raw writes require offset + length to be multiples of the
                 # physical sector size; pad the trailing chunk's `[n, aligned)`
                 # window with zeros (Read rewrote `[0, n)` so only the pad
-                # region could be stale).
+                # region could be stale). `$disk.PhysicalSectorSize` returns
+                # 512 on legacy 512n media and 4096 on 4Kn drives.
                 $sectorSize = $disk.PhysicalSectorSize
                 $bufSize = 16MB
                 $buf = New-Object byte[] $bufSize
