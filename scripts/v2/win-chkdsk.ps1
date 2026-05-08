@@ -216,5 +216,17 @@ try {
     # most of a 64 GiB VM disk). The Mac side keeps its own copy if
     # post-mortem inspection is needed; the .vhdx wrapper cleanup
     # already takes the actual disk-image artefacts with it.
+    #
+    # Best-effort delete: don't crash the script if the file's
+    # somehow held by a process that didn't release. But verify
+    # afterward and emit a warning + per-scenario diag entry —
+    # silently suppressing the failure is exactly what would let the
+    # leak recur unnoticed, which defeats the whole point of this
+    # cleanup block.
     Remove-Item -LiteralPath $ImagePath -Force -EA SilentlyContinue
+    if (Test-Path -LiteralPath $ImagePath) {
+        "cleanup_failed image_path=$ImagePath" |
+            Out-File "$Diag\cleanup-warnings.txt" -Append -Encoding ASCII
+        Write-Warning "Failed to remove shipped image: $ImagePath (still on disk after Remove-Item; see cleanup-warnings.txt)"
+    }
 }
