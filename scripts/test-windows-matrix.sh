@@ -87,13 +87,17 @@ tar --exclude='./target' --exclude='./.git' --exclude='./diag' \
 # argv-handling change in libtest-mimic ate the flag at the test side.
 EXTRA_ARGS=""
 VERBOSE_ENV_PREFIX=""
-for arg in "${TEST_ARGS[@]}"; do
-    if [[ "$arg" == "--verbose" ]]; then
-        VERBOSE_ENV_PREFIX="\$env:MATRIX_VERBOSE='1'; "
-        echo "[run]  --verbose detected — engaging per-step tree on remote"
-    fi
-done
+# Guarded iteration for bash 3.2 (the system bash on macOS): under
+# `set -u`, expanding an empty array via "${arr[@]}" raises an unbound
+# variable error. The length-check below is bash 3.2-safe and avoids
+# making contributors install a newer bash.
 if [[ ${#TEST_ARGS[@]} -gt 0 ]]; then
+    for arg in "${TEST_ARGS[@]}"; do
+        if [[ "$arg" == "--verbose" ]]; then
+            VERBOSE_ENV_PREFIX="\$env:MATRIX_VERBOSE='1'; "
+            echo "[run]  --verbose detected — engaging per-step tree on remote"
+        fi
+    done
     EXTRA_ARGS=$(printf ' %q' "${TEST_ARGS[@]}")
 fi
 
