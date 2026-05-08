@@ -49,6 +49,14 @@ impl<T: fs_core::BlockDevice> BlockIo for CoreDevice<T> {
     }
 
     fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        // Up-front guard: spec-compliant `BlockDevice` impls return
+        // `Err(ReadOnly)` from `write_at` when not writable, but the
+        // contract leaves room for impls that silently no-op or check
+        // elsewhere. Refuse the write here so the failure mode is
+        // deterministic regardless of which implementor we wrap.
+        if !fs_core::BlockDevice::is_writable(&self.inner) {
+            return Err("device is not writable".to_string());
+        }
         fs_core::BlockDevice::write_at(&self.inner, offset, buf).map_err(|e| e.to_string())
     }
 
@@ -95,6 +103,17 @@ mod tests {
             let mut b = self.0.lock().unwrap();
             let start = offset as usize;
             let end = start + buf.len();
+            // Mirror `read_at`: convert OOB into a tidy `fs_core::Error`
+            // rather than letting `copy_from_slice` panic with an opaque
+            // index-out-of-range. Future tests writing past the end will
+            // get a clean assertion failure instead of a panic.
+            if end > b.len() {
+                return Err(fs_core::Error::ShortRead {
+                    offset,
+                    want: buf.len(),
+                    got: b.len().saturating_sub(start),
+                });
+            }
             b[start..end].copy_from_slice(buf);
             Ok(())
         }

@@ -721,6 +721,11 @@ pub extern "C" fn fs_ntfs_mount_with_fs_core_device(
         return std::ptr::null_mut();
     }
 
+    // Safety: `handle` is non-null (checked above) and the C ABI
+    // contract documented in `include/fs_ntfs.h` requires the caller to
+    // keep the pointer valid for the duration of this call. The clone
+    // takes a fresh `Arc` reference so the underlying device outlives
+    // any subsequent mutation of the handle.
     let inner = unsafe { (*handle).inner().clone() };
     let size = fs_core::BlockRead::size_bytes(&inner);
 
