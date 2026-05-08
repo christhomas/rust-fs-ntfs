@@ -90,17 +90,30 @@ try {
         throw "partition smaller than raw image ($($part.Size) < $rawSize)"
     }
 
-    # Write the .img bytes into the partition's offset on the raw
-    # disk. Mirrors what scripts/run-scenario.ps1 does in v1.
+    # Stream the .img bytes into the partition's offset on the raw
+    # disk. v1's run-scenario.ps1 used `[IO.File]::ReadAllBytes` here,
+    # which slurps the whole image into a single byte[] — fine for
+    # 32 MiB - 1 GiB volumes, but .NET arrays cap at ~2 GiB so the
+    # 4 GiB / 16 GiB scenarios in the matrix always errored out.
+    # Streaming via `Stream.CopyTo` with a 16 MiB buffer copies
+    # arbitrary sizes with bounded memory.
     $rawPath = "\\.\PhysicalDrive$($disk.Number)"
-    $imgBytes = [System.IO.File]::ReadAllBytes($ImagePath)
-    $fs = [System.IO.File]::Open($rawPath, [System.IO.FileMode]::Open,
-        [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+    # FileShare.Read on the source matches what `[IO.File]::ReadAllBytes`
+    # uses internally — denies write-sharing while we read. Without
+    # this, a concurrent scp retry or an incomplete `ship-to-vm`
+    # could overwrite the .img mid-copy and we'd write a torn image
+    # into the partition silently.
+    $src = [System.IO.File]::Open($ImagePath, [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     try {
-        $fs.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
-        $fs.Write($imgBytes, 0, $imgBytes.Length)
-        $fs.Flush($true)
-    } finally { $fs.Close() }
+        $dst = [System.IO.File]::Open($rawPath, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+        try {
+            $dst.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $src.CopyTo($dst, 16MB)
+            $dst.Flush($true)
+        } finally { $dst.Close() }
+    } finally { $src.Close() }
 
     # Dismount + remount so ntfs.sys re-recognises the populated
     # partition and assigns a drive letter.
