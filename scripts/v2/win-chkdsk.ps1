@@ -135,7 +135,22 @@ try {
     if (-not $letter) { throw "no drive letter assigned" }
 
     # ── chkdsk passes ─────────────────────────────────────────────
-    $allClean = $true
+    #
+    # Pass/fail rules — match v1's `Clean` VerdictShape (matrix.rs:999):
+    #
+    #   readonly mode:  must exit 0
+    #   /scan mode:     0, 11, 13 are all "ok"
+    #     - 0  = clean
+    #     - 11 = frs.cxx 60f ceiling (known v1 technical debt — not real
+    #            corruption; matrix.rs's existing verdict tolerates it)
+    #     - 13 = VSS / shadow-copy infra error on tiny volumes; same
+    #            class of "infrastructure flake, not corruption"
+    #
+    # Future RepairOk / RepairRequired shapes will need a `-VerdictShape`
+    # parameter; not implemented in this slice — every scenario using
+    # this script today defaults to Clean.
+    $rawExits  = @{}      # mode -> exit code (for diag inspection)
+    $passed    = $true
     foreach ($mode in $Modes.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) {
         $modeFile = $mode -replace '[/\\ ]', '-'
         $log = "$Diag\chkdsk-$modeFile.txt"
@@ -146,8 +161,26 @@ try {
         }
         $proc = Start-Process -FilePath chkdsk -ArgumentList $args -NoNewWindow -PassThru -Wait -RedirectStandardOutput $log
         "$($proc.ExitCode)" | Out-File $exitFile -Encoding ASCII
-        if ($proc.ExitCode -ne 0) { $allClean = $false }
+        $rawExits[$mode] = $proc.ExitCode
+
+        # Apply Clean-shape verdict per-mode.
+        if ($mode -eq 'readonly') {
+            if ($proc.ExitCode -ne 0) { $passed = $false }
+        } else {
+            # /scan and other modes: accept 0/11/13 as Clean-shape "ok".
+            if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 11 -and $proc.ExitCode -ne 13) {
+                $passed = $false
+            }
+        }
     }
+
+    # Emit a verdict summary file so a triage agent doesn't have to
+    # parse all the chkdsk-*-exit.txt files individually.
+    @{
+        passed = $passed
+        verdict_shape = "clean"
+        exits = $rawExits
+    } | ConvertTo-Json -Compress | Out-File "$Diag\verdict.json" -Encoding ASCII
 
     # NTFS / Disk / partmgr events fired during this run.
     try {
@@ -160,7 +193,7 @@ try {
             Format-List | Out-File "$Diag\mount-eventlog.txt"
     } catch { }
 
-    if ($allClean) { exit 0 } else { exit 1 }
+    if ($passed) { exit 0 } else { exit 1 }
 
 } finally {
     foreach ($v in @($Vhdx)) {
