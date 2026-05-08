@@ -104,6 +104,7 @@ try {
     # behaviour against an offline VHD isn't guaranteed across Windows
     # versions.
     Set-Disk -Number $disk.Number -IsOffline $true
+    $writeFailed = $false
     try {
         # Stream the .img bytes into the partition's offset on the raw
         # disk. v1's `[IO.File]::ReadAllBytes` capped at ~2 GiB (.NET
@@ -126,23 +127,35 @@ try {
                 $sectorSize = $disk.PhysicalSectorSize
                 $bufSize = 16MB
                 $buf = New-Object byte[] $bufSize
-                while ($true) {
-                    $n = $src.Read($buf, 0, $bufSize)
-                    if ($n -le 0) { break }
-                    $aligned = [int][Math]::Ceiling($n / $sectorSize) * $sectorSize
-                    if ($aligned -gt $n) {
-                        [Array]::Clear($buf, $n, $aligned - $n)
+                try {
+                    while ($true) {
+                        $n = $src.Read($buf, 0, $bufSize)
+                        if ($n -le 0) { break }
+                        $aligned = [int][Math]::Ceiling($n / $sectorSize) * $sectorSize
+                        if ($aligned -gt $n) {
+                            [Array]::Clear($buf, $n, $aligned - $n)
+                        }
+                        $dst.Write($buf, 0, $aligned)
                     }
-                    $dst.Write($buf, 0, $aligned)
+                    $dst.Flush($true)
+                } catch {
+                    $writeFailed = $true
+                    throw
                 }
-                $dst.Flush($true)
             } finally { $dst.Close() }
         } finally { $src.Close() }
     } finally {
         # Bring the disk back online so ntfs.sys can mount the populated
-        # partition for chkdsk. `-EA SilentlyContinue` so a transient
-        # online failure doesn't mask the original exception (if any).
-        Set-Disk -Number $disk.Number -IsOffline $false -EA SilentlyContinue
+        # partition for chkdsk. If the streaming write itself failed,
+        # silence any restore error so the original write exception is
+        # what propagates. Otherwise let the restore fail loudly — a
+        # silent restore failure here would surface later as a
+        # cryptic `Dismount-DiskImage` / drive-letter error.
+        if ($writeFailed) {
+            Set-Disk -Number $disk.Number -IsOffline $false -EA SilentlyContinue
+        } else {
+            Set-Disk -Number $disk.Number -IsOffline $false -EA Stop
+        }
     }
 
     # Dismount + remount so ntfs.sys re-recognises the populated
