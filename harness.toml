@@ -265,7 +265,23 @@ host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-delete.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
-# Other win-side ops (win-repeat-mount, win-mount/win-unmount as
-# separate ops, win-format, win-mkdir/win-rename/win-modify/win-read)
-# follow the same shape and land alongside their first scenario consumer
-# in subsequent Phase 4c PRs.
+[ops.win-repeat-mount]
+# Mount/dismount the .vhdx wrapper N times to surface any state leak
+# in ntfs.sys's volume-recognition path or the VHD miniport. No I/O
+# happens between cycles. Used by `repeat-mount(N)` scenarios that
+# sandwich this op between two chkdsk passes to verify the volume's
+# NTFS structure survives repeated remounts.
+#
+# Step fields:
+#   image_path   — vm-side absolute path to the .img
+#   cycles       — positive integer (mount-then-dismount count)
+#   keep_image?  — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   diag         — vm-side directory for repeat-mount-result.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-repeat-mount.ps1' -ImagePath '{step.image_path}' -Cycles '{step.cycles}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+# Other win-side ops (win-mount/win-unmount as separate ops, win-format,
+# win-mkdir/win-rename/win-modify/win-read) follow the same shape and
+# land alongside their first scenario consumer in subsequent Phase 4c
+# PRs.
