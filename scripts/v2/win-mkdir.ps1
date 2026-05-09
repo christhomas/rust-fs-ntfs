@@ -3,8 +3,13 @@
 #
 # Mounts the .img (re-using a prior op's .vhdx if `keep_image=true`
 # was set on the prior step) and runs
-# `New-Item -ItemType Directory -Path -Force` to create the directory
-# at `path`. The path is interpreted relative to the volume root.
+# `New-Item -ItemType Directory -Path $target -Force` to create the
+# directory at `path`. `-Path` (not `-LiteralPath`) because PS 5.1's
+# `New-Item` doesn't accept `-LiteralPath` — the param was added in
+# PS 6+. In creation context `-Path` doesn't expand wildcards anyway
+# (wildcard chars become literal name components); the dot-segment
+# guard below rejects the only practically dangerous shapes (`.` /
+# `..`). The path is interpreted relative to the volume root.
 #
 # `New-Item -Force` creates parent directories automatically — the
 # `deep-nesting` scenario relies on this so an 8-level path can be
