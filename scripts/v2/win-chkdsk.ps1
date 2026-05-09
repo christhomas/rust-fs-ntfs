@@ -278,6 +278,17 @@ try {
             $rawExits[$mode] = $exit
             if ($mode -eq '/scan') { $preScanExit = $exit }
         }
+        # The verdict gates on `pre_scan != 0` (proves the volume was
+        # actually dirty), so `/scan` must be in -Modes. Surface a clear
+        # config error rather than letting the verdict silently fail with
+        # `pre_scan == $null`. We bypass `Write-Error` here because
+        # `$ErrorActionPreference = 'Stop'` would convert it to a
+        # terminating error, propagate to the outer `try`/`finally`, and
+        # exit 1 — masking the intentional `exit 2` for "config error".
+        if ($null -eq $preScanExit) {
+            [Console]::Error.WriteLine("RepairRequired requires '/scan' in -Modes; got -Modes '$Modes'")
+            exit 2
+        }
         # /F + post-/F /scan run regardless; their exits drive the
         # verdict alongside pre_scan. `/F /X` matches v1's run-scenario.ps1
         # — `/X` forces an exclusive dismount before the fix so chkdsk
