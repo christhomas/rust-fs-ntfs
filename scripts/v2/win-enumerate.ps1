@@ -57,8 +57,12 @@ try {
             Select-Object -ExpandProperty FullName |
             Out-File "$Diag\enumerate.txt" -Encoding UTF8
     } catch {
+        # Don't rethrow — the script's contract (and harness's
+        # `expect_exit = 0`) is "always exit 0; enumeration is an
+        # observation, not a verdict". Log the failure for triage and
+        # let the run continue. Future verdict shapes that gate on the
+        # listing's content can flip this.
         $_.Exception.Message | Out-File "$Diag\enumerate-error.txt" -Encoding UTF8
-        throw
     }
 
     exit 0
