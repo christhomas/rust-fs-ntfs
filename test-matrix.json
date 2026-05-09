@@ -1043,9 +1043,47 @@
         "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:write(F1,F2) -> mac:enumerate(F1,F2)",
-      "_note": "depends on Mac-side enumerate CLI",
+      "_note": "depends on Mac-side enumerate CLI; uses the harness `ship-to-host` builtin to pull the VM-side .img back so mac-enumerate sees the win-side writes. VM-side .img + .vhdx are intentionally left in place after the last win-write-content (keep_image=true on every win-* step) so ship-to-host has something to copy; cleanup happens implicitly the next time `ship-to-vm` overwrites the path or the user clears the VM workdir manually (~70+ GiB free).",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
-      "note": "Operation sequence needs the chkdsk-clean state iter15+ has to deliver. mac:enumerate itself is plumbed via the new inspect_ntfs CLI on c5fe branch."
+      "note": "Operation sequence needs the chkdsk-clean state iter15+ has to deliver. mac:enumerate itself is plumbed via the new inspect_ntfs CLI on c5fe branch.",
+      "image": "nfs-mac-format-win-write-mac-enumerate.img",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-mac-enumerate.img"
+        },
+        {
+          "op": "win-write-content",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-mac-enumerate.img",
+          "path": "/F1.txt",
+          "content": "F1",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-mac-enumerate"
+        },
+        {
+          "op": "win-write-content",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-mac-enumerate.img",
+          "path": "/F2.txt",
+          "content": "F2",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-mac-enumerate"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-mac-enumerate.img",
+          "dest": "{scenario.image}"
+        },
+        {
+          "op": "mac-enumerate"
+        }
+      ]
     },
     "mac-format-win-write-many-small": {
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
@@ -1421,9 +1459,76 @@
         "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:write(F1,F2,F3) -> win:delete(all) -> mac:enumerate(empty)",
-      "_note": "depends on Mac-side enumerate CLI",
+      "_note": "depends on Mac-side enumerate CLI; uses the harness `ship-to-host` builtin to pull the VM-side .img back so mac-enumerate can verify the post-delete state. VM-side .img + .vhdx are intentionally left in place after the last win-delete (keep_image=true on every win-* step) so ship-to-host has something to copy; cleanup happens implicitly the next time `ship-to-vm` overwrites the path or the user clears the VM workdir manually (~70+ GiB free).",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
-      "note": "Operation sequence needs the chkdsk-clean state iter15+ has to deliver. mac:enumerate itself is plumbed via the new inspect_ntfs CLI on c5fe branch."
+      "note": "Operation sequence needs the chkdsk-clean state iter15+ has to deliver. mac:enumerate itself is plumbed via the new inspect_ntfs CLI on c5fe branch. mac-enumerate is observation-only today, so this scenario passes if the steps complete without error; future verdict shapes can gate on the listing being empty of user-visible files (only NTFS metadata visible).",
+      "image": "nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img"
+        },
+        {
+          "op": "win-write-content",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
+          "path": "/F1.txt",
+          "content": "F1",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-win-delete-mac-verify-empty"
+        },
+        {
+          "op": "win-write-content",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
+          "path": "/F2.txt",
+          "content": "F2",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-win-delete-mac-verify-empty"
+        },
+        {
+          "op": "win-write-content",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
+          "path": "/F3.txt",
+          "content": "F3",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-win-delete-mac-verify-empty"
+        },
+        {
+          "op": "win-delete",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
+          "path": "/F1.txt",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-win-delete-mac-verify-empty"
+        },
+        {
+          "op": "win-delete",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
+          "path": "/F2.txt",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-win-delete-mac-verify-empty"
+        },
+        {
+          "op": "win-delete",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
+          "path": "/F3.txt",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-win-delete-mac-verify-empty"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
+          "dest": "{scenario.image}"
+        },
+        {
+          "op": "mac-enumerate"
+        }
+      ]
     },
     "mac-format-write-set-dirty-win-chkdsk": {
       "status": "pending",
