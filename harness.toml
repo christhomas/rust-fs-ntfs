@@ -281,7 +281,23 @@ host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-repeat-mount.ps1' -ImagePath '{step.image_path}' -Cycles '{step.cycles}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
+[ops.win-rename]
+# Rename a single file at `from_path` to `to_path` on the mounted
+# volume. Mounts the .img (re-using a prior op's .vhdx if
+# `keep_image=true` was set on the prior step) and runs
+# `Move-Item -LiteralPath -Force`. Both paths are interpreted relative
+# to the volume root; their parent directories must already exist.
+#
+# Step fields:
+#   image_path   — vm-side absolute path to the .img
+#   from_path    — source path inside the volume (e.g. "/a.txt")
+#   to_path      — destination path inside the volume (e.g. "/b.txt")
+#   keep_image?  — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   diag         — vm-side directory for rename-result.txt + rename-error.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-rename.ps1' -ImagePath '{step.image_path}' -FromPath '{step.from_path}' -ToPath '{step.to_path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
 # Other win-side ops (win-mount/win-unmount as separate ops, win-format,
-# win-mkdir/win-rename/win-modify/win-read) follow the same shape and
-# land alongside their first scenario consumer in subsequent Phase 4c
-# PRs.
+# win-mkdir/win-modify/win-read) follow the same shape and land
+# alongside their first scenario consumer in subsequent Phase 4c PRs.
