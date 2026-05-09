@@ -210,6 +210,48 @@ host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-enumerate.ps1' -ImagePath '{step.image_path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
-# Other win-side ops (win-repeat-mount, win-write, win-mount/win-unmount
-# as separate ops, win-format) follow the same shape and land alongside
-# their first scenario consumer in subsequent Phase 4c PRs.
+[ops.win-write-content]
+# Write a single file at `path` whose content is the literal UTF-8
+# bytes of `content`. For binary / zero-fill content use win-write-size
+# instead.
+#
+# Two ops (rather than one with both `content?` and `size_bytes?`)
+# because cmd.exe → PowerShell collapses empty single-quoted args
+# (`-SizeBytes ''` becomes "missing argument"); separate ops keep
+# every supplied arg non-empty.
+#
+# Step fields:
+#   image_path   — vm-side absolute path to the .img
+#   path         — file path inside the volume (e.g. "/tiny.txt")
+#   content      — literal UTF-8 string (no trailing newline)
+#   keep_image?  — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   diag         — vm-side directory for write-result.txt + wrapper-create.txt
+#
+# `content` is single-quoted in the template so payloads with spaces
+# (e.g. "hello world") survive the cmd shell parse intact. Same caveat
+# as mac-write's `{step.content}`: single quotes don't escape literal
+# `'` in the content; matrix payloads today are simple ASCII so this
+# is safe. When write content needs `'`, swap to a file-based transport.
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-write.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Content '{step.content}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+[ops.win-write-size]
+# Write a single file at `path` filled with `size_bytes` zero bytes.
+# Streamed in 64 KiB chunks so files above the .NET 2 GiB byte[] cap
+# work. For text content use win-write-content instead.
+#
+# Step fields:
+#   image_path   — vm-side absolute path to the .img
+#   path         — file path inside the volume (e.g. "/big.bin")
+#   size_bytes   — number of zero bytes (integer as string)
+#   keep_image?  — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   diag         — vm-side directory for write-result.txt + wrapper-create.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-write.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+# Other win-side ops (win-repeat-mount, win-mount/win-unmount as
+# separate ops, win-format, win-mkdir/win-delete/win-rename/win-modify/
+# win-read) follow the same shape and land alongside their first
+# scenario consumer in subsequent Phase 4c PRs.

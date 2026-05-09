@@ -817,7 +817,51 @@
         }
       ],
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-large.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-large.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-large"
+        },
+        {
+          "op": "win-write-size",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-large.img",
+          "path": "/big.bin",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-large",
+          "size_bytes": "4194304"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-large.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-large"
+        },
+        {
+          "op": "win-enumerate",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-large.img",
+          "keep_image": "false",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-large"
+        }
+      ],
+      "image": "nfs-mac-format-win-write-large.img"
     },
     "mac-format-win-write-mac-enumerate": {
       "status": "blocked-on-windows-write-resource-error-frs60f-agent-c6a1-2026-05-02",
@@ -868,7 +912,51 @@
         }
       ],
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-medium.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-medium.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-medium"
+        },
+        {
+          "op": "win-write-size",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-medium.img",
+          "path": "/medium.bin",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-medium",
+          "size_bytes": "4096"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-medium.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-medium"
+        },
+        {
+          "op": "win-enumerate",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-medium.img",
+          "keep_image": "false",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-medium"
+        }
+      ],
+      "image": "nfs-mac-format-win-write-medium.img"
     },
     "mac-format-win-write-modify-win-chkdsk": {
       "status": "pending",
@@ -945,7 +1033,51 @@
         }
       ],
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072454",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-tiny.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-tiny.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-tiny"
+        },
+        {
+          "op": "win-write-content",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-tiny.img",
+          "path": "/tiny.txt",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-tiny",
+          "content": "hello world"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-tiny.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-tiny"
+        },
+        {
+          "op": "win-enumerate",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-tiny.img",
+          "keep_image": "false",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-tiny"
+        }
+      ],
+      "image": "nfs-mac-format-win-write-tiny.img"
     },
     "mac-format-win-write-win-delete-mac-verify-empty": {
       "status": "blocked-on-windows-write-resource-error-frs60f-agent-c6a1-2026-05-02",
