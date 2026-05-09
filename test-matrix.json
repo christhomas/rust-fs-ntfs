@@ -1145,7 +1145,69 @@
           "content_pattern": "random"
         }
       ],
-      "note": "Overwrites a middle range of an existing non-resident $DATA. Surfaces bugs in run-list rewrite when a single run is split."
+      "note": "Overwrites a middle range of an existing non-resident $DATA. Surfaces bugs in run-list rewrite when a single run is split. v2 recipe substitutes a 4 MiB zero-fill for 'random' content (chkdsk's structural checks don't care about $DATA payload bytes), and uses win-modify with a fixed 0xFF pattern at offset=1 MiB len=4 KiB so win-read can eyeball the modified window against a known-non-zero value.",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-modify-win-chkdsk.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-modify-win-chkdsk.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-modify-win-chkdsk"
+        },
+        {
+          "op": "win-write-size",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-modify-win-chkdsk.img",
+          "path": "/big.bin",
+          "size_bytes": "4194304",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-modify-win-chkdsk"
+        },
+        {
+          "op": "win-modify",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-modify-win-chkdsk.img",
+          "path": "/big.bin",
+          "offset": "1048576",
+          "len": "4096",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-modify-win-chkdsk"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-modify-win-chkdsk.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-modify-win-chkdsk"
+        },
+        {
+          "op": "win-read",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-modify-win-chkdsk.img",
+          "path": "/big.bin",
+          "offset": "1048576",
+          "len": "4096",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-modify-win-chkdsk"
+        },
+        {
+          "op": "win-enumerate",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-modify-win-chkdsk.img",
+          "keep_image": "false",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-modify-win-chkdsk"
+        }
+      ],
+      "image": "nfs-mac-format-win-write-modify-win-chkdsk.img"
     },
     "mac-format-win-write-remount-win-chkdsk": {
       "status": "pending",
