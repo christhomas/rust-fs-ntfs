@@ -46,6 +46,18 @@ function Initialize-VhdxFromImg {
 
     $Vhdx = Get-VhdxPathFor -ImagePath $ImagePath
 
+    # Belt-and-braces: tear down any orphaned mount of this Vhdx path
+    # before we look at the file. A crashed prior run could leave the
+    # VHDX both on disk *and* attached — the reuse fast path below
+    # would then return early and the caller's Mount-VhdxAndGetLetter
+    # would fail trying to remount an already-attached image. Run this
+    # before the existence check so both paths self-heal.
+    try {
+        Get-DiskImage -ImagePath $Vhdx -EA SilentlyContinue |
+            Where-Object Attached |
+            Dismount-DiskImage -EA SilentlyContinue | Out-Null
+    } catch { }
+
     # Already-streamed VHDX from a prior op — nothing to do here.
     if (Test-Path $Vhdx) {
         return @{ Vhdx = $Vhdx }
@@ -55,15 +67,6 @@ function Initialize-VhdxFromImg {
     $rawSize     = (Get-Item $ImagePath).Length
     $rawSizeMb   = [int][Math]::Ceiling($rawSize / 1MB)
     $wrapperMb   = $rawSizeMb + 64
-
-    # Belt-and-braces: tear down any orphaned mount of this Vhdx path
-    # before we start (shouldn't happen, but a crashed prior run could
-    # leave one attached and Mount-DiskImage would then fail).
-    try {
-        Get-DiskImage -ImagePath $Vhdx -EA SilentlyContinue |
-            Where-Object Attached |
-            Dismount-DiskImage -EA SilentlyContinue | Out-Null
-    } catch { }
 
     & qemu-img create -f vhdx -o subformat=fixed $Vhdx "${wrapperMb}M" *> "$Diag\wrapper-create.txt"
     if ($LASTEXITCODE -ne 0) {
@@ -142,6 +145,15 @@ function Initialize-VhdxFromImg {
 function Mount-VhdxAndGetLetter {
     param([Parameter(Mandatory=$true)] [string]$Vhdx)
 
+    # Brief pause so a prior Dismount-DiskImage (either from
+    # Initialize-VhdxFromImg's tail or a prior op's
+    # Dismount-VhdxAndCleanup) has a chance to fully settle before
+    # ntfs.sys is asked to recognise the volume again. The old monolithic
+    # win-chkdsk.ps1 had this `Start-Sleep -Seconds 1` between dismount
+    # and remount; the lib refactor split those across functions and
+    # dropped it. Removing it works on the dev VM but Windows' VHD stack
+    # has been known to race the dismount completion on slower hosts.
+    Start-Sleep -Seconds 1
     $lettersBefore = @((Get-Volume | Where-Object { $_.DriveLetter }).DriveLetter)
     $vhd = Mount-DiskImage -ImagePath $Vhdx -PassThru
     $letter = $null
@@ -192,10 +204,16 @@ function Dismount-VhdxAndCleanup {
 
     if ($KeepImage) { return }
 
+    # Best-effort delete with explicit verification on both files.
+    # Silently swallowing a cleanup failure was the bug PR #9 fixed for
+    # the .img; the .vhdx needs the same treatment because
+    # Initialize-VhdxFromImg uses .vhdx existence as its idempotency
+    # signal — a silently-failed wrapper cleanup would cause the next
+    # scenario to skip the create+stream phase and remount stale data.
     Remove-Item -LiteralPath $Vhdx -Force -EA SilentlyContinue
-    # Best-effort delete with explicit verification — silently swallowing
-    # an .img cleanup failure is exactly what would let it accumulate
-    # across scenarios and fill the C: drive (see PR #9).
+    if (Test-Path -LiteralPath $Vhdx) {
+        Write-Warning "Failed to remove VHDX wrapper: $Vhdx"
+    }
     Remove-Item -LiteralPath $ImagePath -Force -EA SilentlyContinue
     if (Test-Path -LiteralPath $ImagePath) {
         Write-Warning "Failed to remove shipped image: $ImagePath"
