@@ -456,7 +456,41 @@
       },
       "operation_sequence": "mac:format -> mac:mkdir(/data) -> mac:touch(/data/file.txt) -> mac:set-dirty -> win:chkdsk(readonly,/scan)",
       "note": "Tier-3 dirty volume with directory + nested file. Stresses the parent-pointer / $I30 invariants the chkdsk dirty-bit branch would walk.",
-      "verdict_shape": "repair-required"
+      "verdict_shape": "repair-required",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-mkdir",
+          "parent": "/",
+          "basename": "data"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/data",
+          "basename": "file.txt"
+        },
+        {
+          "op": "mac-set-dirty"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-mkdir-set-dirty-win-chkdsk.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-mkdir-set-dirty-win-chkdsk.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "RepairRequired",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-mkdir-set-dirty-win-chkdsk"
+        }
+      ],
+      "image": "nfs-mac-format-mkdir-set-dirty-win-chkdsk.img"
     },
     "mac-format-set-dirty-win-chkdsk": {
       "status": "pending",
@@ -467,7 +501,31 @@
       },
       "operation_sequence": "mac:format -> mac:set-dirty -> win:chkdsk(readonly,/scan)",
       "note": "Tier-3 dirty-volume injection. Mac formats then explicitly sets VOLUME_IS_DIRTY. Windows-side chkdsk must detect the dirty bit and either repair or report it. Clean baseline for chkdsk's dirty-volume code path.",
-      "verdict_shape": "repair-required"
+      "verdict_shape": "repair-required",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-set-dirty"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-set-dirty-win-chkdsk.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-set-dirty-win-chkdsk.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "RepairRequired",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-set-dirty-win-chkdsk"
+        }
+      ],
+      "image": "nfs-mac-format-set-dirty-win-chkdsk.img"
     },
     "mac-format-small-64mib": {
       "status": "passed-to-frs60f-ceiling-agent-8a29-2026-05-02",
@@ -850,7 +908,41 @@
       },
       "operation_sequence": "mac:format -> mac:touch(/staged.txt) -> mac:write(/staged.txt='partial') -> mac:set-dirty -> win:chkdsk(readonly,/scan)",
       "note": "Tier-3 dirty-volume + content. Simulates a half-completed write followed by a crash (dirty-bit set without our writer issuing a clean dismount). chkdsk must keep our partial-write file readable, not orphan or truncate it.",
-      "verdict_shape": "repair-required"
+      "verdict_shape": "repair-required",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "staged.txt"
+        },
+        {
+          "op": "mac-write",
+          "path": "/staged.txt",
+          "content": "partial"
+        },
+        {
+          "op": "mac-set-dirty"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-write-set-dirty-win-chkdsk.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-write-set-dirty-win-chkdsk.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "RepairRequired",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-write-set-dirty-win-chkdsk"
+        }
+      ],
+      "image": "nfs-mac-format-write-set-dirty-win-chkdsk.img"
     },
     "win-format-mac-enumerate-empty": {
       "status": "pending",
