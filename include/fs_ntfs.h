@@ -158,9 +158,9 @@ fs_ntfs_fs_t *fs_ntfs_mount_with_callbacks(
  * (`qcow2_open` from am-img-qcow2, `partitions_open_slice` from
  * am-partitions, `fs_core_file_open` from am-fs-core).
  *
- * Read-only at present — mutator API calls (`fs_ntfs_unlink`,
- * `fs_ntfs_mkdir`, etc.) return EINVAL with "handle has no recorded
- * mount source". RW support over FsCoreDevice handles is planned.
+ * Read-only — mutator API calls on the resulting handle (`_h` family)
+ * return EINVAL with "handle has no recorded mount source". For RW
+ * use `fs_ntfs_mount_rw_with_fs_core_device` below.
  *
  * The handle's reference count is incremented internally; the caller
  * still owns their *FsCoreDevice and frees it via
@@ -173,6 +173,28 @@ fs_ntfs_fs_t *fs_ntfs_mount_with_callbacks(
  */
 struct FsCoreDevice;
 fs_ntfs_fs_t *fs_ntfs_mount_with_fs_core_device(struct FsCoreDevice *handle);
+
+/*
+ * Mount via an FsCoreDevice handle, RW. Same shape as
+ * `fs_ntfs_mount_with_fs_core_device` but the underlying device is
+ * recorded as the handle's mount source so the `_h` mutator family
+ * (`fs_ntfs_create_file_h`, `fs_ntfs_mkdir_h`,
+ * `fs_ntfs_write_file_contents_h`, `fs_ntfs_unlink_h`, …) can write
+ * through it.
+ *
+ * The supplied device should report `is_writable=true` (see
+ * `fs_core_device_is_writable`); a non-writable device still mounts
+ * (read paths work) but the first mutator call returns EINVAL with a
+ * descriptive error string. The mount itself does not pre-flight
+ * writability so callers can mount hybrid devices that gate
+ * writability per-region.
+ *
+ * Reference-counting and ownership rules are identical to
+ * `fs_ntfs_mount_with_fs_core_device`.
+ *
+ * Returns NULL on failure; use fs_ntfs_last_error() for detail.
+ */
+fs_ntfs_fs_t *fs_ntfs_mount_rw_with_fs_core_device(struct FsCoreDevice *handle);
 
 /*
  * Unmount and free all resources.
