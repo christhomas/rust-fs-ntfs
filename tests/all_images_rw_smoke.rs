@@ -238,7 +238,8 @@ fn run_round_trip(image_basename: &str) {
             )
         };
         assert_eq!(
-            n, 64,
+            n,
+            64,
             "[{image_basename}] read_file returned {n} on probe (errno={})",
             fs_ntfs_last_errno()
         );
