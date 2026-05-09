@@ -1154,14 +1154,65 @@
         "label": "REMOUNT",
         "alloc_unit_size": 4096
       },
-      "operation_sequence": "mac:format -> win:chkdsk -> win:write(tiny.txt='hello') -> win:dismount -> win:remount -> win:chkdsk -> win:enumerate(tiny.txt)",
+      "operation_sequence": "mac:format -> win:chkdsk -> win:write(tiny.txt='hello') -> win:repeat-mount(1) -> win:chkdsk -> win:enumerate(tiny.txt)",
       "fixture_files": [
         {
           "name": "tiny.txt",
           "content": "hello"
         }
       ],
-      "note": "Adds a dismount/remount cycle in the middle. Catches bugs where our writer leaves the volume in a state that's only inconsistent after a clean dismount."
+      "note": "Adds a dismount/remount cycle in the middle. Catches bugs where our writer leaves the volume in a state that's only inconsistent after a clean dismount. Originally written as `win:dismount -> win:remount` in v1; collapsed to `win:repeat-mount(1)` in v2 since the per-op model already mounts/dismounts implicitly per op, so a single explicit cycle on top is the equivalent unit of work.",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-remount-win-chkdsk.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-remount-win-chkdsk.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-remount-win-chkdsk"
+        },
+        {
+          "op": "win-write-content",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-remount-win-chkdsk.img",
+          "path": "/tiny.txt",
+          "content": "hello",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-remount-win-chkdsk"
+        },
+        {
+          "op": "win-repeat-mount",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-remount-win-chkdsk.img",
+          "cycles": "1",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-remount-win-chkdsk"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-remount-win-chkdsk.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-remount-win-chkdsk"
+        },
+        {
+          "op": "win-enumerate",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-remount-win-chkdsk.img",
+          "keep_image": "false",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-remount-win-chkdsk"
+        }
+      ],
+      "image": "nfs-mac-format-win-write-remount-win-chkdsk.img"
     },
     "mac-format-win-write-rename-win-chkdsk": {
       "status": "pending",
