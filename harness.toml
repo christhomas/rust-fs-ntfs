@@ -298,6 +298,23 @@ host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-rename.ps1' -ImagePath '{step.image_path}' -FromPath '{step.from_path}' -ToPath '{step.to_path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
+[ops.win-mkdir]
+# Create a directory at `path` on the mounted volume. Uses
+# `New-Item -ItemType Directory -Force`, which creates intermediate
+# parent directories automatically — the `deep-nesting` scenario
+# relies on this so an 8-level path can be materialised in a single
+# call. A recipe that wants to surface "missing parent" as an error
+# should split into per-level mkdir calls.
+#
+# Step fields:
+#   image_path   — vm-side absolute path to the .img
+#   path         — directory path inside the volume (e.g. "/a/b/c")
+#   keep_image?  — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   diag         — vm-side directory for mkdir-result.txt + mkdir-error.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-mkdir.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
 # Other win-side ops (win-mount/win-unmount as separate ops, win-format,
-# win-mkdir/win-modify/win-read) follow the same shape and land
-# alongside their first scenario consumer in subsequent Phase 4c PRs.
+# win-modify/win-read) follow the same shape and land alongside their
+# first scenario consumer in subsequent Phase 4c PRs.
