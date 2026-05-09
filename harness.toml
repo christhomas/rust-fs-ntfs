@@ -315,6 +315,58 @@ host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-mkdir.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
+[ops.win-write-many-size]
+# Bulk-write `count` files of `size_bytes` zero bytes each, all in a
+# single mount/dismount cycle. Names follow `name_pattern` with the
+# literal `{N}` placeholder substituted by the iteration index,
+# zero-padded to the width of `count - 1` (count=256 → width 3 →
+# `file_000.txt` .. `file_255.txt`).
+#
+# Bulk shape (rather than N x win-write-size steps) because each
+# single-file op pays a full mount + drive-letter assignment + dismount
+# (~5–10s on the dev VM); 256 single-file ops would burn 20–40 min of
+# mount overhead per scenario for ~4 KiB of payload. One mount, looped
+# writes, one dismount.
+#
+# Step fields:
+#   image_path     — vm-side absolute path to the .img
+#   count          — positive integer (number of files to write)
+#   name_pattern   — volume-relative path containing `{N}` (e.g. "/file_{N}.txt")
+#   size_bytes     — zero-byte body length per file (>= 0, integer as string)
+#   keep_image?    — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   diag           — vm-side directory for write-many-result.txt + write-many-error.txt
+#
+# Content-mode counterpart (literal-string body) is intentionally not
+# shipped yet — no current scenario needs one. When it does, add a
+# separate `win-write-many-content` op (same cmd-shell empty-arg
+# rationale as `win-write-content` vs `win-write-size`).
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-write-many.ps1' -ImagePath '{step.image_path}' -Count '{step.count}' -NamePattern '{step.name_pattern}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+[ops.win-delete-many]
+# Bulk-delete files matching a numbered `name_pattern` from the mounted
+# volume in a single mount/dismount cycle. Iterates the half-open range
+# `[start, end)` stepped by `step` (same shape as PowerShell's
+# `for ($i = $start; $i -lt $end; $i += $step)`); indices are
+# zero-padded to the width of `end - 1` so naming lines up with files
+# emitted by `win-write-many-size` for the same `count = end`.
+#
+# Same bulk-vs-N-singletons rationale as win-write-many-size — one
+# mount, looped deletes, one dismount.
+#
+# Step fields:
+#   image_path     — vm-side absolute path to the .img
+#   start          — first index, inclusive (integer >= 0)
+#   end            — stop index, exclusive (integer > start)
+#   step           — stride (positive integer)
+#   name_pattern   — volume-relative path containing `{N}` (e.g. "/file_{N}.txt")
+#   keep_image?    — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   diag           — vm-side directory for delete-many-result.txt + delete-many-error.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-delete-many.ps1' -ImagePath '{step.image_path}' -Start '{step.start}' -End '{step.end}' -Step '{step.step}' -NamePattern '{step.name_pattern}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
 # Other win-side ops (win-mount/win-unmount as separate ops, win-format,
 # win-modify/win-read) follow the same shape and land alongside their
 # first scenario consumer in subsequent Phase 4c PRs.

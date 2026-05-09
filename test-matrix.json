@@ -1056,7 +1056,52 @@
       },
       "operation_sequence": "mac:format -> win:chkdsk -> win:write(256 files of 16 bytes) -> win:chkdsk -> win:enumerate(all)",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "note": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-small.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-small.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-small"
+        },
+        {
+          "op": "win-write-many-size",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-small.img",
+          "count": "256",
+          "name_pattern": "/file_{N}.txt",
+          "size_bytes": "16",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-small"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-small.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-small"
+        },
+        {
+          "op": "win-enumerate",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-small.img",
+          "keep_image": "false",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-small"
+        }
+      ],
+      "image": "nfs-mac-format-win-write-many-small.img"
     },
     "mac-format-win-write-many-win-delete-half-win-chkdsk": {
       "status": "pending",
@@ -1066,7 +1111,62 @@
         "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk -> win:write(256 files x 16 bytes) -> win:delete(every other) -> win:chkdsk -> win:enumerate(128 remain)",
-      "note": "$Bitmap free-then-reuse and $I30 entry-removal churn. If our writer leaves dangling free-bitmap state, chkdsk after delete catches it."
+      "note": "$Bitmap free-then-reuse and $I30 entry-removal churn. If our writer leaves dangling free-bitmap state, chkdsk after delete catches it.",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-win-delete-half-win-chkdsk"
+        },
+        {
+          "op": "win-write-many-size",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img",
+          "count": "256",
+          "name_pattern": "/file_{N}.txt",
+          "size_bytes": "16",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-win-delete-half-win-chkdsk"
+        },
+        {
+          "op": "win-delete-many",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img",
+          "start": "0",
+          "end": "256",
+          "step": "2",
+          "name_pattern": "/file_{N}.txt",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-win-delete-half-win-chkdsk"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-win-delete-half-win-chkdsk"
+        },
+        {
+          "op": "win-enumerate",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img",
+          "keep_image": "false",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-win-delete-half-win-chkdsk"
+        }
+      ],
+      "image": "nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img"
     },
     "mac-format-win-write-medium": {
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
