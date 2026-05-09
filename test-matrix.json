@@ -1126,7 +1126,59 @@
           "content": "hello"
         }
       ],
-      "note": "Same-parent rename \u2014 catches bugs where the old $FILE_NAME isn't fully retired or the parent $I30 isn't kept consistent."
+      "note": "Same-parent rename \u2014 catches bugs where the old $FILE_NAME isn't fully retired or the parent $I30 isn't kept consistent.",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-rename-win-chkdsk.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-rename-win-chkdsk.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-rename-win-chkdsk"
+        },
+        {
+          "op": "win-write-content",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-rename-win-chkdsk.img",
+          "path": "/a.txt",
+          "content": "hello",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-rename-win-chkdsk"
+        },
+        {
+          "op": "win-rename",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-rename-win-chkdsk.img",
+          "from_path": "/a.txt",
+          "to_path": "/b.txt",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-rename-win-chkdsk"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-rename-win-chkdsk.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-rename-win-chkdsk"
+        },
+        {
+          "op": "win-enumerate",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-rename-win-chkdsk.img",
+          "keep_image": "false",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-rename-win-chkdsk"
+        }
+      ],
+      "image": "nfs-mac-format-win-write-rename-win-chkdsk.img"
     },
     "mac-format-win-write-then-delete": {
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
