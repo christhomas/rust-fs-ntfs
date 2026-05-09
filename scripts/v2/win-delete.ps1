@@ -34,9 +34,12 @@ if ($KeepImage -and $KeepImage.Trim() -ne '') {
 }
 
 # Strip a leading separator so we can join with the drive-letter root.
+# Reject dot-segments (`.` / `..`) too — they normalise unpredictably
+# under Windows path resolution and have no legitimate use in a recipe
+# that names a file inside the freshly-mounted volume.
 $relPath = $Path -replace '^[/\\]+', ''
-if ($relPath -eq '') {
-    [Console]::Error.WriteLine("win-delete: -Path must name a file under the volume root; got '$Path'")
+if ($relPath -eq '' -or $relPath -match '(^|[\\/])\.{1,2}([\\/]|$)') {
+    [Console]::Error.WriteLine("win-delete: -Path must name a file under the volume root with no '.' or '..' segments; got '$Path'")
     exit 2
 }
 
