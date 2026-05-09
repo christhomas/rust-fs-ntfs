@@ -180,16 +180,36 @@ expect_exit = 0
 #                    on pre-/scan != 0 (volume actually dirty) AND
 #                    fix_exit == 0 AND post_scan_exit == 0. Used by
 #                    `mac:set-dirty -> win:chkdsk` scenarios.
+#   keep_image?    — `true` keeps the .img + .vhdx on the VM after this
+#                    op so a follow-on win-* op (e.g. win-enumerate)
+#                    can mount them. Default `false` cleans up. The
+#                    final win-* op in a multi-op recipe should omit
+#                    this (or pass `false`) so cleanup runs.
 #   diag           — vm-side directory for chkdsk-*.txt + eventlog
 #
 # The script path is hardcoded against `vm.workdir` because the
 # harness's substitution surface doesn't (yet) carry `{vm.*}` tokens
 # from `[vm]`. When that lands, swap the literal for `{vm.workdir}`.
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-chkdsk.ps1' -ImagePath '{step.image_path}' -Modes '{step.modes?}' -VerdictShape '{step.verdict_shape?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-chkdsk.ps1' -ImagePath '{step.image_path}' -Modes '{step.modes?}' -VerdictShape '{step.verdict_shape?}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
-# Other win-side ops (win-enumerate, win-repeat-mount, win-write,
-# win-mount/win-unmount as separate ops, win-format) follow the same
-# shape and land alongside their first scenario consumer in
-# subsequent Phase 4c PRs.
+[ops.win-enumerate]
+# Mount the .img (reusing a prior op's .vhdx if `keep_image=true` was
+# set on the prior step) and walk the volume root recursively. Writes
+# one line per entry to <diag>/enumerate.txt for downstream consumption
+# (today an observation; future verdict shapes can gate against it).
+#
+# Step fields:
+#   image_path  — vm-side absolute path to the .img
+#   keep_image? — `true` keeps the .img + .vhdx for a follow-on op.
+#                 Default `false` cleans up. The final win-* op in a
+#                 multi-op recipe should omit this so cleanup runs.
+#   diag        — vm-side directory for enumerate.txt + wrapper-create.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-enumerate.ps1' -ImagePath '{step.image_path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+# Other win-side ops (win-repeat-mount, win-write, win-mount/win-unmount
+# as separate ops, win-format) follow the same shape and land alongside
+# their first scenario consumer in subsequent Phase 4c PRs.

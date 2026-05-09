@@ -11,24 +11,37 @@
 # requested modes, dismounts, and cleans up.
 #
 # Args:
-#   -ImagePath  Path on the VM to the .img file (typically
-#               <vm.workdir>/<scenario.image>).
-#   -Modes      Comma-separated list of chkdsk passes to run, in
-#               order: readonly, /scan, /spotfix, /F, /F /scan.
-#               Empty / absent => run readonly only (matches the
-#               default `mac:format -> win:chkdsk` shape).
-#   -Diag       Directory to write diag artefacts into:
-#                 chkdsk-<mode>.txt        — chkdsk's stdout
-#                 chkdsk-<mode>-exit.txt   — exit code marker
-#                 mount-eventlog.txt       — Disk/Ntfs/partmgr events
-#                 wrapper-create.txt       — qemu-img output
+#   -ImagePath   Path on the VM to the .img file (typically
+#                <vm.workdir>/<scenario.image>).
+#   -Modes       Comma-separated list of chkdsk passes to run, in
+#                order: readonly, /scan, /spotfix, /F, /F /scan.
+#                Empty / absent => run readonly only (matches the
+#                default `mac:format -> win:chkdsk` shape).
+#   -VerdictShape  `Clean` (default) or `RepairRequired`. See the
+#                  comment block above the chkdsk loop for the gating
+#                  rules.
+#   -KeepImage   If `true` (string, from `{step.keep_image?}`), the
+#                .img and .vhdx are left in place on the VM after this
+#                op completes so a follow-on win-* op can mount them.
+#                Default `false` matches the single-win-op recipe shape.
+#                The final win-* op in a multi-op recipe must omit
+#                this flag (or pass `false`) so cleanup runs.
+#   -Diag        Directory to write diag artefacts into:
+#                  chkdsk-<mode>.txt        - chkdsk's stdout
+#                  chkdsk-<mode>-exit.txt   - exit code marker
+#                  mount-eventlog.txt       - Disk/Ntfs/partmgr events
+#                  wrapper-create.txt       - qemu-img output
+#                  verdict.json             - final pass/fail summary
 #
 # Exit code:
-#   0 if every chkdsk mode exited 0
+#   0 if every chkdsk mode exited 0 (Clean) or the RepairRequired
+#     verdict logic returned passed=true
 #   1 otherwise; per-mode exit codes are in <Diag>/chkdsk-*-exit.txt
+#   2 for config errors (bad -VerdictShape, missing /scan in
+#     RepairRequired modes)
 #
 # Phase 1e replacement target: this script invokes `qemu-img` to wrap
-# the .img into a VHDX — the same dependency that Phase 1e plans to
+# the .img into a VHDX -- the same dependency that Phase 1e plans to
 # replace with `am-img-vhd::create_fixed`. When that lands, the
 # `qemu-img create` line below becomes a thin invocation of the
 # Antimatter Studios VHD writer; the rest of the lifecycle (mount,
@@ -38,21 +51,13 @@ param(
     [Parameter(Mandatory=$true)] [string]$ImagePath,
     [string]$Modes = "readonly",
     [Parameter(Mandatory=$true)] [string]$Diag,
-    # Verdict shape — must match v1's tests/matrix.rs `VerdictShape`:
-    #   Clean           — every requested mode is gated against the
-    #                     Clean-shape rules (readonly==0, /scan in
-    #                     {0,11,13}). Default; preserves existing
-    #                     scenarios.
-    #   RepairRequired  — the listed modes are run first (their exit
-    #                     codes captured but NOT gated). The volume is
-    #                     expected to be dirty, so the pre-/F /scan is
-    #                     expected to return non-zero. Then /F runs
-    #                     (capture as `fix_exit`) and a post-/F /scan
-    #                     runs (capture as `post_scan_exit`). Verdict
-    #                     gates on: pre-/scan != 0 AND fix_exit == 0
-    #                     AND post_scan_exit == 0.
-    [string]$VerdictShape = 'Clean'
+    [string]$VerdictShape = 'Clean',
+    [string]$KeepImage = 'false'
 )
+
+$ErrorActionPreference = 'Stop'
+
+. "$PSScriptRoot\_lib.ps1"
 
 # Accept empty (from `{step.verdict_shape?}` substitution when omitted)
 # as the Clean default so callers don't have to spell it out everywhere.
@@ -64,161 +69,22 @@ if ($VerdictShape -ne 'Clean' -and $VerdictShape -ne 'RepairRequired') {
     exit 2
 }
 
-$ErrorActionPreference = 'Stop'
-
-# qemu-img is on the PATH via setup-windows-vm.ps1's package install.
-$env:PATH = "C:\Program Files\Cloudbase Solutions\QEMU\bin;$env:PATH"
-
-if (-not (Test-Path $ImagePath)) {
-    Write-Error "image not found on VM: $ImagePath"
-    exit 2
+# Same trick for KeepImage: empty -> false. Accept any case-insensitive
+# truthy string so recipes can write "True" without surprises.
+$KeepImageBool = $false
+if ($KeepImage -and $KeepImage.Trim() -ne '') {
+    if ($KeepImage -match '^(?i:true|1|yes)$') { $KeepImageBool = $true }
 }
 
 New-Item -ItemType Directory -Path $Diag -Force | Out-Null
 
-# Sized just larger than the .img so the GPT slack fits.
-$rawSize     = (Get-Item $ImagePath).Length
-$rawSizeMb   = [int][Math]::Ceiling($rawSize / 1MB)
-$wrapperMb   = $rawSizeMb + 64
-$Vhdx        = [System.IO.Path]::ChangeExtension($ImagePath, ".vhdx")
-
-# Ensure a clean slate — any prior wrapper for this scenario is
-# torn down before we start.
-foreach ($v in @($Vhdx)) {
-    try {
-        Get-DiskImage -ImagePath $v -EA SilentlyContinue |
-            Where-Object Attached |
-            Dismount-DiskImage -EA SilentlyContinue | Out-Null
-    } catch { }
-}
-Remove-Item -LiteralPath $Vhdx -Force -EA SilentlyContinue
-
 $startTime = Get-Date
+$state = $null
+$Vhdx = Get-VhdxPathFor -ImagePath $ImagePath
 
 try {
-    # ── Wrap .img into a VHDX (Phase 1e replacement target) ───────
-    & qemu-img create -f vhdx -o subformat=fixed $Vhdx "${wrapperMb}M" *> "$Diag\wrapper-create.txt"
-    if ($LASTEXITCODE -ne 0) {
-        throw "qemu-img create failed exit=$LASTEXITCODE (see wrapper-create.txt)"
-    }
-    fsutil sparse setflag $Vhdx 0 | Out-Null
-
-    # ── Mount + initialise ────────────────────────────────────────
-    $vhd = Mount-DiskImage -ImagePath $Vhdx -PassThru
-    Start-Sleep -Seconds 2
-    Initialize-Disk -Number $vhd.Number -PartitionStyle GPT
-    Start-Sleep -Seconds 2
-    $disk = Get-Disk -Number $vhd.Number
-    $part = New-Partition -DiskNumber $vhd.Number -UseMaximumSize -AssignDriveLetter:$false
-    if ($part.Size -lt $rawSize) {
-        throw "partition smaller than raw image ($($part.Size) < $rawSize)"
-    }
-
-    # Take the disk offline before opening the raw `\\.\PhysicalDriveN`
-    # handle. Without this, chunked writes to the raw handle return
-    # `Access to the path is denied.` once the volume layer auto-detects
-    # the new partition and locks it — v1's run-scenario.ps1 documents
-    # the same failure mode (lines 115-122) and explicitly skips
-    # >2 GiB scenarios to avoid it. Setting the disk offline tells the
-    # Volume Manager to release any volume-level holds; raw block-layer
-    # writes via `\\.\PhysicalDriveN` still work while offline. The disk
-    # is brought back online in this block's `finally` so it's restored
-    # even if the streaming throws — otherwise an exception here would
-    # leave the disk offline and the outer cleanup's `Dismount-DiskImage`
-    # behaviour against an offline VHD isn't guaranteed across Windows
-    # versions.
-    Set-Disk -Number $disk.Number -IsOffline $true
-    $writeFailed = $false
-    try {
-        # Stream the .img bytes into the partition's offset on the raw
-        # disk. v1's `[IO.File]::ReadAllBytes` capped at ~2 GiB (.NET
-        # `byte[]` length is Int32); chunked Read + Write avoids the cap.
-        $rawPath = "\\.\PhysicalDrive$($disk.Number)"
-        # FileShare.Read on the source matches `[IO.File]::ReadAllBytes`'s
-        # internal share — denies write-sharing during the copy so a
-        # concurrent scp retry can't produce a torn image.
-        $src = [System.IO.File]::Open($ImagePath, [System.IO.FileMode]::Open,
-            [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
-        try {
-            # Catch wraps the entire `$dst` lifetime — the raw-disk
-            # `[IO.File]::Open`, the `Seek`, the read/write loop, and
-            # `Flush` — so any failure in this window sets `$writeFailed`
-            # before the outer finally hits Set-Disk. `$dst.Close()` in
-            # the inner finally only runs if `$dst` was assigned.
-            try {
-                $dst = [System.IO.File]::Open($rawPath, [System.IO.FileMode]::Open,
-                    [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
-                try {
-                    $dst.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
-                    # Raw writes require offset + length to be multiples of the
-                    # physical sector size; pad the trailing chunk's `[n, aligned)`
-                    # window with zeros (Read rewrote `[0, n)` so only the pad
-                    # region could be stale). `$disk.PhysicalSectorSize` returns
-                    # 512 on legacy 512n media and 4096 on 4Kn drives.
-                    $sectorSize = $disk.PhysicalSectorSize
-                    $bufSize = 16MB
-                    $buf = New-Object byte[] $bufSize
-                    while ($true) {
-                        $n = $src.Read($buf, 0, $bufSize)
-                        if ($n -le 0) { break }
-                        $aligned = [int][Math]::Ceiling($n / $sectorSize) * $sectorSize
-                        if ($aligned -gt $n) {
-                            [Array]::Clear($buf, $n, $aligned - $n)
-                        }
-                        $dst.Write($buf, 0, $aligned)
-                    }
-                    $dst.Flush($true)
-                } finally { $dst.Close() }
-            } catch {
-                $writeFailed = $true
-                throw
-            }
-        } finally { $src.Close() }
-    } finally {
-        # Bring the disk back online so ntfs.sys can mount the populated
-        # partition for chkdsk. If the streaming write itself failed,
-        # silence any restore error so the original write exception is
-        # what propagates. Otherwise let the restore fail loudly — a
-        # silent restore failure here would surface later as a
-        # cryptic `Dismount-DiskImage` / drive-letter error.
-        if ($writeFailed) {
-            Set-Disk -Number $disk.Number -IsOffline $false -EA SilentlyContinue
-        } else {
-            Set-Disk -Number $disk.Number -IsOffline $false -EA Stop
-        }
-    }
-
-    # Dismount + remount so ntfs.sys re-recognises the populated
-    # partition and assigns a drive letter.
-    Dismount-DiskImage -ImagePath $Vhdx | Out-Null
-    Start-Sleep -Seconds 1
-    $lettersBefore = @((Get-Volume | Where-Object { $_.DriveLetter }).DriveLetter)
-    $vhd = Mount-DiskImage -ImagePath $Vhdx -PassThru
-    $letter = $null
-    for ($i = 0; $i -lt 10; $i++) {
-        Start-Sleep -Seconds 1
-        $lettersAfter = @((Get-Volume | Where-Object { $_.DriveLetter }).DriveLetter)
-        $new = $lettersAfter | Where-Object { $_ -notin $lettersBefore }
-        if ($new) { $letter = $new | Select-Object -First 1; break }
-    }
-    if (-not $letter) {
-        $disk2 = Get-Disk -Number $vhd.Number
-        $partition = Get-Partition -DiskNumber $disk2.Number |
-            Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
-        $used = (Get-Volume | ForEach-Object { $_.DriveLetter }) +
-                (Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Name })
-        foreach ($c in [char[]](68..90)) {
-            if ($c -notin $used) {
-                try {
-                    Set-Partition -DiskNumber $disk2.Number `
-                        -PartitionNumber $partition.PartitionNumber `
-                        -NewDriveLetter $c -ErrorAction Stop
-                    $letter = "$c"; break
-                } catch { }
-            }
-        }
-    }
-    if (-not $letter) { throw "no drive letter assigned" }
+    $state = Initialize-VhdxFromImg -ImagePath $ImagePath -Diag $Diag
+    $letter = Mount-VhdxAndGetLetter -Vhdx $state.Vhdx
 
     # ── chkdsk passes ─────────────────────────────────────────────
     #
@@ -326,37 +192,5 @@ try {
     if ($passed) { exit 0 } else { exit 1 }
 
 } finally {
-    # Tear down the VHDX wrapper. Leftover wrappers from a crashed run
-    # would block a subsequent Mount-DiskImage with a drive-letter
-    # collision, plus they consume real bytes on the C: drive — not
-    # negligible for the 1GiB+ scenarios.
-    foreach ($v in @($Vhdx)) {
-        try {
-            Get-DiskImage -ImagePath $v -EA SilentlyContinue |
-                Where-Object Attached |
-                Dismount-DiskImage -EA SilentlyContinue | Out-Null
-        } catch { }
-    }
-    Remove-Item -LiteralPath $Vhdx -Force -EA SilentlyContinue
-
-    # Drop the shipped .img too. The harness's `ship-to-vm` op puts it
-    # here at scenario start; without explicit cleanup we accumulate
-    # one image-sized file per scenario, which fills the C: drive
-    # within a single matrix run (a 16 GiB volume scenario alone is
-    # most of a 64 GiB VM disk). The Mac side keeps its own copy if
-    # post-mortem inspection is needed; the .vhdx wrapper cleanup
-    # already takes the actual disk-image artefacts with it.
-    #
-    # Best-effort delete: don't crash the script if the file's
-    # somehow held by a process that didn't release. But verify
-    # afterward and emit a warning + per-scenario diag entry —
-    # silently suppressing the failure is exactly what would let the
-    # leak recur unnoticed, which defeats the whole point of this
-    # cleanup block.
-    Remove-Item -LiteralPath $ImagePath -Force -EA SilentlyContinue
-    if (Test-Path -LiteralPath $ImagePath) {
-        "cleanup_failed image_path=$ImagePath" |
-            Out-File "$Diag\cleanup-warnings.txt" -Append -Encoding ASCII
-        Write-Warning "Failed to remove shipped image: $ImagePath (still on disk after Remove-Item; see cleanup-warnings.txt)"
-    }
+    Dismount-VhdxAndCleanup -Vhdx $Vhdx -ImagePath $ImagePath -KeepImage $KeepImageBool
 }

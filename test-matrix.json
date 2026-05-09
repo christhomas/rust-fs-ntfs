@@ -27,7 +27,35 @@
             "scan": 11
           }
         }
-      ]
+      ],
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-basic-256mib.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-basic-256mib.img",
+          "modes": "readonly,/scan",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-basic-256mib",
+          "verdict_shape": "Clean"
+        },
+        {
+          "op": "win-enumerate",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-basic-256mib.img",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-basic-256mib",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-mac-format-basic-256mib.img"
     },
     "mac-format-cluster-1k": {
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
@@ -56,7 +84,9 @@
           "op": "win-chkdsk",
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-1k.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-cluster-1k"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-cluster-1k",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
         }
       ]
     },
@@ -87,7 +117,9 @@
           "op": "win-chkdsk",
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-512.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-cluster-512"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-cluster-512",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
         }
       ]
     },
@@ -118,7 +150,9 @@
           "op": "win-chkdsk",
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-64k.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-cluster-64k"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-cluster-64k",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
         }
       ]
     },
@@ -149,7 +183,9 @@
           "op": "win-chkdsk",
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-8k.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-cluster-8k"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-cluster-8k",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
         }
       ]
     },
@@ -181,7 +217,9 @@
           "op": "win-chkdsk",
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-32chars.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-label-32chars"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-label-32chars",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
         }
       ]
     },
@@ -213,7 +251,9 @@
           "op": "win-chkdsk",
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-cjk.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-label-cjk"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-label-cjk",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
         }
       ]
     },
@@ -245,7 +285,9 @@
           "op": "win-chkdsk",
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-empty.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-label-empty"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-label-empty",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
         }
       ]
     },
@@ -277,7 +319,9 @@
           "op": "win-chkdsk",
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-latin1.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-label-latin1"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-label-latin1",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
         }
       ]
     },
@@ -309,7 +353,9 @@
           "op": "win-chkdsk",
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-large-1gib.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-large-1gib"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-large-1gib",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
         }
       ]
     },
@@ -487,7 +533,8 @@
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-mkdir-set-dirty-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "RepairRequired",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-mkdir-set-dirty-win-chkdsk"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-mkdir-set-dirty-win-chkdsk",
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-mkdir-set-dirty-win-chkdsk.img"
@@ -522,7 +569,8 @@
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-set-dirty-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "RepairRequired",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-set-dirty-win-chkdsk"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-set-dirty-win-chkdsk",
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-set-dirty-win-chkdsk.img"
@@ -555,7 +603,9 @@
           "op": "win-chkdsk",
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-small-64mib.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-small-64mib"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-small-64mib",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
         }
       ]
     },
@@ -587,7 +637,9 @@
           "op": "win-chkdsk",
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-tiny-32mib.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-tiny-32mib"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-tiny-32mib",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
         }
       ]
     },
@@ -617,7 +669,9 @@
           "op": "win-chkdsk",
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-16gib-cluster-4k.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-volume-16gib-cluster-4k"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-volume-16gib-cluster-4k",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
         }
       ]
     },
@@ -647,7 +701,9 @@
           "op": "win-chkdsk",
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-32mib-cluster-512.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-volume-32mib-cluster-512"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-volume-32mib-cluster-512",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
         }
       ]
     },
@@ -677,7 +733,9 @@
           "op": "win-chkdsk",
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-4gib-cluster-4k.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-volume-4gib-cluster-4k"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-volume-4gib-cluster-4k",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
         }
       ]
     },
@@ -707,7 +765,9 @@
           "op": "win-chkdsk",
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-4gib-cluster-64k.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-volume-4gib-cluster-64k"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-volume-4gib-cluster-64k",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
         }
       ]
     },
@@ -939,7 +999,8 @@
           "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-write-set-dirty-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "RepairRequired",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-write-set-dirty-win-chkdsk"
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-write-set-dirty-win-chkdsk",
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-write-set-dirty-win-chkdsk.img"
