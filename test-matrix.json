@@ -873,7 +873,7 @@
         "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly) -> win:repeat-mount(5) -> win:chkdsk(readonly,/scan)",
-      "note": "Tier-3 repeat-mount. After initial chkdsk, dismount/remount \u00d7 5 with chkdsk between each cycle. Catches bugs where the volume only goes inconsistent after multiple clean dismounts (e.g. $LogFile state ntfs.sys tolerates once but rejects on the third mount).",
+      "note": "Tier-3 repeat-mount. After initial chkdsk, dismount/remount \u00d7 5, then run trailing chkdsk. Catches bugs where the volume only goes inconsistent after multiple clean dismounts (e.g. $LogFile state ntfs.sys tolerates once but rejects on later mounts).",
       "recipe": [
         {
           "op": "init-image"
