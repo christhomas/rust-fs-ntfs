@@ -491,7 +491,54 @@
         "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> mac:touch(/persistent.txt) -> mac:write(/persistent.txt='hello') -> win:chkdsk(readonly) -> win:repeat-mount(3) -> win:chkdsk(readonly,/scan)",
-      "note": "Tier-3 repeat-mount with mac-side content. Verifies our writer's metadata stays valid across multiple dismount/remount cycles after we've added a file."
+      "note": "Tier-3 repeat-mount with mac-side content. Verifies our writer's metadata stays valid across multiple dismount/remount cycles after we've added a file.",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "persistent.txt"
+        },
+        {
+          "op": "mac-write",
+          "path": "/persistent.txt",
+          "content": "hello"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-mac-write-win-repeat-mount-3-win-chkdsk.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-mac-write-win-repeat-mount-3-win-chkdsk.img",
+          "modes": "readonly",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-mac-write-win-repeat-mount-3-win-chkdsk"
+        },
+        {
+          "op": "win-repeat-mount",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-mac-write-win-repeat-mount-3-win-chkdsk.img",
+          "cycles": "3",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-mac-write-win-repeat-mount-3-win-chkdsk"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-mac-write-win-repeat-mount-3-win-chkdsk.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-mac-write-win-repeat-mount-3-win-chkdsk"
+        }
+      ],
+      "image": "nfs-mac-format-mac-write-win-repeat-mount-3-win-chkdsk.img"
     },
     "mac-format-mkdir-set-dirty-win-chkdsk": {
       "status": "pending",
@@ -779,7 +826,44 @@
         "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly) -> win:repeat-mount(10) -> win:chkdsk(readonly,/scan)",
-      "note": "Same as repeat-mount-5 but \u00d710 cycles. If our writer leaves a slowly-degrading state, this surfaces it past the 5-cycle ceiling."
+      "note": "Same as repeat-mount-5 but \u00d710 cycles. If our writer leaves a slowly-degrading state, this surfaces it past the 5-cycle ceiling.",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-10-win-chkdsk.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-10-win-chkdsk.img",
+          "modes": "readonly",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-repeat-mount-10-win-chkdsk"
+        },
+        {
+          "op": "win-repeat-mount",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-10-win-chkdsk.img",
+          "cycles": "10",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-repeat-mount-10-win-chkdsk"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-10-win-chkdsk.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-repeat-mount-10-win-chkdsk"
+        }
+      ],
+      "image": "nfs-mac-format-win-repeat-mount-10-win-chkdsk.img"
     },
     "mac-format-win-repeat-mount-5-win-chkdsk": {
       "status": "pending",
@@ -789,7 +873,44 @@
         "alloc_unit_size": 4096
       },
       "operation_sequence": "mac:format -> win:chkdsk(readonly) -> win:repeat-mount(5) -> win:chkdsk(readonly,/scan)",
-      "note": "Tier-3 repeat-mount. After initial chkdsk, dismount/remount \u00d7 5 with chkdsk between each cycle. Catches bugs where the volume only goes inconsistent after multiple clean dismounts (e.g. $LogFile state ntfs.sys tolerates once but rejects on the third mount)."
+      "note": "Tier-3 repeat-mount. After initial chkdsk, dismount/remount \u00d7 5, then run trailing chkdsk. Catches bugs where the volume only goes inconsistent after multiple clean dismounts (e.g. $LogFile state ntfs.sys tolerates once but rejects on later mounts).",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-5-win-chkdsk.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-5-win-chkdsk.img",
+          "modes": "readonly",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-repeat-mount-5-win-chkdsk"
+        },
+        {
+          "op": "win-repeat-mount",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-5-win-chkdsk.img",
+          "cycles": "5",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-repeat-mount-5-win-chkdsk"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-5-win-chkdsk.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-repeat-mount-5-win-chkdsk"
+        }
+      ],
+      "image": "nfs-mac-format-win-repeat-mount-5-win-chkdsk.img"
     },
     "mac-format-win-write-deep-nesting-win-chkdsk": {
       "status": "pending",
