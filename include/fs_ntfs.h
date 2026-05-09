@@ -408,6 +408,34 @@ int fs_ntfs_fsck_with_callbacks(
     uint64_t *out_logfile_bytes,
     uint8_t  *out_dirty_cleared);
 
+/*
+ * fs_core counterparts of `fs_ntfs_is_dirty_with_callbacks` and
+ * `fs_ntfs_fsck_with_callbacks`. Use these when the underlying device
+ * is reached through an FsCoreDevice handle from a sister crate
+ * (`qcow2_open_rw_on_device`, `partitions_open_slice`,
+ * `fs_core_file_open`, ...) — there's no need to plumb individual
+ * callbacks when the device is already an FsCoreDevice.
+ *
+ * The handle is borrowed (its inner Arc is cloned for the duration
+ * of the call). The caller still owns the handle and frees it via
+ * `fs_core_device_close`.
+ *
+ * Semantics + return values match the `_with_callbacks` siblings:
+ *   is_dirty: 1 = dirty, 0 = clean, -1 = error.
+ *   fsck:     0 = success, -1 = error. out_logfile_bytes /
+ *             out_dirty_cleared (if non-NULL) filled on success.
+ *
+ * fsck requires the device to report `is_writable() == true`;
+ * otherwise it fails up front with -1 and a descriptive error.
+ */
+int fs_ntfs_is_dirty_with_fs_core_device(struct FsCoreDevice *handle);
+int fs_ntfs_fsck_with_fs_core_device(
+    struct FsCoreDevice *handle,
+    fs_ntfs_fsck_progress_fn progress_cb,
+    void *progress_ctx,
+    uint64_t *out_logfile_bytes,
+    uint8_t  *out_dirty_cleared);
+
 /* ---- In-place writes (phase W1) ---- */
 
 /*

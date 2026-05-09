@@ -886,6 +886,27 @@ impl BlockIoTrait for FsCoreBlockIo {
     }
 }
 
+/// Same shape as the `BlockIo` impl above — fsck and the mutator API
+/// have parallel trait surfaces (intentional, see `src/fsck.rs`),
+/// so the adapter has to satisfy both. Bodies are identical.
+impl crate::fsck::FsckIo for FsCoreBlockIo {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        fs_core::BlockRead::read_at(&self.device, offset, buf).map_err(|e| e.to_string())
+    }
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        if !fs_core::BlockDevice::is_writable(&self.device) {
+            return Err("device is not writable".to_string());
+        }
+        fs_core::BlockDevice::write_at(&self.device, offset, buf).map_err(|e| e.to_string())
+    }
+    fn size(&self) -> u64 {
+        self.size
+    }
+    fn sync(&mut self) -> Result<(), String> {
+        fs_core::BlockDevice::flush(&self.device).map_err(|e| e.to_string())
+    }
+}
+
 impl BlockIoTrait for HandleIo {
     fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
         match self {
@@ -2712,6 +2733,114 @@ pub extern "C" fn fs_ntfs_fsck_with_callbacks(
         }
     };
 
+    #[allow(clippy::type_complexity)]
+    let progress: Option<&mut (dyn FnMut(&str, u64, u64) + '_)> = if pcb.is_some() {
+        Some(&mut progress_closure)
+    } else {
+        None
+    };
+
+    match fsck::fsck_io(&mut io, progress) {
+        Ok(report) => {
+            if !out_logfile_bytes.is_null() {
+                unsafe { *out_logfile_bytes = report.logfile_bytes };
+            }
+            if !out_dirty_cleared.is_null() {
+                unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };
+            }
+            0
+        }
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// `fs_core` counterpart of [`fs_ntfs_is_dirty_with_callbacks`]. Reads
+/// the dirty flag through an `FsCoreDevice` handle from a sister crate
+/// (`qcow2_open_rw_on_device`, `partitions_open_slice`,
+/// `fs_core_file_open`, ...). Returns `1` if dirty, `0` if clean,
+/// `-1` on error.
+///
+/// The handle is borrowed (its inner `Arc` is cloned for the duration
+/// of the call). The caller still owns the handle and frees it via
+/// `fs_core_device_close`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_is_dirty_with_fs_core_device(
+    handle: *mut fs_core::ffi::FsCoreDevice,
+) -> c_int {
+    if handle.is_null() {
+        set_error("fs_ntfs_is_dirty_with_fs_core_device: null handle");
+        return -1;
+    }
+    // Safety: handle non-null per the check above; caller-owned per the
+    // doc contract. The Arc clone keeps the device alive through the
+    // call independent of any caller-side close.
+    let device = unsafe { (*handle).inner().clone() };
+    let size = fs_core::BlockRead::size_bytes(&device);
+    let mut io = FsCoreBlockIo { device, size };
+
+    match fsck::is_dirty_io(&mut io) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// `fs_core` counterpart of [`fs_ntfs_fsck_with_callbacks`]. Replays
+/// `$LogFile` and clears the dirty bit through an `FsCoreDevice`
+/// handle. The device must report `is_writable() == true`; otherwise
+/// the call fails up front.
+///
+/// On success `out_logfile_bytes` (if non-NULL) receives the byte
+/// count overwritten in `$LogFile` during recovery, and
+/// `out_dirty_cleared` (if non-NULL) is set to `1` if the dirty bit
+/// was actually cleared (meaning the volume was dirty before the
+/// call). Returns `0` on success, `-1` on error.
+///
+/// `progress_cb` (if non-NULL) is invoked from the calling thread as
+/// fsck advances; the `phase` C string is owned by fs_ntfs and only
+/// valid for the duration of the callback.
+///
+/// The handle is borrowed (its inner `Arc` is cloned for the duration
+/// of the call). The caller still owns the handle and frees it via
+/// `fs_core_device_close`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_fsck_with_fs_core_device(
+    handle: *mut fs_core::ffi::FsCoreDevice,
+    progress_cb: Option<FsckProgressCallback>,
+    progress_ctx: *mut c_void,
+    out_logfile_bytes: *mut u64,
+    out_dirty_cleared: *mut u8,
+) -> c_int {
+    if handle.is_null() {
+        set_error("fs_ntfs_fsck_with_fs_core_device: null handle");
+        return -1;
+    }
+    let device = unsafe { (*handle).inner().clone() };
+    if !fs_core::BlockDevice::is_writable(&device) {
+        set_error("fs_ntfs_fsck_with_fs_core_device: device is not writable (fsck requires RW)");
+        return -1;
+    }
+    let size = fs_core::BlockRead::size_bytes(&device);
+    let mut io = FsCoreBlockIo { device, size };
+
+    // Same closure-to-fn-pointer adapter as fs_ntfs_fsck_with_callbacks
+    // — see that function for the lifetime / Send rationale.
+    struct PtrWrap(*mut c_void);
+    let pctx = PtrWrap(progress_ctx);
+    let pcb = progress_cb;
+    let mut progress_closure = move |phase: &str, done: u64, total: u64| {
+        if let Some(cb) = pcb {
+            if let Ok(cstr) = CString::new(phase) {
+                let _ = unsafe { cb(pctx.0, cstr.as_ptr(), done, total) };
+            }
+        }
+    };
     #[allow(clippy::type_complexity)]
     let progress: Option<&mut (dyn FnMut(&str, u64, u64) + '_)> = if pcb.is_some() {
         Some(&mut progress_closure)
