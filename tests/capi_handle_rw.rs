@@ -19,8 +19,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
 
 use fs_ntfs::{
-    fs_ntfs_clear_last_error, fs_ntfs_create_file_h, fs_ntfs_last_errno, fs_ntfs_mount_with_callbacks,
-    fs_ntfs_umount, fs_ntfs_unlink_h, fs_ntfs_write_file_contents_h, FsNtfsBlockdevCfg,
+    fs_ntfs_clear_last_error, fs_ntfs_create_file_h, fs_ntfs_last_errno,
+    fs_ntfs_mount_with_callbacks, fs_ntfs_umount, fs_ntfs_unlink_h, fs_ntfs_write_file_contents_h,
+    FsNtfsBlockdevCfg,
 };
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
@@ -99,8 +100,16 @@ fn handle_rw_create_write_unlink_round_trip() {
 
     fs_ntfs_clear_last_error();
     let fs = unsafe { fs_ntfs_mount_with_callbacks(&cfg) };
-    assert!(!fs.is_null(), "rw callback mount failed (errno={})", fs_ntfs_last_errno());
-    assert_eq!(fs_ntfs_last_errno(), 0, "errno after successful mount must be 0");
+    assert!(
+        !fs.is_null(),
+        "rw callback mount failed (errno={})",
+        fs_ntfs_last_errno()
+    );
+    assert_eq!(
+        fs_ntfs_last_errno(),
+        0,
+        "errno after successful mount must be 0"
+    );
 
     let parent = CString::new("/").unwrap();
     let base = CString::new("tmp_test_file").unwrap();
@@ -108,9 +117,23 @@ fn handle_rw_create_write_unlink_round_trip() {
 
     // create_file_h
     fs_ntfs_clear_last_error();
-    let rn = unsafe { fs_ntfs_create_file_h(fs, parent.as_ptr() as *const c_char, base.as_ptr() as *const c_char) };
-    assert!(rn > 0, "create_file_h returned {rn}; errno={}", fs_ntfs_last_errno());
-    assert_eq!(fs_ntfs_last_errno(), 0, "errno after create_file_h must be 0");
+    let rn = unsafe {
+        fs_ntfs_create_file_h(
+            fs,
+            parent.as_ptr() as *const c_char,
+            base.as_ptr() as *const c_char,
+        )
+    };
+    assert!(
+        rn > 0,
+        "create_file_h returned {rn}; errno={}",
+        fs_ntfs_last_errno()
+    );
+    assert_eq!(
+        fs_ntfs_last_errno(),
+        0,
+        "errno after create_file_h must be 0"
+    );
 
     // write_file_contents_h with exactly 16 bytes
     let payload: &[u8] = b"Hello, NTFS!\n\0\0\0";
@@ -124,13 +147,23 @@ fn handle_rw_create_write_unlink_round_trip() {
             payload.len() as u64,
         )
     };
-    assert_eq!(n, payload.len() as i64, "write_file_contents_h returned {n}; errno={}", fs_ntfs_last_errno());
+    assert_eq!(
+        n,
+        payload.len() as i64,
+        "write_file_contents_h returned {n}; errno={}",
+        fs_ntfs_last_errno()
+    );
     assert_eq!(fs_ntfs_last_errno(), 0, "errno after write must be 0");
 
     // unlink_h
     fs_ntfs_clear_last_error();
     let rc = unsafe { fs_ntfs_unlink_h(fs, full.as_ptr() as *const c_char) };
-    assert_eq!(rc, 0, "unlink_h returned {rc}; errno={}", fs_ntfs_last_errno());
+    assert_eq!(
+        rc,
+        0,
+        "unlink_h returned {rc}; errno={}",
+        fs_ntfs_last_errno()
+    );
     assert_eq!(fs_ntfs_last_errno(), 0, "errno after unlink must be 0");
 
     unsafe { fs_ntfs_umount(fs) };

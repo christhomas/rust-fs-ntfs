@@ -170,17 +170,23 @@ expect_exit = 0
 # the requested modes (default `readonly`), capture diag, dismount.
 #
 # Step fields:
-#   image_path  — vm-side absolute path to the .img (typically
-#                 `<vm.workdir>/<scenario.image>` after ship-to-vm)
-#   modes?      — comma-separated chkdsk-pass list, e.g.
-#                 "readonly,/scan". Empty => script default
-#   diag        — vm-side directory for chkdsk-*.txt + eventlog
+#   image_path     — vm-side absolute path to the .img (typically
+#                    `<vm.workdir>/<scenario.image>` after ship-to-vm)
+#   modes?         — comma-separated chkdsk-pass list, e.g.
+#                    "readonly,/scan". Empty => script default
+#   verdict_shape? — `Clean` (default) or `RepairRequired`. The latter
+#                    runs the listed modes (capture exits, don't gate),
+#                    then runs /F + post-/F /scan and gates the verdict
+#                    on pre-/scan != 0 (volume actually dirty) AND
+#                    fix_exit == 0 AND post_scan_exit == 0. Used by
+#                    `mac:set-dirty -> win:chkdsk` scenarios.
+#   diag           — vm-side directory for chkdsk-*.txt + eventlog
 #
 # The script path is hardcoded against `vm.workdir` because the
 # harness's substitution surface doesn't (yet) carry `{vm.*}` tokens
 # from `[vm]`. When that lands, swap the literal for `{vm.workdir}`.
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-chkdsk.ps1' -ImagePath '{step.image_path}' -Modes '{step.modes?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-chkdsk.ps1' -ImagePath '{step.image_path}' -Modes '{step.modes?}' -VerdictShape '{step.verdict_shape?}' -Diag '{step.diag}'"
 expect_exit = 0
 
 # Other win-side ops (win-enumerate, win-repeat-mount, win-write,

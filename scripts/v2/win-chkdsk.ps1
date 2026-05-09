@@ -37,8 +37,32 @@
 param(
     [Parameter(Mandatory=$true)] [string]$ImagePath,
     [string]$Modes = "readonly",
-    [Parameter(Mandatory=$true)] [string]$Diag
+    [Parameter(Mandatory=$true)] [string]$Diag,
+    # Verdict shape — must match v1's tests/matrix.rs `VerdictShape`:
+    #   Clean           — every requested mode is gated against the
+    #                     Clean-shape rules (readonly==0, /scan in
+    #                     {0,11,13}). Default; preserves existing
+    #                     scenarios.
+    #   RepairRequired  — the listed modes are run first (their exit
+    #                     codes captured but NOT gated). The volume is
+    #                     expected to be dirty, so the pre-/F /scan is
+    #                     expected to return non-zero. Then /F runs
+    #                     (capture as `fix_exit`) and a post-/F /scan
+    #                     runs (capture as `post_scan_exit`). Verdict
+    #                     gates on: pre-/scan != 0 AND fix_exit == 0
+    #                     AND post_scan_exit == 0.
+    [string]$VerdictShape = 'Clean'
 )
+
+# Accept empty (from `{step.verdict_shape?}` substitution when omitted)
+# as the Clean default so callers don't have to spell it out everywhere.
+if (-not $VerdictShape -or $VerdictShape.Trim() -eq '') {
+    $VerdictShape = 'Clean'
+}
+if ($VerdictShape -ne 'Clean' -and $VerdictShape -ne 'RepairRequired') {
+    Write-Error "invalid -VerdictShape: '$VerdictShape' (expected Clean or RepairRequired)"
+    exit 2
+}
 
 $ErrorActionPreference = 'Stop'
 
@@ -198,51 +222,95 @@ try {
 
     # ── chkdsk passes ─────────────────────────────────────────────
     #
-    # Pass/fail rules — match v1's `Clean` VerdictShape (matrix.rs:999):
+    # Pass/fail rules — match v1's tests/matrix.rs `VerdictShape`:
     #
-    #   readonly mode:  must exit 0
-    #   /scan mode:     0, 11, 13 are all "ok"
-    #     - 0  = clean
-    #     - 11 = frs.cxx 60f ceiling (known v1 technical debt — not real
-    #            corruption; matrix.rs's existing verdict tolerates it)
-    #     - 13 = VSS / shadow-copy infra error on tiny volumes; same
-    #            class of "infrastructure flake, not corruption"
+    #   Clean (default):
+    #     - readonly:  must exit 0
+    #     - /scan:     0, 11, 13 are all "ok"
+    #         - 0  = clean
+    #         - 11 = frs.cxx 60f ceiling (known v1 technical debt)
+    #         - 13 = VSS / shadow-copy infra flake on tiny volumes
     #
-    # Future RepairOk / RepairRequired shapes will need a `-VerdictShape`
-    # parameter; not implemented in this slice — every scenario using
-    # this script today defaults to Clean.
-    $rawExits  = @{}      # mode -> exit code (for diag inspection)
-    $passed    = $true
-    foreach ($mode in $Modes.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) {
-        $modeFile = $mode -replace '[/\\ ]', '-'
-        $log = "$Diag\chkdsk-$modeFile.txt"
-        $exitFile = "$Diag\chkdsk-$modeFile-exit.txt"
-        $args = @("${letter}:")
+    #   RepairRequired:
+    #     - run the listed modes first (capture exits, don't gate);
+    #       a `set-dirty` scenario expects the pre-/F /scan to return
+    #       non-zero (proving the volume was actually dirty)
+    #     - run /F (capture as `fix_exit`)
+    #     - run post-/F /scan (capture as `post_scan_exit`)
+    #     - verdict: pre_scan != 0 AND fix_exit == 0 AND post_scan_exit == 0
+    $rawExits = @{}      # diag-key -> exit code (for diag inspection)
+    function Invoke-ChkdskMode([string]$mode, [string]$letter, [string]$diag, [string]$labelSuffix = '') {
+        $modeFile = ($mode -replace '[/\\ ]', '-') + $labelSuffix
+        $log = "$diag\chkdsk-$modeFile.txt"
+        $exitFile = "$diag\chkdsk-$modeFile-exit.txt"
+        $argsList = @("${letter}:")
         if ($mode -ne "readonly") {
-            $args += $mode -split ' '
+            $argsList += $mode -split ' '
         }
-        $proc = Start-Process -FilePath chkdsk -ArgumentList $args -NoNewWindow -PassThru -Wait -RedirectStandardOutput $log
+        $proc = Start-Process -FilePath chkdsk -ArgumentList $argsList -NoNewWindow -PassThru -Wait -RedirectStandardOutput $log
         "$($proc.ExitCode)" | Out-File $exitFile -Encoding ASCII
-        $rawExits[$mode] = $proc.ExitCode
-
-        # Apply Clean-shape verdict per-mode.
-        if ($mode -eq 'readonly') {
-            if ($proc.ExitCode -ne 0) { $passed = $false }
-        } else {
-            # /scan and other modes: accept 0/11/13 as Clean-shape "ok".
-            if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 11 -and $proc.ExitCode -ne 13) {
-                $passed = $false
-            }
-        }
+        return $proc.ExitCode
     }
 
-    # Emit a verdict summary file so a triage agent doesn't have to
-    # parse all the chkdsk-*-exit.txt files individually.
-    @{
-        passed = $passed
-        verdict_shape = "clean"
-        exits = $rawExits
-    } | ConvertTo-Json -Compress | Out-File "$Diag\verdict.json" -Encoding ASCII
+    if ($VerdictShape -eq 'Clean') {
+        $passed = $true
+        foreach ($mode in $Modes.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) {
+            $exit = Invoke-ChkdskMode -mode $mode -letter $letter -diag $Diag
+            $rawExits[$mode] = $exit
+            if ($mode -eq 'readonly') {
+                if ($exit -ne 0) { $passed = $false }
+            } else {
+                if ($exit -ne 0 -and $exit -ne 11 -and $exit -ne 13) {
+                    $passed = $false
+                }
+            }
+        }
+        @{
+            passed = $passed
+            verdict_shape = 'clean'
+            exits = $rawExits
+        } | ConvertTo-Json -Compress | Out-File "$Diag\verdict.json" -Encoding ASCII
+    } else {
+        # RepairRequired
+        $preScanExit = $null
+        foreach ($mode in $Modes.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) {
+            $exit = Invoke-ChkdskMode -mode $mode -letter $letter -diag $Diag
+            $rawExits[$mode] = $exit
+            if ($mode -eq '/scan') { $preScanExit = $exit }
+        }
+        # The verdict gates on `pre_scan != 0` (proves the volume was
+        # actually dirty), so `/scan` must be in -Modes. Surface a clear
+        # config error rather than letting the verdict silently fail with
+        # `pre_scan == $null`. We bypass `Write-Error` here because
+        # `$ErrorActionPreference = 'Stop'` would convert it to a
+        # terminating error, propagate to the outer `try`/`finally`, and
+        # exit 1 — masking the intentional `exit 2` for "config error".
+        if ($null -eq $preScanExit) {
+            [Console]::Error.WriteLine("RepairRequired requires '/scan' in -Modes; got -Modes '$Modes'")
+            exit 2
+        }
+        # /F + post-/F /scan run regardless; their exits drive the
+        # verdict alongside pre_scan. `/F /X` matches v1's run-scenario.ps1
+        # — `/X` forces an exclusive dismount before the fix so chkdsk
+        # doesn't hang on a "do you want to dismount?" prompt that we
+        # can't answer non-interactively. The post-scan reuses the
+        # `/scan` chkdsk arg but lands in `chkdsk--scan-post.txt` so
+        # the pre/post logs are distinct.
+        $fixExit = Invoke-ChkdskMode -mode '/F /X' -letter $letter -diag $Diag
+        $rawExits['/F /X'] = $fixExit
+        $postScanExit = Invoke-ChkdskMode -mode '/scan' -letter $letter -diag $Diag -labelSuffix '-post'
+        $rawExits['/scan-post'] = $postScanExit
+        $passed = ($null -ne $preScanExit) -and ($preScanExit -ne 0) `
+                  -and ($fixExit -eq 0) -and ($postScanExit -eq 0)
+        @{
+            passed = $passed
+            verdict_shape = 'repair-required'
+            exits = $rawExits
+            pre_scan_exit = $preScanExit
+            fix_exit = $fixExit
+            post_scan_exit = $postScanExit
+        } | ConvertTo-Json -Compress | Out-File "$Diag\verdict.json" -Encoding ASCII
+    }
 
     # NTFS / Disk / partmgr events fired during this run.
     try {
