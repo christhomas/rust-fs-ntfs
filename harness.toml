@@ -315,6 +315,37 @@ host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-mkdir.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
-# Other win-side ops (win-mount/win-unmount as separate ops, win-format,
+[ops.win-format]
+# Format a freshly-shipped (zero-filled) .img with Microsoft's canonical
+# NTFS formatter (Format-Volume -FileSystem NTFS, which dispatches to
+# fmifs.dll's NTFS path -- the same code format.com /FS:NTFS uses).
+# Produces a Microsoft-canonical NTFS volume that subsequent steps can
+# round-trip back to the host (via ship-to-host) and feed to our
+# rust-ntfs reader. The win-format-* scenarios exist precisely to
+# isolate reader bugs from writer bugs by feeding our reader a volume
+# the canonical writer produced.
+#
+# Recipe shape:
+#   init-image -> ship-to-vm -> win-format (this op)
+#     -> [optional follow-on win-* ops with keep_image=true]
+#     -> ship-to-host -> mac-enumerate
+#
+# The init-image step sizes the .img per scenario.volume_params.size_mib;
+# there is NO mac-format step in win-format-* recipes (otherwise the .img
+# would arrive at the VM already-NTFS-formatted by rust-ntfs, defeating
+# the point). The empty .img ships as zeros; Initialize-VhdxFromImg lays
+# down a partition table on the wrapper and streams those zeros into the
+# partition; Format-Volume then writes the NTFS structure in-place.
+#
+# Step fields:
+#   image_path   -- vm-side absolute path to the .img
+#   label        -- volume label (e.g. "WINFMT", "WINREF")
+#   keep_image?  -- `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   diag         -- vm-side directory for format-result.txt + wrapper-create.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-format.ps1' -ImagePath '{step.image_path}' -Label '{step.label}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+# Other win-side ops (win-mount/win-unmount as separate ops,
 # win-modify/win-read) follow the same shape and land alongside their
 # first scenario consumer in subsequent Phase 4c PRs.

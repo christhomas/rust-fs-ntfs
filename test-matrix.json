@@ -1479,7 +1479,34 @@
         "alloc_unit_size": 4096
       },
       "operation_sequence": "win:format -> mac:enumerate(empty: only system files)",
-      "note": "Pure reader test on Microsoft-canonical format. If our reader chokes here it's a reader bug, not a writer bug \u2014 orthogonal axis to all the mac:format scenarios."
+      "note": "Pure reader test on Microsoft-canonical format. If our reader chokes here it's a reader bug, not a writer bug \u2014 orthogonal axis to all the mac:format scenarios.",
+      "_note": "Forward-only ship-from-vm shape: init-image (zeros) -> ship-to-vm -> win-format -> ship-to-host -> mac-enumerate. NO mac-format step (otherwise the .img would arrive at the VM already-NTFS-formatted by rust-ntfs, defeating the win-format-* axis). VM-side .img + .vhdx are intentionally left in place after win-format (keep_image=true) so ship-to-host has something to copy; cleanup happens implicitly the next time ship-to-vm overwrites the path or the user clears the VM workdir manually (~70+ GiB free).",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-mac-enumerate-empty.img"
+        },
+        {
+          "op": "win-format",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-mac-enumerate-empty.img",
+          "label": "WINFMT",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-mac-enumerate-empty"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-mac-enumerate-empty.img",
+          "dest": "{scenario.image}"
+        },
+        {
+          "op": "mac-enumerate"
+        }
+      ],
+      "image": "nfs-win-format-mac-enumerate-empty.img"
     },
     "win-format-win-write-mac-delete-win-verify": {
       "status": "blocked-needs-winformat-mode-runner-refactor-agent-c6a1-2026-05-02",
@@ -1494,16 +1521,58 @@
       "note": "Filesystem::unlink plumbed via inspect_ntfs CLI on c5fe branch. Matrix runner glue not yet wired."
     },
     "win-format-win-write-mac-verify": {
-      "status": "blocked-needs-winformat-mode-runner-refactor-agent-c6a1-2026-05-02",
+      "status": "pending",
       "volume_params": {
         "size_mib": 256,
         "label": "WINREF",
         "alloc_unit_size": 4096
       },
       "operation_sequence": "win:format -> win:write(F1,F2) -> mac:enumerate(F1,F2)",
-      "_note": "Microsoft format.com is the canonical reference; this proves our reader handles Microsoft-format output",
+      "_note": "Microsoft format.com is the canonical reference; this proves our reader handles Microsoft-format output. Forward-only ship-from-vm shape: init-image (zeros) -> ship-to-vm -> win-format -> 2x win-write-content -> ship-to-host -> mac-enumerate. NO mac-format step (would defeat the win-format axis). VM-side .img + .vhdx are intentionally left in place after the last win-write-content (keep_image=true on every win-* step) so ship-to-host has something to copy; cleanup happens implicitly the next time ship-to-vm overwrites the path or the user clears the VM workdir manually (~70+ GiB free).",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
-      "note": "Operation sequence needs the chkdsk-clean state iter15+ has to deliver. mac:enumerate itself is plumbed via the new inspect_ntfs CLI on c5fe branch."
+      "note": "Operation sequence needs the chkdsk-clean state iter15+ has to deliver. mac:enumerate itself is plumbed via the new inspect_ntfs CLI on c5fe branch.",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-verify.img"
+        },
+        {
+          "op": "win-format",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-verify.img",
+          "label": "WINREF",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-verify"
+        },
+        {
+          "op": "win-write-content",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-verify.img",
+          "path": "/F1.txt",
+          "content": "F1",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-verify"
+        },
+        {
+          "op": "win-write-content",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-verify.img",
+          "path": "/F2.txt",
+          "content": "F2",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-verify"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-verify.img",
+          "dest": "{scenario.image}"
+        },
+        {
+          "op": "mac-enumerate"
+        }
+      ],
+      "image": "nfs-win-format-win-write-mac-verify.img"
     },
     "win-format-win-write-mac-write-win-verify": {
       "status": "blocked-needs-winformat-mode-runner-refactor-agent-c6a1-2026-05-02",
