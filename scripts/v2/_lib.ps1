@@ -97,12 +97,17 @@ function Initialize-VhdFromImg {
     }
     fsutil sparse setflag $Vhd 0 | Out-Null
 
-    $vhd = Mount-DiskImage -ImagePath $Vhd -PassThru
+    # PowerShell variable names are case-insensitive — assigning the
+    # Mount-DiskImage CimInstance to `$vhd` would silently overwrite
+    # the `$Vhd` path string, breaking the `Dismount-DiskImage -ImagePath
+    # $Vhd` call below and the returned hashtable's `Vhd` field. Use
+    # a distinct name for the CimInstance.
+    $mountedImg = Mount-DiskImage -ImagePath $Vhd -PassThru
     Start-Sleep -Seconds 2
-    Initialize-Disk -Number $vhd.Number -PartitionStyle GPT
+    Initialize-Disk -Number $mountedImg.Number -PartitionStyle GPT
     Start-Sleep -Seconds 2
-    $disk = Get-Disk -Number $vhd.Number
-    $part = New-Partition -DiskNumber $vhd.Number -UseMaximumSize -AssignDriveLetter:$false
+    $disk = Get-Disk -Number $mountedImg.Number
+    $part = New-Partition -DiskNumber $mountedImg.Number -UseMaximumSize -AssignDriveLetter:$false
     if ($part.Size -lt $rawSize) {
         throw "partition smaller than raw image ($($part.Size) < $rawSize)"
     }
@@ -178,7 +183,11 @@ function Mount-VhdAndGetLetter {
     # has been known to race the dismount completion on slower hosts.
     Start-Sleep -Seconds 1
     $lettersBefore = @((Get-Volume | Where-Object { $_.DriveLetter }).DriveLetter)
-    $vhd = Mount-DiskImage -ImagePath $Vhd -PassThru
+    # Distinct name for the CimInstance — avoids the case-insensitive
+    # collision with the `$Vhd` path-string param. Benign here (the
+    # path isn't used again after this line), but consistent with
+    # Initialize-VhdFromImg.
+    $mountedImg = Mount-DiskImage -ImagePath $Vhd -PassThru
     $letter = $null
     for ($i = 0; $i -lt 10; $i++) {
         Start-Sleep -Seconds 1
@@ -187,7 +196,7 @@ function Mount-VhdAndGetLetter {
         if ($new) { $letter = $new | Select-Object -First 1; break }
     }
     if (-not $letter) {
-        $disk2 = Get-Disk -Number $vhd.Number
+        $disk2 = Get-Disk -Number $mountedImg.Number
         $partition = Get-Partition -DiskNumber $disk2.Number |
             Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
         $used = (Get-Volume | ForEach-Object { $_.DriveLetter }) +
