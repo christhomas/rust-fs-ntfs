@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# scripts/v2/test -- single entrypoint for the v2 harness pipeline.
+#
+# Wraps the four steps you'd otherwise hand-orchestrate (IP swap,
+# build, ship, run) so a single command can do any combination of
+# them and clean up after itself.
+#
+# Usage:
+#   scripts/v2/test [SCENARIO]
+#     Smoke-runs SCENARIO (substring filter against the matrix).
+#     Default SCENARIO = mac-format-tiny-32mib.
+#
+#   scripts/v2/test [SCENARIO] --build
+#     Rebuild rust-ntfs + the harness runner on the host first.
+#
+#   scripts/v2/test [SCENARIO] --ship
+#     tar+scp the source tree to the VM first (after harness/script
+#     edits). Implies the binaries already exist; combine with --build
+#     to rebuild then ship.
+#
+#   scripts/v2/test --list [PATTERN]
+#     List scenarios that have a v2 recipe + match the optional pattern;
+#     don't run anything. Useful before --filter to confirm your filter.
+#
+# Implicit IP swap:
+#   harness.toml's [vm].host is committed at the canonical IP for the
+#   maintainer's dev VM. Your local VM is probably on a different IP,
+#   set in .test-env's VM_HOST. This script transparently swaps the
+#   committed IP for VM_HOST during the run and restores it afterwards
+#   (via a `trap` on EXIT — works for success, failure, and Ctrl-C).
+#
+#   To run against the IP that's literally committed in harness.toml
+#   (e.g. you've already manually edited it and want it left alone),
+#   pass --no-ip-swap.
+#
+# Examples:
+#   scripts/v2/test                                          # smoke tiny-32mib
+#   scripts/v2/test mac-format-set-dirty                     # one set-dirty scenario
+#   scripts/v2/test set-dirty                                # all 3 set-dirty scenarios (substring)
+#   scripts/v2/test mac-format-volume- --build --ship        # full rebuild+ship+all volume scenarios
+#   scripts/v2/test --list                                   # list every translated scenario
+#   scripts/v2/test --list dirty                             # list scenarios with 'dirty' in the name
+#
+# Output:
+#   stdout: harness summary + per-scenario verdicts
+#   diag:   test-diagnostics/matrix/<scenario>/ on host
+#           <vm.workdir>/diag/v2/<scenario>/   on VM
+#
+# Exit code:
+#   0 if every matching scenario passed (or matched a `pending` baseline)
+#   non-zero if any scenario regressed
+
+set -uo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${REPO_ROOT}"
+
+# ── arg parsing ─────────────────────────────────────────────────
+DO_BUILD=0
+DO_SHIP=0
+DO_LIST=0
+DO_IP_SWAP=1
+SCENARIO=""
+
+usage() {
+    sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --build)        DO_BUILD=1 ;;
+        --ship)         DO_SHIP=1 ;;
+        --list)         DO_LIST=1 ;;
+        --no-ip-swap)   DO_IP_SWAP=0 ;;
+        --help|-h)      usage; exit 0 ;;
+        --*)
+            echo "[test] unknown flag: ${arg}" >&2
+            echo "[test] use --help for usage" >&2
+            exit 2
+            ;;
+        *)
+            if [[ -n "${SCENARIO}" ]]; then
+                echo "[test] multiple positional args: '${SCENARIO}' and '${arg}'" >&2
+                echo "[test] only one scenario filter is supported" >&2
+                exit 2
+            fi
+            SCENARIO="${arg}"
+            ;;
+    esac
+done
+
+if [[ "${DO_LIST}" == "1" ]]; then
+    # `--list` is offline; just walk test-matrix.json and grep names.
+    python3 - <<EOF
+import json, sys
+m = json.load(open("test-matrix.json"))
+ss = m["scenarios"]
+pat = "${SCENARIO}"
+for name in sorted(ss):
+    s = ss[name]
+    if not isinstance(s, dict): continue
+    has_recipe = "recipe" in s
+    if pat and pat not in name: continue
+    mark = " " if has_recipe else "*"
+    status = s.get("status", "")
+    print(f"  [{mark}] {name:<55} {status}")
+print()
+print("(* = no v2 recipe yet — translation pending)")
+EOF
+    exit 0
+fi
+
+# Default scenario for plain `scripts/v2/test`.
+if [[ -z "${SCENARIO}" ]]; then
+    SCENARIO="mac-format-tiny-32mib"
+fi
+
+# ── load .test-env (VM_HOST, VM_WORKDIR, SSH_OPTS) ──────────────
+if [[ ! -f "${REPO_ROOT}/.test-env" ]]; then
+    echo "[test] .test-env not found at ${REPO_ROOT}/.test-env" >&2
+    echo "[test] run scripts/setup-local.sh to generate it, or copy from a peer dev" >&2
+    exit 2
+fi
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/.test-env"
+
+if [[ -z "${VM_HOST:-}" ]]; then
+    echo "[test] VM_HOST unset in .test-env" >&2
+    exit 2
+fi
+if [[ -z "${VM_WORKDIR:-}" ]]; then
+    echo "[test] VM_WORKDIR unset in .test-env" >&2
+    exit 2
+fi
+
+# ── IP swap (transparent, restored on exit) ─────────────────────
+COMMITTED_HOST=""
+NEED_RESTORE=0
+
+if [[ "${DO_IP_SWAP}" == "1" ]]; then
+    COMMITTED_HOST=$(grep -E '^host[[:space:]]*=' harness.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+    if [[ "${COMMITTED_HOST}" != "${VM_HOST}" ]]; then
+        echo "[test] swapping harness.toml [vm].host: '${COMMITTED_HOST}' -> '${VM_HOST}' (will restore on exit)"
+        # Use a perl-ish sed that escapes the IP for the regex.
+        sed -i.bak "s|^host[[:space:]]*=.*|host           = \"${VM_HOST}\"|" harness.toml
+        NEED_RESTORE=1
+        trap 'if [[ "${NEED_RESTORE}" == "1" ]]; then sed -i.bak "s|^host[[:space:]]*=.*|host           = \"${COMMITTED_HOST}\"|" harness.toml && rm -f harness.toml.bak; fi' EXIT
+    fi
+fi
+
+# ── build phase ─────────────────────────────────────────────────
+if [[ "${DO_BUILD}" == "1" ]]; then
+    echo "[test] === build phase ==="
+    cargo build --release --bin rust-ntfs
+    cargo build --manifest-path vendor/harness/runner/Cargo.toml --release --bin run-matrix
+fi
+
+# ── ship phase ──────────────────────────────────────────────────
+if [[ "${DO_SHIP}" == "1" ]]; then
+    echo "[test] === ship phase: ${VM_HOST}:${VM_WORKDIR} ==="
+    VM_WORKDIR_PS="${VM_WORKDIR//\//\\}"
+    ssh ${SSH_OPTS:-} "${VM_HOST}" "if (-not (Test-Path '${VM_WORKDIR_PS}')) { New-Item -ItemType Directory -Path '${VM_WORKDIR_PS}' -Force | Out-Null }"
+    tar --exclude='./target' --exclude='./.git' --exclude='./diag' \
+        --exclude='./test-disks' --exclude='./test-diagnostics' \
+        --exclude='./vendor/harness/runner/target' \
+        --exclude='*.swp' --exclude='.DS_Store' \
+        --exclude='./privatekey' --exclude='./privatekey.*' \
+        --exclude='./.claude' \
+        -cf - . | ssh ${SSH_OPTS:-} "${VM_HOST}" "tar -xf - -C '${VM_WORKDIR}'"
+    echo "[test] ship done"
+fi
+
+# Local pre-run cleanup: stale diag from a prior run for the same
+# scenario name confuses triage (you'd be looking at last week's
+# verdict.json).
+rm -rf "test-diagnostics/matrix/${SCENARIO}" 2>/dev/null
+rm -f "nfs-${SCENARIO}.img" 2>/dev/null
+
+# ── run phase ───────────────────────────────────────────────────
+echo "[test] === running scenarios matching: '${SCENARIO}' ==="
+START=$(date +%s)
+HARNESS_CONSUMER_ROOT="$(pwd)" HARNESS_IMAGE_DIR="$(pwd)" \
+    cargo run --manifest-path vendor/harness/runner/Cargo.toml \
+              --release --bin run-matrix -- "${SCENARIO}"
+RC=$?
+ELAPSED=$(( $(date +%s) - START ))
+
+echo
+echo "═══════════════════════════════════════"
+echo "  verdict:  $([[ ${RC} -eq 0 ]] && echo PASSED || echo "FAILED (rc=${RC})")"
+echo "  elapsed:  ${ELAPSED}s"
+echo "  scenario: ${SCENARIO}"
+echo "  diag:     test-diagnostics/matrix/${SCENARIO}/   (host)"
+echo "            ${VM_WORKDIR}/diag/v2/${SCENARIO}/    (VM)"
+echo "═══════════════════════════════════════"
+
+# Local cleanup so the next run starts fresh.
+rm -f "nfs-${SCENARIO}.img" 2>/dev/null
+
+exit "${RC}"
