@@ -1,0 +1,524 @@
+#!/usr/bin/env bash
+# scripts/v2/test -- single entrypoint for the v2 harness pipeline.
+#
+# Wraps the four steps you'd otherwise hand-orchestrate (IP swap,
+# build, ship, run) so a single command can do any combination of
+# them and clean up after itself.
+#
+# Output policy: this is a long-running remote-VM test harness.
+# Individual scenarios are 30 s – several minutes; bulk runs are an
+# hour-plus. The cost of "test failed at minute 33, re-run with
+# --verbose to find out why" is unacceptable, so the default output
+# is *always* the rich diagnostic view: per-step rows print live as
+# steps complete, and failed steps' stderr is dumped inline. Use
+# --quiet to opt out (one line per scenario, libtest-mimic style)
+# only when you genuinely want compact output (CI summary, grepping).
+#
+# Usage:
+#   scripts/v2/test
+#     Run the FULL matrix (every scenario with a v2 recipe — currently
+#     ~33, ~30+ minutes wall-clock). Same convention as `cargo test`:
+#     no filter = run everything.
+#
+#     Before the matrix run, a single-scenario *smoke gate* runs first
+#     (mac-format-tiny-32mib, ~30 s). If the smoke fails the matrix is
+#     skipped — same logic as the FPV smoke-stopper before connecting
+#     the real battery: 30 s of cheap "is the wiring sane" insurance
+#     against burning 30+ min on a misconfigured run. The smoke
+#     scenario then runs again as part of the matrix; that ~30 s
+#     duplication is the cost of catching wiring breakage in 30 s
+#     instead of 30 min. The smoke gate is skipped when SCENARIO is
+#     given (you've targeted something specifically; trusted).
+#
+#   scripts/v2/test SCENARIO
+#     Substring filter against the matrix. Examples:
+#       scripts/v2/test mac-format-tiny-32mib   # one explicit scenario
+#       scripts/v2/test set-dirty               # all 3 set-dirty scenarios
+#       scripts/v2/test mac-format-volume-      # the 4 large-volume scenarios
+#
+#   scripts/v2/test [SCENARIO] --build
+#     Rebuild rust-ntfs + the harness runner on the host first.
+#
+#   scripts/v2/test [SCENARIO] --ship
+#     tar+scp the source tree to the VM first (after harness/script
+#     edits). Implies the binaries already exist; combine with --build
+#     to rebuild then ship.
+#
+#   scripts/v2/test --list [PATTERN]
+#     List scenarios that have a v2 recipe + match the optional pattern;
+#     don't run anything. Useful before a filter to preview what'll run.
+#
+#   scripts/v2/test [SCENARIO] --quiet
+#     Suppress the live per-step rows + inline stderr. Print only the
+#     libtest-mimic per-scenario summary lines at the end. Use this in
+#     CI or when piping to a grep/jq.
+#
+# Implicit IP swap:
+#   harness.toml's [vm].host is committed at the canonical IP for the
+#   maintainer's dev VM. Your local VM is probably on a different IP,
+#   set in .test-env's VM_HOST. This script transparently swaps the
+#   committed IP for VM_HOST during the run and restores it afterwards
+#   (via a `trap` on EXIT — works for success, failure, and Ctrl-C).
+#
+#   To run against the IP that's literally committed in harness.toml
+#   (e.g. you've already manually edited it and want it left alone),
+#   pass --no-ip-swap.
+#
+# Examples:
+#   scripts/v2/test                                          # smoke tiny-32mib
+#   scripts/v2/test mac-format-set-dirty                     # one set-dirty scenario
+#   scripts/v2/test set-dirty                                # all 3 set-dirty scenarios (substring)
+#   scripts/v2/test mac-format-volume- --build --ship        # full rebuild+ship+all volume scenarios
+#   scripts/v2/test --list                                   # list every translated scenario
+#   scripts/v2/test --list dirty                             # list scenarios with 'dirty' in the name
+#   scripts/v2/test set-dirty --quiet                        # CI-style compact output
+#
+# Output:
+#   stdout: harness summary + per-step matrix (default) or per-scenario
+#           lines (--quiet)
+#   diag:   test-diagnostics/matrix/<scenario>/ on host
+#           <vm.workdir>/diag/v2/<scenario>/   on VM
+#
+# Exit code:
+#   0 if every matching scenario passed
+#   non-zero if any scenario failed
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${REPO_ROOT}"
+
+# ── arg parsing ─────────────────────────────────────────────────
+DO_BUILD=0
+DO_SHIP=0
+DO_LIST=0
+DO_IP_SWAP=1
+DO_QUIET=0
+SCENARIO=""
+
+usage() {
+    # Print the leading header comment block (everything up to the
+    # first non-`#` line). Earlier versions used `sed -n '2,/^$/p'`,
+    # which stopped at the first truly-empty line — but that's the
+    # blank line *after* `set -euo pipefail`, so `--help` ended up
+    # spilling shell code into the help text.
+    awk '
+        NR == 1 { next }                       # skip shebang
+        /^#/ { sub(/^# ?/, ""); print; next }  # strip "# " prefix
+        { exit }                               # stop at first non-comment
+    ' "$0"
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --build)        DO_BUILD=1 ;;
+        --ship)         DO_SHIP=1 ;;
+        --list)         DO_LIST=1 ;;
+        --no-ip-swap)   DO_IP_SWAP=0 ;;
+        --quiet|-q)     DO_QUIET=1 ;;
+        --help|-h)      usage; exit 0 ;;
+        --*)
+            echo "[test] unknown flag: ${arg}" >&2
+            echo "[test] use --help for usage" >&2
+            exit 2
+            ;;
+        *)
+            if [[ -n "${SCENARIO}" ]]; then
+                echo "[test] multiple positional args: '${SCENARIO}' and '${arg}'" >&2
+                echo "[test] only one scenario filter is supported" >&2
+                exit 2
+            fi
+            SCENARIO="${arg}"
+            ;;
+    esac
+done
+
+if [[ "${DO_LIST}" == "1" ]]; then
+    # `--list` is offline; just walk test-matrix.json and grep names.
+    python3 - <<EOF
+import json, sys
+m = json.load(open("test-matrix.json"))
+ss = m["scenarios"]
+pat = "${SCENARIO}"
+for name in sorted(ss):
+    s = ss[name]
+    if not isinstance(s, dict): continue
+    has_recipe = "recipe" in s
+    if pat and pat not in name: continue
+    mark = " " if has_recipe else "*"
+    status = s.get("status", "")
+    print(f"  [{mark}] {name:<55} {status}")
+print()
+print("(* = no v2 recipe yet — translation pending)")
+EOF
+    exit 0
+fi
+
+# SCENARIO is whatever the user passed as the positional arg, or empty
+# string if they passed nothing. libtest-mimic treats "" as a substring
+# that matches every test — so `scripts/v2/test` with no args runs the
+# whole matrix (cargo-test convention).
+#
+# When SCENARIO is empty (full matrix), we gate on a single-scenario
+# smoke first (mac-format-tiny-32mib, ~30s) — same logic as the FPV
+# smoke-stopper before connecting the real battery: cheap "is the
+# wiring sane" check before committing to the 30+ min full run. The
+# smoke scenario then runs again as part of the matrix; that ~30s
+# duplication is the cost of finding wiring breakage in 30s instead
+# of 30 minutes.
+#
+# When SCENARIO is set, the user has explicitly targeted something;
+# trust them and skip the smoke gate.
+SMOKE_SCENARIO="mac-format-tiny-32mib"
+
+# ── load .test-env (VM_HOST, VM_WORKDIR, SSH_OPTS) ──────────────
+if [[ ! -f "${REPO_ROOT}/.test-env" ]]; then
+    echo "[test] .test-env not found at ${REPO_ROOT}/.test-env" >&2
+    echo "[test] run scripts/setup-local.sh to generate it, or copy from a peer dev" >&2
+    exit 2
+fi
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/.test-env"
+
+if [[ -z "${VM_HOST:-}" ]]; then
+    echo "[test] VM_HOST unset in .test-env" >&2
+    exit 2
+fi
+if [[ -z "${VM_WORKDIR:-}" ]]; then
+    echo "[test] VM_WORKDIR unset in .test-env" >&2
+    exit 2
+fi
+
+# ── IP swap (transparent, restored on exit) ─────────────────────
+# Strategy: snapshot the original harness.toml byte-for-byte, edit
+# in place, restore the snapshot on exit. Atomic; no regex risk.
+# Earlier attempts used sed `s|^host[[:space:]]*=.*|...|` which caught
+# *every* `host = "..."` line — including the per-op `host = "host"`
+# / `host = "vm"` keys — and corrupted them all into SSH targets.
+HARNESS_TOML_ORIG=""
+WATCHER_PID=""
+
+cleanup() {
+    if [[ -n "${WATCHER_PID}" ]]; then
+        kill "${WATCHER_PID}" 2>/dev/null || true
+        wait "${WATCHER_PID}" 2>/dev/null || true
+    fi
+    if [[ -n "${HARNESS_TOML_ORIG}" && -f "${HARNESS_TOML_ORIG}" ]]; then
+        cp "${HARNESS_TOML_ORIG}" harness.toml
+        rm -f "${HARNESS_TOML_ORIG}"
+    fi
+}
+trap cleanup EXIT
+
+if [[ "${DO_IP_SWAP}" == "1" ]]; then
+    # Read just the [vm].host value (the only `host` key whose value
+    # looks like an SSH target — i.e., contains `@`).
+    COMMITTED_HOST=$(awk -F'"' '/^host[[:space:]]*=[[:space:]]*"[^"]*@[^"]*"/ { print $2; exit }' harness.toml)
+    if [[ -z "${COMMITTED_HOST}" ]]; then
+        echo "[test] could not find [vm].host in harness.toml" >&2
+        exit 2
+    fi
+    if [[ "${COMMITTED_HOST}" != "${VM_HOST}" ]]; then
+        echo "[test] swapping harness.toml [vm].host: '${COMMITTED_HOST}' -> '${VM_HOST}' (will restore on exit)"
+        HARNESS_TOML_ORIG=$(mktemp -t harness.toml.test-orig.XXXXXX)
+        cp harness.toml "${HARNESS_TOML_ORIG}"
+        # Replace ONLY the line whose host value matches COMMITTED_HOST
+        # (anchored on the literal value to avoid hitting per-op lines).
+        python3 - "${COMMITTED_HOST}" "${VM_HOST}" <<'PYEOF'
+import re, sys
+old, new = sys.argv[1], sys.argv[2]
+with open('harness.toml') as f: t = f.read()
+pattern = r'^(host\s*=\s*)"' + re.escape(old) + r'"'
+result, n = re.subn(pattern, lambda m: m.group(1) + '"' + new + '"', t, count=1, flags=re.MULTILINE)
+if n != 1:
+    sys.exit(f"expected exactly 1 match for {old!r}, got {n}")
+with open('harness.toml', 'w') as f: f.write(result)
+PYEOF
+    fi
+fi
+
+# ── pre-flight: matrix + harness.toml well-formed ───────────────
+# Catches syntactic corruption (bad JSON escape, missing comma) and
+# the most common semantic problems (op references that don't resolve,
+# missing scenario fields) BEFORE we burn 30 s on build/ship/run only
+# to die deep in the harness binary with a TOML parse panic. See
+# scripts/v2/check-matrix --help for the full list of checks.
+echo "[test] === preflight: matrix lint ==="
+if ! scripts/v2/check-matrix; then
+    echo "[test] preflight: matrix or harness.toml has structural problems; aborting" >&2
+    exit 2
+fi
+
+# ── pre-flight: VM SSH reachability ─────────────────────────────
+# Why pre-flight: the harness's per-op SSH/SCP calls fail with cryptic
+# exit 255 and a one-liner stderr ("Host key verification failed",
+# "Connection refused", etc.). Without this check we'd discover the
+# problem 0.5s into the run *after* a 10-second build, surfaced only
+# as exit-Some(255) on a step.
+#
+# Common failure modes we surface as actionable hints:
+#   - "Host key verification failed"   -> known_hosts missing the VM's
+#     IP (often after a DHCP-assigned IP change). Auto-recover via
+#     ssh-keyscan since the user's already trusted the VM by pointing
+#     .test-env at it; otherwise instruct them.
+#   - "Connection refused" / "Operation timed out" -> VM not running,
+#     or sshd not started, or wrong IP.
+#   - "Permission denied"              -> ssh_key path or user wrong.
+preflight_ssh() {
+    local probe_out probe_rc
+    probe_out=$(ssh ${SSH_OPTS:-} -o BatchMode=yes -o ConnectTimeout=5 \
+        "${VM_HOST}" 'echo OK' 2>&1)
+    probe_rc=$?
+    if [[ "${probe_rc}" -eq 0 && "${probe_out}" == *OK* ]]; then
+        return 0
+    fi
+    echo "[test] preflight: SSH to ${VM_HOST} failed (rc=${probe_rc})" >&2
+    echo "[test] preflight: ${probe_out}" >&2
+
+    # Auto-recover: missing known_hosts entry. The VM is already trusted
+    # via .test-env; ssh-keyscan + retry. Fingerprint TOFU is acceptable
+    # for a dev VM the user explicitly points the wrapper at.
+    if [[ "${probe_out}" == *"Host key verification failed"* \
+       || "${probe_out}" == *"No matching host key"* ]]; then
+        local ip="${VM_HOST#*@}"
+        echo "[test] preflight: auto-trusting ${ip}'s host key (ssh-keyscan -> ~/.ssh/known_hosts)" >&2
+        if ssh-keyscan -H -T 5 "${ip}" >> "${HOME}/.ssh/known_hosts" 2>/dev/null; then
+            # Retry probe.
+            probe_out=$(ssh ${SSH_OPTS:-} -o BatchMode=yes -o ConnectTimeout=5 \
+                "${VM_HOST}" 'echo OK' 2>&1)
+            probe_rc=$?
+            if [[ "${probe_rc}" -eq 0 && "${probe_out}" == *OK* ]]; then
+                echo "[test] preflight: SSH OK after keyscan" >&2
+                return 0
+            fi
+        fi
+        echo "[test] preflight: ssh-keyscan didn't unblock — see above" >&2
+    fi
+
+    # Hint by error class.
+    case "${probe_out}" in
+        *"Connection refused"*)
+            echo "[test] hint: VM is up but sshd isn't listening on port 22 — check 'Get-Service sshd' on the VM" >&2 ;;
+        *"Operation timed out"*|*"Network is unreachable"*|*"Host is down"*)
+            echo "[test] hint: can't reach ${VM_HOST#*@} — VM down? wrong IP? check 'ipconfig' on the VM and fix .test-env's VM_HOST" >&2 ;;
+        *"Permission denied"*)
+            echo "[test] hint: ssh key rejected — check ssh_key path in harness.toml + .test-env's SSH_OPTS, and that the VM's ~/.ssh/authorized_keys includes the public half" >&2 ;;
+    esac
+    return 1
+}
+
+if ! preflight_ssh; then
+    echo "[test] preflight failed; aborting before build/ship/run" >&2
+    exit 2
+fi
+
+# ── pre-flight: VM script set in sync with local ────────────────
+# Catches the "local has new scripts/v2/*.ps1 that the VM hasn't seen
+# yet" failure mode, which otherwise surfaces mid-matrix as cryptic
+# "The argument '...win-X.ps1' to the -File parameter does not exist"
+# from PowerShell, several scenarios in. We compare just file *names*,
+# not contents — content-drift is a separate concern (use --ship to
+# force a re-ship if you're paranoid about edits not being mirrored).
+preflight_scripts() {
+    local vm_scripts local_scripts missing
+    local_scripts=$(cd scripts/v2 && ls win-*.ps1 _lib.ps1 2>/dev/null | sort)
+    vm_scripts=$(ssh ${SSH_OPTS:-} -o BatchMode=yes -o ConnectTimeout=5 \
+        "${VM_HOST}" "Get-ChildItem '${VM_WORKDIR}/scripts/v2/' -Filter '*.ps1' | ForEach-Object Name | Sort-Object" 2>/dev/null \
+        | tr -d '\r')
+    missing=$(comm -23 <(echo "$local_scripts") <(echo "$vm_scripts"))
+    if [[ -n "${missing}" ]]; then
+        echo "[test] preflight: VM is missing these scripts that exist locally:" >&2
+        echo "${missing}" | sed 's/^/  /' >&2
+        echo "[test] hint: re-run with --ship to push the source tree to the VM" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Skip when we're about to --ship anyway — the ship will fix any drift.
+if [[ "${DO_SHIP}" != "1" ]]; then
+    if ! preflight_scripts; then
+        exit 2
+    fi
+fi
+
+# ── build phase ─────────────────────────────────────────────────
+if [[ "${DO_BUILD}" == "1" ]]; then
+    echo "[test] === build phase ==="
+    cargo build --release --bin rust-ntfs
+    cargo build --manifest-path vendor/harness/runner/Cargo.toml --release --bin run-matrix
+fi
+
+# ── ship phase ──────────────────────────────────────────────────
+if [[ "${DO_SHIP}" == "1" ]]; then
+    echo "[test] === ship phase: ${VM_HOST}:${VM_WORKDIR} ==="
+    VM_WORKDIR_PS="${VM_WORKDIR//\//\\}"
+    ssh ${SSH_OPTS:-} "${VM_HOST}" "if (-not (Test-Path '${VM_WORKDIR_PS}')) { New-Item -ItemType Directory -Path '${VM_WORKDIR_PS}' -Force | Out-Null }"
+    tar --exclude='./target' --exclude='./.git' --exclude='./diag' \
+        --exclude='./test-disks' --exclude='./test-diagnostics' \
+        --exclude='./vendor/harness/runner/target' \
+        --exclude='*.swp' --exclude='.DS_Store' \
+        --exclude='./privatekey' --exclude='./privatekey.*' \
+        --exclude='./.claude' \
+        -cf - . | ssh ${SSH_OPTS:-} "${VM_HOST}" "tar -xf - -C '${VM_WORKDIR}'"
+    echo "[test] ship done"
+fi
+
+# ── run-with-watcher helper ─────────────────────────────────────
+# Encapsulates: nuke diag dir, launch live watcher (default mode),
+# invoke cargo run with the supplied filter, stop watcher. Returns
+# cargo run's exit code.
+#
+# Used twice when SCENARIO is empty (full matrix): once for the smoke
+# gate, once for the actual matrix run.
+run_harness() {
+    local filter="$1"
+
+    # Local pre-run cleanup: nuke the WHOLE matrix diag dir so the live
+    # watcher's seen-set starts empty against a fresh dir. Otherwise
+    # it'd emit every step.json from the prior run before the new one
+    # even starts. The harness binary nukes the dir at startup too
+    # (run-matrix.rs:139), so this is just doing the same thing earlier.
+    rm -rf "test-diagnostics/matrix" 2>/dev/null
+    rm -f nfs-mac-format-*.img 2>/dev/null
+
+    # ── live step watcher (DEFAULT — see Output policy header) ──
+    # Polls test-diagnostics/matrix/*/step-*/step.json files every 1.5s.
+    # When a new step.json appears, prints one row immediately. On a
+    # failed step, also dumps that step's stderr.txt inline so the
+    # run's tail carries enough context to triage without a re-run.
+    #
+    # Skipped under --quiet: cargo run prints the libtest-mimic per-
+    # test announcements directly; that's the compact view.
+    if [[ "${DO_QUIET}" != "1" ]]; then
+        python3 -u - <<'PYEOF' &
+import json, os, sys, time
+seen = set()
+DIAG = "test-diagnostics/matrix"
+LAST_SCN = None
+def emit(scn, sj_path):
+    global LAST_SCN
+    try:
+        s = json.load(open(sj_path))
+    except Exception:
+        return
+    if scn != LAST_SCN:
+        # New scenario: print a header so steps below are grouped visually.
+        print(f"\n[{scn}]")
+        sys.stdout.flush()
+        LAST_SCN = scn
+    idx = s.get("index", "?")
+    op = s.get("op", "?")
+    host = s.get("host", "?")
+    exit_code = s.get("exit_code")
+    expected = s.get("expected_exit", 0)
+    dur_ms = s.get("duration_ms", 0)
+    skipped = s.get("skipped", False)
+    if skipped:
+        mark, status = "-", "SKIP"
+    elif exit_code is None:
+        mark, status = "?", "----"
+    elif exit_code == expected:
+        mark, status = ".", " ok "
+    else:
+        mark, status = "x", "FAIL"
+    dur_str = f"{dur_ms/1000:>7.2f}s"
+    print(f"  [{idx:>2}] {mark} {op:<22} {host:<5} exit={str(exit_code):<6} {status} {dur_str}")
+    sys.stdout.flush()
+    # On failure, dump the step's stderr.txt inline (this is the bit
+    # that turns "well, gotta re-run" into "I see the error already").
+    if mark == "x":
+        stderr_path = os.path.join(os.path.dirname(sj_path), "stderr.txt")
+        if os.path.exists(stderr_path):
+            try:
+                txt = open(stderr_path).read().strip()
+                if txt:
+                    for line in txt.splitlines():
+                        print(f"        | {line}")
+                    sys.stdout.flush()
+            except Exception:
+                pass
+try:
+    while True:
+        if os.path.isdir(DIAG):
+            for scn in sorted(os.listdir(DIAG)):
+                scn_dir = os.path.join(DIAG, scn)
+                if not os.path.isdir(scn_dir):
+                    continue
+                for sd in sorted(os.listdir(scn_dir)):
+                    if not sd.startswith("step-"):
+                        continue
+                    sj = os.path.join(scn_dir, sd, "step.json")
+                    if not os.path.exists(sj) or sj in seen:
+                        continue
+                    seen.add(sj)
+                    emit(scn, sj)
+        time.sleep(1.5)
+except (KeyboardInterrupt, BrokenPipeError):
+    pass
+PYEOF
+        WATCHER_PID=$!
+    fi
+
+    # ── run phase ─────────────────────────────────────────────
+    # `cargo run` is the one place we explicitly *want* a non-zero
+    # exit to flow through to summary/verdict logic rather than abort
+    # the script (set -e). The `|| rc=$?` idiom captures the exit
+    # without tripping errexit; the `: $((${rc:=0}))` falls back to 0
+    # if cargo run actually succeeded (so $? was never assigned).
+    echo "[test] === running scenarios matching: '${filter}' ==="
+    local start rc elapsed
+    start=$(date +%s)
+    rc=0
+    HARNESS_CONSUMER_ROOT="$(pwd)" HARNESS_IMAGE_DIR="$(pwd)" \
+        cargo run --manifest-path vendor/harness/runner/Cargo.toml \
+                  --release --bin run-matrix -- "${filter}" \
+        || rc=$?
+    elapsed=$(( $(date +%s) - start ))
+
+    # Stop the watcher and let it drain anything from the final 1.5s window.
+    if [[ -n "${WATCHER_PID}" ]]; then
+        sleep 2  # final poll cycle
+        kill "${WATCHER_PID}" 2>/dev/null || true
+        wait "${WATCHER_PID}" 2>/dev/null || true
+        WATCHER_PID=""
+    fi
+
+    echo
+    echo "═══════════════════════════════════════"
+    echo "  verdict:  $([[ ${rc} -eq 0 ]] && echo PASSED || echo "FAILED (rc=${rc})")"
+    echo "  elapsed:  ${elapsed}s"
+    if [[ -n "${filter}" ]]; then
+        echo "  filter:   ${filter}"
+    else
+        echo "  filter:   (full matrix — every translated scenario)"
+    fi
+    echo "  diag:     test-diagnostics/matrix/<scenario>/   (host, per scenario)"
+    echo "            ${VM_WORKDIR}/diag/v2/<scenario>/    (VM, per scenario)"
+    echo "═══════════════════════════════════════"
+
+    # Local cleanup so the next run starts fresh.
+    rm -f nfs-mac-format-*.img 2>/dev/null
+
+    return "${rc}"
+}
+
+# ── smoke gate (only when running the full matrix) ──────────────
+# Cheap sanity check before committing to a 30+ min full run. Same
+# logic as the FPV smoke-stopper before connecting the real battery.
+# The smoke scenario then runs again as part of the matrix; that's
+# ~30s duplication for the value of catching wiring breakage in 30s
+# instead of 30 minutes.
+if [[ -z "${SCENARIO}" ]]; then
+    echo "[test] === smoke gate: ${SMOKE_SCENARIO} ==="
+    if ! run_harness "${SMOKE_SCENARIO}"; then
+        echo "[test] smoke gate failed; aborting before full matrix run" >&2
+        exit 1
+    fi
+    echo "[test] smoke gate passed; proceeding to full matrix"
+    echo
+fi
+
+# ── main run phase ──────────────────────────────────────────────
+run_harness "${SCENARIO}"
+exit "$?"
