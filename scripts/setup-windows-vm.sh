@@ -7,8 +7,9 @@
 #   2. Execute it (idempotent -- safe to re-run).
 #   3. Verify the test pipeline can build at least once.
 #
-# After this completes, the matrix runner (via fs-test-harness's
-# scripts/test-windows-matrix.sh) should work against the VM.
+# After this completes, the matrix runner
+# (vendor/harness/scripts/test-windows-matrix.sh) should work against
+# the VM.
 #
 # Cost (one-time, on a fresh VM):
 #   * Rustup     ~50 MB  / ~30 s
@@ -34,4 +35,4 @@ ssh "${VM_HOST}" "powershell -ExecutionPolicy Bypass -File '${VM_WORKDIR_PS}\\sc
 
 echo
 echo "[setup] Done. Try a real iteration:"
-echo "    bash ${REPO_ROOT}/scripts/test-windows-local.sh"
+echo "    bash ${REPO_ROOT}/vendor/harness/scripts/test-windows-matrix.sh"
