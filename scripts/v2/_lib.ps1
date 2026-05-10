@@ -58,9 +58,28 @@ function Initialize-VhdxFromImg {
             Dismount-DiskImage -EA SilentlyContinue | Out-Null
     } catch { }
 
-    # Already-streamed VHDX from a prior op — nothing to do here.
+    # Already-streamed VHDX from a prior op — fast path: skip the
+    # qemu-img + stream phase, just return the path.
+    #
+    # Stale-VHDX detection: if the .img is *newer* than the .vhdx, a
+    # mac-side op (or a re-ship-to-vm) modified the source bytes after
+    # the VHDX was last streamed. Reusing the VHDX would mount the
+    # OLD bytes — the round-trip win-format scenarios depend on this
+    # detection (`win:format -> ship-to-host -> mac:write -> ship-to-vm
+    # -> win:chkdsk`: the second win-* op must see the post-mac-write
+    # bytes, not the pre-mac-write ones from the prior win-format).
+    # Wipe the stale VHDX and fall through to rebuild.
     if (Test-Path $Vhdx) {
-        return @{ Vhdx = $Vhdx }
+        $imgWriteTime = (Get-Item $ImagePath).LastWriteTimeUtc
+        $vhdxWriteTime = (Get-Item $Vhdx).LastWriteTimeUtc
+        if ($imgWriteTime -le $vhdxWriteTime) {
+            return @{ Vhdx = $Vhdx }
+        }
+        # .img is newer — VHDX is stale. Delete and rebuild.
+        Remove-Item -LiteralPath $Vhdx -Force -EA SilentlyContinue
+        if (Test-Path -LiteralPath $Vhdx) {
+            throw "Stale VHDX could not be removed: $Vhdx (img mtime $imgWriteTime > vhdx mtime $vhdxWriteTime)"
+        }
     }
 
     # Sized just larger than the .img so the GPT slack fits.
