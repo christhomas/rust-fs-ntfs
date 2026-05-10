@@ -184,22 +184,21 @@ are documented there.
 - **Static images** for fixtures awkward to build programmatically
   live under `test-disks/`. Most tests assemble their NTFS image at
   runtime.
-- **chkdsk validation:** the `tests/matrix.rs` harness (declared
-  with `harness = false` in `Cargo.toml`) loads scenarios from
-  `test-matrix.json` and on Windows shells out to `rust-ntfs format`,
-  Microsoft's `format.com`, and Microsoft's `chkdsk` to validate
-  every formatted image. On non-Windows hosts the matrix tests are
-  reported as ignored. Microsoft's `chkdsk` is the authoritative
-  validator — not byte-equivalence with any third-party formatter.
+- **chkdsk validation:** the `test-matrix.json` matrix runs through
+  the vendored `fs-test-harness` runner (see
+  `vendor/harness/scripts/test-windows-matrix.sh`), which on Windows
+  shells out to `rust-ntfs format`, Microsoft's `format.com`, and
+  Microsoft's `chkdsk` to validate every formatted image. On non-
+  Windows hosts the matrix tests are reported as ignored. Microsoft's
+  `chkdsk` is the authoritative validator — not byte-equivalence with
+  any third-party formatter.
 - **Test matrix:** `test-matrix.json` at repo root carries 42
-  scenarios (status snapshot at HEAD: 17 passed, 19 pending, 5
-  blocked, 1 failed). The harness drives mac-side ops (format,
-  populate via the pure-Rust write API) and Windows-side ops
-  (mount, chkdsk, enumerate, write, repeat-mount stability cycles)
-  through a single declarative JSON contract; results from a
-  Windows VM stream back over SSH. See
-  `docs/multi-agent-test-protocol.md` for the agent-coordination
-  rules around this matrix.
+  scenarios. The harness drives mac-side ops (format, populate via
+  the pure-Rust write API) and Windows-side ops (mount, chkdsk,
+  enumerate, write, repeat-mount stability cycles) through a single
+  declarative JSON contract; results from a Windows VM stream back
+  over SSH. See `harness.toml` for the op declarations and
+  `vendor/harness/` for the runner.
 - **Fuzz:** `fuzz/` carries cargo-fuzz harnesses for the three
   byte-decoders most likely to regress (data-runs, attribute headers,
   INDX block headers).
@@ -366,28 +365,26 @@ cargo test --lib               # unit only
 
 ### Test matrix (Windows + macOS VM coordination)
 
-The chkdsk-validated matrix lives in `test-matrix.json` at the
-repo root. Drivers:
+The chkdsk-validated matrix lives in `test-matrix.json` at the repo
+root. The matrix runs through the vendored `fs-test-harness` runner.
+Drivers:
 
 - `scripts/setup-windows-vm.sh` / `.ps1` — bootstrap a Windows VM
-  with the toolchain needed to run `format.com` / `chkdsk` / the
-  smoke harness.
-- `scripts/test-windows-matrix.sh` — local driver for the full
-  matrix.
-- `scripts/test-windows-write-smoke.sh` — minimal mkfs → mount →
-  write-one-file diagnostic; answer the question "does ntfs.sys
-  actually take a write to our format?".
-- `scripts/run-cycle.sh` — multi-agent claim / run / mark loop driver,
-  used when several agents share the matrix. Delegates the claim and
-  status-update steps to the shared harness (`vendor/harness/scripts/`).
+  with the toolchain needed to run `format.com` / `chkdsk` plus
+  `vhd_tool` for the wrapper-image lifecycle.
+- `vendor/harness/scripts/test-windows-matrix.sh` — orchestrator that
+  tars the consumer source, SSHes to the VM, invokes the harness's
+  `run-matrix` runner, and pulls per-scenario diag back to the Mac.
 - `vendor/harness/scripts/claim-scenario.sh`,
   `vendor/harness/scripts/update-scenario-status.sh`,
-  `vendor/harness/scripts/reset-non-passed.sh` — generic, FS-agnostic state
-  machine over `test-matrix.json`. Vendored from
-  `fs-test-harness`; consumed via the `vendor/harness/` submodule.
+  `vendor/harness/scripts/reset-non-passed.sh` — generic, FS-agnostic
+  state-machine over `test-matrix.json`. Vendored from
+  `antimatter-studios/fs-test-harness`.
 
 Agent coordination rules: see
-[`docs/multi-agent-test-protocol.md`](docs/multi-agent-test-protocol.md).
+[`docs/multi-agent-test-protocol.md`](docs/multi-agent-test-protocol.md)
+(historical — describes the v1 matrix flow; some script names have
+moved into `vendor/harness/scripts/`).
 
 ### Pre-commit hooks
 

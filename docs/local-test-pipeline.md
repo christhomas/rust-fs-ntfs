@@ -1,5 +1,13 @@
 # Local Windows test pipeline
 
+> **Status:** historical. Describes the v1 single-scenario pipeline
+> driven by the now-removed `scripts/test-windows-local.sh` and
+> `scripts/run-windows-test.ps1`. The current entry point is the
+> matrix runner via `vendor/harness/scripts/test-windows-matrix.sh`,
+> which dispatches per-scenario recipes from `test-matrix.json`. Kept
+> for the architectural narrative (VHD wrapping, format.com reference,
+> byte-diff debugging contract) which still applies.
+
 A local mirror of the GitHub Actions `validate-mkfs-windows` job. Lets
 us iterate on `rust-ntfs format` against Microsoft's `chkdsk` in **~30-90 s**
 per cycle instead of the ~2-4 min CI roundtrip, and without burning
