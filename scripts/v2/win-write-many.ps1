@@ -155,10 +155,16 @@ try {
         $resultLines.Add("summary: wrote $written files of $sizeInt bytes (pattern '$NamePattern', pad-width $padWidth)") | Out-Null
         $resultLines | Out-File "$Diag\write-many-result.txt" -Encoding UTF8
     } catch {
-        # Persist whatever we got so the failure point is visible in diag.
-        if ($resultLines.Count -gt 0) {
-            $resultLines | Out-File "$Diag\write-many-result.txt" -Encoding UTF8
+        # Persist whatever we got so the failure point is visible in
+        # diag. Always emit the result file (even when empty) — a
+        # triage agent that finds *no* result file can't distinguish
+        # "script never reached this op" from "op crashed before the
+        # first file landed". Drop a sentinel line when there's
+        # nothing to report so the file's never zero-byte.
+        if ($resultLines.Count -eq 0) {
+            $resultLines.Add("(no files written before failure; see write-many-error.txt)") | Out-Null
         }
+        $resultLines | Out-File "$Diag\write-many-result.txt" -Encoding UTF8
         "failed after $written / $countInt files: $($_.Exception.Message)" | Out-File "$Diag\write-many-error.txt" -Encoding UTF8
         throw
     }

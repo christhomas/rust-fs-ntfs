@@ -119,9 +119,15 @@ try {
         $resultLines.Add("summary: deleted $deleted files (range [$startInt, $endInt) step $stepInt, pattern '$NamePattern', pad-width $padWidth)") | Out-Null
         $resultLines | Out-File "$Diag\delete-many-result.txt" -Encoding UTF8
     } catch {
-        if ($resultLines.Count -gt 0) {
-            $resultLines | Out-File "$Diag\delete-many-result.txt" -Encoding UTF8
+        # Always emit the result file (even when empty) so a triage
+        # agent can distinguish "op crashed before deleting anything"
+        # from "op never ran". Drop a sentinel line when there's
+        # nothing to report so the file's never zero-byte. Mirrors
+        # the same fix in win-write-many.ps1.
+        if ($resultLines.Count -eq 0) {
+            $resultLines.Add("(no files deleted before failure; see delete-many-error.txt)") | Out-Null
         }
+        $resultLines | Out-File "$Diag\delete-many-result.txt" -Encoding UTF8
         "failed after $deleted deletions: $($_.Exception.Message)" | Out-File "$Diag\delete-many-error.txt" -Encoding UTF8
         throw
     }
