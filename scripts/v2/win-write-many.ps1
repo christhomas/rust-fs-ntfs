@@ -81,6 +81,16 @@ if ($sizeInt -lt 0) {
     [Console]::Error.WriteLine("win-write-many: -SizeBytes must be >= 0; got $sizeInt")
     exit 2
 }
+# byte[] allocation + FileStream.Write below both take Int32-sized
+# counts. Without this guard a -SizeBytes > Int32.MaxValue would die
+# at allocation time with a runtime OverflowException. Match the
+# explicit-arg-error pattern used by win-modify / win-read so a
+# misconfigured recipe fails with a clear stderr message instead
+# of a .NET stack trace.
+if ($sizeInt -gt [int]::MaxValue) {
+    [Console]::Error.WriteLine("win-write-many: -SizeBytes $sizeInt exceeds [int]::MaxValue ($([int]::MaxValue)); chunked writes not yet implemented")
+    exit 2
+}
 
 # Pattern must contain the `{N}` placeholder so we know where the
 # index goes. Anything else is a recipe authoring error.
