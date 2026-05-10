@@ -22,6 +22,12 @@
 #     List scenarios that have a v2 recipe + match the optional pattern;
 #     don't run anything. Useful before --filter to confirm your filter.
 #
+#   scripts/v2/test [SCENARIO] --verbose
+#     After each scenario, print a per-step table (init-image, mac-format,
+#     ship-to-vm, win-chkdsk, ...) with each step's host (host/vm), exit
+#     code, duration, and pass/fail. Default output is one line per
+#     scenario; --verbose adds a breakdown per step underneath each row.
+#
 # Implicit IP swap:
 #   harness.toml's [vm].host is committed at the canonical IP for the
 #   maintainer's dev VM. Your local VM is probably on a different IP,
@@ -60,6 +66,7 @@ DO_BUILD=0
 DO_SHIP=0
 DO_LIST=0
 DO_IP_SWAP=1
+DO_VERBOSE=0
 SCENARIO=""
 
 usage() {
@@ -72,6 +79,7 @@ for arg in "$@"; do
         --ship)         DO_SHIP=1 ;;
         --list)         DO_LIST=1 ;;
         --no-ip-swap)   DO_IP_SWAP=0 ;;
+        --verbose|-v)   DO_VERBOSE=1 ;;
         --help|-h)      usage; exit 0 ;;
         --*)
             echo "[test] unknown flag: ${arg}" >&2
@@ -183,6 +191,69 @@ HARNESS_CONSUMER_ROOT="$(pwd)" HARNESS_IMAGE_DIR="$(pwd)" \
     cargo run --manifest-path vendor/harness/runner/Cargo.toml \
               --release --bin run-matrix -- "${SCENARIO}"
 RC=$?
+
+# ── verbose post-run breakdown ──────────────────────────────────
+# The default output (one line per scenario) is enough for the green
+# path. --verbose walks each scenario's diag dir and prints a per-step
+# table reconstructed from step-NN/step.json — that's the "every column
+# of every row" view a triage agent wants when something failed.
+if [[ "${DO_VERBOSE}" == "1" ]]; then
+    echo
+    echo "═══════════════════════════════════════"
+    echo "  per-step breakdown (--verbose)"
+    echo "═══════════════════════════════════════"
+    python3 - <<'PYEOF'
+import json, os, sys
+matrix_diag = "test-diagnostics/matrix"
+if not os.path.isdir(matrix_diag):
+    print("  (no diag dir; nothing to dump)")
+    sys.exit(0)
+scenarios = sorted(d for d in os.listdir(matrix_diag) if os.path.isdir(os.path.join(matrix_diag, d)))
+if not scenarios:
+    print("  (no scenarios in diag dir)")
+    sys.exit(0)
+for scn in scenarios:
+    scn_dir = os.path.join(matrix_diag, scn)
+    result_path = os.path.join(scn_dir, "result.json")
+    overall = "?"
+    overall_secs = None
+    if os.path.exists(result_path):
+        try:
+            r = json.load(open(result_path))
+            overall = r.get("status", "?")
+            overall_secs = r.get("duration_secs")
+        except Exception:
+            pass
+    secs_str = f"  ({overall_secs:.1f}s)" if isinstance(overall_secs, (int, float)) else ""
+    print(f"\n  {scn}:  {overall.upper()}{secs_str}")
+    step_dirs = sorted(d for d in os.listdir(scn_dir) if d.startswith("step-"))
+    for sd in step_dirs:
+        sj = os.path.join(scn_dir, sd, "step.json")
+        if not os.path.exists(sj):
+            continue
+        try:
+            s = json.load(open(sj))
+        except Exception:
+            continue
+        idx = s.get("index", "?")
+        op = s.get("op", "?")
+        host = s.get("host", "?")
+        exit_code = s.get("exit_code")
+        expected = s.get("expected_exit", 0)
+        dur_ms = s.get("duration_ms", 0)
+        skipped = s.get("skipped", False)
+        if skipped:
+            mark, status = "-", "SKIP"
+        elif exit_code is None:
+            mark, status = "?", "----"
+        elif exit_code == expected:
+            mark, status = ".", " ok "
+        else:
+            mark, status = "x", "FAIL"
+        dur_str = f"{dur_ms/1000:>7.2f}s"
+        print(f"    [{idx:>2}] {mark} {op:<22} {host:<5} exit={str(exit_code):<6} {status} {dur_str}")
+PYEOF
+fi
 ELAPSED=$(( $(date +%s) - START ))
 
 echo
