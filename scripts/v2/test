@@ -15,9 +15,16 @@
 # only when you genuinely want compact output (CI summary, grepping).
 #
 # Usage:
-#   scripts/v2/test [SCENARIO]
-#     Smoke-runs SCENARIO (substring filter against the matrix).
-#     Default SCENARIO = mac-format-tiny-32mib.
+#   scripts/v2/test
+#     Run the FULL matrix (every scenario with a v2 recipe — currently
+#     ~33, ~30+ minutes wall-clock). Same convention as `cargo test`:
+#     no filter = run everything.
+#
+#   scripts/v2/test SCENARIO
+#     Substring filter against the matrix. Examples:
+#       scripts/v2/test mac-format-tiny-32mib   # one explicit scenario
+#       scripts/v2/test set-dirty               # all 3 set-dirty scenarios
+#       scripts/v2/test mac-format-volume-      # the 4 large-volume scenarios
 #
 #   scripts/v2/test [SCENARIO] --build
 #     Rebuild rust-ntfs + the harness runner on the host first.
@@ -29,7 +36,7 @@
 #
 #   scripts/v2/test --list [PATTERN]
 #     List scenarios that have a v2 recipe + match the optional pattern;
-#     don't run anything. Useful before a filter to confirm what'll run.
+#     don't run anything. Useful before a filter to preview what'll run.
 #
 #   scripts/v2/test [SCENARIO] --quiet
 #     Suppress the live per-step rows + inline stderr. Print only the
@@ -88,6 +95,7 @@ for arg in "$@"; do
         --build)        DO_BUILD=1 ;;
         --ship)         DO_SHIP=1 ;;
         --list)         DO_LIST=1 ;;
+        --all)          DO_ALL=1 ;;
         --no-ip-swap)   DO_IP_SWAP=0 ;;
         --quiet|-q)     DO_QUIET=1 ;;
         --help|-h)      usage; exit 0 ;;
@@ -128,8 +136,21 @@ EOF
     exit 0
 fi
 
-# Default scenario for plain `scripts/v2/test`.
-if [[ -z "${SCENARIO}" ]]; then
+# Conflict guard: --all and a positional filter are mutually exclusive.
+if [[ "${DO_ALL}" == "1" && -n "${SCENARIO}" ]]; then
+    echo "[test] --all and a scenario filter ('${SCENARIO}') are mutually exclusive" >&2
+    exit 2
+fi
+
+# Resolve the filter that gets passed to libtest-mimic:
+#   - explicit --all  -> empty string (libtest-mimic substring "" matches every test)
+#   - explicit filter -> use it as-is
+#   - neither         -> default smoke (mac-format-tiny-32mib). Keeps a
+#                        bare `scripts/v2/test` invocation from accidentally
+#                        kicking off the full ~hour matrix.
+if [[ "${DO_ALL}" == "1" ]]; then
+    SCENARIO=""
+elif [[ -z "${SCENARIO}" ]]; then
     SCENARIO="mac-format-tiny-32mib"
 fi
 
@@ -197,6 +218,18 @@ if n != 1:
 with open('harness.toml', 'w') as f: f.write(result)
 PYEOF
     fi
+fi
+
+# ── pre-flight: matrix + harness.toml well-formed ───────────────
+# Catches syntactic corruption (bad JSON escape, missing comma) and
+# the most common semantic problems (op references that don't resolve,
+# missing scenario fields) BEFORE we burn 30 s on build/ship/run only
+# to die deep in the harness binary with a TOML parse panic. See
+# scripts/v2/check-matrix --help for the full list of checks.
+echo "[test] === preflight: matrix lint ==="
+if ! scripts/v2/check-matrix; then
+    echo "[test] preflight: matrix or harness.toml has structural problems; aborting" >&2
+    exit 2
 fi
 
 # ── pre-flight: VM SSH reachability ─────────────────────────────
@@ -292,7 +325,7 @@ fi
 # binary nukes the dir at startup too (run-matrix.rs:139), so this is
 # just doing the same thing earlier.
 rm -rf "test-diagnostics/matrix" 2>/dev/null
-rm -f "nfs-${SCENARIO}.img" 2>/dev/null
+rm -f nfs-mac-format-*.img 2>/dev/null
 
 # ── live step watcher (DEFAULT — see Output policy header) ──────
 # Polls test-diagnostics/matrix/*/step-*/step.json files every 1.5s.
@@ -394,12 +427,18 @@ echo
 echo "═══════════════════════════════════════"
 echo "  verdict:  $([[ ${RC} -eq 0 ]] && echo PASSED || echo "FAILED (rc=${RC})")"
 echo "  elapsed:  ${ELAPSED}s"
-echo "  scenario: ${SCENARIO}"
-echo "  diag:     test-diagnostics/matrix/${SCENARIO}/   (host)"
-echo "            ${VM_WORKDIR}/diag/v2/${SCENARIO}/    (VM)"
+if [[ -n "${SCENARIO}" ]]; then
+    echo "  filter:   ${SCENARIO}"
+    echo "  diag:     test-diagnostics/matrix/${SCENARIO}/   (host)"
+    echo "            ${VM_WORKDIR}/diag/v2/${SCENARIO}/    (VM)"
+else
+    echo "  filter:   (--all — every translated scenario)"
+    echo "  diag:     test-diagnostics/matrix/<scenario>/   (host, per scenario)"
+    echo "            ${VM_WORKDIR}/diag/v2/<scenario>/    (VM, per scenario)"
+fi
 echo "═══════════════════════════════════════"
 
 # Local cleanup so the next run starts fresh.
-rm -f "nfs-${SCENARIO}.img" 2>/dev/null
+rm -f nfs-mac-format-*.img 2>/dev/null
 
 exit "${RC}"

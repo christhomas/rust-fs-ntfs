@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""scripts/v2/check-matrix -- mechanical lint for test-matrix.json + harness.toml.
+
+Catches the kind of corruption that would otherwise blow up mid-run as
+a cryptic TOML parse panic or a "no such op" SSH failure deep into a
+60-minute matrix run.
+
+Checks (each prints a line-anchored error if it fails):
+
+  1. test-matrix.json parses as valid JSON. On failure: line + column +
+     the offending character + a few lines of context.
+  2. harness.toml parses as valid TOML.
+  3. Top-level `scenarios` map exists in the matrix.
+  4. Each scenario has the required input fields (volume_params with
+     size_mib/label/alloc_unit_size).
+  5. Each recipe step:
+       - is an object with an `op` field
+       - the op exists in harness.toml's [ops.X] block (or is one of
+         the harness's built-ins: ship-to-vm, ship-to-host)
+  6. Cross-check: every op declared in harness.toml gets used by at
+     least one recipe (warn-only — declared-but-unused isn't fatal,
+     just maybe rot).
+
+Exit code:
+  0 if matrix + harness.toml are both valid
+  1 on any check failure (stderr lists every problem before exiting,
+    not just the first — a bulk scan is more useful than fail-fast
+    when a contributor has just done a mass edit)
+  2 on infrastructure errors (file missing, etc.)
+
+Usage:
+  scripts/v2/check-matrix                      # check the repo's matrix
+  scripts/v2/check-matrix --quiet              # exit code only, no output
+  scripts/v2/check-matrix --matrix path.json   # check a different file
+
+Wired into scripts/v2/test as a preflight phase before SSH probing.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import tomllib
+from pathlib import Path
+from typing import Any
+
+# Ops defined by the harness binary itself, not in [ops.X] of consumer
+# harness.toml. See vendor/harness/runner/src/dispatch.rs `run_builtin_ship`.
+HARNESS_BUILTIN_OPS = {"ship-to-vm", "ship-to-host"}
+
+# Fields every scenario MUST have for the harness to dispatch.
+REQUIRED_VOLUME_PARAMS = {"size_mib", "label", "alloc_unit_size"}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Mechanical lint for test-matrix.json + harness.toml."
+    )
+    parser.add_argument("--matrix", default="test-matrix.json",
+                        help="Path to the matrix JSON (default: test-matrix.json)")
+    parser.add_argument("--harness", default="harness.toml",
+                        help="Path to harness.toml (default: harness.toml)")
+    parser.add_argument("--quiet", "-q", action="store_true",
+                        help="Suppress output; signal status via exit code only")
+    args = parser.parse_args()
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    def err(msg: str) -> None:
+        errors.append(msg)
+
+    def warn(msg: str) -> None:
+        warnings.append(msg)
+
+    # ── 1. matrix JSON parse ──
+    matrix_path = Path(args.matrix)
+    if not matrix_path.exists():
+        if not args.quiet:
+            print(f"[check-matrix] {matrix_path}: file not found", file=sys.stderr)
+        return 2
+    matrix_text = matrix_path.read_text()
+    try:
+        matrix = json.loads(matrix_text)
+    except json.JSONDecodeError as e:
+        # Show the offending line + a few lines of context — the bit
+        # that turns "json.decoder.JSONDecodeError" into "I see the
+        # problem on line 1595".
+        lines = matrix_text.splitlines()
+        ctx_start = max(0, e.lineno - 2)
+        ctx_end = min(len(lines), e.lineno + 1)
+        if not args.quiet:
+            print(f"[check-matrix] {matrix_path}: JSON parse error", file=sys.stderr)
+            print(f"  line {e.lineno} col {e.colno} (char {e.pos}): {e.msg}", file=sys.stderr)
+            for i in range(ctx_start, ctx_end):
+                marker = "  > " if (i + 1) == e.lineno else "    "
+                print(f"  {marker}{i+1:>5}: {lines[i][:120]}", file=sys.stderr)
+                if (i + 1) == e.lineno:
+                    print(f"        {' ' * 5}  {' ' * (e.colno - 1)}^", file=sys.stderr)
+        return 1
+
+    # ── 2. harness.toml parse ──
+    harness_path = Path(args.harness)
+    if not harness_path.exists():
+        if not args.quiet:
+            print(f"[check-matrix] {harness_path}: file not found", file=sys.stderr)
+        return 2
+    try:
+        harness = tomllib.loads(harness_path.read_text())
+    except tomllib.TOMLDecodeError as e:
+        if not args.quiet:
+            print(f"[check-matrix] {harness_path}: TOML parse error", file=sys.stderr)
+            print(f"  {e}", file=sys.stderr)
+        return 1
+
+    declared_ops: set[str] = set(harness.get("ops", {}).keys())
+    all_known_ops: set[str] = declared_ops | HARNESS_BUILTIN_OPS
+
+    # ── 3. top-level shape ──
+    if not isinstance(matrix, dict):
+        err(f"{matrix_path}: top-level must be an object, got {type(matrix).__name__}")
+        return 1 if not _emit(errors, warnings, args.quiet) else 1
+    scenarios: Any = matrix.get("scenarios")
+    if not isinstance(scenarios, dict):
+        err(f"{matrix_path}: missing or non-object `scenarios` key")
+        _emit(errors, warnings, args.quiet)
+        return 1
+
+    # ── 4 + 5. per-scenario / per-recipe-step ──
+    used_ops: set[str] = set()
+    for name, scn in sorted(scenarios.items()):
+        if not isinstance(scn, dict):
+            err(f"scenario {name!r}: must be an object, got {type(scn).__name__}")
+            continue
+        # 4. volume_params required
+        vp = scn.get("volume_params")
+        if not isinstance(vp, dict):
+            err(f"scenario {name!r}: missing or non-object `volume_params`")
+        else:
+            missing = REQUIRED_VOLUME_PARAMS - set(vp.keys())
+            if missing:
+                err(f"scenario {name!r}.volume_params: missing fields {sorted(missing)}")
+
+        # 5. per-step in recipe (only if recipe present — translation is opt-in per scenario)
+        recipe = scn.get("recipe")
+        if recipe is None:
+            continue
+        if not isinstance(recipe, list):
+            err(f"scenario {name!r}.recipe: must be a list, got {type(recipe).__name__}")
+            continue
+        for idx, step in enumerate(recipe):
+            if not isinstance(step, dict):
+                err(f"scenario {name!r}.recipe[{idx}]: must be an object")
+                continue
+            op = step.get("op")
+            if not isinstance(op, str) or not op:
+                err(f"scenario {name!r}.recipe[{idx}]: missing or empty `op` field")
+                continue
+            used_ops.add(op)
+            if op not in all_known_ops:
+                err(f"scenario {name!r}.recipe[{idx}]: op {op!r} not declared in "
+                    f"{harness_path} or harness builtins")
+
+    # ── 6. declared-but-unused (warn) ──
+    unused = declared_ops - used_ops
+    for op in sorted(unused):
+        warn(f"{harness_path} [ops.{op}]: declared but no recipe uses it (rot?)")
+
+    rc = _emit(errors, warnings, args.quiet)
+    return rc
+
+
+def _emit(errors: list[str], warnings: list[str], quiet: bool) -> int:
+    """Print all collected diagnostics; return appropriate exit code."""
+    if not quiet:
+        for w in warnings:
+            print(f"[check-matrix] warn: {w}", file=sys.stderr)
+        for e in errors:
+            print(f"[check-matrix] error: {e}", file=sys.stderr)
+        if not errors and not warnings:
+            print("[check-matrix] ok: matrix + harness.toml validate cleanly", file=sys.stderr)
+        elif not errors:
+            print(f"[check-matrix] ok with {len(warnings)} warning(s)", file=sys.stderr)
+        else:
+            print(f"[check-matrix] FAILED: {len(errors)} error(s), {len(warnings)} warning(s)",
+                  file=sys.stderr)
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
