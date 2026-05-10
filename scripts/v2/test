@@ -304,6 +304,36 @@ if ! preflight_ssh; then
     exit 2
 fi
 
+# ── pre-flight: VM script set in sync with local ────────────────
+# Catches the "local has new scripts/v2/*.ps1 that the VM hasn't seen
+# yet" failure mode, which otherwise surfaces mid-matrix as cryptic
+# "The argument '...win-X.ps1' to the -File parameter does not exist"
+# from PowerShell, several scenarios in. We compare just file *names*,
+# not contents — content-drift is a separate concern (use --ship to
+# force a re-ship if you're paranoid about edits not being mirrored).
+preflight_scripts() {
+    local vm_scripts local_scripts missing
+    local_scripts=$(cd scripts/v2 && ls win-*.ps1 _lib.ps1 2>/dev/null | sort)
+    vm_scripts=$(ssh ${SSH_OPTS:-} -o BatchMode=yes -o ConnectTimeout=5 \
+        "${VM_HOST}" "Get-ChildItem '${VM_WORKDIR}/scripts/v2/' -Filter '*.ps1' | ForEach-Object Name | Sort-Object" 2>/dev/null \
+        | tr -d '\r')
+    missing=$(comm -23 <(echo "$local_scripts") <(echo "$vm_scripts"))
+    if [[ -n "${missing}" ]]; then
+        echo "[test] preflight: VM is missing these scripts that exist locally:" >&2
+        echo "${missing}" | sed 's/^/  /' >&2
+        echo "[test] hint: re-run with --ship to push the source tree to the VM" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Skip when we're about to --ship anyway — the ship will fix any drift.
+if [[ "${DO_SHIP}" != "1" ]]; then
+    if ! preflight_scripts; then
+        exit 2
+    fi
+fi
+
 # ── build phase ─────────────────────────────────────────────────
 if [[ "${DO_BUILD}" == "1" ]]; then
     echo "[test] === build phase ==="
