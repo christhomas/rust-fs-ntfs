@@ -18,24 +18,24 @@
 # isolates a reader bug from a writer bug.
 #
 # Mount lifecycle:
-#   1. Initialize-VhdxFromImg wraps the .img into a VHDX, GPT-inits,
+#   1. Initialize-VhdFromImg wraps the .img into a VHD, GPT-inits,
 #      partitions, streams the (zero) bytes into the partition. This
 #      works on a fresh zero .img -- it just lays down a partition table
 #      on the wrapper and writes zeros into the partition data area.
-#   2. Mount-VhdxAndGetLetter remounts so a drive letter is assigned.
+#   2. Mount-VhdAndGetLetter remounts so a drive letter is assigned.
 #      The volume is RAW at this point (no NTFS structure yet); the
 #      lib helper's Set-Partition fallback covers the case where
 #      Windows declines to auto-assign a letter to a RAW volume.
 #   3. Format-Volume -DriveLetter <letter> -FileSystem NTFS does the
 #      actual formatting in-place on the mounted drive letter.
-#   4. Dismount-VhdxAndCleanup tears the wrapper down. KeepImage=true
-#      leaves the .img + .vhdx on the VM so a follow-on win-* op
+#   4. Dismount-VhdAndCleanup tears the wrapper down. KeepImage=true
+#      leaves the .img + .vhd on the VM so a follow-on win-* op
 #      (e.g. win-write-content) or ship-to-host can read it.
 #
 # Args:
 #   -ImagePath  Path on the VM to the (zero-filled) .img file.
 #   -Label      Volume label for the formatted NTFS volume.
-#   -KeepImage  'true' to leave .img + .vhdx for a follow-on op (default 'false').
+#   -KeepImage  'true' to leave .img + .vhd for a follow-on op (default 'false').
 #   -Diag       Directory for format-result.txt + wrapper-create.txt.
 #
 # Exit code:
@@ -70,11 +70,11 @@ if ($Label.Trim() -eq '') {
 
 New-Item -ItemType Directory -Path $Diag -Force | Out-Null
 
-$Vhdx = Get-VhdxPathFor -ImagePath $ImagePath
+$Vhd = Get-VhdPathFor -ImagePath $ImagePath
 
 try {
-    $state = Initialize-VhdxFromImg -ImagePath $ImagePath -Diag $Diag
-    $letter = Mount-VhdxAndGetLetter -Vhdx $state.Vhdx
+    $state = Initialize-VhdFromImg -ImagePath $ImagePath -Diag $Diag
+    $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
 
     try {
         # -Force + -Confirm:$false matches the non-interactive mode the
@@ -99,5 +99,5 @@ try {
 
     exit 0
 } finally {
-    Dismount-VhdxAndCleanup -Vhdx $Vhdx -ImagePath $ImagePath -KeepImage $KeepImageBool
+    Dismount-VhdAndCleanup -Vhd $Vhd -ImagePath $ImagePath -KeepImage $KeepImageBool
 }

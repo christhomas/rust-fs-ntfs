@@ -20,7 +20,7 @@
 #   -Step         Stride (positive integer).
 #   -NamePattern  Volume-relative path containing the literal `{N}`
 #                 placeholder (e.g. "/file_{N}.txt").
-#   -KeepImage    `true` to leave .img + .vhdx for a follow-on op.
+#   -KeepImage    `true` to leave .img + .vhd for a follow-on op.
 #                 Default `false`.
 #   -Diag         Directory for delete-many-result.txt + delete-many-error.txt.
 #
@@ -90,11 +90,11 @@ $padWidth = ([string]($endInt - 1)).Length
 
 New-Item -ItemType Directory -Path $Diag -Force | Out-Null
 
-$Vhdx = Get-VhdxPathFor -ImagePath $ImagePath
+$Vhd = Get-VhdPathFor -ImagePath $ImagePath
 
 try {
-    $state  = Initialize-VhdxFromImg -ImagePath $ImagePath -Diag $Diag
-    $letter = Mount-VhdxAndGetLetter -Vhdx $state.Vhdx
+    $state  = Initialize-VhdFromImg -ImagePath $ImagePath -Diag $Diag
+    $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
 
     $resultLines = New-Object System.Collections.Generic.List[string]
     $deleted = 0
@@ -134,5 +134,5 @@ try {
 
     exit 0
 } finally {
-    Dismount-VhdxAndCleanup -Vhdx $Vhdx -ImagePath $ImagePath -KeepImage $KeepImageBool
+    Dismount-VhdAndCleanup -Vhd $Vhd -ImagePath $ImagePath -KeepImage $KeepImageBool
 }

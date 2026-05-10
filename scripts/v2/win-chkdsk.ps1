@@ -6,7 +6,7 @@
 # the per-op replacement chain that retires it.
 #
 # Wraps a host-side .img (already shipped to the VM via the harness's
-# built-in `ship-to-vm` op) into a temporary VHDX, mounts it on
+# built-in `ship-to-vm` op) into a temporary VHD, mounts it on
 # Windows, runs chkdsk against the resulting drive letter with the
 # requested modes, dismounts, and cleans up.
 #
@@ -21,7 +21,7 @@
 #                  comment block above the chkdsk loop for the gating
 #                  rules.
 #   -KeepImage   If `true` (string, from `{step.keep_image?}`), the
-#                .img and .vhdx are left in place on the VM after this
+#                .img and .vhd are left in place on the VM after this
 #                op completes so a follow-on win-* op can mount them.
 #                Default `false` matches the single-win-op recipe shape.
 #                The final win-* op in a multi-op recipe must omit
@@ -30,7 +30,7 @@
 #                  chkdsk-<mode>.txt        - chkdsk's stdout
 #                  chkdsk-<mode>-exit.txt   - exit code marker
 #                  mount-eventlog.txt       - Disk/Ntfs/partmgr events
-#                  wrapper-create.txt       - qemu-img output
+#                  wrapper-create.txt       - vhd_tool output
 #                  verdict.json             - final pass/fail summary
 #
 # Exit code:
@@ -40,12 +40,10 @@
 #   2 for config errors (bad -VerdictShape, missing /scan in
 #     RepairRequired modes)
 #
-# Phase 1e replacement target: this script invokes `qemu-img` to wrap
-# the .img into a VHDX -- the same dependency that Phase 1e plans to
-# replace with `am-img-vhd::create_fixed`. When that lands, the
-# `qemu-img create` line below becomes a thin invocation of the
-# Antimatter Studios VHD writer; the rest of the lifecycle (mount,
-# initialize, dd, chkdsk) stays the same.
+# Phase 1e (done): this script invokes `vhd_tool create-fixed` from
+# antimatter-studios/rust-img-vhd to wrap the .img into a VHD before
+# mounting (replaced the prior qemu-img dep). The rest of the
+# lifecycle (mount, initialize, dd, chkdsk) is unchanged.
 
 param(
     [Parameter(Mandatory=$true)] [string]$ImagePath,
@@ -80,11 +78,11 @@ New-Item -ItemType Directory -Path $Diag -Force | Out-Null
 
 $startTime = Get-Date
 $state = $null
-$Vhdx = Get-VhdxPathFor -ImagePath $ImagePath
+$Vhd = Get-VhdPathFor -ImagePath $ImagePath
 
 try {
-    $state = Initialize-VhdxFromImg -ImagePath $ImagePath -Diag $Diag
-    $letter = Mount-VhdxAndGetLetter -Vhdx $state.Vhdx
+    $state = Initialize-VhdFromImg -ImagePath $ImagePath -Diag $Diag
+    $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
 
     # ── chkdsk passes ─────────────────────────────────────────────
     #
@@ -192,5 +190,5 @@ try {
     if ($passed) { exit 0 } else { exit 1 }
 
 } finally {
-    Dismount-VhdxAndCleanup -Vhdx $Vhdx -ImagePath $ImagePath -KeepImage $KeepImageBool
+    Dismount-VhdAndCleanup -Vhd $Vhd -ImagePath $ImagePath -KeepImage $KeepImageBool
 }

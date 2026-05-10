@@ -11,7 +11,12 @@
 #      `aarch64-w64-mingw32-clang.exe`, the linker the gnullvm target
 #      requires for build scripts that compile native code (proc-macro2,
 #      quote, etc.). ~200 MB self-contained.
-#   4. cloudbase.qemu-img -- creates the VHDX wrapper used in tests.
+#   4. cloudbase.qemu-img -- legacy v1 test path uses this to create
+#      VHDX wrappers. Will be removed once v1 is retired (the v2
+#      harness uses vhd_tool below).
+#   5. vhd_tool from antimatter-studios/rust-img-vhd -- creates the
+#      VHD wrapper used by the v2 test harness (replaces the qemu-img
+#      dependency in the v2 path; see docs/phase-1e-design.md).
 #
 # Why these specific components:
 #   - We picked gnullvm over MSVC because MSVC pulls in 3+ GB of Visual
@@ -22,10 +27,11 @@
 #     to get aarch64-w64-mingw32-clang on Windows ARM64. Rustup's
 #     gnullvm target ships rust-lld but expects this clang for build
 #     scripts.
-#   - qemu-img creates the GPT-partitioned VHDX wrapper that lets
-#     Mount-DiskImage attach our raw .img -- Windows Mount-DiskImage
-#     refuses raw images, only VHD/VHDX/ISO. See
-#     `docs/chkdsk-findings.md` iter1-2 for why this wrapper is needed.
+#   - qemu-img (v1 only) and vhd_tool (v2) both create the
+#     GPT-partitioned wrapper that lets Mount-DiskImage attach our
+#     raw .img -- Windows Mount-DiskImage refuses raw images, only
+#     VHD/VHDX/ISO. See `docs/chkdsk-findings.md` iter1-2 for why
+#     this wrapper is needed.
 #
 # Usage:
 #   - Run on the VM directly (admin or non-admin both fine for winget):
@@ -85,9 +91,9 @@ if ($current -ne "stable-aarch64-pc-windows-gnullvm") {
 Install-IfMissing -Id "MartinStorsjo.LLVM-MinGW.UCRT" `
     -Description "LLVM-MinGW (linker for the gnullvm target)"
 
-# ---------- 4. qemu-img --------------------------------------------------
+# ---------- 4. qemu-img (legacy v1 path) ---------------------------------
 Install-IfMissing -Id "cloudbase.qemu-img" `
-    -Description "qemu-img (creates VHDX wrappers)"
+    -Description "qemu-img (legacy: creates VHDX wrappers in v1 test scripts)"
 
 # ---------- 5. Workdir ---------------------------------------------------
 $workdirPath = $Workdir.TrimEnd('\','/')
@@ -96,7 +102,31 @@ if (-not (Test-Path $workdirPath)) {
 }
 Write-Host "[setup] workdir: $workdirPath"
 
-# ---------- 6. Verify everything ----------------------------------------
+# ---------- 6. vhd_tool from rust-img-vhd (v2 wrapper writer) ------------
+# Clones antimatter-studios/rust-img-vhd into the workdir, builds + installs
+# `vhd_tool` to ~/.cargo/bin (which is on PATH after rustup setup). The v2
+# harness's _lib.ps1::Initialize-VhdFromImg invokes `vhd_tool create-fixed`
+# directly. See docs/phase-1e-design.md for the design rationale (Path B:
+# build on the VM rather than cross-compile from the Mac).
+$vhdRepoDir = Join-Path $workdirPath "rust-img-vhd"
+if (-not (Test-Path $vhdRepoDir)) {
+    Write-Host "[setup] cloning rust-img-vhd into $vhdRepoDir"
+    git clone --depth 1 https://github.com/antimatter-studios/rust-img-vhd.git $vhdRepoDir 2>&1 |
+        Select-Object -Last 3 | ForEach-Object { Write-Host "        $_" }
+} else {
+    Write-Host "[setup] rust-img-vhd already cloned; pulling latest"
+    Push-Location $vhdRepoDir
+    git pull --ff-only 2>&1 | Select-Object -Last 3 | ForEach-Object { Write-Host "        $_" }
+    Pop-Location
+}
+
+Write-Host "[setup] cargo install --path $vhdRepoDir --bin vhd_tool --locked"
+Push-Location $vhdRepoDir
+cargo install --path . --bin vhd_tool --locked 2>&1 |
+    Select-Object -Last 3 | ForEach-Object { Write-Host "        $_" }
+Pop-Location
+
+# ---------- 7. Verify everything ----------------------------------------
 $qemuBin = "C:\Program Files\Cloudbase Solutions\QEMU\bin"
 $env:PATH = "$cargoBin;$qemuBin;$env:PATH"
 
@@ -105,6 +135,12 @@ Write-Host "=== Verification ==="
 & rustc --version 2>&1 | Select-Object -First 1
 & cargo --version 2>&1 | Select-Object -First 1
 & qemu-img --version 2>&1 | Select-Object -First 1
+$vhdToolBin = Get-Command vhd_tool -ErrorAction SilentlyContinue
+if ($vhdToolBin) {
+    Write-Host "vhd_tool: $($vhdToolBin.Source)"
+} else {
+    Write-Host "WARN: vhd_tool not on PATH; new shell may be needed"
+}
 $mingwClang = Get-Command "aarch64-w64-mingw32-clang*" -ErrorAction SilentlyContinue |
     Select-Object -First 1
 if ($mingwClang) {

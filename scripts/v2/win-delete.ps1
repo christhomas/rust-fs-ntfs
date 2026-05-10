@@ -1,7 +1,7 @@
 # scripts/v2/win-delete.ps1 -- delete a single file (or empty dir) on
 # the mounted NTFS volume.
 #
-# Mounts the .img (re-using a prior op's .vhdx if `keep_image=true` was
+# Mounts the .img (re-using a prior op's .vhd if `keep_image=true` was
 # set on the prior step) and removes the entry at `path` from the
 # volume root.
 #
@@ -9,7 +9,7 @@
 #   -ImagePath   Path on the VM to the .img file.
 #   -Path        Path inside the volume to remove (e.g. "/F2.txt").
 #                Forward or back slashes both work.
-#   -KeepImage   `true` keeps .img + .vhdx for a follow-on op (default `false`).
+#   -KeepImage   `true` keeps .img + .vhd for a follow-on op (default `false`).
 #   -Diag        Directory for delete-result.txt + delete-error.txt.
 #
 # Exit code:
@@ -45,11 +45,11 @@ if ($relPath -eq '' -or $relPath -match '(^|[\\/])\.{1,2}([\\/]|$)') {
 
 New-Item -ItemType Directory -Path $Diag -Force | Out-Null
 
-$Vhdx = Get-VhdxPathFor -ImagePath $ImagePath
+$Vhd = Get-VhdPathFor -ImagePath $ImagePath
 
 try {
-    $state = Initialize-VhdxFromImg -ImagePath $ImagePath -Diag $Diag
-    $letter = Mount-VhdxAndGetLetter -Vhdx $state.Vhdx
+    $state = Initialize-VhdFromImg -ImagePath $ImagePath -Diag $Diag
+    $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
 
     $target = "${letter}:\$relPath"
     try {
@@ -62,5 +62,5 @@ try {
 
     exit 0
 } finally {
-    Dismount-VhdxAndCleanup -Vhdx $Vhdx -ImagePath $ImagePath -KeepImage $KeepImageBool
+    Dismount-VhdAndCleanup -Vhd $Vhd -ImagePath $ImagePath -KeepImage $KeepImageBool
 }

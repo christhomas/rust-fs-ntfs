@@ -1,7 +1,7 @@
 # scripts/v2/win-read.ps1 -- read a byte range from a file on the
 # mounted NTFS volume and dump it to a diag artefact.
 #
-# Mounts the .img (re-using a prior op's .vhdx if `keep_image=true` was
+# Mounts the .img (re-using a prior op's .vhd if `keep_image=true` was
 # set on the prior step), opens the target file at `<letter>:\<path>`
 # for Read, seeks to `Offset`, reads `Length` bytes, writes the raw
 # bytes to <Diag>\read-bytes.bin and a hex-dump summary to
@@ -24,7 +24,7 @@
 #               short read (file ends before Offset+Length) is captured
 #               truthfully -- the artefact reflects what we got, not
 #               what we asked for.
-#   -KeepImage  `true` to leave .img + .vhdx for a follow-on op. Default `false`.
+#   -KeepImage  `true` to leave .img + .vhd for a follow-on op. Default `false`.
 #   -Diag       Directory for read-bytes.bin + read-bytes.txt + read-error.txt.
 #
 # Exit code:
@@ -85,11 +85,11 @@ if ($lengthInt -gt [int]::MaxValue) {
 
 New-Item -ItemType Directory -Path $Diag -Force | Out-Null
 
-$Vhdx = Get-VhdxPathFor -ImagePath $ImagePath
+$Vhd = Get-VhdPathFor -ImagePath $ImagePath
 
 try {
-    $state = Initialize-VhdxFromImg -ImagePath $ImagePath -Diag $Diag
-    $letter = Mount-VhdxAndGetLetter -Vhdx $state.Vhdx
+    $state = Initialize-VhdFromImg -ImagePath $ImagePath -Diag $Diag
+    $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
 
     $target = "${letter}:\$relPath"
     try {
@@ -154,5 +154,5 @@ try {
 
     exit 0
 } finally {
-    Dismount-VhdxAndCleanup -Vhdx $Vhdx -ImagePath $ImagePath -KeepImage $KeepImageBool
+    Dismount-VhdAndCleanup -Vhd $Vhd -ImagePath $ImagePath -KeepImage $KeepImageBool
 }

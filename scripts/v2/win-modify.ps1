@@ -1,7 +1,7 @@
 # scripts/v2/win-modify.ps1 -- write a deterministic byte pattern at a
 # specific offset inside an existing file on the mounted NTFS volume.
 #
-# Mounts the .img (re-using a prior op's .vhdx if `keep_image=true` was
+# Mounts the .img (re-using a prior op's .vhd if `keep_image=true` was
 # set on the prior step), opens the target file at `<letter>:\<path>`
 # for ReadWrite, seeks to `Offset`, writes `Length` bytes of a
 # deterministic 0xFF pattern, flushes, and closes. The 0xFF pattern is
@@ -24,7 +24,7 @@
 #               Offset+Length bytes long.
 #   -Length     Number of bytes to write (integer as string; >= 0). Zero
 #               is a valid no-op (logged but no I/O).
-#   -KeepImage  `true` to leave .img + .vhdx for a follow-on op. Default `false`.
+#   -KeepImage  `true` to leave .img + .vhd for a follow-on op. Default `false`.
 #   -Diag       Directory for modify-result.txt + modify-error.txt.
 #
 # Exit code:
@@ -84,11 +84,11 @@ if ($lengthInt -lt 0) {
 
 New-Item -ItemType Directory -Path $Diag -Force | Out-Null
 
-$Vhdx = Get-VhdxPathFor -ImagePath $ImagePath
+$Vhd = Get-VhdPathFor -ImagePath $ImagePath
 
 try {
-    $state = Initialize-VhdxFromImg -ImagePath $ImagePath -Diag $Diag
-    $letter = Mount-VhdxAndGetLetter -Vhdx $state.Vhdx
+    $state = Initialize-VhdFromImg -ImagePath $ImagePath -Diag $Diag
+    $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
 
     $target = "${letter}:\$relPath"
     try {
@@ -143,5 +143,5 @@ try {
 
     exit 0
 } finally {
-    Dismount-VhdxAndCleanup -Vhdx $Vhdx -ImagePath $ImagePath -KeepImage $KeepImageBool
+    Dismount-VhdAndCleanup -Vhd $Vhd -ImagePath $ImagePath -KeepImage $KeepImageBool
 }
