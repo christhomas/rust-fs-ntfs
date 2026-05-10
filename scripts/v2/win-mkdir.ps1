@@ -1,7 +1,7 @@
 # scripts/v2/win-mkdir.ps1 -- create a directory on the mounted NTFS
 # volume.
 #
-# Mounts the .img (re-using a prior op's .vhdx if `keep_image=true`
+# Mounts the .img (re-using a prior op's .vhd if `keep_image=true`
 # was set on the prior step) and runs
 # `New-Item -ItemType Directory -Path $target -Force` to create the
 # directory at `path`. `-Path` (not `-LiteralPath`) because PS 5.1's
@@ -20,7 +20,7 @@
 # Args:
 #   -ImagePath   Path on the VM to the .img file.
 #   -Path        Directory path inside the volume (e.g. "/a/b/c").
-#   -KeepImage   `true` keeps .img + .vhdx for a follow-on op (default `false`).
+#   -KeepImage   `true` keeps .img + .vhd for a follow-on op (default `false`).
 #   -Diag        Directory for mkdir-result.txt + mkdir-error.txt.
 #
 # Exit code:
@@ -56,11 +56,11 @@ if ($relPath -eq '' -or $relPath -match '(^|[\\/])\.{1,2}([\\/]|$)') {
 
 New-Item -ItemType Directory -Path $Diag -Force | Out-Null
 
-$Vhdx = Get-VhdxPathFor -ImagePath $ImagePath
+$Vhd = Get-VhdPathFor -ImagePath $ImagePath
 
 try {
-    $state = Initialize-VhdxFromImg -ImagePath $ImagePath -Diag $Diag
-    $letter = Mount-VhdxAndGetLetter -Vhdx $state.Vhdx
+    $state = Initialize-VhdFromImg -ImagePath $ImagePath -Diag $Diag
+    $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
 
     $target = "${letter}:\$relPath"
     try {
@@ -73,5 +73,5 @@ try {
 
     exit 0
 } finally {
-    Dismount-VhdxAndCleanup -Vhdx $Vhdx -ImagePath $ImagePath -KeepImage $KeepImageBool
+    Dismount-VhdAndCleanup -Vhd $Vhd -ImagePath $ImagePath -KeepImage $KeepImageBool
 }

@@ -30,6 +30,7 @@ test-disks/*.img
 tmp/
 docs/archive
 *.vhdx
+*.vhd
 nfs.img
 nfs-*.img
 

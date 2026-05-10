@@ -1,7 +1,7 @@
 # scripts/v2/win-write.ps1 -- write a single file to a mounted NTFS
 # volume.
 #
-# Mounts the .img (creating a fresh VHDX wrapper if there isn't one
+# Mounts the .img (creating a fresh VHD wrapper if there isn't one
 # from a prior op) and writes a single file at the requested path.
 #
 # Two body modes:
@@ -23,7 +23,7 @@
 #   -Path       File path inside the volume, e.g. "/tiny.txt".
 #   -Content    Literal string to write (UTF-8 bytes, no trailing newline).
 #   -SizeBytes  Number of zero bytes to write. Mutually exclusive with -Content.
-#   -KeepImage  `true` to leave .img + .vhdx for a follow-on op. Default `false`.
+#   -KeepImage  `true` to leave .img + .vhd for a follow-on op. Default `false`.
 #   -Diag       Directory for write-result.txt + wrapper-create.txt.
 #
 # Exit code:
@@ -78,11 +78,11 @@ if ($relPath -eq '') {
 
 New-Item -ItemType Directory -Path $Diag -Force | Out-Null
 
-$Vhdx = Get-VhdxPathFor -ImagePath $ImagePath
+$Vhd = Get-VhdPathFor -ImagePath $ImagePath
 
 try {
-    $state = Initialize-VhdxFromImg -ImagePath $ImagePath -Diag $Diag
-    $letter = Mount-VhdxAndGetLetter -Vhdx $state.Vhdx
+    $state = Initialize-VhdFromImg -ImagePath $ImagePath -Diag $Diag
+    $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
 
     $target = "${letter}:\$relPath"
     try {
@@ -116,5 +116,5 @@ try {
 
     exit 0
 } finally {
-    Dismount-VhdxAndCleanup -Vhdx $Vhdx -ImagePath $ImagePath -KeepImage $KeepImageBool
+    Dismount-VhdAndCleanup -Vhd $Vhd -ImagePath $ImagePath -KeepImage $KeepImageBool
 }

@@ -1,7 +1,7 @@
 # scripts/v2/win-rename.ps1 -- rename a single file on the mounted
 # NTFS volume.
 #
-# Mounts the .img (re-using a prior op's .vhdx if `keep_image=true`
+# Mounts the .img (re-using a prior op's .vhd if `keep_image=true`
 # was set on the prior step) and runs `Move-Item -LiteralPath -Force`
 # to rename `from-path` to `to-path`. Both paths are interpreted
 # relative to the volume root; their parent directories must already
@@ -11,7 +11,7 @@
 #   -ImagePath   Path on the VM to the .img file.
 #   -FromPath    Source path inside the volume (e.g. "/a.txt").
 #   -ToPath      Destination path inside the volume (e.g. "/b.txt").
-#   -KeepImage   `true` keeps .img + .vhdx for a follow-on op (default `false`).
+#   -KeepImage   `true` keeps .img + .vhd for a follow-on op (default `false`).
 #   -Diag        Directory for rename-result.txt + rename-error.txt.
 #
 # Exit code:
@@ -54,11 +54,11 @@ $relTo   = Resolve-RelPath $ToPath   'ToPath'
 
 New-Item -ItemType Directory -Path $Diag -Force | Out-Null
 
-$Vhdx = Get-VhdxPathFor -ImagePath $ImagePath
+$Vhd = Get-VhdPathFor -ImagePath $ImagePath
 
 try {
-    $state = Initialize-VhdxFromImg -ImagePath $ImagePath -Diag $Diag
-    $letter = Mount-VhdxAndGetLetter -Vhdx $state.Vhdx
+    $state = Initialize-VhdFromImg -ImagePath $ImagePath -Diag $Diag
+    $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
 
     $src = "${letter}:\$relFrom"
     $dst = "${letter}:\$relTo"
@@ -72,5 +72,5 @@ try {
 
     exit 0
 } finally {
-    Dismount-VhdxAndCleanup -Vhdx $Vhdx -ImagePath $ImagePath -KeepImage $KeepImageBool
+    Dismount-VhdAndCleanup -Vhd $Vhd -ImagePath $ImagePath -KeepImage $KeepImageBool
 }

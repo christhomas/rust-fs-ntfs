@@ -1,6 +1,6 @@
 # scripts/v2/win-repeat-mount.ps1 -- stress the mount/dismount cycle.
 #
-# Mounts and dismounts the .vhdx wrapper N times in a row to surface
+# Mounts and dismounts the .vhd wrapper N times in a row to surface
 # any state leak in ntfs.sys's volume-recognition path or the VHD
 # miniport. No I/O happens between cycles — only mount + dismount.
 # Used by `repeat-mount(N)` scenarios, which sandwich this op between
@@ -10,7 +10,7 @@
 # Args:
 #   -ImagePath   Path on the VM to the .img file.
 #   -Cycles      Number of mount-then-dismount cycles to run.
-#   -KeepImage   `true` keeps .img + .vhdx for a follow-on op
+#   -KeepImage   `true` keeps .img + .vhd for a follow-on op
 #                (default `false`). The next op will mount on its own.
 #   -Diag        Directory for repeat-mount-result.txt + per-cycle
 #                error markers if any cycle fails.
@@ -43,19 +43,19 @@ if (-not [int]::TryParse($Cycles, [ref]$cyclesInt) -or $cyclesInt -lt 1) {
 
 New-Item -ItemType Directory -Path $Diag -Force | Out-Null
 
-$Vhdx = Get-VhdxPathFor -ImagePath $ImagePath
+$Vhd = Get-VhdPathFor -ImagePath $ImagePath
 
 try {
-    # Initialize-VhdxFromImg leaves the wrapper dismounted, which is
+    # Initialize-VhdFromImg leaves the wrapper dismounted, which is
     # the right starting state for the cycle loop below.
-    $null = Initialize-VhdxFromImg -ImagePath $ImagePath -Diag $Diag
+    $null = Initialize-VhdFromImg -ImagePath $ImagePath -Diag $Diag
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     for ($i = 1; $i -le $cyclesInt; $i++) {
         try {
-            Mount-DiskImage -ImagePath $Vhdx | Out-Null
+            Mount-DiskImage -ImagePath $Vhd | Out-Null
             Start-Sleep -Seconds 1
-            Dismount-DiskImage -ImagePath $Vhdx | Out-Null
+            Dismount-DiskImage -ImagePath $Vhd | Out-Null
             Start-Sleep -Seconds 1
         } catch {
             "cycle $i failed: $($_.Exception.Message)" |
@@ -73,5 +73,5 @@ try {
     # Pass through to the shared cleanup (handles dismount of any
     # leftover attached state from a mid-loop failure + file deletion
     # if KeepImage=false).
-    Dismount-VhdxAndCleanup -Vhdx $Vhdx -ImagePath $ImagePath -KeepImage $KeepImageBool
+    Dismount-VhdAndCleanup -Vhd $Vhd -ImagePath $ImagePath -KeepImage $KeepImageBool
 }

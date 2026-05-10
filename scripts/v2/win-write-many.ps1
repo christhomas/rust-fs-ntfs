@@ -31,7 +31,7 @@
 #                 placeholder (e.g. "/file_{N}.txt"). Forward or back
 #                 slashes both work; leading separator is stripped.
 #   -SizeBytes    Number of zero bytes per file (>= 0).
-#   -KeepImage    `true` to leave .img + .vhdx for a follow-on op.
+#   -KeepImage    `true` to leave .img + .vhd for a follow-on op.
 #                 Default `false`.
 #   -Diag         Directory for write-many-result.txt + write-many-error.txt.
 #
@@ -105,11 +105,11 @@ $padWidth = ([string]($countInt - 1)).Length
 
 New-Item -ItemType Directory -Path $Diag -Force | Out-Null
 
-$Vhdx = Get-VhdxPathFor -ImagePath $ImagePath
+$Vhd = Get-VhdPathFor -ImagePath $ImagePath
 
 try {
-    $state  = Initialize-VhdxFromImg -ImagePath $ImagePath -Diag $Diag
-    $letter = Mount-VhdxAndGetLetter -Vhdx $state.Vhdx
+    $state  = Initialize-VhdFromImg -ImagePath $ImagePath -Diag $Diag
+    $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
 
     # Pre-allocate a single zero buffer + reuse it across all files;
     # each file is a single Write call when SizeBytes is small. For a
@@ -171,5 +171,5 @@ try {
 
     exit 0
 } finally {
-    Dismount-VhdxAndCleanup -Vhdx $Vhdx -ImagePath $ImagePath -KeepImage $KeepImageBool
+    Dismount-VhdAndCleanup -Vhd $Vhd -ImagePath $ImagePath -KeepImage $KeepImageBool
 }

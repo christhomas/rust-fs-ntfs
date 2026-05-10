@@ -35,10 +35,10 @@ host           = "chris@192.168.213.145"
 ssh_key        = "privatekey"
 workdir        = "C:/Users/chris/dev/rust-fs-ntfs-matrix"
 rust_toolchain = "stable-aarch64-pc-windows-gnullvm"
-# Packages installed on first VM provisioning. Strictly the ones
-# needed for the v1 win-side flow today; v2 win-ops in Phase 4c
-# will revisit this list (and the qemu-img dependency in particular —
-# tracked as Phase 1e: replace VHDX wrap with am-img-vhd::create_fixed).
+# Packages installed on first VM provisioning. The v2 wrapper toolchain
+# (vhd_tool from antimatter-studios/rust-img-vhd) is installed by
+# scripts/setup-windows-vm.ps1 directly; legacy v1 still uses qemu-img
+# from the same setup script and will be removed when v1 retires.
 packages = []
 
 # ============================================================
@@ -162,11 +162,12 @@ expect_exit = 0
 # v2 dispatcher gives us per-step granularity, so each op gets its
 # own small script.
 #
-# The VHDX-wrap path inside `win-chkdsk.ps1` still uses qemu-img;
-# Phase 1e replaces that with `am-img-vhd::create_fixed`.
+# The VHD-wrap path inside `win-chkdsk.ps1` (and every other v2 op
+# routed through `_lib.ps1`) uses `vhd_tool create-fixed` from
+# antimatter-studios/rust-img-vhd — see docs/phase-1e-design.md.
 
 [ops.win-chkdsk]
-# Wrap the .img into a VHDX, mount it on Windows, run chkdsk with
+# Wrap the .img into a VHD, mount it on Windows, run chkdsk with
 # the requested modes (default `readonly`), capture diag, dismount.
 #
 # Step fields:
@@ -180,7 +181,7 @@ expect_exit = 0
 #                    on pre-/scan != 0 (volume actually dirty) AND
 #                    fix_exit == 0 AND post_scan_exit == 0. Used by
 #                    `mac:set-dirty -> win:chkdsk` scenarios.
-#   keep_image?    — `true` keeps the .img + .vhdx on the VM after this
+#   keep_image?    — `true` keeps the .img + .vhd on the VM after this
 #                    op so a follow-on win-* op (e.g. win-enumerate)
 #                    can mount them. Default `false` cleans up. The
 #                    final win-* op in a multi-op recipe should omit
@@ -195,14 +196,14 @@ command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '
 expect_exit = 0
 
 [ops.win-enumerate]
-# Mount the .img (reusing a prior op's .vhdx if `keep_image=true` was
+# Mount the .img (reusing a prior op's .vhd if `keep_image=true` was
 # set on the prior step) and walk the volume root recursively. Writes
 # one line per entry to <diag>/enumerate.txt for downstream consumption
 # (today an observation; future verdict shapes can gate against it).
 #
 # Step fields:
 #   image_path  — vm-side absolute path to the .img
-#   keep_image? — `true` keeps the .img + .vhdx for a follow-on op.
+#   keep_image? — `true` keeps the .img + .vhd for a follow-on op.
 #                 Default `false` cleans up. The final win-* op in a
 #                 multi-op recipe should omit this so cleanup runs.
 #   diag        — vm-side directory for enumerate.txt + wrapper-create.txt
@@ -224,7 +225,7 @@ expect_exit = 0
 #   image_path   — vm-side absolute path to the .img
 #   path         — file path inside the volume (e.g. "/tiny.txt")
 #   content      — literal UTF-8 string (no trailing newline)
-#   keep_image?  — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for write-result.txt + wrapper-create.txt
 #
 # `content` is single-quoted in the template so payloads with spaces
@@ -245,7 +246,7 @@ expect_exit = 0
 #   image_path   — vm-side absolute path to the .img
 #   path         — file path inside the volume (e.g. "/big.bin")
 #   size_bytes   — number of zero bytes (integer as string)
-#   keep_image?  — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for write-result.txt + wrapper-create.txt
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-write.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
@@ -253,20 +254,20 @@ expect_exit = 0
 
 [ops.win-delete]
 # Delete a single file at `path` from the mounted volume. Mounts the
-# .img (re-using a prior op's .vhdx if `keep_image=true` was set on
+# .img (re-using a prior op's .vhd if `keep_image=true` was set on
 # the prior step) and runs `Remove-Item -LiteralPath -Force`.
 #
 # Step fields:
 #   image_path   — vm-side absolute path to the .img
 #   path         — file path inside the volume to remove (e.g. "/F2.txt")
-#   keep_image?  — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for delete-result.txt + delete-error.txt
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-delete.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
 [ops.win-repeat-mount]
-# Mount/dismount the .vhdx wrapper N times to surface any state leak
+# Mount/dismount the .vhd wrapper N times to surface any state leak
 # in ntfs.sys's volume-recognition path or the VHD miniport. No I/O
 # happens between cycles. Used by `repeat-mount(N)` scenarios that
 # sandwich this op between two chkdsk passes to verify the volume's
@@ -275,7 +276,7 @@ expect_exit = 0
 # Step fields:
 #   image_path   — vm-side absolute path to the .img
 #   cycles       — positive integer (mount-then-dismount count)
-#   keep_image?  — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for repeat-mount-result.txt
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-repeat-mount.ps1' -ImagePath '{step.image_path}' -Cycles '{step.cycles}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
@@ -283,7 +284,7 @@ expect_exit = 0
 
 [ops.win-rename]
 # Rename a single file at `from_path` to `to_path` on the mounted
-# volume. Mounts the .img (re-using a prior op's .vhdx if
+# volume. Mounts the .img (re-using a prior op's .vhd if
 # `keep_image=true` was set on the prior step) and runs
 # `Move-Item -LiteralPath -Force`. Both paths are interpreted relative
 # to the volume root; their parent directories must already exist.
@@ -292,7 +293,7 @@ expect_exit = 0
 #   image_path   — vm-side absolute path to the .img
 #   from_path    — source path inside the volume (e.g. "/a.txt")
 #   to_path      — destination path inside the volume (e.g. "/b.txt")
-#   keep_image?  — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for rename-result.txt + rename-error.txt
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-rename.ps1' -ImagePath '{step.image_path}' -FromPath '{step.from_path}' -ToPath '{step.to_path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
@@ -309,7 +310,7 @@ expect_exit = 0
 # Step fields:
 #   image_path   — vm-side absolute path to the .img
 #   path         — directory path inside the volume (e.g. "/a/b/c")
-#   keep_image?  — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for mkdir-result.txt + mkdir-error.txt
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-mkdir.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
@@ -332,7 +333,7 @@ expect_exit = 0
 #   path         — file path inside the volume (e.g. "/big.bin")
 #   offset       — byte offset to start writing at (integer as string; >= 0)
 #   len          — number of bytes to write (integer as string; >= 0)
-#   keep_image?  — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for modify-result.txt + modify-error.txt
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-modify.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
@@ -351,7 +352,7 @@ expect_exit = 0
 #   path         — file path inside the volume (e.g. "/big.bin")
 #   offset       — byte offset to start reading from (integer as string; >= 0)
 #   len          — number of bytes to read (integer as string; >= 0)
-#   keep_image?  — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for read-bytes.bin + read-bytes.txt + read-error.txt
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-read.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
@@ -375,7 +376,7 @@ expect_exit = 0
 #   count          — positive integer (number of files to write)
 #   name_pattern   — volume-relative path containing `{N}` (e.g. "/file_{N}.txt")
 #   size_bytes     — zero-byte body length per file (>= 0, integer as string)
-#   keep_image?    — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   keep_image?    — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag           — vm-side directory for write-many-result.txt + write-many-error.txt
 #
 # Content-mode counterpart (literal-string body) is intentionally not
@@ -403,7 +404,7 @@ expect_exit = 0
 #   end            — stop index, exclusive (integer > start)
 #   step           — stride (positive integer)
 #   name_pattern   — volume-relative path containing `{N}` (e.g. "/file_{N}.txt")
-#   keep_image?    — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   keep_image?    — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag           — vm-side directory for delete-many-result.txt + delete-many-error.txt
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-delete-many.ps1' -ImagePath '{step.image_path}' -Start '{step.start}' -End '{step.end}' -Step '{step.step}' -NamePattern '{step.name_pattern}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
@@ -427,14 +428,14 @@ expect_exit = 0
 # The init-image step sizes the .img per scenario.volume_params.size_mib;
 # there is NO mac-format step in win-format-* recipes (otherwise the .img
 # would arrive at the VM already-NTFS-formatted by rust-ntfs, defeating
-# the point). The empty .img ships as zeros; Initialize-VhdxFromImg lays
+# the point). The empty .img ships as zeros; Initialize-VhdFromImg lays
 # down a partition table on the wrapper and streams those zeros into the
 # partition; Format-Volume then writes the NTFS structure in-place.
 #
 # Step fields:
 #   image_path   -- vm-side absolute path to the .img
 #   label        -- volume label (e.g. "WINFMT", "WINREF")
-#   keep_image?  -- `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   keep_image?  -- `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         -- vm-side directory for format-result.txt + wrapper-create.txt
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-format.ps1' -ImagePath '{step.image_path}' -Label '{step.label}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"

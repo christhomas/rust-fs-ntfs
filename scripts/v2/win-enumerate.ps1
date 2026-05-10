@@ -1,25 +1,25 @@
 # scripts/v2/win-enumerate.ps1 -- list the files/dirs on a mounted
 # NTFS volume.
 #
-# Mounts the .img (creating a fresh VHDX wrapper if there isn't one
+# Mounts the .img (creating a fresh VHD wrapper if there isn't one
 # already from a prior op in the same scenario) and walks the volume
 # root recursively, writing the listing to <Diag>\enumerate.txt for
 # the harness verdict layer + a future v2 verdict-shape system to
 # consume.
 #
 # Args:
-#   -ImagePath   Path on the VM to the .img file. If a .vhdx wrapper
+#   -ImagePath   Path on the VM to the .img file. If a .vhd wrapper
 #                of the same basename already exists (left behind by a
 #                prior win-* op with KeepImage=true), it's reused;
 #                otherwise it's built from the .img.
-#   -KeepImage   If `true`, the .img and .vhdx are left in place after
+#   -KeepImage   If `true`, the .img and .vhd are left in place after
 #                this op so a follow-on op can mount them. Default
 #                `false` (this op is the cleanup point for the
 #                scenario).
 #   -Diag        Directory to write diag artefacts into:
 #                  enumerate.txt        - one line per entry, full path
 #                  enumerate-error.txt  - if Get-ChildItem raised
-#                  wrapper-create.txt   - qemu-img output (if first op)
+#                  wrapper-create.txt   - vhd_tool output (if first op)
 #
 # Exit code:
 #   0 always for now (matches v1's win:enumerate semantics: it's an
@@ -43,11 +43,11 @@ if ($KeepImage -and $KeepImage.Trim() -ne '') {
 
 New-Item -ItemType Directory -Path $Diag -Force | Out-Null
 
-$Vhdx = Get-VhdxPathFor -ImagePath $ImagePath
+$Vhd = Get-VhdPathFor -ImagePath $ImagePath
 
 try {
-    $state = Initialize-VhdxFromImg -ImagePath $ImagePath -Diag $Diag
-    $letter = Mount-VhdxAndGetLetter -Vhdx $state.Vhdx
+    $state = Initialize-VhdFromImg -ImagePath $ImagePath -Diag $Diag
+    $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
 
     try {
         # `-Force` so System / Hidden NTFS metadata files are surfaced
@@ -67,5 +67,5 @@ try {
 
     exit 0
 } finally {
-    Dismount-VhdxAndCleanup -Vhdx $Vhdx -ImagePath $ImagePath -KeepImage $KeepImageBool
+    Dismount-VhdAndCleanup -Vhd $Vhd -ImagePath $ImagePath -KeepImage $KeepImageBool
 }

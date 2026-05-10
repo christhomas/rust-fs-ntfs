@@ -6,35 +6,36 @@
 # try/finally lifecycle.
 #
 # Two execution shapes share these helpers:
-#   - "first op for a scenario": .img is on the VM (shipped), no .vhdx
-#     yet. Init-VhdxFromImg creates the wrapper + streams the .img bytes
+#   - "first op for a scenario": .img is on the VM (shipped), no .vhd
+#     yet. Init-VhdFromImg creates the wrapper + streams the .img bytes
 #     into the partition, leaves the volume ready to mount.
-#   - "follow-on op": .vhdx already exists on disk from a prior op (the
-#     prior op was invoked with KeepImage=true). Init-VhdxFromImg sees
-#     the existing .vhdx and skips the create+stream phase.
+#   - "follow-on op": .vhd already exists on disk from a prior op (the
+#     prior op was invoked with KeepImage=true). Init-VhdFromImg sees
+#     the existing .vhd and skips the create+stream phase.
 #
-# Mount-VhdxAndGetLetter does the dismount/remount + letter detection
+# Mount-VhdAndGetLetter does the dismount/remount + letter detection
 # dance that ntfs.sys requires after a fresh raw write — used by
 # every op after the volume's bytes are in place.
 
-# qemu-img is on the PATH via setup-windows-vm.ps1's package install.
-$env:PATH = "C:\Program Files\Cloudbase Solutions\QEMU\bin;$env:PATH"
+# vhd_tool is on the PATH via setup-windows-vm.ps1 (cargo install
+# --bin vhd_tool puts it in ~/.cargo/bin which rustup adds to PATH).
+$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
 
-function Get-VhdxPathFor {
+function Get-VhdPathFor {
     param([Parameter(Mandatory=$true)] [string]$ImagePath)
-    return [System.IO.Path]::ChangeExtension($ImagePath, ".vhdx")
+    return [System.IO.Path]::ChangeExtension($ImagePath, ".vhd")
 }
 
-# Wrap an .img into a fixed VHDX, mount, GPT-init, partition, and stream
-# the .img bytes into the partition's offset. Returns @{ Vhdx; Disk; }
-# (the caller passes Vhdx through to Mount-VhdxAndGetLetter and Disk
+# Wrap an .img into a fixed VHD, mount, GPT-init, partition, and stream
+# the .img bytes into the partition's offset. Returns @{ Vhd; Disk; }
+# (the caller passes Vhd through to Mount-VhdAndGetLetter and Disk
 # isn't used after this — kept for diag/debugging).
 #
-# Idempotent: if the .vhdx already exists on disk (because a prior op
+# Idempotent: if the .vhd already exists on disk (because a prior op
 # in the same scenario ran with KeepImage=true), the create+stream
-# phase is skipped and we just return the existing Vhdx path. The
-# caller still needs to call Mount-VhdxAndGetLetter to get a letter.
-function Initialize-VhdxFromImg {
+# phase is skipped and we just return the existing Vhd path. The
+# caller still needs to call Mount-VhdAndGetLetter to get a letter.
+function Initialize-VhdFromImg {
     param(
         [Parameter(Mandatory=$true)] [string]$ImagePath,
         [Parameter(Mandatory=$true)] [string]$Diag
@@ -44,56 +45,59 @@ function Initialize-VhdxFromImg {
         throw "image not found on VM: $ImagePath"
     }
 
-    $Vhdx = Get-VhdxPathFor -ImagePath $ImagePath
+    $Vhd = Get-VhdPathFor -ImagePath $ImagePath
 
-    # Belt-and-braces: tear down any orphaned mount of this Vhdx path
+    # Belt-and-braces: tear down any orphaned mount of this Vhd path
     # before we look at the file. A crashed prior run could leave the
-    # VHDX both on disk *and* attached — the reuse fast path below
-    # would then return early and the caller's Mount-VhdxAndGetLetter
+    # VHD both on disk *and* attached — the reuse fast path below
+    # would then return early and the caller's Mount-VhdAndGetLetter
     # would fail trying to remount an already-attached image. Run this
     # before the existence check so both paths self-heal.
     try {
-        Get-DiskImage -ImagePath $Vhdx -EA SilentlyContinue |
+        Get-DiskImage -ImagePath $Vhd -EA SilentlyContinue |
             Where-Object Attached |
             Dismount-DiskImage -EA SilentlyContinue | Out-Null
     } catch { }
 
-    # Already-streamed VHDX from a prior op — fast path: skip the
-    # qemu-img + stream phase, just return the path.
+    # Already-streamed VHD from a prior op — fast path: skip the
+    # vhd_tool + stream phase, just return the path.
     #
-    # Stale-VHDX detection: if the .img is *newer* than the .vhdx, a
+    # Stale-VHD detection: if the .img is *newer* than the .vhd, a
     # mac-side op (or a re-ship-to-vm) modified the source bytes after
-    # the VHDX was last streamed. Reusing the VHDX would mount the
+    # the VHD was last streamed. Reusing the VHD would mount the
     # OLD bytes — the round-trip win-format scenarios depend on this
     # detection (`win:format -> ship-to-host -> mac:write -> ship-to-vm
     # -> win:chkdsk`: the second win-* op must see the post-mac-write
     # bytes, not the pre-mac-write ones from the prior win-format).
-    # Wipe the stale VHDX and fall through to rebuild.
-    if (Test-Path $Vhdx) {
+    # Wipe the stale VHD and fall through to rebuild.
+    if (Test-Path $Vhd) {
         $imgWriteTime = (Get-Item $ImagePath).LastWriteTimeUtc
-        $vhdxWriteTime = (Get-Item $Vhdx).LastWriteTimeUtc
-        if ($imgWriteTime -le $vhdxWriteTime) {
-            return @{ Vhdx = $Vhdx }
+        $vhdWriteTime = (Get-Item $Vhd).LastWriteTimeUtc
+        if ($imgWriteTime -le $vhdWriteTime) {
+            return @{ Vhd = $Vhd }
         }
-        # .img is newer — VHDX is stale. Delete and rebuild.
-        Remove-Item -LiteralPath $Vhdx -Force -EA SilentlyContinue
-        if (Test-Path -LiteralPath $Vhdx) {
-            throw "Stale VHDX could not be removed: $Vhdx (img mtime $imgWriteTime > vhdx mtime $vhdxWriteTime)"
+        # .img is newer — VHD is stale. Delete and rebuild.
+        Remove-Item -LiteralPath $Vhd -Force -EA SilentlyContinue
+        if (Test-Path -LiteralPath $Vhd) {
+            throw "Stale VHD could not be removed: $Vhd (img mtime $imgWriteTime > vhd mtime $vhdWriteTime)"
         }
     }
 
-    # Sized just larger than the .img so the GPT slack fits.
-    $rawSize     = (Get-Item $ImagePath).Length
-    $rawSizeMb   = [int][Math]::Ceiling($rawSize / 1MB)
-    $wrapperMb   = $rawSizeMb + 64
+    # Sized just larger than the .img so the GPT slack fits. vhd_tool's
+    # create-fixed takes raw bytes (no MB suffix), so multiply by 1MB
+    # explicitly before passing.
+    $rawSize          = (Get-Item $ImagePath).Length
+    $rawSizeMb        = [int][Math]::Ceiling($rawSize / 1MB)
+    $wrapperMb        = $rawSizeMb + 64
+    $wrapperSizeBytes = [int64]$wrapperMb * 1MB
 
-    & qemu-img create -f vhdx -o subformat=fixed $Vhdx "${wrapperMb}M" *> "$Diag\wrapper-create.txt"
+    & vhd_tool create-fixed $Vhd $wrapperSizeBytes *> "$Diag\wrapper-create.txt"
     if ($LASTEXITCODE -ne 0) {
-        throw "qemu-img create failed exit=$LASTEXITCODE (see wrapper-create.txt)"
+        throw "vhd_tool create-fixed failed exit=$LASTEXITCODE (see wrapper-create.txt)"
     }
-    fsutil sparse setflag $Vhdx 0 | Out-Null
+    fsutil sparse setflag $Vhd 0 | Out-Null
 
-    $vhd = Mount-DiskImage -ImagePath $Vhdx -PassThru
+    $vhd = Mount-DiskImage -ImagePath $Vhd -PassThru
     Start-Sleep -Seconds 2
     Initialize-Disk -Number $vhd.Number -PartitionStyle GPT
     Start-Sleep -Seconds 2
@@ -149,24 +153,24 @@ function Initialize-VhdxFromImg {
         }
     }
 
-    # Dismount the just-streamed VHDX. The caller's Mount-VhdxAndGetLetter
+    # Dismount the just-streamed VHD. The caller's Mount-VhdAndGetLetter
     # remounts it so ntfs.sys re-recognises the populated partition and
     # assigns a drive letter.
-    Dismount-DiskImage -ImagePath $Vhdx | Out-Null
+    Dismount-DiskImage -ImagePath $Vhd | Out-Null
 
-    return @{ Vhdx = $Vhdx; Disk = $disk }
+    return @{ Vhd = $Vhd; Disk = $disk }
 }
 
-# Mount the VHDX, wait for ntfs.sys to assign a drive letter (with a
+# Mount the VHD, wait for ntfs.sys to assign a drive letter (with a
 # manual Set-Partition fallback if auto-assignment doesn't happen
 # within 10s). Returns the bare letter (e.g. "E"). Throws if no letter
 # can be obtained.
-function Mount-VhdxAndGetLetter {
-    param([Parameter(Mandatory=$true)] [string]$Vhdx)
+function Mount-VhdAndGetLetter {
+    param([Parameter(Mandatory=$true)] [string]$Vhd)
 
     # Brief pause so a prior Dismount-DiskImage (either from
-    # Initialize-VhdxFromImg's tail or a prior op's
-    # Dismount-VhdxAndCleanup) has a chance to fully settle before
+    # Initialize-VhdFromImg's tail or a prior op's
+    # Dismount-VhdAndCleanup) has a chance to fully settle before
     # ntfs.sys is asked to recognise the volume again. The old monolithic
     # win-chkdsk.ps1 had this `Start-Sleep -Seconds 1` between dismount
     # and remount; the lib refactor split those across functions and
@@ -174,7 +178,7 @@ function Mount-VhdxAndGetLetter {
     # has been known to race the dismount completion on slower hosts.
     Start-Sleep -Seconds 1
     $lettersBefore = @((Get-Volume | Where-Object { $_.DriveLetter }).DriveLetter)
-    $vhd = Mount-DiskImage -ImagePath $Vhdx -PassThru
+    $vhd = Mount-DiskImage -ImagePath $Vhd -PassThru
     $letter = $null
     for ($i = 0; $i -lt 10; $i++) {
         Start-Sleep -Seconds 1
@@ -203,20 +207,20 @@ function Mount-VhdxAndGetLetter {
     return "$letter"
 }
 
-# Tear down a VHDX wrapper (best-effort dismount + remove the file).
-# `KeepImage=$true` leaves the source .img and the .vhdx in place so a
+# Tear down a VHD wrapper (best-effort dismount + remove the file).
+# `KeepImage=$true` leaves the source .img and the .vhd in place so a
 # follow-on op in the same scenario can mount them again. The final op
 # in the scenario should use KeepImage=$false (or call Remove-ScenarioImage
 # explicitly) to avoid leaving GiB-sized artefacts on the VM.
-function Dismount-VhdxAndCleanup {
+function Dismount-VhdAndCleanup {
     param(
-        [Parameter(Mandatory=$true)] [string]$Vhdx,
+        [Parameter(Mandatory=$true)] [string]$Vhd,
         [Parameter(Mandatory=$true)] [string]$ImagePath,
         [bool]$KeepImage = $false
     )
 
     try {
-        Get-DiskImage -ImagePath $Vhdx -EA SilentlyContinue |
+        Get-DiskImage -ImagePath $Vhd -EA SilentlyContinue |
             Where-Object Attached |
             Dismount-DiskImage -EA SilentlyContinue | Out-Null
     } catch { }
@@ -225,13 +229,13 @@ function Dismount-VhdxAndCleanup {
 
     # Best-effort delete with explicit verification on both files.
     # Silently swallowing a cleanup failure was the bug PR #9 fixed for
-    # the .img; the .vhdx needs the same treatment because
-    # Initialize-VhdxFromImg uses .vhdx existence as its idempotency
+    # the .img; the .vhd needs the same treatment because
+    # Initialize-VhdFromImg uses .vhd existence as its idempotency
     # signal — a silently-failed wrapper cleanup would cause the next
     # scenario to skip the create+stream phase and remount stale data.
-    Remove-Item -LiteralPath $Vhdx -Force -EA SilentlyContinue
-    if (Test-Path -LiteralPath $Vhdx) {
-        Write-Warning "Failed to remove VHDX wrapper: $Vhdx"
+    Remove-Item -LiteralPath $Vhd -Force -EA SilentlyContinue
+    if (Test-Path -LiteralPath $Vhd) {
+        Write-Warning "Failed to remove VHD wrapper: $Vhd"
     }
     Remove-Item -LiteralPath $ImagePath -Force -EA SilentlyContinue
     if (Test-Path -LiteralPath $ImagePath) {
