@@ -152,8 +152,12 @@ if [[ -z "${VM_WORKDIR:-}" ]]; then
 fi
 
 # ── IP swap (transparent, restored on exit) ─────────────────────
-COMMITTED_HOST=""
-NEED_RESTORE=0
+# Strategy: snapshot the original harness.toml byte-for-byte, edit
+# in place, restore the snapshot on exit. Atomic; no regex risk.
+# Earlier attempts used sed `s|^host[[:space:]]*=.*|...|` which caught
+# *every* `host = "..."` line — including the per-op `host = "host"`
+# / `host = "vm"` keys — and corrupted them all into SSH targets.
+HARNESS_TOML_ORIG=""
 WATCHER_PID=""
 
 cleanup() {
@@ -161,19 +165,37 @@ cleanup() {
         kill "${WATCHER_PID}" 2>/dev/null || true
         wait "${WATCHER_PID}" 2>/dev/null || true
     fi
-    if [[ "${NEED_RESTORE}" == "1" ]]; then
-        sed -i.bak "s|^host[[:space:]]*=.*|host           = \"${COMMITTED_HOST}\"|" harness.toml
-        rm -f harness.toml.bak
+    if [[ -n "${HARNESS_TOML_ORIG}" && -f "${HARNESS_TOML_ORIG}" ]]; then
+        cp "${HARNESS_TOML_ORIG}" harness.toml
+        rm -f "${HARNESS_TOML_ORIG}"
     fi
 }
 trap cleanup EXIT
 
 if [[ "${DO_IP_SWAP}" == "1" ]]; then
-    COMMITTED_HOST=$(grep -E '^host[[:space:]]*=' harness.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+    # Read just the [vm].host value (the only `host` key whose value
+    # looks like an SSH target — i.e., contains `@`).
+    COMMITTED_HOST=$(awk -F'"' '/^host[[:space:]]*=[[:space:]]*"[^"]*@[^"]*"/ { print $2; exit }' harness.toml)
+    if [[ -z "${COMMITTED_HOST}" ]]; then
+        echo "[test] could not find [vm].host in harness.toml" >&2
+        exit 2
+    fi
     if [[ "${COMMITTED_HOST}" != "${VM_HOST}" ]]; then
         echo "[test] swapping harness.toml [vm].host: '${COMMITTED_HOST}' -> '${VM_HOST}' (will restore on exit)"
-        sed -i.bak "s|^host[[:space:]]*=.*|host           = \"${VM_HOST}\"|" harness.toml
-        NEED_RESTORE=1
+        HARNESS_TOML_ORIG=$(mktemp -t harness.toml.test-orig.XXXXXX)
+        cp harness.toml "${HARNESS_TOML_ORIG}"
+        # Replace ONLY the line whose host value matches COMMITTED_HOST
+        # (anchored on the literal value to avoid hitting per-op lines).
+        python3 - "${COMMITTED_HOST}" "${VM_HOST}" <<'PYEOF'
+import re, sys
+old, new = sys.argv[1], sys.argv[2]
+with open('harness.toml') as f: t = f.read()
+pattern = r'^(host\s*=\s*)"' + re.escape(old) + r'"'
+result, n = re.subn(pattern, lambda m: m.group(1) + '"' + new + '"', t, count=1, flags=re.MULTILINE)
+if n != 1:
+    sys.exit(f"expected exactly 1 match for {old!r}, got {n}")
+with open('harness.toml', 'w') as f: f.write(result)
+PYEOF
     fi
 fi
 
@@ -199,9 +221,14 @@ if [[ "${DO_SHIP}" == "1" ]]; then
     echo "[test] ship done"
 fi
 
-# Local pre-run cleanup: stale diag from a prior run for the same
-# scenario name confuses the live-watcher's seen-set.
-rm -rf "test-diagnostics/matrix/${SCENARIO}" 2>/dev/null
+# Local pre-run cleanup: nuke the WHOLE matrix diag dir so the live
+# watcher's seen-set starts empty against a fresh dir. Otherwise it'd
+# emit every step.json from the prior run before the new one even
+# starts — confusing-as-hell rows for "[some-other-scenario]" appearing
+# under a header that says we're running THIS scenario. The harness
+# binary nukes the dir at startup too (run-matrix.rs:139), so this is
+# just doing the same thing earlier.
+rm -rf "test-diagnostics/matrix" 2>/dev/null
 rm -f "nfs-${SCENARIO}.img" 2>/dev/null
 
 # ── live step watcher (DEFAULT — see Output policy header) ──────
