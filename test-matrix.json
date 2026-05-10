@@ -1518,7 +1518,69 @@
       "operation_sequence": "win:format -> win:write(F1,F2) -> mac:delete(F1) -> win:chkdsk -> win:enumerate(F2)",
       "_note": "depends on Mac-side deleter",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
-      "note": "Filesystem::unlink plumbed via inspect_ntfs CLI on c5fe branch. Matrix runner glue not yet wired."
+      "note": "Filesystem::unlink plumbed via inspect_ntfs CLI on c5fe branch. Matrix runner glue not yet wired.",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img"
+        },
+        {
+          "op": "win-format",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-delete-win-verify"
+        },
+        {
+          "op": "win-write-content",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img",
+          "path": "/F1.txt",
+          "content": "F1",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-delete-win-verify"
+        },
+        {
+          "op": "win-write-content",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img",
+          "path": "/F2.txt",
+          "content": "F2",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-delete-win-verify"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img",
+          "dest": "{scenario.image}"
+        },
+        {
+          "op": "mac-rm",
+          "path": "/F1.txt"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-delete-win-verify"
+        },
+        {
+          "op": "win-enumerate",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img",
+          "keep_image": "false",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-delete-win-verify"
+        }
+      ],
+      "image": "nfs-win-format-win-write-mac-delete-win-verify.img"
     },
     "win-format-win-write-mac-verify": {
       "status": "pending",
@@ -1584,7 +1646,67 @@
       "operation_sequence": "win:format -> win:write(F1) -> mac:write(F2) -> win:chkdsk -> win:enumerate(F1,F2)",
       "_note": "depends on Mac-side writer; first agent scaffolds it or marks blocked-on-writer",
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
-      "note": "Filesystem::create_file is plumbed and exposed via the inspect_ntfs CLI on the c5fe branch. Matrix runner glue (drive a Mac-side touch in the orchestrator) is the only missing piece."
+      "note": "Filesystem::create_file is plumbed and exposed via the inspect_ntfs CLI on the c5fe branch. Matrix runner glue (drive a Mac-side touch in the orchestrator) is the only missing piece.",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img"
+        },
+        {
+          "op": "win-format",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-write-win-verify"
+        },
+        {
+          "op": "win-write-content",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img",
+          "path": "/F1.txt",
+          "content": "F1",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-write-win-verify"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img",
+          "dest": "{scenario.image}"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "F2.txt"
+        },
+        {
+          "op": "mac-write",
+          "path": "/F2.txt",
+          "content": "F2"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{scenario.image}",
+          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img"
+        },
+        {
+          "op": "win-chkdsk",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-write-win-verify"
+        },
+        {
+          "op": "win-enumerate",
+          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img",
+          "keep_image": "false",
+          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-write-win-verify"
+        }
+      ],
+      "image": "nfs-win-format-win-write-mac-write-win-verify.img"
     }
   },
   "_consolidated_by": "agent-c5fe-2026-05-02",
