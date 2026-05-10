@@ -75,7 +75,7 @@ autonomous for the duration of the run.
    rename to avoid race:
 
    ```sh
-   bash vendor/harness/scripts/claim-scenario.sh "$AGENT_SESSION"
+   bash vendor/fs-test-harness/scripts/claim-scenario.sh "$AGENT_SESSION"
    # exits 0 with claimed scenario name on stdout, or non-zero if
    # nothing left to claim.
    ```
@@ -186,8 +186,8 @@ restore from `git log` and proceed:
 
 ```sh
 [ -f test-matrix.json ]                          || echo "MISSING: work-list"
-[ -x vendor/harness/scripts/claim-scenario.sh ]         || echo "MISSING: harness submodule (run: git submodule update --init --recursive)"
-[ -x vendor/harness/scripts/update-scenario-status.sh ] || echo "MISSING: harness submodule"
+[ -x vendor/fs-test-harness/scripts/claim-scenario.sh ]         || echo "MISSING: harness submodule (run: git submodule update --init --recursive)"
+[ -x vendor/fs-test-harness/scripts/update-scenario-status.sh ] || echo "MISSING: harness submodule"
 [ -x scripts/test-windows-local.sh ]             || echo "MISSING: pipeline runner"
 ```
 
