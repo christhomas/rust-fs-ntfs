@@ -315,6 +315,48 @@ host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-mkdir.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
-# Other win-side ops (win-mount/win-unmount as separate ops, win-format,
-# win-modify/win-read) follow the same shape and land alongside their
-# first scenario consumer in subsequent Phase 4c PRs.
+[ops.win-modify]
+# Write a deterministic 0xFF byte pattern at a specific offset inside
+# an existing file on the mounted volume. v2 equivalent of v1's
+# `win:modify(path offset=N len=M)`. Sits alongside win-write-content /
+# win-write-size: those overwrite the file from offset 0; this one
+# rewrites a window in the middle of an existing non-resident $DATA
+# (exercises the run-list rewrite path when a single run is split).
+#
+# The pattern is fixed at 0xFF so a follow-on win-read can verify the
+# modified region against a known-non-zero value (the surrounding
+# bytes, written by win-write-size, are zeros).
+#
+# Step fields:
+#   image_path   — vm-side absolute path to the .img
+#   path         — file path inside the volume (e.g. "/big.bin")
+#   offset       — byte offset to start writing at (integer as string; >= 0)
+#   len          — number of bytes to write (integer as string; >= 0)
+#   keep_image?  — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   diag         — vm-side directory for modify-result.txt + modify-error.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-modify.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+[ops.win-read]
+# Read a byte range from a file on the mounted volume and dump it to a
+# diag artefact. v2 equivalent of v1's `win:read(path)`. Observation-only
+# today (always exits 0 on a successful read); a future verdict shape
+# can gate against the captured bytes (e.g. "expect 0xFF for the whole
+# window"). For the write-modify-chkdsk-read recipe, the captured bytes
+# let us verify manually that the modify op landed at the right offset.
+#
+# Step fields:
+#   image_path   — vm-side absolute path to the .img
+#   path         — file path inside the volume (e.g. "/big.bin")
+#   offset       — byte offset to start reading from (integer as string; >= 0)
+#   len          — number of bytes to read (integer as string; >= 0)
+#   keep_image?  — `true` keeps .img + .vhdx for a follow-on op (default `false`)
+#   diag         — vm-side directory for read-bytes.bin + read-bytes.txt + read-error.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-read.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+# Other win-side ops (win-mount/win-unmount as separate ops, win-format)
+# follow the same shape and land alongside their first scenario consumer
+# in subsequent Phase 4c PRs.
