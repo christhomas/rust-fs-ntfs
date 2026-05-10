@@ -181,11 +181,11 @@ expect_exit = 0
 #                    this (or pass `false`) so cleanup runs.
 #   diag           — vm-side directory for chkdsk-*.txt + eventlog
 #
-# The script path is hardcoded against `vm.workdir` because the
-# harness's substitution surface doesn't (yet) carry `{vm.*}` tokens
-# from `[vm]`. When that lands, swap the literal for `{vm.workdir}`.
+# Script path uses `{vm.workdir}` (added in fs-test-harness v3.1.0)
+# so the matrix workdir on the VM can be relocated without editing
+# every op command — single source of truth at `[vm].workdir` above.
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-chkdsk.ps1' -ImagePath '{step.image_path}' -Modes '{step.modes?}' -VerdictShape '{step.verdict_shape?}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/v2/win-chkdsk.ps1' -ImagePath '{step.image_path}' -Modes '{step.modes?}' -VerdictShape '{step.verdict_shape?}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
 [ops.win-enumerate]
@@ -201,7 +201,7 @@ expect_exit = 0
 #                 multi-op recipe should omit this so cleanup runs.
 #   diag        — vm-side directory for enumerate.txt + wrapper-create.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-enumerate.ps1' -ImagePath '{step.image_path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/v2/win-enumerate.ps1' -ImagePath '{step.image_path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
 [ops.win-write-content]
@@ -227,7 +227,7 @@ expect_exit = 0
 # `'` in the content; matrix payloads today are simple ASCII so this
 # is safe. When write content needs `'`, swap to a file-based transport.
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-write.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Content '{step.content}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/v2/win-write.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Content '{step.content}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
 [ops.win-write-size]
@@ -242,7 +242,7 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for write-result.txt + wrapper-create.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-write.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/v2/win-write.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
 [ops.win-delete]
@@ -256,7 +256,7 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for delete-result.txt + delete-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-delete.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/v2/win-delete.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
 [ops.win-repeat-mount]
@@ -272,7 +272,7 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for repeat-mount-result.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-repeat-mount.ps1' -ImagePath '{step.image_path}' -Cycles '{step.cycles}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/v2/win-repeat-mount.ps1' -ImagePath '{step.image_path}' -Cycles '{step.cycles}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
 [ops.win-rename]
@@ -289,7 +289,7 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for rename-result.txt + rename-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-rename.ps1' -ImagePath '{step.image_path}' -FromPath '{step.from_path}' -ToPath '{step.to_path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/v2/win-rename.ps1' -ImagePath '{step.image_path}' -FromPath '{step.from_path}' -ToPath '{step.to_path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
 [ops.win-mkdir]
@@ -306,7 +306,7 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for mkdir-result.txt + mkdir-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-mkdir.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/v2/win-mkdir.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
 [ops.win-modify]
@@ -329,7 +329,7 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for modify-result.txt + modify-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-modify.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/v2/win-modify.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
 [ops.win-read]
@@ -348,7 +348,7 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for read-bytes.bin + read-bytes.txt + read-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-read.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/v2/win-read.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
 [ops.win-write-many-size]
@@ -377,7 +377,7 @@ expect_exit = 0
 # separate `win-write-many-content` op (same cmd-shell empty-arg
 # rationale as `win-write-content` vs `win-write-size`).
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-write-many.ps1' -ImagePath '{step.image_path}' -Count '{step.count}' -NamePattern '{step.name_pattern}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/v2/win-write-many.ps1' -ImagePath '{step.image_path}' -Count '{step.count}' -NamePattern '{step.name_pattern}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
 [ops.win-delete-many]
@@ -400,7 +400,7 @@ expect_exit = 0
 #   keep_image?    — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag           — vm-side directory for delete-many-result.txt + delete-many-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-delete-many.ps1' -ImagePath '{step.image_path}' -Start '{step.start}' -End '{step.end}' -Step '{step.step}' -NamePattern '{step.name_pattern}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/v2/win-delete-many.ps1' -ImagePath '{step.image_path}' -Start '{step.start}' -End '{step.end}' -Step '{step.step}' -NamePattern '{step.name_pattern}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
 [ops.win-format]
@@ -431,7 +431,7 @@ expect_exit = 0
 #   keep_image?  -- `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         -- vm-side directory for format-result.txt + wrapper-create.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 'C:/Users/chris/dev/rust-fs-ntfs-matrix/scripts/v2/win-format.ps1' -ImagePath '{step.image_path}' -Label '{step.label}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/v2/win-format.ps1' -ImagePath '{step.image_path}' -Label '{step.label}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
 expect_exit = 0
 
 # Other win-side ops (win-mount/win-unmount as separate ops,
