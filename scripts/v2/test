@@ -136,23 +136,10 @@ EOF
     exit 0
 fi
 
-# Conflict guard: --all and a positional filter are mutually exclusive.
-if [[ "${DO_ALL}" == "1" && -n "${SCENARIO}" ]]; then
-    echo "[test] --all and a scenario filter ('${SCENARIO}') are mutually exclusive" >&2
-    exit 2
-fi
-
-# Resolve the filter that gets passed to libtest-mimic:
-#   - explicit --all  -> empty string (libtest-mimic substring "" matches every test)
-#   - explicit filter -> use it as-is
-#   - neither         -> default smoke (mac-format-tiny-32mib). Keeps a
-#                        bare `scripts/v2/test` invocation from accidentally
-#                        kicking off the full ~hour matrix.
-if [[ "${DO_ALL}" == "1" ]]; then
-    SCENARIO=""
-elif [[ -z "${SCENARIO}" ]]; then
-    SCENARIO="mac-format-tiny-32mib"
-fi
+# SCENARIO is whatever the user passed as the positional arg, or empty
+# string if they passed nothing. libtest-mimic treats "" as a substring
+# that matches every test — so `scripts/v2/test` with no args runs the
+# whole matrix, same convention as `cargo test`.
 
 # ── load .test-env (VM_HOST, VM_WORKDIR, SSH_OPTS) ──────────────
 if [[ ! -f "${REPO_ROOT}/.test-env" ]]; then
