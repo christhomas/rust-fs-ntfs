@@ -5,6 +5,15 @@
 # build, ship, run) so a single command can do any combination of
 # them and clean up after itself.
 #
+# Output policy: this is a long-running remote-VM test harness.
+# Individual scenarios are 30 s – several minutes; bulk runs are an
+# hour-plus. The cost of "test failed at minute 33, re-run with
+# --verbose to find out why" is unacceptable, so the default output
+# is *always* the rich diagnostic view: per-step rows print live as
+# steps complete, and failed steps' stderr is dumped inline. Use
+# --quiet to opt out (one line per scenario, libtest-mimic style)
+# only when you genuinely want compact output (CI summary, grepping).
+#
 # Usage:
 #   scripts/v2/test [SCENARIO]
 #     Smoke-runs SCENARIO (substring filter against the matrix).
@@ -20,13 +29,12 @@
 #
 #   scripts/v2/test --list [PATTERN]
 #     List scenarios that have a v2 recipe + match the optional pattern;
-#     don't run anything. Useful before --filter to confirm your filter.
+#     don't run anything. Useful before a filter to confirm what'll run.
 #
-#   scripts/v2/test [SCENARIO] --verbose
-#     After each scenario, print a per-step table (init-image, mac-format,
-#     ship-to-vm, win-chkdsk, ...) with each step's host (host/vm), exit
-#     code, duration, and pass/fail. Default output is one line per
-#     scenario; --verbose adds a breakdown per step underneath each row.
+#   scripts/v2/test [SCENARIO] --quiet
+#     Suppress the live per-step rows + inline stderr. Print only the
+#     libtest-mimic per-scenario summary lines at the end. Use this in
+#     CI or when piping to a grep/jq.
 #
 # Implicit IP swap:
 #   harness.toml's [vm].host is committed at the canonical IP for the
@@ -46,15 +54,17 @@
 #   scripts/v2/test mac-format-volume- --build --ship        # full rebuild+ship+all volume scenarios
 #   scripts/v2/test --list                                   # list every translated scenario
 #   scripts/v2/test --list dirty                             # list scenarios with 'dirty' in the name
+#   scripts/v2/test set-dirty --quiet                        # CI-style compact output
 #
 # Output:
-#   stdout: harness summary + per-scenario verdicts
+#   stdout: harness summary + per-step matrix (default) or per-scenario
+#           lines (--quiet)
 #   diag:   test-diagnostics/matrix/<scenario>/ on host
 #           <vm.workdir>/diag/v2/<scenario>/   on VM
 #
 # Exit code:
-#   0 if every matching scenario passed (or matched a `pending` baseline)
-#   non-zero if any scenario regressed
+#   0 if every matching scenario passed
+#   non-zero if any scenario failed
 
 set -uo pipefail
 
@@ -66,7 +76,7 @@ DO_BUILD=0
 DO_SHIP=0
 DO_LIST=0
 DO_IP_SWAP=1
-DO_VERBOSE=0
+DO_QUIET=0
 SCENARIO=""
 
 usage() {
@@ -79,7 +89,7 @@ for arg in "$@"; do
         --ship)         DO_SHIP=1 ;;
         --list)         DO_LIST=1 ;;
         --no-ip-swap)   DO_IP_SWAP=0 ;;
-        --verbose|-v)   DO_VERBOSE=1 ;;
+        --quiet|-q)     DO_QUIET=1 ;;
         --help|-h)      usage; exit 0 ;;
         --*)
             echo "[test] unknown flag: ${arg}" >&2
@@ -144,15 +154,26 @@ fi
 # ── IP swap (transparent, restored on exit) ─────────────────────
 COMMITTED_HOST=""
 NEED_RESTORE=0
+WATCHER_PID=""
+
+cleanup() {
+    if [[ -n "${WATCHER_PID}" ]]; then
+        kill "${WATCHER_PID}" 2>/dev/null || true
+        wait "${WATCHER_PID}" 2>/dev/null || true
+    fi
+    if [[ "${NEED_RESTORE}" == "1" ]]; then
+        sed -i.bak "s|^host[[:space:]]*=.*|host           = \"${COMMITTED_HOST}\"|" harness.toml
+        rm -f harness.toml.bak
+    fi
+}
+trap cleanup EXIT
 
 if [[ "${DO_IP_SWAP}" == "1" ]]; then
     COMMITTED_HOST=$(grep -E '^host[[:space:]]*=' harness.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
     if [[ "${COMMITTED_HOST}" != "${VM_HOST}" ]]; then
         echo "[test] swapping harness.toml [vm].host: '${COMMITTED_HOST}' -> '${VM_HOST}' (will restore on exit)"
-        # Use a perl-ish sed that escapes the IP for the regex.
         sed -i.bak "s|^host[[:space:]]*=.*|host           = \"${VM_HOST}\"|" harness.toml
         NEED_RESTORE=1
-        trap 'if [[ "${NEED_RESTORE}" == "1" ]]; then sed -i.bak "s|^host[[:space:]]*=.*|host           = \"${COMMITTED_HOST}\"|" harness.toml && rm -f harness.toml.bak; fi' EXIT
     fi
 fi
 
@@ -179,10 +200,88 @@ if [[ "${DO_SHIP}" == "1" ]]; then
 fi
 
 # Local pre-run cleanup: stale diag from a prior run for the same
-# scenario name confuses triage (you'd be looking at last week's
-# verdict.json).
+# scenario name confuses the live-watcher's seen-set.
 rm -rf "test-diagnostics/matrix/${SCENARIO}" 2>/dev/null
 rm -f "nfs-${SCENARIO}.img" 2>/dev/null
+
+# ── live step watcher (DEFAULT — see Output policy header) ──────
+# Polls test-diagnostics/matrix/*/step-*/step.json files every 1.5s.
+# When a new step.json appears, prints one row immediately. On a failed
+# step, also dumps that step's stderr.txt inline so the run's tail
+# carries enough context to triage without a re-run.
+#
+# Skipped under --quiet: cargo run prints the libtest-mimic per-test
+# announcements directly; that's the compact view.
+if [[ "${DO_QUIET}" != "1" ]]; then
+    echo "[test] === live step rows ==="
+    python3 -u - <<'PYEOF' &
+import json, os, sys, time
+seen = set()
+DIAG = "test-diagnostics/matrix"
+LAST_SCN = None
+def emit(scn, sj_path):
+    global LAST_SCN
+    try:
+        s = json.load(open(sj_path))
+    except Exception:
+        return
+    if scn != LAST_SCN:
+        # New scenario: print a header so steps below are grouped visually.
+        print(f"\n[{scn}]")
+        sys.stdout.flush()
+        LAST_SCN = scn
+    idx = s.get("index", "?")
+    op = s.get("op", "?")
+    host = s.get("host", "?")
+    exit_code = s.get("exit_code")
+    expected = s.get("expected_exit", 0)
+    dur_ms = s.get("duration_ms", 0)
+    skipped = s.get("skipped", False)
+    if skipped:
+        mark, status = "-", "SKIP"
+    elif exit_code is None:
+        mark, status = "?", "----"
+    elif exit_code == expected:
+        mark, status = ".", " ok "
+    else:
+        mark, status = "x", "FAIL"
+    dur_str = f"{dur_ms/1000:>7.2f}s"
+    print(f"  [{idx:>2}] {mark} {op:<22} {host:<5} exit={str(exit_code):<6} {status} {dur_str}")
+    sys.stdout.flush()
+    # On failure, dump the step's stderr.txt inline (this is the bit
+    # that turns "well, gotta re-run" into "I see the error already").
+    if mark == "x":
+        stderr_path = os.path.join(os.path.dirname(sj_path), "stderr.txt")
+        if os.path.exists(stderr_path):
+            try:
+                txt = open(stderr_path).read().strip()
+                if txt:
+                    for line in txt.splitlines():
+                        print(f"        | {line}")
+                    sys.stdout.flush()
+            except Exception:
+                pass
+try:
+    while True:
+        if os.path.isdir(DIAG):
+            for scn in sorted(os.listdir(DIAG)):
+                scn_dir = os.path.join(DIAG, scn)
+                if not os.path.isdir(scn_dir):
+                    continue
+                for sd in sorted(os.listdir(scn_dir)):
+                    if not sd.startswith("step-"):
+                        continue
+                    sj = os.path.join(scn_dir, sd, "step.json")
+                    if not os.path.exists(sj) or sj in seen:
+                        continue
+                    seen.add(sj)
+                    emit(scn, sj)
+        time.sleep(1.5)
+except (KeyboardInterrupt, BrokenPipeError):
+    pass
+PYEOF
+    WATCHER_PID=$!
+fi
 
 # ── run phase ───────────────────────────────────────────────────
 echo "[test] === running scenarios matching: '${SCENARIO}' ==="
@@ -191,70 +290,15 @@ HARNESS_CONSUMER_ROOT="$(pwd)" HARNESS_IMAGE_DIR="$(pwd)" \
     cargo run --manifest-path vendor/harness/runner/Cargo.toml \
               --release --bin run-matrix -- "${SCENARIO}"
 RC=$?
-
-# ── verbose post-run breakdown ──────────────────────────────────
-# The default output (one line per scenario) is enough for the green
-# path. --verbose walks each scenario's diag dir and prints a per-step
-# table reconstructed from step-NN/step.json — that's the "every column
-# of every row" view a triage agent wants when something failed.
-if [[ "${DO_VERBOSE}" == "1" ]]; then
-    echo
-    echo "═══════════════════════════════════════"
-    echo "  per-step breakdown (--verbose)"
-    echo "═══════════════════════════════════════"
-    python3 - <<'PYEOF'
-import json, os, sys
-matrix_diag = "test-diagnostics/matrix"
-if not os.path.isdir(matrix_diag):
-    print("  (no diag dir; nothing to dump)")
-    sys.exit(0)
-scenarios = sorted(d for d in os.listdir(matrix_diag) if os.path.isdir(os.path.join(matrix_diag, d)))
-if not scenarios:
-    print("  (no scenarios in diag dir)")
-    sys.exit(0)
-for scn in scenarios:
-    scn_dir = os.path.join(matrix_diag, scn)
-    result_path = os.path.join(scn_dir, "result.json")
-    overall = "?"
-    overall_secs = None
-    if os.path.exists(result_path):
-        try:
-            r = json.load(open(result_path))
-            overall = r.get("status", "?")
-            overall_secs = r.get("duration_secs")
-        except Exception:
-            pass
-    secs_str = f"  ({overall_secs:.1f}s)" if isinstance(overall_secs, (int, float)) else ""
-    print(f"\n  {scn}:  {overall.upper()}{secs_str}")
-    step_dirs = sorted(d for d in os.listdir(scn_dir) if d.startswith("step-"))
-    for sd in step_dirs:
-        sj = os.path.join(scn_dir, sd, "step.json")
-        if not os.path.exists(sj):
-            continue
-        try:
-            s = json.load(open(sj))
-        except Exception:
-            continue
-        idx = s.get("index", "?")
-        op = s.get("op", "?")
-        host = s.get("host", "?")
-        exit_code = s.get("exit_code")
-        expected = s.get("expected_exit", 0)
-        dur_ms = s.get("duration_ms", 0)
-        skipped = s.get("skipped", False)
-        if skipped:
-            mark, status = "-", "SKIP"
-        elif exit_code is None:
-            mark, status = "?", "----"
-        elif exit_code == expected:
-            mark, status = ".", " ok "
-        else:
-            mark, status = "x", "FAIL"
-        dur_str = f"{dur_ms/1000:>7.2f}s"
-        print(f"    [{idx:>2}] {mark} {op:<22} {host:<5} exit={str(exit_code):<6} {status} {dur_str}")
-PYEOF
-fi
 ELAPSED=$(( $(date +%s) - START ))
+
+# Stop the watcher and let it drain anything from the final 1.5s window.
+if [[ -n "${WATCHER_PID}" ]]; then
+    sleep 2  # final poll cycle
+    kill "${WATCHER_PID}" 2>/dev/null || true
+    wait "${WATCHER_PID}" 2>/dev/null || true
+    WATCHER_PID=""
+fi
 
 echo
 echo "═══════════════════════════════════════"
