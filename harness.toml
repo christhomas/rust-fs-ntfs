@@ -4,12 +4,9 @@
 # https://github.com/antimatter-studios/fs-test-harness. Run
 # `git submodule update --init --recursive` after cloning.
 #
-# Phase 4 of the harness migration: this file declares mac-side
-# (host) op-templates only. Win-side ops are added in Phase 4c
-# alongside the cross-host scenarios. Until then, only the
-# pure-mac-chain scenarios in `test-matrix.json` translate cleanly
-# to v2; the rest stay v1 and continue running through
-# `tests/matrix.rs`.
+# All scenarios in test-matrix.json are recipe-shaped and dispatched
+# through the runner; mac-side (host) ops live in this file alongside
+# the win-side ops invoked over SSH on the Windows VM.
 
 [project]
 name        = "rust-fs-ntfs"
@@ -35,10 +32,9 @@ host           = "chris@192.168.213.145"
 ssh_key        = "privatekey"
 workdir        = "C:/Users/chris/dev/rust-fs-ntfs-matrix"
 rust_toolchain = "stable-aarch64-pc-windows-gnullvm"
-# Packages installed on first VM provisioning. The v2 wrapper toolchain
-# (vhd_tool from antimatter-studios/rust-img-vhd) is installed by
-# scripts/setup-windows-vm.ps1 directly; legacy v1 still uses qemu-img
-# from the same setup script and will be removed when v1 retires.
+# The wrapper toolchain (vhd_tool from antimatter-studios/rust-img-vhd)
+# is installed by scripts/setup-windows-vm.ps1 directly. Consumers don't
+# declare additional packages here.
 packages = []
 
 # ============================================================
@@ -137,9 +133,8 @@ expect_exit = 0
 
 [ops.mac-enumerate]
 # `ls -t` walks the tree recursively. Today it ignores the path
-# argument and lists everything; scenarios with mac:enumerate(/foo)
-# in the v1 string will see an unfiltered listing in v2 — matches
-# what tests/matrix.rs does today (it doesn't pass the path either).
+# argument and lists everything; recipes calling mac-enumerate with
+# a path receive an unfiltered listing.
 host = "host"
 command = "{binary} ls -t {scenario.image}"
 expect_exit = 0
@@ -153,16 +148,14 @@ command = "{binary} set-dirty {scenario.image}"
 expect_exit = 0
 
 # ============================================================
-# Win-side (vm) ops — Phase 4c
+# Win-side (vm) ops
 # ============================================================
 #
 # These dispatch via SSH to the Windows VM. Each step invokes a
-# focused PowerShell helper under `scripts/v2/` rather than the
-# legacy 734-LOC `scripts/run-scenario.ps1` driver — the harness's
-# v2 dispatcher gives us per-step granularity, so each op gets its
-# own small script.
+# focused PowerShell helper under `scripts/v2/` — the dispatcher
+# gives per-step granularity, so each op gets its own small script.
 #
-# The VHD-wrap path inside `win-chkdsk.ps1` (and every other v2 op
+# The VHD-wrap path inside `win-chkdsk.ps1` (and every other op
 # routed through `_lib.ps1`) uses `vhd_tool create-fixed` from
 # antimatter-studios/rust-img-vhd — see docs/phase-1e-design.md.
 

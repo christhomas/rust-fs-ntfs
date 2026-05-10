@@ -7,14 +7,16 @@
 #   2. Execute it (idempotent -- safe to re-run).
 #   3. Verify the test pipeline can build at least once.
 #
-# After this completes, `scripts/test-windows-local.sh` should work.
+# After this completes, the matrix runner
+# (vendor/harness/scripts/test-windows-matrix.sh) should work against
+# the VM.
 #
 # Cost (one-time, on a fresh VM):
-#   * Rustup    ~50 MB  / ~30 s
-#   * gnullvm   ~600 MB / ~2 min  (Rust toolchain + std)
+#   * Rustup     ~50 MB  / ~30 s
+#   * gnullvm    ~600 MB / ~2 min  (Rust toolchain + std)
 #   * LLVM-MinGW ~250 MB / ~30 s
-#   * qemu-img  ~10 MB  / ~10 s
-#   Total: ~900 MB / ~3 min over a typical home connection.
+#   * vhd_tool   ~built locally from rust-img-vhd source / <1 min
+#   Total: ~900 MB / ~4 min over a typical home connection.
 
 set -euo pipefail
 
@@ -33,4 +35,4 @@ ssh "${VM_HOST}" "powershell -ExecutionPolicy Bypass -File '${VM_WORKDIR_PS}\\sc
 
 echo
 echo "[setup] Done. Try a real iteration:"
-echo "    bash ${REPO_ROOT}/scripts/test-windows-local.sh"
+echo "    bash ${REPO_ROOT}/vendor/harness/scripts/test-windows-matrix.sh"

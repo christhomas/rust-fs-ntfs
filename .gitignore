@@ -29,7 +29,6 @@ test-disks/*.img
 # it committed.
 tmp/
 docs/archive
-*.vhdx
 *.vhd
 nfs.img
 nfs-*.img
