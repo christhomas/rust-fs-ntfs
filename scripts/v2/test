@@ -20,6 +20,16 @@
 #     ~33, ~30+ minutes wall-clock). Same convention as `cargo test`:
 #     no filter = run everything.
 #
+#     Before the matrix run, a single-scenario *smoke gate* runs first
+#     (mac-format-tiny-32mib, ~30 s). If the smoke fails the matrix is
+#     skipped — same logic as the FPV smoke-stopper before connecting
+#     the real battery: 30 s of cheap "is the wiring sane" insurance
+#     against burning 30+ min on a misconfigured run. The smoke
+#     scenario then runs again as part of the matrix; that ~30 s
+#     duplication is the cost of catching wiring breakage in 30 s
+#     instead of 30 min. The smoke gate is skipped when SCENARIO is
+#     given (you've targeted something specifically; trusted).
+#
 #   scripts/v2/test SCENARIO
 #     Substring filter against the matrix. Examples:
 #       scripts/v2/test mac-format-tiny-32mib   # one explicit scenario
@@ -139,7 +149,19 @@ fi
 # SCENARIO is whatever the user passed as the positional arg, or empty
 # string if they passed nothing. libtest-mimic treats "" as a substring
 # that matches every test — so `scripts/v2/test` with no args runs the
-# whole matrix, same convention as `cargo test`.
+# whole matrix (cargo-test convention).
+#
+# When SCENARIO is empty (full matrix), we gate on a single-scenario
+# smoke first (mac-format-tiny-32mib, ~30s) — same logic as the FPV
+# smoke-stopper before connecting the real battery: cheap "is the
+# wiring sane" check before committing to the 30+ min full run. The
+# smoke scenario then runs again as part of the matrix; that ~30s
+# duplication is the cost of finding wiring breakage in 30s instead
+# of 30 minutes.
+#
+# When SCENARIO is set, the user has explicitly targeted something;
+# trust them and skip the smoke gate.
+SMOKE_SCENARIO="mac-format-tiny-32mib"
 
 # ── load .test-env (VM_HOST, VM_WORKDIR, SSH_OPTS) ──────────────
 if [[ ! -f "${REPO_ROOT}/.test-env" ]]; then
@@ -304,27 +326,34 @@ if [[ "${DO_SHIP}" == "1" ]]; then
     echo "[test] ship done"
 fi
 
-# Local pre-run cleanup: nuke the WHOLE matrix diag dir so the live
-# watcher's seen-set starts empty against a fresh dir. Otherwise it'd
-# emit every step.json from the prior run before the new one even
-# starts — confusing-as-hell rows for "[some-other-scenario]" appearing
-# under a header that says we're running THIS scenario. The harness
-# binary nukes the dir at startup too (run-matrix.rs:139), so this is
-# just doing the same thing earlier.
-rm -rf "test-diagnostics/matrix" 2>/dev/null
-rm -f nfs-mac-format-*.img 2>/dev/null
-
-# ── live step watcher (DEFAULT — see Output policy header) ──────
-# Polls test-diagnostics/matrix/*/step-*/step.json files every 1.5s.
-# When a new step.json appears, prints one row immediately. On a failed
-# step, also dumps that step's stderr.txt inline so the run's tail
-# carries enough context to triage without a re-run.
+# ── run-with-watcher helper ─────────────────────────────────────
+# Encapsulates: nuke diag dir, launch live watcher (default mode),
+# invoke cargo run with the supplied filter, stop watcher. Returns
+# cargo run's exit code.
 #
-# Skipped under --quiet: cargo run prints the libtest-mimic per-test
-# announcements directly; that's the compact view.
-if [[ "${DO_QUIET}" != "1" ]]; then
-    echo "[test] === live step rows ==="
-    python3 -u - <<'PYEOF' &
+# Used twice when SCENARIO is empty (full matrix): once for the smoke
+# gate, once for the actual matrix run.
+run_harness() {
+    local filter="$1"
+
+    # Local pre-run cleanup: nuke the WHOLE matrix diag dir so the live
+    # watcher's seen-set starts empty against a fresh dir. Otherwise
+    # it'd emit every step.json from the prior run before the new one
+    # even starts. The harness binary nukes the dir at startup too
+    # (run-matrix.rs:139), so this is just doing the same thing earlier.
+    rm -rf "test-diagnostics/matrix" 2>/dev/null
+    rm -f nfs-mac-format-*.img 2>/dev/null
+
+    # ── live step watcher (DEFAULT — see Output policy header) ──
+    # Polls test-diagnostics/matrix/*/step-*/step.json files every 1.5s.
+    # When a new step.json appears, prints one row immediately. On a
+    # failed step, also dumps that step's stderr.txt inline so the
+    # run's tail carries enough context to triage without a re-run.
+    #
+    # Skipped under --quiet: cargo run prints the libtest-mimic per-
+    # test announcements directly; that's the compact view.
+    if [[ "${DO_QUIET}" != "1" ]]; then
+        python3 -u - <<'PYEOF' &
 import json, os, sys, time
 seen = set()
 DIAG = "test-diagnostics/matrix"
@@ -390,42 +419,62 @@ try:
 except (KeyboardInterrupt, BrokenPipeError):
     pass
 PYEOF
-    WATCHER_PID=$!
-fi
+        WATCHER_PID=$!
+    fi
 
-# ── run phase ───────────────────────────────────────────────────
-echo "[test] === running scenarios matching: '${SCENARIO}' ==="
-START=$(date +%s)
-HARNESS_CONSUMER_ROOT="$(pwd)" HARNESS_IMAGE_DIR="$(pwd)" \
-    cargo run --manifest-path vendor/harness/runner/Cargo.toml \
-              --release --bin run-matrix -- "${SCENARIO}"
-RC=$?
-ELAPSED=$(( $(date +%s) - START ))
+    # ── run phase ─────────────────────────────────────────────
+    echo "[test] === running scenarios matching: '${filter}' ==="
+    local start rc elapsed
+    start=$(date +%s)
+    HARNESS_CONSUMER_ROOT="$(pwd)" HARNESS_IMAGE_DIR="$(pwd)" \
+        cargo run --manifest-path vendor/harness/runner/Cargo.toml \
+                  --release --bin run-matrix -- "${filter}"
+    rc=$?
+    elapsed=$(( $(date +%s) - start ))
 
-# Stop the watcher and let it drain anything from the final 1.5s window.
-if [[ -n "${WATCHER_PID}" ]]; then
-    sleep 2  # final poll cycle
-    kill "${WATCHER_PID}" 2>/dev/null || true
-    wait "${WATCHER_PID}" 2>/dev/null || true
-    WATCHER_PID=""
-fi
+    # Stop the watcher and let it drain anything from the final 1.5s window.
+    if [[ -n "${WATCHER_PID}" ]]; then
+        sleep 2  # final poll cycle
+        kill "${WATCHER_PID}" 2>/dev/null || true
+        wait "${WATCHER_PID}" 2>/dev/null || true
+        WATCHER_PID=""
+    fi
 
-echo
-echo "═══════════════════════════════════════"
-echo "  verdict:  $([[ ${RC} -eq 0 ]] && echo PASSED || echo "FAILED (rc=${RC})")"
-echo "  elapsed:  ${ELAPSED}s"
-if [[ -n "${SCENARIO}" ]]; then
-    echo "  filter:   ${SCENARIO}"
-    echo "  diag:     test-diagnostics/matrix/${SCENARIO}/   (host)"
-    echo "            ${VM_WORKDIR}/diag/v2/${SCENARIO}/    (VM)"
-else
-    echo "  filter:   (--all — every translated scenario)"
+    echo
+    echo "═══════════════════════════════════════"
+    echo "  verdict:  $([[ ${rc} -eq 0 ]] && echo PASSED || echo "FAILED (rc=${rc})")"
+    echo "  elapsed:  ${elapsed}s"
+    if [[ -n "${filter}" ]]; then
+        echo "  filter:   ${filter}"
+    else
+        echo "  filter:   (full matrix — every translated scenario)"
+    fi
     echo "  diag:     test-diagnostics/matrix/<scenario>/   (host, per scenario)"
     echo "            ${VM_WORKDIR}/diag/v2/<scenario>/    (VM, per scenario)"
+    echo "═══════════════════════════════════════"
+
+    # Local cleanup so the next run starts fresh.
+    rm -f nfs-mac-format-*.img 2>/dev/null
+
+    return "${rc}"
+}
+
+# ── smoke gate (only when running the full matrix) ──────────────
+# Cheap sanity check before committing to a 30+ min full run. Same
+# logic as the FPV smoke-stopper before connecting the real battery.
+# The smoke scenario then runs again as part of the matrix; that's
+# ~30s duplication for the value of catching wiring breakage in 30s
+# instead of 30 minutes.
+if [[ -z "${SCENARIO}" ]]; then
+    echo "[test] === smoke gate: ${SMOKE_SCENARIO} ==="
+    if ! run_harness "${SMOKE_SCENARIO}"; then
+        echo "[test] smoke gate failed; aborting before full matrix run" >&2
+        exit 1
+    fi
+    echo "[test] smoke gate passed; proceeding to full matrix"
+    echo
 fi
-echo "═══════════════════════════════════════"
 
-# Local cleanup so the next run starts fresh.
-rm -f nfs-mac-format-*.img 2>/dev/null
-
-exit "${RC}"
+# ── main run phase ──────────────────────────────────────────────
+run_harness "${SCENARIO}"
+exit "$?"
