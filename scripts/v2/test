@@ -199,6 +199,69 @@ PYEOF
     fi
 fi
 
+# ── pre-flight: VM SSH reachability ─────────────────────────────
+# Why pre-flight: the harness's per-op SSH/SCP calls fail with cryptic
+# exit 255 and a one-liner stderr ("Host key verification failed",
+# "Connection refused", etc.). Without this check we'd discover the
+# problem 0.5s into the run *after* a 10-second build, surfaced only
+# as exit-Some(255) on a step.
+#
+# Common failure modes we surface as actionable hints:
+#   - "Host key verification failed"   -> known_hosts missing the VM's
+#     IP (often after a DHCP-assigned IP change). Auto-recover via
+#     ssh-keyscan since the user's already trusted the VM by pointing
+#     .test-env at it; otherwise instruct them.
+#   - "Connection refused" / "Operation timed out" -> VM not running,
+#     or sshd not started, or wrong IP.
+#   - "Permission denied"              -> ssh_key path or user wrong.
+preflight_ssh() {
+    local probe_out probe_rc
+    probe_out=$(ssh ${SSH_OPTS:-} -o BatchMode=yes -o ConnectTimeout=5 \
+        "${VM_HOST}" 'echo OK' 2>&1)
+    probe_rc=$?
+    if [[ "${probe_rc}" -eq 0 && "${probe_out}" == *OK* ]]; then
+        return 0
+    fi
+    echo "[test] preflight: SSH to ${VM_HOST} failed (rc=${probe_rc})" >&2
+    echo "[test] preflight: ${probe_out}" >&2
+
+    # Auto-recover: missing known_hosts entry. The VM is already trusted
+    # via .test-env; ssh-keyscan + retry. Fingerprint TOFU is acceptable
+    # for a dev VM the user explicitly points the wrapper at.
+    if [[ "${probe_out}" == *"Host key verification failed"* \
+       || "${probe_out}" == *"No matching host key"* ]]; then
+        local ip="${VM_HOST#*@}"
+        echo "[test] preflight: auto-trusting ${ip}'s host key (ssh-keyscan -> ~/.ssh/known_hosts)" >&2
+        if ssh-keyscan -H -T 5 "${ip}" >> "${HOME}/.ssh/known_hosts" 2>/dev/null; then
+            # Retry probe.
+            probe_out=$(ssh ${SSH_OPTS:-} -o BatchMode=yes -o ConnectTimeout=5 \
+                "${VM_HOST}" 'echo OK' 2>&1)
+            probe_rc=$?
+            if [[ "${probe_rc}" -eq 0 && "${probe_out}" == *OK* ]]; then
+                echo "[test] preflight: SSH OK after keyscan" >&2
+                return 0
+            fi
+        fi
+        echo "[test] preflight: ssh-keyscan didn't unblock — see above" >&2
+    fi
+
+    # Hint by error class.
+    case "${probe_out}" in
+        *"Connection refused"*)
+            echo "[test] hint: VM is up but sshd isn't listening on port 22 — check 'Get-Service sshd' on the VM" >&2 ;;
+        *"Operation timed out"*|*"Network is unreachable"*|*"Host is down"*)
+            echo "[test] hint: can't reach ${VM_HOST#*@} — VM down? wrong IP? check 'ipconfig' on the VM and fix .test-env's VM_HOST" >&2 ;;
+        *"Permission denied"*)
+            echo "[test] hint: ssh key rejected — check ssh_key path in harness.toml + .test-env's SSH_OPTS, and that the VM's ~/.ssh/authorized_keys includes the public half" >&2 ;;
+    esac
+    return 1
+}
+
+if ! preflight_ssh; then
+    echo "[test] preflight failed; aborting before build/ship/run" >&2
+    exit 2
+fi
+
 # ── build phase ─────────────────────────────────────────────────
 if [[ "${DO_BUILD}" == "1" ]]; then
     echo "[test] === build phase ==="
