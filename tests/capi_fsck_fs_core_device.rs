@@ -12,8 +12,6 @@
 
 #![allow(unused_unsafe)]
 
-mod common;
-
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -278,6 +276,8 @@ fn fsck_with_fs_core_device_progress_callback_fires() {
 
     let img = dirty_copy("progress", true, true);
     let h = open_dev(&img, true);
+
+    EVENTS.lock().expect("lock").clear();
 
     let mut bytes: u64 = 0;
     let mut cleared: u8 = 0;
