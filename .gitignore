@@ -11,6 +11,10 @@ Cargo.lock.bak
 .idea/
 *.swp
 
+# Coding-agent local working dir (worktrees, scratch, prompts).
+# Per-checkout state, never worth committing.
+.claude/
+
 # Build output
 /dist/
 *.xcframework.zip
