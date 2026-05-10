@@ -313,9 +313,10 @@ pub struct FsNtfsHandle {
 }
 
 /// Tracks whether the handle was mounted from a filesystem path
-/// (`Path`) or from a caller-supplied callback pair (`Callbacks`). Used
-/// by the handle-based mutator API to construct a fresh `BlockIo`-impl
-/// for each mutation call without duplicating the open file.
+/// (`Path`), a caller-supplied callback pair (`Callbacks`), or a shared
+/// `fs_core::BlockDevice` handle (`FsCore`). Used by the handle-based
+/// mutator API to construct a fresh `BlockIo`-impl for each mutation
+/// call without duplicating the underlying device.
 enum MountSource {
     Path(PathBuf),
     Callbacks {
@@ -325,6 +326,17 @@ enum MountSource {
         write_fn: Option<WriteCallback>,
         context: *mut c_void,
         size: u64,
+    },
+    /// Mount sourced from a shared `fs_core::BlockDevice` (a qcow2
+    /// reader, a partition slice, an in-process file device, …). The
+    /// `Arc` is cloned per mutation call so the underlying device is
+    /// kept alive for the duration of each write without locking the
+    /// handle for the whole mount lifetime. Writability is decided
+    /// per-call via `fs_core::BlockDevice::is_writable` so RO devices
+    /// behave the same way as RO-via-callbacks: mutators surface
+    /// EINVAL with a descriptive error string.
+    FsCore {
+        device: std::sync::Arc<dyn fs_core::BlockDevice>,
     },
 }
 
@@ -706,12 +718,11 @@ pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) ->
 /// `fs_core_device_close`. Closing the resulting `*FsNtfsHandle` via
 /// `fs_ntfs_umount` drops the mount's own reference.
 ///
-/// This entry point currently provides **read-only** access — the
-/// handle's `source` is `None`, which causes any mutator API call
-/// (`fs_ntfs_unlink`, `fs_ntfs_mkdir`, etc.) to return EINVAL with
-/// `"handle has no recorded mount source"`. Read paths
-/// (`fs_ntfs_dir_open`, `fs_ntfs_read_file`, …) are unaffected. RW
-/// support over `FsCoreDevice` is a future enhancement.
+/// This entry point provides **read-only** access. Mutator API calls
+/// (`fs_ntfs_unlink_h`, `fs_ntfs_mkdir_h`, `fs_ntfs_write_file_contents_h`,
+/// etc.) return EINVAL with `"handle has no recorded mount source"`.
+/// Read paths (`fs_ntfs_dir_open`, `fs_ntfs_read_file`, …) are
+/// unaffected. For RW use [`fs_ntfs_mount_rw_with_fs_core_device`].
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mount_with_fs_core_device(
     handle: *mut fs_core::ffi::FsCoreDevice,
@@ -752,11 +763,78 @@ pub extern "C" fn fs_ntfs_mount_with_fs_core_device(
     let bridge = Box::new(FsNtfsHandle {
         ntfs,
         reader,
-        // No MountSource — mutator API returns EINVAL for fs-core mounts
-        // until an FsCore-aware MountSource variant is plumbed in.
+        // No MountSource — mutator API returns EINVAL for fs-core RO
+        // mounts. Callers that need RW must use
+        // `fs_ntfs_mount_rw_with_fs_core_device` instead.
         source: None,
     });
     log::info!(target: "fs_ntfs", "mount via fs_core handle (size={size})");
+    Box::into_raw(bridge)
+}
+
+/// Mount an NTFS volume RW via an `FsCoreDevice` handle from a sister
+/// crate. Same shape as [`fs_ntfs_mount_with_fs_core_device`], but the
+/// underlying device is recorded as the handle's mount source so the
+/// `_h` mutator family (`fs_ntfs_create_file_h`, `fs_ntfs_mkdir_h`,
+/// `fs_ntfs_write_file_contents_h`, `fs_ntfs_unlink_h`, …) can write
+/// through it.
+///
+/// The supplied device must report `is_writable() == true`; otherwise
+/// the mount succeeds (the device itself is parsable) but the first
+/// mutator call returns EINVAL with a descriptive error string. The
+/// mount itself does not pre-flight writability so callers can mount
+/// hybrid devices that gate writability per-region (e.g. a disk image
+/// reader whose RW support is enabled lazily). Read paths work
+/// regardless of writability.
+///
+/// Returns NULL on failure; consult `fs_ntfs_last_error()` for detail.
+///
+/// The handle's reference count is incremented internally; the caller
+/// still owns their `*FsCoreDevice` and frees it via
+/// `fs_core_device_close`. Closing the resulting `*FsNtfsHandle` via
+/// `fs_ntfs_umount` drops the mount's own reference.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_mount_rw_with_fs_core_device(
+    handle: *mut fs_core::ffi::FsCoreDevice,
+) -> *mut FsNtfsHandle {
+    if handle.is_null() {
+        set_error("null fs_core handle");
+        return std::ptr::null_mut();
+    }
+
+    // Safety: same contract as the RO sibling above. The Arc clone
+    // here is the source-of-truth reference recorded in MountSource;
+    // the second clone below is for the BufReader-backed reader used
+    // by the read path.
+    let device = unsafe { (*handle).inner().clone() };
+    let size = fs_core::BlockRead::size_bytes(&device);
+
+    let fs_core_reader = FsCoreReader {
+        inner: device.clone(),
+        size,
+        position: 0,
+    };
+    let mut reader = ReaderKind::FsCore(BufReader::new(fs_core_reader));
+
+    let mut ntfs = match Ntfs::new(&mut reader) {
+        Ok(n) => n,
+        Err(e) => {
+            set_error(&format!("ntfs init: {e}"));
+            return std::ptr::null_mut();
+        }
+    };
+
+    if let Err(e) = ntfs.read_upcase_table(&mut reader) {
+        set_error(&format!("upcase table: {e}"));
+        return std::ptr::null_mut();
+    }
+
+    let bridge = Box::new(FsNtfsHandle {
+        ntfs,
+        reader,
+        source: Some(MountSource::FsCore { device }),
+    });
+    log::info!(target: "fs_ntfs", "mount rw via fs_core handle (size={size})");
     Box::into_raw(bridge)
 }
 
@@ -771,6 +849,62 @@ pub extern "C" fn fs_ntfs_mount_with_fs_core_device(
 enum HandleIo {
     Path(RwPathIo),
     Callback(CallbackBlockIo),
+    FsCore(FsCoreBlockIo),
+}
+
+/// `BlockIo` adapter over a shared `Arc<dyn fs_core::BlockDevice>`.
+///
+/// The trait is `&mut self` for legacy reasons but every method only
+/// needs shared access to the underlying device — `BlockRead::read_at`
+/// and `BlockDevice::write_at` both take `&self`. Using `Arc` rather
+/// than a generic parameter keeps the `HandleIo` enum object-safe and
+/// matches how the device crosses the FFI boundary.
+struct FsCoreBlockIo {
+    device: std::sync::Arc<dyn fs_core::BlockDevice>,
+    size: u64,
+}
+
+impl BlockIoTrait for FsCoreBlockIo {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        fs_core::BlockRead::read_at(&self.device, offset, buf).map_err(|e| e.to_string())
+    }
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        // Mirror `fs_core_bridge::CoreDevice` — refuse the write up
+        // front when the device reports itself read-only, so the
+        // failure mode is deterministic regardless of which
+        // implementor we wrap.
+        if !fs_core::BlockDevice::is_writable(&self.device) {
+            return Err("device is not writable".to_string());
+        }
+        fs_core::BlockDevice::write_at(&self.device, offset, buf).map_err(|e| e.to_string())
+    }
+    fn size(&self) -> u64 {
+        self.size
+    }
+    fn sync(&mut self) -> Result<(), String> {
+        fs_core::BlockDevice::flush(&self.device).map_err(|e| e.to_string())
+    }
+}
+
+/// Same shape as the `BlockIo` impl above — fsck and the mutator API
+/// have parallel trait surfaces (intentional, see `src/fsck.rs`),
+/// so the adapter has to satisfy both. Bodies are identical.
+impl crate::fsck::FsckIo for FsCoreBlockIo {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        fs_core::BlockRead::read_at(&self.device, offset, buf).map_err(|e| e.to_string())
+    }
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        if !fs_core::BlockDevice::is_writable(&self.device) {
+            return Err("device is not writable".to_string());
+        }
+        fs_core::BlockDevice::write_at(&self.device, offset, buf).map_err(|e| e.to_string())
+    }
+    fn size(&self) -> u64 {
+        self.size
+    }
+    fn sync(&mut self) -> Result<(), String> {
+        fs_core::BlockDevice::flush(&self.device).map_err(|e| e.to_string())
+    }
 }
 
 impl BlockIoTrait for HandleIo {
@@ -778,24 +912,28 @@ impl BlockIoTrait for HandleIo {
         match self {
             HandleIo::Path(p) => p.read_exact_at(offset, buf),
             HandleIo::Callback(c) => c.read_exact_at(offset, buf),
+            HandleIo::FsCore(f) => f.read_exact_at(offset, buf),
         }
     }
     fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
         match self {
             HandleIo::Path(p) => p.write_all_at(offset, buf),
             HandleIo::Callback(c) => c.write_all_at(offset, buf),
+            HandleIo::FsCore(f) => f.write_all_at(offset, buf),
         }
     }
     fn size(&self) -> u64 {
         match self {
             HandleIo::Path(p) => p.size(),
             HandleIo::Callback(c) => c.size(),
+            HandleIo::FsCore(f) => f.size(),
         }
     }
     fn sync(&mut self) -> Result<(), String> {
         match self {
             HandleIo::Path(p) => p.sync(),
             HandleIo::Callback(c) => c.sync(),
+            HandleIo::FsCore(f) => f.sync(),
         }
     }
 }
@@ -822,6 +960,18 @@ fn handle_to_rw_io(handle: &FsNtfsHandle) -> Result<HandleIo, String> {
                 write_fn: *write_fn,
                 context: *context,
                 size: *size,
+            }))
+        }
+        Some(MountSource::FsCore { device }) => {
+            if !fs_core::BlockDevice::is_writable(device) {
+                return Err(
+                    "handle mounted read-only via fs_core device (is_writable=false)".to_string(),
+                );
+            }
+            let size = fs_core::BlockRead::size_bytes(device);
+            Ok(HandleIo::FsCore(FsCoreBlockIo {
+                device: device.clone(),
+                size,
             }))
         }
         None => Err("handle has no recorded mount source".to_string()),
@@ -2583,6 +2733,114 @@ pub extern "C" fn fs_ntfs_fsck_with_callbacks(
         }
     };
 
+    #[allow(clippy::type_complexity)]
+    let progress: Option<&mut (dyn FnMut(&str, u64, u64) + '_)> = if pcb.is_some() {
+        Some(&mut progress_closure)
+    } else {
+        None
+    };
+
+    match fsck::fsck_io(&mut io, progress) {
+        Ok(report) => {
+            if !out_logfile_bytes.is_null() {
+                unsafe { *out_logfile_bytes = report.logfile_bytes };
+            }
+            if !out_dirty_cleared.is_null() {
+                unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };
+            }
+            0
+        }
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// `fs_core` counterpart of [`fs_ntfs_is_dirty_with_callbacks`]. Reads
+/// the dirty flag through an `FsCoreDevice` handle from a sister crate
+/// (`qcow2_open_rw_on_device`, `partitions_open_slice`,
+/// `fs_core_file_open`, ...). Returns `1` if dirty, `0` if clean,
+/// `-1` on error.
+///
+/// The handle is borrowed (its inner `Arc` is cloned for the duration
+/// of the call). The caller still owns the handle and frees it via
+/// `fs_core_device_close`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_is_dirty_with_fs_core_device(
+    handle: *mut fs_core::ffi::FsCoreDevice,
+) -> c_int {
+    if handle.is_null() {
+        set_error("fs_ntfs_is_dirty_with_fs_core_device: null handle");
+        return -1;
+    }
+    // Safety: handle non-null per the check above; caller-owned per the
+    // doc contract. The Arc clone keeps the device alive through the
+    // call independent of any caller-side close.
+    let device = unsafe { (*handle).inner().clone() };
+    let size = fs_core::BlockRead::size_bytes(&device);
+    let mut io = FsCoreBlockIo { device, size };
+
+    match fsck::is_dirty_io(&mut io) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// `fs_core` counterpart of [`fs_ntfs_fsck_with_callbacks`]. Replays
+/// `$LogFile` and clears the dirty bit through an `FsCoreDevice`
+/// handle. The device must report `is_writable() == true`; otherwise
+/// the call fails up front.
+///
+/// On success `out_logfile_bytes` (if non-NULL) receives the byte
+/// count overwritten in `$LogFile` during recovery, and
+/// `out_dirty_cleared` (if non-NULL) is set to `1` if the dirty bit
+/// was actually cleared (meaning the volume was dirty before the
+/// call). Returns `0` on success, `-1` on error.
+///
+/// `progress_cb` (if non-NULL) is invoked from the calling thread as
+/// fsck advances; the `phase` C string is owned by fs_ntfs and only
+/// valid for the duration of the callback.
+///
+/// The handle is borrowed (its inner `Arc` is cloned for the duration
+/// of the call). The caller still owns the handle and frees it via
+/// `fs_core_device_close`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_fsck_with_fs_core_device(
+    handle: *mut fs_core::ffi::FsCoreDevice,
+    progress_cb: Option<FsckProgressCallback>,
+    progress_ctx: *mut c_void,
+    out_logfile_bytes: *mut u64,
+    out_dirty_cleared: *mut u8,
+) -> c_int {
+    if handle.is_null() {
+        set_error("fs_ntfs_fsck_with_fs_core_device: null handle");
+        return -1;
+    }
+    let device = unsafe { (*handle).inner().clone() };
+    if !fs_core::BlockDevice::is_writable(&device) {
+        set_error("fs_ntfs_fsck_with_fs_core_device: device is not writable (fsck requires RW)");
+        return -1;
+    }
+    let size = fs_core::BlockRead::size_bytes(&device);
+    let mut io = FsCoreBlockIo { device, size };
+
+    // Same closure-to-fn-pointer adapter as fs_ntfs_fsck_with_callbacks
+    // — see that function for the lifetime / Send rationale.
+    struct PtrWrap(*mut c_void);
+    let pctx = PtrWrap(progress_ctx);
+    let pcb = progress_cb;
+    let mut progress_closure = move |phase: &str, done: u64, total: u64| {
+        if let Some(cb) = pcb {
+            if let Ok(cstr) = CString::new(phase) {
+                let _ = unsafe { cb(pctx.0, cstr.as_ptr(), done, total) };
+            }
+        }
+    };
     #[allow(clippy::type_complexity)]
     let progress: Option<&mut (dyn FnMut(&str, u64, u64) + '_)> = if pcb.is_some() {
         Some(&mut progress_closure)

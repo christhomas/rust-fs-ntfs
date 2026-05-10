@@ -158,9 +158,9 @@ fs_ntfs_fs_t *fs_ntfs_mount_with_callbacks(
  * (`qcow2_open` from am-img-qcow2, `partitions_open_slice` from
  * am-partitions, `fs_core_file_open` from am-fs-core).
  *
- * Read-only at present — mutator API calls (`fs_ntfs_unlink`,
- * `fs_ntfs_mkdir`, etc.) return EINVAL with "handle has no recorded
- * mount source". RW support over FsCoreDevice handles is planned.
+ * Read-only — mutator API calls on the resulting handle (`_h` family)
+ * return EINVAL with "handle has no recorded mount source". For RW
+ * use `fs_ntfs_mount_rw_with_fs_core_device` below.
  *
  * The handle's reference count is incremented internally; the caller
  * still owns their *FsCoreDevice and frees it via
@@ -173,6 +173,28 @@ fs_ntfs_fs_t *fs_ntfs_mount_with_callbacks(
  */
 struct FsCoreDevice;
 fs_ntfs_fs_t *fs_ntfs_mount_with_fs_core_device(struct FsCoreDevice *handle);
+
+/*
+ * Mount via an FsCoreDevice handle, RW. Same shape as
+ * `fs_ntfs_mount_with_fs_core_device` but the underlying device is
+ * recorded as the handle's mount source so the `_h` mutator family
+ * (`fs_ntfs_create_file_h`, `fs_ntfs_mkdir_h`,
+ * `fs_ntfs_write_file_contents_h`, `fs_ntfs_unlink_h`, …) can write
+ * through it.
+ *
+ * The supplied device should report `is_writable=true` (see
+ * `fs_core_device_is_writable`); a non-writable device still mounts
+ * (read paths work) but the first mutator call returns EINVAL with a
+ * descriptive error string. The mount itself does not pre-flight
+ * writability so callers can mount hybrid devices that gate
+ * writability per-region.
+ *
+ * Reference-counting and ownership rules are identical to
+ * `fs_ntfs_mount_with_fs_core_device`.
+ *
+ * Returns NULL on failure; use fs_ntfs_last_error() for detail.
+ */
+fs_ntfs_fs_t *fs_ntfs_mount_rw_with_fs_core_device(struct FsCoreDevice *handle);
 
 /*
  * Unmount and free all resources.
@@ -381,6 +403,34 @@ typedef int (*fs_ntfs_fsck_progress_fn)(void *context, const char *phase,
  */
 int fs_ntfs_fsck_with_callbacks(
     const fs_ntfs_blockdev_cfg_t *cfg,
+    fs_ntfs_fsck_progress_fn progress_cb,
+    void *progress_ctx,
+    uint64_t *out_logfile_bytes,
+    uint8_t  *out_dirty_cleared);
+
+/*
+ * fs_core counterparts of `fs_ntfs_is_dirty_with_callbacks` and
+ * `fs_ntfs_fsck_with_callbacks`. Use these when the underlying device
+ * is reached through an FsCoreDevice handle from a sister crate
+ * (`qcow2_open_rw_on_device`, `partitions_open_slice`,
+ * `fs_core_file_open`, ...) — there's no need to plumb individual
+ * callbacks when the device is already an FsCoreDevice.
+ *
+ * The handle is borrowed (its inner Arc is cloned for the duration
+ * of the call). The caller still owns the handle and frees it via
+ * `fs_core_device_close`.
+ *
+ * Semantics + return values match the `_with_callbacks` siblings:
+ *   is_dirty: 1 = dirty, 0 = clean, -1 = error.
+ *   fsck:     0 = success, -1 = error. out_logfile_bytes /
+ *             out_dirty_cleared (if non-NULL) filled on success.
+ *
+ * fsck requires the device to report `is_writable() == true`;
+ * otherwise it fails up front with -1 and a descriptive error.
+ */
+int fs_ntfs_is_dirty_with_fs_core_device(struct FsCoreDevice *handle);
+int fs_ntfs_fsck_with_fs_core_device(
+    struct FsCoreDevice *handle,
     fs_ntfs_fsck_progress_fn progress_cb,
     void *progress_ctx,
     uint64_t *out_logfile_bytes,
