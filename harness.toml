@@ -1,6 +1,6 @@
 # harness.toml — fs-test-harness consumer config for rust-fs-ntfs.
 #
-# The harness scripts + Rust runner live at ./vendor/harness/, vendored from
+# The harness scripts + Rust runner live at ./vendor/fs-test-harness/, vendored from
 # https://github.com/antimatter-studios/fs-test-harness. Run
 # `git submodule update --init --recursive` after cloning.
 #
@@ -21,7 +21,7 @@ matrix_path = "test-matrix.json"
 #
 #   1. Edit `host` / `ssh_key` / `workdir` to point at your own
 #      Windows-ARM64 VM, OR
-#   2. Run `bash vendor/harness/scripts/setup-local.sh` to get prompted for
+#   2. Run `bash vendor/fs-test-harness/scripts/setup-local.sh` to get prompted for
 #      your settings — the script writes a gitignored `.test-env`
 #      that overrides this section at runtime without touching
 #      tracked config.

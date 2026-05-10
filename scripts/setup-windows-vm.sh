@@ -8,7 +8,7 @@
 #   3. Verify the test pipeline can build at least once.
 #
 # After this completes, the matrix runner
-# (vendor/harness/scripts/test-windows-matrix.sh) should work against
+# (vendor/fs-test-harness/scripts/test-windows-matrix.sh) should work against
 # the VM.
 #
 # Cost (one-time, on a fresh VM):
@@ -35,4 +35,4 @@ ssh "${VM_HOST}" "powershell -ExecutionPolicy Bypass -File '${VM_WORKDIR_PS}\\sc
 
 echo
 echo "[setup] Done. Try a real iteration:"
-echo "    bash ${REPO_ROOT}/vendor/harness/scripts/test-windows-matrix.sh"
+echo "    bash ${REPO_ROOT}/vendor/fs-test-harness/scripts/test-windows-matrix.sh"
