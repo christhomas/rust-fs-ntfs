@@ -114,7 +114,17 @@ def main() -> int:
             print(f"  {e}", file=sys.stderr)
         return 1
 
-    declared_ops: set[str] = set(harness.get("ops", {}).keys())
+    # Defensive: harness.toml could have `ops = "..."` or `ops = [...]`
+    # by mistake (e.g. mid-edit half-broken file). Surface it as a
+    # normal lint failure rather than crash with AttributeError on
+    # `.keys()`.
+    ops_section = harness.get("ops", {})
+    if not isinstance(ops_section, dict):
+        if not args.quiet:
+            print(f"[check-matrix] {harness_path}: top-level `ops` must be a table, "
+                  f"got {type(ops_section).__name__}", file=sys.stderr)
+        return 1
+    declared_ops: set[str] = set(ops_section.keys())
     all_known_ops: set[str] = declared_ops | HARNESS_BUILTIN_OPS
 
     # ── 3. top-level shape ──
@@ -142,10 +152,12 @@ def main() -> int:
             if missing:
                 err(f"scenario {name!r}.volume_params: missing fields {sorted(missing)}")
 
-        # 5. per-step in recipe (only if recipe present — translation is opt-in per scenario)
-        recipe = scn.get("recipe")
-        if recipe is None:
+        # 5. per-step in recipe (only if recipe present — translation is opt-in per scenario).
+        # Distinguish "key absent" (untranslated, fine) from "key set to null" (broken
+        # translation edit) — the former skips, the latter is flagged.
+        if "recipe" not in scn:
             continue
+        recipe = scn["recipe"]
         if not isinstance(recipe, list):
             err(f"scenario {name!r}.recipe: must be a list, got {type(recipe).__name__}")
             continue
