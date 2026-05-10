@@ -110,6 +110,24 @@ try {
             $fs = [System.IO.File]::Open($target, [System.IO.FileMode]::Open,
                 [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
             try {
+                # Enforce the documented contract: target must already
+                # be at least Offset+Length bytes long. Without this
+                # check, a too-large Offset+Length silently *extends*
+                # the file (FileMode::Open + FileAccess::ReadWrite
+                # allows growth past current EOF). That hides recipe
+                # errors — the modification would land somewhere the
+                # author didn't expect, and a follow-on win-read
+                # against the post-write offset would see writes that
+                # weren't supposed to be there.
+                if ($offsetInt -gt ([int64]::MaxValue - $lengthInt)) {
+                    [Console]::Error.WriteLine("win-modify: -Offset + -Length overflows Int64 (offset=$offsetInt, len=$lengthInt)")
+                    exit 2
+                }
+                $endExclusive = $offsetInt + $lengthInt
+                if ($endExclusive -gt $fs.Length) {
+                    [Console]::Error.WriteLine("win-modify: target file too small (file length=$($fs.Length), need >= $endExclusive for offset=$offsetInt + len=$lengthInt)")
+                    exit 2
+                }
                 $fs.Seek($offsetInt, [System.IO.SeekOrigin]::Begin) | Out-Null
                 $fs.Write($buf, 0, $buf.Length)
                 $fs.Flush($true)
