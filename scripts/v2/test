@@ -83,7 +83,7 @@
 #   0 if every matching scenario passed
 #   non-zero if any scenario failed
 
-set -uo pipefail
+set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
@@ -97,7 +97,16 @@ DO_QUIET=0
 SCENARIO=""
 
 usage() {
-    sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
+    # Print the leading header comment block (everything up to the
+    # first non-`#` line). Earlier versions used `sed -n '2,/^$/p'`,
+    # which stopped at the first truly-empty line — but that's the
+    # blank line *after* `set -euo pipefail`, so `--help` ended up
+    # spilling shell code into the help text.
+    awk '
+        NR == 1 { next }                       # skip shebang
+        /^#/ { sub(/^# ?/, ""); print; next }  # strip "# " prefix
+        { exit }                               # stop at first non-comment
+    ' "$0"
 }
 
 for arg in "$@"; do
@@ -105,7 +114,6 @@ for arg in "$@"; do
         --build)        DO_BUILD=1 ;;
         --ship)         DO_SHIP=1 ;;
         --list)         DO_LIST=1 ;;
-        --all)          DO_ALL=1 ;;
         --no-ip-swap)   DO_IP_SWAP=0 ;;
         --quiet|-q)     DO_QUIET=1 ;;
         --help|-h)      usage; exit 0 ;;
@@ -453,13 +461,19 @@ PYEOF
     fi
 
     # ── run phase ─────────────────────────────────────────────
+    # `cargo run` is the one place we explicitly *want* a non-zero
+    # exit to flow through to summary/verdict logic rather than abort
+    # the script (set -e). The `|| rc=$?` idiom captures the exit
+    # without tripping errexit; the `: $((${rc:=0}))` falls back to 0
+    # if cargo run actually succeeded (so $? was never assigned).
     echo "[test] === running scenarios matching: '${filter}' ==="
     local start rc elapsed
     start=$(date +%s)
+    rc=0
     HARNESS_CONSUMER_ROOT="$(pwd)" HARNESS_IMAGE_DIR="$(pwd)" \
         cargo run --manifest-path vendor/harness/runner/Cargo.toml \
-                  --release --bin run-matrix -- "${filter}"
-    rc=$?
+                  --release --bin run-matrix -- "${filter}" \
+        || rc=$?
     elapsed=$(( $(date +%s) - start ))
 
     # Stop the watcher and let it drain anything from the final 1.5s window.
