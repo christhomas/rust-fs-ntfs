@@ -163,7 +163,14 @@ impl Filesystem {
     }
 
     pub fn volume_info(&self) -> Result<VolumeInfo, Error> {
-        let (ntfs, _reader) = self.open_reader()?;
+        let (ntfs, mut reader) = self.open_reader()?;
+        // Read the real $VOLUME_INFORMATION bytes off disk. A
+        // fresh-format volume reads back as 1.2 with UPGRADE_ON_MOUNT
+        // set; ntfs.sys rewrites it to 3.1 on first RW mount.
+        // Hardcoding 3.1 lied about that state.
+        let vi = ntfs
+            .volume_info(&mut reader)
+            .map_err(|e| Error(format!("read $VOLUME_INFORMATION: {e}")))?;
         // We don't resolve $Volume's name here (that path is in lib.rs
         // and a proper extraction is follow-up work). Provide everything
         // the boot sector gives us.
@@ -171,8 +178,8 @@ impl Filesystem {
             volume_name: String::new(),
             cluster_size: ntfs.cluster_size(),
             total_clusters: ntfs.size() / ntfs.cluster_size() as u64,
-            ntfs_version_major: 3,
-            ntfs_version_minor: 1,
+            ntfs_version_major: vi.major_version() as u16,
+            ntfs_version_minor: vi.minor_version() as u16,
             serial_number: ntfs.serial_number(),
             total_size: ntfs.size(),
         })
