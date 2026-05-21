@@ -1888,31 +1888,63 @@ fn build_populated_named_index_root_attr(
     buf
 }
 
-/// Build a single INDEX_ENTRY for a view-index ($SDH / $SII style).
-/// MS-FSCC §2.4.9 INDEX_ENTRY layout:
-///   +0x00 file_reference  u64   (zero on view-indexes — no MFT ref)
-///   +0x08 entry_length    u16   (total bytes incl. padding)
-///   +0x0A stream_length   u16   (= key_length; size of key bytes only)
-///   +0x0C flags           u32   (0 for normal, 0x02 for LAST)
-///   +0x10 key             key_length bytes
-///   +pad  data            (value bytes, located at +0x10+key_length
-///                          rounded up to 8). For view-indexes the data
-///                          offset is also reported by a field at
-///                          +0x08-ish... but the canonical layout used
-///                          by Microsoft's $SDH/$SII is key-immediately-
-///                          followed-by-value, both within entry_length.
+/// Build a single INDEX_ENTRY for a view-index (`$SDH` / `$SII` style).
 ///
-/// Returns the entry bytes (no extra padding outside entry_length).
+/// INDEX_ENTRY's first 8 bytes are a union (per MS-FSCC §2.4.9 +
+/// Windows Internals 7e ch. "NTFS On-Disk Structure"):
+///
+/// * **File-name indexes** (`$I30`) put a `FILE_REFERENCE` (u64)
+///   there — the MFT ref the entry points at. The KEY embedded in
+///   the entry body IS the data (`$FILE_NAME` stream), so no
+///   separate data-offset/length is needed.
+/// * **View indexes** (`$SDH`, `$SII`, `$O`, `$Q`, ...) put
+///   `data_offset` (u16 LE) at `+0x00` and `data_length` (u16 LE)
+///   at `+0x02`, with `+0x04..0x08` reserved. The value lives at
+///   `entry_start + data_offset` and is **separate** from the key.
+///
+/// S2's first cut wrote zeros into `+0x00..0x08`, treating the union
+/// as `file_reference = 0`. That's the file-name-index convention,
+/// not the view-index one. chkdsk's view-index parser (per
+/// Iter I trace: `Index $SDH in file 9 is corrupt`) reads
+/// `data_offset = 0` from that, finds no value, and flags the entry.
+///
+/// Full layout this builder produces:
+///
+/// ```text
+///   +0x00 data_offset   u16   = `value_off` (== key data ends, aligned to 8)
+///   +0x02 data_length   u16   = `value.len()`
+///   +0x04 reserved      u32   = 0
+///   +0x08 entry_length  u16   = total bytes incl. padding
+///   +0x0A key_length    u16
+///   +0x0C flags         u32   = 0 (normal) or 0x02 (LAST / INDEX_ENTRY_END)
+///   +0x10 key           key_length bytes
+///   +pad  value         value.len() bytes (at data_offset)
+/// ```
+///
+/// Returns the entry bytes (no extra padding outside `entry_length`).
 fn build_view_index_entry(key: &[u8], value: &[u8]) -> Vec<u8> {
     let header = 0x10usize;
     let key_len = key.len();
     let value_off = align8(header + key_len);
     let entry_len = align8(value_off + value.len());
     let mut buf = vec![0u8; entry_len];
-    // file_reference = 0 (no MFT backing).
+    // View-index union: data_offset + data_length, NOT file_reference.
+    // u16 narrowing must fail loudly if a future caller's
+    // `value_off` or `value.len()` ever exceeds 65535 — those fields
+    // are u16-sized on disk per MS-FSCC §2.4.9, so silent truncation
+    // would produce a wrong on-disk layout. Current callers ($SDH/$SII
+    // with 4-/8-byte keys and 20-byte values) stay well under, but
+    // future view indexes ($O / $Q / etc.) could push higher.
+    let data_offset_u16 = u16::try_from(value_off).expect("view-index data_offset overflows u16");
+    let data_length_u16 = u16::try_from(value.len()).expect("view-index data_length overflows u16");
+    buf[0..2].copy_from_slice(&data_offset_u16.to_le_bytes());
+    buf[2..4].copy_from_slice(&data_length_u16.to_le_bytes());
+    // buf[4..8] reserved (already zero).
     buf[8..10].copy_from_slice(&(entry_len as u16).to_le_bytes());
     buf[10..12].copy_from_slice(&(key_len as u16).to_le_bytes());
-    buf[12..16].copy_from_slice(&0u32.to_le_bytes()); // flags
+    // flags (u32) — only low 2 bits defined (0x01 HAS_SUBNODE,
+    // 0x02 LAST). Zero for a normal entry.
+    buf[12..16].copy_from_slice(&0u32.to_le_bytes());
     buf[header..header + key_len].copy_from_slice(key);
     buf[value_off..value_off + value.len()].copy_from_slice(value);
     buf
