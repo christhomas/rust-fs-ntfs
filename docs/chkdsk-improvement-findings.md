@@ -2210,6 +2210,91 @@ removing/re-introducing iter12's IS_VIEW_INDEX flag from rec 9
 interact with this? Test only after §6.1 lands and we can verify
 the expected behaviour cleanly.
 
+### Iter I findings — post-S1+S2+S3 trace (2026-05-21)
+
+After [PR #39 (S1)](https://github.com/christhomas/rust-fs-ntfs/pull/39),
+[PR #40 (S3)](https://github.com/christhomas/rust-fs-ntfs/pull/40),
+and [PR #41 (S2)](https://github.com/christhomas/rust-fs-ntfs/pull/41)
+landed, re-ran `scripts/procmon-chkdsk-trace.ps1` on the same 256 MiB
+volume scenario. (PR-number / sub-PR-letter mismatch: S3 merged
+before S2 — S2 went through an extra review round to correct the
+48-byte `$STANDARD_INFORMATION` SecurityId offset, while S3 was a
+clean pass-through.)
+
+**Verdict moved from "exact nature unknown" to a named structural
+complaint.**
+
+Before S1+S2+S3:
+
+```text
+chkdsk readonly  exit 0  ("found no problems")
+chkdsk /scan     exit 13 ("must be fixed offline")
+Event log        NTFS 55: "corruption detected, exact nature unknown"
+```
+
+After S1+S2+S3:
+
+```text
+chkdsk readonly  exit 3   (errors found)
+chkdsk /scan     exit 11  (snapshot setup failed)
+
+readonly stdout:
+    Stage 1: Examining basic file system structure ...   [clean]
+    Stage 2: Examining file name linkage ...
+    Index $SDH in file 9 is corrupt.
+    Index $SII in file 9 is corrupt.
+    70 index entries processed.
+    Errors found.  CHKDSK cannot continue in read-only mode.
+
+scan stdout:
+    Insufficient storage available to create either the shadow
+    copy storage file or other shadow copy data.
+    A snapshot error occured while scanning this drive.
+```
+
+**Interpretation**:
+
+1. The "exact nature unknown" black box opened. chkdsk now names the
+   `$SDH` and `$SII` indexes (rec 9, file=$Secure) as corrupt. Those
+   are precisely the structures S2 introduced. So S2's byte layout
+   for at least one of `$SDH` / `$SII` is malformed against
+   chkdsk's parser.
+2. `/scan` exit 11 (snapshot-error) is a *secondary* failure mode:
+   chkdsk tries to create a shadow copy before running /scan, that
+   step is failing — likely because readonly stage already returned
+   non-zero, OR because the volume's free-space accounting changed
+   when S2 allocated the SDS clusters. Either way, this is not the
+   primary target; the readonly $SDH/$SII complaint is.
+3. The "Read-only chkdsk found bad on-disk uppercase table" warning
+   (pre-existing per §4.2) still fires. Unrelated to S2.
+
+**Hypothesis ranking for the next iteration**:
+
+1. **`$SDH` INDEX_ENTRY layout is wrong.** Most likely candidate
+   given two named complaints land on `$SDH` and `$SII` together;
+   if both are wrong in the same way, the shared INDEX_ENTRY
+   builder (`build_view_index_entry` per S2's report) is the
+   suspect. Investigate INDEX_ENTRY header byte-layout +
+   alignment + LAST-entry framing per MS-FSCC §2.4.9.
+2. **`$INDEX_ROOT` `total_size_of_entries` /
+   `allocated_size_of_entries` mismatch.** chkdsk validates the
+   index-header byte counts against the actual content length;
+   off-by-N here trips structural checks. Verify our values match
+   `header_size + sum(entry_lengths)`.
+3. **Collation constant value is wrong.** S2 used
+   `COLLATION_NTOFS_SECURITY_HASH = 0x12` (`$SDH`) and
+   `COLLATION_NTOFS_ULONG = 0x10` (`$SII`). MS-FSCC §2.4.9 lists
+   these in a different order than the find-in-spec lookup S2's
+   agent reported. Re-verify by byte-diff against
+   `Format-Volume`'s `$Secure` rec 9.
+
+**Productive next move**:
+
+Iter J — dump rec 9 from our current volume + from a Microsoft
+`Format-Volume` reference, byte-diff the `$SDH` / `$SII`
+`$INDEX_ROOT` attributes, find the divergence, fix it in a follow-up
+PR. Iter J's scope is narrowly the S2 follow-up; S4 / S5 wait.
+
 ---
 
 ## 7. Anti-hallucination cross-checks
