@@ -295,13 +295,23 @@ pub fn format_filesystem(
     let mft_bitmap_lcn = attrdef_lcn + attrdef_clusters;
     let mft_bitmap_clusters: u64 = 1;
 
+    // $Secure:$SDS data — two real clusters (primary entries + mirror at
+    // file offset 0x40000). Placed immediately after $MFT's $BITMAP
+    // cluster. The 256 KiB gap between primary and mirror lives in a
+    // sparse data run, so only 2 clusters are actually consumed on
+    // disk regardless of cluster size — matches the Microsoft
+    // reference's $SDS layout (primary + mirror, sparse middle).
+    let sds_primary_lcn = mft_bitmap_lcn + mft_bitmap_clusters;
+    let sds_mirror_lcn = sds_primary_lcn + 1;
+    let sds_real_clusters: u64 = 2;
+
     let mftmirr_lcn = cluster_count / 2;
     // Mirror records 0..3 (4 records). Round up in case record_size > cluster_size.
     let mftmirr_clusters: u64 = (4 * mft_record_size as u64).div_ceil(cluster_size as u64);
 
     let backup_boot_lcn = cluster_count - 1;
 
-    let last_used_lcn = mft_bitmap_lcn + mft_bitmap_clusters;
+    let last_used_lcn = sds_mirror_lcn + 1;
     if last_used_lcn >= mftmirr_lcn || mftmirr_lcn + mftmirr_clusters >= backup_boot_lcn {
         return Err("volume too small for chosen layout".to_string());
     }
@@ -404,6 +414,7 @@ pub fn format_filesystem(
     allocate(upcase_lcn, upcase_clusters)?;
     allocate(attrdef_lcn, attrdef_clusters)?;
     allocate(mft_bitmap_lcn, mft_bitmap_clusters)?;
+    allocate(sds_primary_lcn, sds_real_clusters)?;
     allocate(mftmirr_lcn, mftmirr_clusters)?;
     allocate(backup_boot_lcn, 1)?;
     // Trailing bits past `cluster_count` (within the final byte) must be
@@ -415,6 +426,37 @@ pub fn format_filesystem(
         }
     }
     dev.write_all_at(bitmap_lcn * cluster_size as u64, &bitmap)?;
+
+    // 4b. $Secure:$SDS data ----------------------------------------------
+    //
+    // Sub-PR S2: one canonical SD entry (`security_id = 0x100`, hash
+    // computed via `sds::sdh_hash`) at file offset 0, mirrored
+    // byte-identical at file offset 0x40000 (256 KiB) per the public
+    // NTFS layout. Two real clusters back the stream — primary at
+    // `sds_primary_lcn`, mirror at `sds_mirror_lcn` — with a sparse
+    // run in the middle representing the 256 KiB gap.
+    let canonical_sd_entry = crate::sds::SdEntry {
+        security_id: 0x100,
+        sd: SD_SYSFILE_RW,
+    };
+    let sds_stream = crate::sds::build_sds(&[canonical_sd_entry]);
+    let sds_primary_off = sds_primary_lcn * cluster_size as u64;
+    let primary_bytes_in_cluster = (cluster_size as usize).min(sds_stream.len());
+    let mut primary_cluster = vec![0u8; cluster_size as usize];
+    primary_cluster[..primary_bytes_in_cluster]
+        .copy_from_slice(&sds_stream[..primary_bytes_in_cluster]);
+    dev.write_all_at(sds_primary_off, &primary_cluster)?;
+
+    let mirror_off_in_stream = crate::sds::SDS_MIRROR_GAP as usize;
+    let mut mirror_cluster = vec![0u8; cluster_size as usize];
+    let mirror_payload_len = sds_stream
+        .len()
+        .saturating_sub(mirror_off_in_stream)
+        .min(cluster_size as usize);
+    mirror_cluster[..mirror_payload_len].copy_from_slice(
+        &sds_stream[mirror_off_in_stream..mirror_off_in_stream + mirror_payload_len],
+    );
+    dev.write_all_at(sds_mirror_lcn * cluster_size as u64, &mirror_cluster)?;
 
     // 5. MFT records ------------------------------------------------------
     let rs = mft_record_size as usize;
@@ -816,26 +858,107 @@ pub fn format_filesystem(
         // layout; S1 makes those three opens succeed. Index-block
         // size is 4 KiB (the same value the populated `$I30` uses).
         let empty_data = build_resident_unnamed(ATTR_DATA, 3, &[]);
-        let sds_name: [u16; 4] = ['$' as u16, 'S' as u16, 'D' as u16, 'S' as u16];
         let sdh_name: [u16; 4] = ['$' as u16, 'S' as u16, 'D' as u16, 'H' as u16];
         let sii_name: [u16; 4] = ['$' as u16, 'S' as u16, 'I' as u16, 'I' as u16];
-        let sds_data = build_resident_named(ATTR_DATA, 4, &sds_name, &[]);
-        let sdh_index_root = build_empty_named_index_root_attr(
+
+        // Sub-PR S2: $SDS becomes non-resident with one canonical SD
+        // entry at offset 0 and its mirror at file offset 0x40000.
+        // Two real clusters back the stream — primary at
+        // sds_primary_lcn, mirror at sds_mirror_lcn — separated by a
+        // sparse run that covers the 256 KiB gap exactly. The
+        // file-logical layout is:
+        //   VCN 0           — primary cluster (LCN = sds_primary_lcn)
+        //   VCN 1..gap_vcn  — sparse hole
+        //   VCN gap_vcn     — mirror cluster (LCN = sds_mirror_lcn)
+        //
+        // gap_vcn = 0x40000 / cluster_size, so the mirror cluster
+        // starts exactly at file offset 0x40000 regardless of
+        // cluster size.
+        let gap_vcn: u64 = crate::sds::SDS_MIRROR_GAP / cluster_size as u64;
+        debug_assert!(gap_vcn >= 1, "256 KiB mirror gap must span >= 1 cluster");
+        let sds_runs = vec![
+            DataRun {
+                starting_vcn: 0,
+                length: 1,
+                lcn: Some(sds_primary_lcn),
+            },
+            DataRun {
+                starting_vcn: 1,
+                length: gap_vcn - 1,
+                lcn: None,
+            },
+            DataRun {
+                starting_vcn: gap_vcn,
+                length: 1,
+                lcn: Some(sds_mirror_lcn),
+            },
+        ];
+        let sds_mp = encode_runs(&sds_runs)?;
+        // data_length: bytes from offset 0 through end of mirror
+        // entry. With a single 72-byte SD payload, each entry
+        // (header+SD) is 92 bytes padded to 96. Mirror starts at
+        // 0x40000; mirror entry occupies 0x40000..0x40060 (data
+        // bytes) — and we round to the 16-byte boundary, ending at
+        // 0x40060. allocated_length is the on-stream allocated size
+        // ((gap_vcn + 1) clusters * cluster_size).
+        let sds_data_len = crate::sds::SDS_MIRROR_GAP
+            + (crate::sds::SDS_HEADER_LEN as u64)
+            + SD_SYSFILE_RW.len() as u64;
+        let sds_alloc_len = (gap_vcn + 1) * cluster_size as u64;
+        let sds_last_vcn = gap_vcn as i64;
+        let sds_data = build_nonresident_attribute(
+            ATTR_DATA,
+            Some("$SDS"),
+            4,
+            sds_data_len,
+            sds_alloc_len,
+            sds_data_len,
+            sds_last_vcn,
+            &sds_mp,
+        )?;
+
+        // $SDH: one entry. Key (8 bytes) = (hash, security_id);
+        // value (20 bytes) = (hash, security_id, sds_offset, sds_size).
+        let sds_size_u32 = crate::sds::SDS_HEADER_LEN + SD_SYSFILE_RW.len() as u32;
+        let sd_hash = crate::sds::sdh_hash(SD_SYSFILE_RW);
+        let security_id: u32 = 0x100;
+        let sds_offset: u64 = 0;
+
+        let mut sdh_key = [0u8; 8];
+        sdh_key[0..4].copy_from_slice(&sd_hash.to_le_bytes());
+        sdh_key[4..8].copy_from_slice(&security_id.to_le_bytes());
+        let mut sdh_value = [0u8; 20];
+        sdh_value[0..4].copy_from_slice(&sd_hash.to_le_bytes());
+        sdh_value[4..8].copy_from_slice(&security_id.to_le_bytes());
+        sdh_value[8..16].copy_from_slice(&sds_offset.to_le_bytes());
+        sdh_value[16..20].copy_from_slice(&sds_size_u32.to_le_bytes());
+        let mut sdh_entries = build_view_index_entry(&sdh_key, &sdh_value);
+        sdh_entries.extend_from_slice(&build_view_index_last_entry());
+        let sdh_index_root = build_populated_named_index_root_attr(
             5,
             &sdh_name,
-            0, // view-index: no underlying attribute type
+            0,
             COLLATION_NTOFS_SECURITY_HASH,
             4096,
             cluster_size,
+            &sdh_entries,
         );
-        let sii_index_root = build_empty_named_index_root_attr(
+
+        // $SII: one entry. Key (4 bytes) = security_id;
+        // value (20 bytes) = same as $SDH's value.
+        let sii_key = security_id.to_le_bytes();
+        let mut sii_entries = build_view_index_entry(&sii_key, &sdh_value);
+        sii_entries.extend_from_slice(&build_view_index_last_entry());
+        let sii_index_root = build_populated_named_index_root_attr(
             6,
             &sii_name,
             0,
             COLLATION_NTOFS_ULONG,
             4096,
             cluster_size,
+            &sii_entries,
         );
+
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::SECURE,
@@ -1204,7 +1327,9 @@ fn build_system_record(
     // so the same encoding applies regardless of which record this is.
     let parent_ref = encode_file_reference(rec::ROOT as u64, 5);
 
-    cursor = write_standard_information(&mut rec, cursor, 0, layout.nt_time, is_dir, true);
+    // Every system record references the single canonical SD entry
+    // shipped in `$Secure:$SDS` (security_id = 0x100).
+    cursor = write_standard_information(&mut rec, cursor, 0, layout.nt_time, is_dir, true, 0x100);
     cursor = write_file_name(
         &mut rec,
         cursor,
@@ -1307,7 +1432,9 @@ fn build_reserved_placeholder(layout: &MftLayout, record_number: u32) -> Result<
     rec[USA_OFFSET..USA_OFFSET + 2].copy_from_slice(&1u16.to_le_bytes());
 
     let mut cursor = attrs_offset;
-    cursor = write_standard_information(&mut rec, cursor, 0, layout.nt_time, false, true);
+    // Reserved-slot placeholder: also references the canonical SD
+    // entry (security_id = 0x100) shipped in `$Secure:$SDS`.
+    cursor = write_standard_information(&mut rec, cursor, 0, layout.nt_time, false, true, 0x100);
 
     // $SECURITY_DESCRIPTOR — SD_SYSFILE_RW per byte-diff with reference's
     // rec 11..15 (run-20260502-170839/reference-mft-16recs.bin).
@@ -1354,6 +1481,7 @@ fn write_standard_information(
     nt_time: u64,
     is_dir: bool,
     is_system: bool,
+    security_id: u32,
 ) -> usize {
     // $STANDARD_INFORMATION has two on-disk forms:
     //   * NTFS 1.x — 48-byte value: 4 timestamps (32) + DOSAttributes (4)
@@ -1414,12 +1542,32 @@ fn write_standard_information(
         f
     };
     rec[v + 32..v + 36].copy_from_slice(&fa.to_le_bytes());
-    // For NTFS-3.x form (non-system), bytes v+36..v+72 are the extended
-    // fields (MaxVersions/VersionNumber/ClassId/OwnerId/SecurityId/
-    // QuotaCharged/USN). All zero — buffer is zero-initialised. For
-    // NTFS-1.x form (system), value_size = 48 means we stop at v+36
-    // and the remaining 12 bytes (MaxVersions+VersionNumber+ClassId)
-    // stay zero — that matches reference's 48-byte system $STD_INFO.
+    // Sub-PR S2: write `security_id` only on the 72-byte v3.x form
+    // (field at +0x34 per MS-FSCC §2.4.2). The 48-byte v1.x form
+    // does **not** have a SecurityId field at all — its tail is
+    // MaxVersions(+0x24) + VersionNumber(+0x28) + ClassId(+0x2C).
+    // Writing security_id into a v1.x record would clobber
+    // VersionNumber and produce a malformed record.
+    //
+    // System records use the 48-byte form (§2.3 in
+    // chkdsk-improvement-findings.md), so this write is effectively a
+    // no-op for every record S2 currently builds; the SDS entry at
+    // id=0x100 exists in $SDS/$SDH/$SII but no STD_INFO references
+    // it yet. If chkdsk requires inbound STD_INFO references, the
+    // next iteration switches system records to the 72-byte form
+    // — a separate decision because it diverges from `format.com`'s
+    // v1.2 reference layout.
+    if value_size == 72 {
+        rec[v + 0x34..v + 0x38].copy_from_slice(&security_id.to_le_bytes());
+    } else {
+        // 48-byte form: security_id arg is ignored by design (see above).
+        let _ = security_id;
+    }
+    // For NTFS-3.x form (non-system), the remaining bytes at v+0x30
+    // (OwnerId), v+0x38..v+0x40 (QuotaCharged) and v+0x40..v+0x48
+    // (USN) stay zero — that's the canonical default for fresh-format
+    // files. For the 48-byte form the bytes at v+0x24 / v+0x2C
+    // (MaxVersions / ClassId) stay zero.
     at + attr_length
 }
 
@@ -1548,6 +1696,8 @@ fn build_resident_unnamed(attr_type: u32, attr_id: u16, value: &[u8]) -> Vec<u8>
 /// placed immediately after the 24-byte header and the value is
 /// placed after the name, both 8-aligned. The total attribute length
 /// is 8-aligned.
+#[allow(dead_code)] // Reserved for future named-stream attributes; kept
+                    // alongside `build_resident_unnamed` for symmetry.
 fn build_resident_named(attr_type: u32, attr_id: u16, name_utf16: &[u16], value: &[u8]) -> Vec<u8> {
     let header_size = 24usize;
     let name_offset = header_size;
@@ -1600,6 +1750,9 @@ fn build_resident_named(attr_type: u32, attr_id: u16, name_utf16: &[u16], value:
 ///   +0x1D..0x20 padding (3 bytes, zero)
 ///   +0x20 END entry (16 bytes: reference=0, entry_len=0x10,
 ///                    stream_len=0, flags=0x02)
+#[allow(dead_code)] // S1 used this; S2 swaps to the populated variant
+                    // but the empty helper is retained as a fallback
+                    // and to keep the byte-layout reference handy.
 fn build_empty_named_index_root_attr(
     attr_id: u16,
     name_utf16: &[u16],
@@ -1668,6 +1821,109 @@ fn build_empty_named_index_root_attr(
     let entries_at = ih + 16;
     buf[entries_at..entries_at + end_entry.len()].copy_from_slice(&end_entry);
 
+    buf
+}
+
+/// Build a populated named `$INDEX_ROOT` view-index attribute. The
+/// caller supplies a pre-built `entries_blob` whose final entry is
+/// the LAST sentinel; this function wraps it in the standard
+/// INDEX_ROOT framing (attribute header + index-root header + index
+/// header + entries). Used at S2 for `$Secure:$SDH` and `$Secure:$SII`
+/// which each carry exactly one data entry plus a LAST sentinel.
+fn build_populated_named_index_root_attr(
+    attr_id: u16,
+    name_utf16: &[u16],
+    indexed_attr_type: u32,
+    collation: u32,
+    index_block_size: u32,
+    cluster_size: u32,
+    entries_blob: &[u8],
+) -> Vec<u8> {
+    let header_size = 16usize + 8usize; // generic + resident
+    let name_offset = header_size;
+    let name_bytes = name_utf16.len() * 2;
+    let value_offset = align8(name_offset + name_bytes);
+    let ir_value_size = 16 + 16 + entries_blob.len(); // ir_hdr + idx_hdr + entries
+    let attr_length = align8(value_offset + ir_value_size);
+
+    let mut buf = vec![0u8; attr_length];
+    buf[0..4].copy_from_slice(&ATTR_INDEX_ROOT.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 0;
+    buf[9] = name_utf16.len() as u8;
+    buf[10..12].copy_from_slice(&(name_offset as u16).to_le_bytes());
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+    buf[16..20].copy_from_slice(&(ir_value_size as u32).to_le_bytes());
+    buf[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes());
+    buf[22] = 0;
+    buf[23] = 0;
+
+    for (i, c) in name_utf16.iter().enumerate() {
+        let off = name_offset + i * 2;
+        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    }
+
+    let v = value_offset;
+    buf[v..v + 4].copy_from_slice(&indexed_attr_type.to_le_bytes());
+    buf[v + 4..v + 8].copy_from_slice(&collation.to_le_bytes());
+    buf[v + 8..v + 12].copy_from_slice(&index_block_size.to_le_bytes());
+    let cpib_byte: u8 = if cluster_size <= index_block_size {
+        (index_block_size / cluster_size) as u8
+    } else {
+        (index_block_size / 512) as u8
+    };
+    buf[v + 12] = cpib_byte;
+
+    let ih = v + 16;
+    buf[ih..ih + 4].copy_from_slice(&16u32.to_le_bytes()); // first_entry_offset
+    let used = 16u32 + entries_blob.len() as u32;
+    buf[ih + 4..ih + 8].copy_from_slice(&used.to_le_bytes()); // total_size_of_entries
+    buf[ih + 8..ih + 12].copy_from_slice(&used.to_le_bytes()); // allocated_size_of_entries
+                                                               // flags byte at ih + 12 stays 0 (SMALL_INDEX / no children).
+
+    let entries_at = ih + 16;
+    buf[entries_at..entries_at + entries_blob.len()].copy_from_slice(entries_blob);
+
+    buf
+}
+
+/// Build a single INDEX_ENTRY for a view-index ($SDH / $SII style).
+/// MS-FSCC §2.4.9 INDEX_ENTRY layout:
+///   +0x00 file_reference  u64   (zero on view-indexes — no MFT ref)
+///   +0x08 entry_length    u16   (total bytes incl. padding)
+///   +0x0A stream_length   u16   (= key_length; size of key bytes only)
+///   +0x0C flags           u32   (0 for normal, 0x02 for LAST)
+///   +0x10 key             key_length bytes
+///   +pad  data            (value bytes, located at +0x10+key_length
+///                          rounded up to 8). For view-indexes the data
+///                          offset is also reported by a field at
+///                          +0x08-ish... but the canonical layout used
+///                          by Microsoft's $SDH/$SII is key-immediately-
+///                          followed-by-value, both within entry_length.
+///
+/// Returns the entry bytes (no extra padding outside entry_length).
+fn build_view_index_entry(key: &[u8], value: &[u8]) -> Vec<u8> {
+    let header = 0x10usize;
+    let key_len = key.len();
+    let value_off = align8(header + key_len);
+    let entry_len = align8(value_off + value.len());
+    let mut buf = vec![0u8; entry_len];
+    // file_reference = 0 (no MFT backing).
+    buf[8..10].copy_from_slice(&(entry_len as u16).to_le_bytes());
+    buf[10..12].copy_from_slice(&(key_len as u16).to_le_bytes());
+    buf[12..16].copy_from_slice(&0u32.to_le_bytes()); // flags
+    buf[header..header + key_len].copy_from_slice(key);
+    buf[value_off..value_off + value.len()].copy_from_slice(value);
+    buf
+}
+
+/// LAST sentinel for a view-index (no key, no value, flags=0x02).
+fn build_view_index_last_entry() -> Vec<u8> {
+    let mut buf = vec![0u8; 0x10];
+    buf[8..10].copy_from_slice(&0x0010u16.to_le_bytes());
+    buf[10..12].copy_from_slice(&0u16.to_le_bytes());
+    buf[12..16].copy_from_slice(&0x00000002u32.to_le_bytes());
     buf
 }
 
