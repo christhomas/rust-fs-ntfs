@@ -1935,10 +1935,8 @@ fn build_view_index_entry(key: &[u8], value: &[u8]) -> Vec<u8> {
     // would produce a wrong on-disk layout. Current callers ($SDH/$SII
     // with 4-/8-byte keys and 20-byte values) stay well under, but
     // future view indexes ($O / $Q / etc.) could push higher.
-    let data_offset_u16 =
-        u16::try_from(value_off).expect("view-index data_offset overflows u16");
-    let data_length_u16 =
-        u16::try_from(value.len()).expect("view-index data_length overflows u16");
+    let data_offset_u16 = u16::try_from(value_off).expect("view-index data_offset overflows u16");
+    let data_length_u16 = u16::try_from(value.len()).expect("view-index data_length overflows u16");
     buf[0..2].copy_from_slice(&data_offset_u16.to_le_bytes());
     buf[2..4].copy_from_slice(&data_length_u16.to_le_bytes());
     // buf[4..8] reserved (already zero).
