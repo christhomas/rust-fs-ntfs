@@ -972,6 +972,13 @@ impl crate::fsck::FsckIo for FsCoreBlockIo {
 /// upgrade-on-mount path drive a callback-backed volume via fsck's
 /// `FsckIo`. Bodies delegate straight to the underlying `BlockIo`
 /// impl in `block_io.rs`.
+///
+/// `sync` delegates explicitly even though both `FsckIo::sync` and
+/// `BlockIo::sync` default to `Ok(())` — the delegation is for
+/// future-proofing: if `BlockIo::sync` on `CallbackBlockIo` ever
+/// grows a real flush (e.g. a host-supplied flush callback), the
+/// fsck path picks it up automatically. Today it's still a no-op
+/// (callback-backed mounts let the host drain on its own barrier).
 impl crate::fsck::FsckIo for CallbackBlockIo {
     fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
         <Self as BlockIoTrait>::read_exact_at(self, offset, buf)
@@ -981,6 +988,9 @@ impl crate::fsck::FsckIo for CallbackBlockIo {
     }
     fn size(&self) -> u64 {
         <Self as BlockIoTrait>::size(self)
+    }
+    fn sync(&mut self) -> Result<(), String> {
+        <Self as BlockIoTrait>::sync(self)
     }
 }
 
