@@ -140,6 +140,18 @@ impl Filesystem {
         fsck::clear_dirty(&self.image).map_err(Error)
     }
 
+    /// Mimic `ntfs.sys`'s "upgrade on mount" transition: rewrite
+    /// `$VOLUME_INFORMATION` from `major=1, minor=2` (the fresh-format
+    /// state Microsoft `format.com` and our `mkfs` produce) to
+    /// `major=3, minor=1` and clear the `UPGRADE_ON_MOUNT` flag.
+    ///
+    /// Returns `Ok(true)` if the upgrade fired, `Ok(false)` if the
+    /// volume didn't need upgrading (already 3.1, different version,
+    /// or flag clear). Idempotent; safe to call before every RW open.
+    pub fn upgrade_volume_version(&self) -> Result<bool, Error> {
+        fsck::upgrade_volume_version(&self.image).map_err(Error)
+    }
+
     /// Rich stats: free clusters, MFT free records, dirty flag.
     /// Two full bitmap scans — not cheap.
     pub fn volume_stats(&self) -> Result<VolumeStats, Error> {

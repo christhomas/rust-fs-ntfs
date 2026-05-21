@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- `fsck::upgrade_volume_version` (path + `FsckIo` variants) and
+  `Filesystem::upgrade_volume_version()` — mimic `ntfs.sys`'s
+  "upgrade on mount" transition: rewrite `$VOLUME_INFORMATION` from
+  `major=1, minor=2 + UPGRADE_ON_MOUNT` (the fresh-format state
+  Microsoft `format.com` and our `mkfs` produce) to `major=3,
+  minor=1` with the flag cleared. Idempotent; returns `Ok(true)` on
+  upgrade, `Ok(false)` if the volume didn't match the pattern.
+- `fs_ntfs_mount_rw_with_fs_core_device` now invokes the upgrade
+  best-effort on every RW mount, so volumes touched by our driver
+  look "already upgraded" when they later reach Windows — parallel
+  to what `ntfs.sys` would do on first RW mount. Upgrade errors are
+  logged at `warn` and don't fail the mount.
+
 ### Build / packaging
 
 - `am-fs-core` is now vendored as a git submodule at
