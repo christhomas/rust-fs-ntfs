@@ -1794,7 +1794,7 @@ not layout-level (per-record header / attribute structure). All
 layout-level diffs have been ruled out.
 
 **Standing hypothesis** (`agent-840e` §7.1, `agent-5442` Iter15+
-candidates):
+candidates) — **confirmed by Iter H Procmon trace, see §6.9 below**:
 
 `$Secure`'s `$SDH` / `$SII` view-index attributes plus a populated
 `$SDS` data stream. Concretely:
@@ -2057,10 +2057,14 @@ form makes things WORSE (chkdsk Stage 1 errors). Leave it empty.
 
 ## 6. Iter17+ ranked candidate plans
 
-### 6.1 `$Secure`'s view-index attributes (`$SDS`/`$SDH`/`$SII`) — HIGHEST yield
+### 6.1 `$Secure`'s view-index attributes (`$SDS`/`$SDH`/`$SII`) — HIGHEST yield, EVIDENCE-CONFIRMED
 
 Documented in §4.1. Most likely to clear `frs.cxx 60f` and the
 Windows-write resource error in one change.
+
+**Iter H Procmon trace confirms** (see §6.9 below): chkdsk literally
+opens `\Device\HarddiskVolume*\$Secure:$SDS` during `/scan` and gets
+an object-not-found error. No longer a speculative hypothesis.
 
 **Public references**:
 - MS-FSCC `$Secure` system file description (security descriptor
@@ -2123,21 +2127,73 @@ dump `$Bitmap` content separately — needs runner patch.
 
 We set `0` (clean). Reference may differ. Worth a dump and diff.
 
-### 6.9 Pure diagnostic — Windows Procmon trace of chkdsk
+### 6.9 Windows Procmon trace of chkdsk — RAN, see Iter H below
 
-The highest-leverage single diagnostic for resolving `frs.cxx 60f`
-**without** the speculative work above:
+Originally listed as a productive next move. The harness now lives at
+[`scripts/procmon-chkdsk-trace.ps1`](../scripts/procmon-chkdsk-trace.ps1)
+with usage in [`docs/procmon-trace.md`](./procmon-trace.md). Uses
+`wpr.exe` (Windows Performance Recorder, built into Windows 10/11)
+for ETW kernel-mode capture rather than Procmon's GUI app — Procmon
+needs an interactive desktop session and exits early under SSH;
+`wpr` is pure CLI.
 
-- Run **Windows Procmon** during a chkdsk session and capture every
-  disk read chkdsk performs against our volume.
-- Correlate read offsets with what we wrote vs. what reference
-  wrote at those exact offsets.
-- The reads chkdsk does immediately before printing "bad upcase
-  table" or asserting `frs.cxx 60f` are diagnostic gold — they
-  tell you *exactly* which bytes the check keys on.
+The trace results are recorded in **Iter H** immediately below.
 
-Out-of-scope for a layout-iteration agent; needs a tooling-focused
-session.
+### Iter H findings — `chkdsk /scan` access trace (2026-05-21)
+
+**Symptom**: same as §3.1 / §4.1 — `chkdsk` read-only exits 0,
+`chkdsk /scan` exits 13 with "found problems that must be fixed
+offline", NTFS Event 55 ("corruption discovered, exact nature
+unknown") in the system event log.
+
+**Method**: ETW DiskIO + FileIO trace of a `chkdsk DRIVE:` +
+`chkdsk DRIVE: /scan` sequence against a fresh mkfs volume on
+Windows 11 Server 2025. The capture surfaces every file path
+chkdsk reaches for on the volume, with `OperationEnd` status codes
+for each open.
+
+**Per-path findings on the test volume** (`HarddiskVolume20` =
+our mounted VHDX, ours = does mkfs write this file/stream today):
+
+| Path                                             | Ours | Notes |
+|--------------------------------------------------|:----:|-------|
+| `$Mft`                                           | yes  | non-resident `$DATA` per §2 |
+| `$Mft::$BITMAP`                                  | yes  | non-resident bitmap, §5.1 was stale |
+| `$MftMirr`                                       | yes  | rec 1 |
+| `$LogFile`                                       | yes  | canonical 12 KiB RSTR+RCRD per §2 |
+| `$BitMap`                                        | yes  | rec 6 |
+| `$AttrDef`                                       | yes  | rec 4 |
+| **`$Secure:$SDS`**                               | **no** | Security descriptor data stream. Standing hypothesis §6.1. |
+| **`$Extend\$Reparse:$R:$INDEX_ALLOCATION`**      | **no** | Reparse-points view-index. We leave `$Extend` (rec 11) entirely unwritten per §2.8. |
+| **`$Extend\$RmMetadata\$TxfLog\$Tops:$T`**       | **no** | TxF transactional log; deprecated by Microsoft but `chkdsk /scan` still probes for it. |
+| `System Volume Information\…`                    | n/a  | Windows creates on first mount, not chkdsk-required. |
+
+**Implication**: §4.1's "standing hypothesis" (build `$Secure`'s
+view-index machinery) is no longer speculative — chkdsk literally
+opens `\Device\HarddiskVolume20\$Secure:$SDS` during `/scan` and
+gets STATUS_OBJECT_PATH_NOT_FOUND. The two `$Extend` paths are
+additional missing files in the same evidence category.
+
+**Hypothesis ranking, updated**:
+
+1. **`$Secure:$SDS` + `$SDH`/`$SII` view indexes** — confirmed
+   target. §6.1 implementation plan still applies (300–500 LOC).
+2. **`$Extend` directory with at minimum `$Reparse` and
+   `$RmMetadata\$TxfLog\$Tops`** — second confirmed target. We
+   currently leave rec 11 unwritten (§2.8). Likely scope: another
+   ~150–300 LOC to ship `$Extend` as a directory with the two
+   sub-files chkdsk probes.
+3. Whether all three are required for `/scan` to exit 0, or just
+   one or two of them, is the next iteration question.
+
+**Cross-check against §4.1's "hypotheses already eliminated"**: none
+of the 11 disproven hypotheses target these three files. So this
+finding is additive, not contradictory.
+
+**Diag**: captured 2026-05-21, see
+`/tmp/procmon-output/chkdsk-trace.csv` (full kernel-event CSV) and
+the per-path filtered subset. ETL trace preserved at
+`chkdsk-trace.etl` for later re-analysis with WPA.
 
 ### 6.10 Rec 11..15 pre-fill with full attribute set — REQUIRES §6.1 first
 
