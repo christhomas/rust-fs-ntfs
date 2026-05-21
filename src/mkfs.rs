@@ -48,6 +48,15 @@ const ATTR_DATA: u32 = 0x80;
 const ATTR_INDEX_ROOT: u32 = 0x90;
 const ATTR_END_MARKER: u32 = 0xFFFF_FFFF;
 const COLLATION_FILE_NAME: u32 = 0x01;
+// $SDH (Security Descriptor Hash) view-index — keyed by
+// (hash, security_id). MS-FSCC §2.4 ("Indexable Types") and the
+// publicly published NTFS layout list this collation as
+// `COLLATION_NTOFS_SECURITY_HASH = 0x12`.
+const COLLATION_NTOFS_SECURITY_HASH: u32 = 0x12;
+// $SII (Security ID Index) view-index — keyed by security_id.
+// `COLLATION_NTOFS_ULONG = 0x10` per the same source. Used by
+// $SII and by `$Quota:$Q` and `$Quota:$O` (not relevant at S1).
+const COLLATION_NTOFS_ULONG: u32 = 0x10;
 
 // ---------------------------------------------------------------------------
 // $SECURITY_DESCRIPTOR (0x50) blobs for system MFT records.
@@ -792,7 +801,40 @@ pub fn format_filesystem(
         // The IS_VIEW_INDEX flag applies to both $Quota and $Secure
         // — both host named view indexes in modern NTFS — so keep
         // the flag-setting branch in build_system_record unchanged.
+        //
+        // Sub-PR S1 (see docs/implementation-plan-secure-and-extend.md
+        // §"Sub-PR S1") adds the three named streams chkdsk's Iter H
+        // Procmon trace shows it opens on `$Secure`:
+        //   * named `$DATA`        "$SDS" — empty (S2 populates).
+        //   * named `$INDEX_ROOT`  "$SDH" — empty (header + END
+        //     sentinel only).
+        //   * named `$INDEX_ROOT`  "$SII" — empty (header + END
+        //     sentinel only).
+        // chkdsk's open of `\Device\…\$Secure:$SDS` failed with
+        // STATUS_OBJECT_PATH_NOT_FOUND on the previous (empty-stub)
+        // layout; S1 makes those three opens succeed. Index-block
+        // size is 4 KiB (the same value the populated `$I30` uses).
         let empty_data = build_resident_unnamed(ATTR_DATA, 3, &[]);
+        let sds_name: [u16; 4] = ['$' as u16, 'S' as u16, 'D' as u16, 'S' as u16];
+        let sdh_name: [u16; 4] = ['$' as u16, 'S' as u16, 'D' as u16, 'H' as u16];
+        let sii_name: [u16; 4] = ['$' as u16, 'S' as u16, 'I' as u16, 'I' as u16];
+        let sds_data = build_resident_named(ATTR_DATA, 4, &sds_name, &[]);
+        let sdh_index_root = build_empty_named_index_root_attr(
+            5,
+            &sdh_name,
+            0, // view-index: no underlying attribute type
+            COLLATION_NTOFS_SECURITY_HASH,
+            4096,
+            cluster_size,
+        );
+        let sii_index_root = build_empty_named_index_root_attr(
+            6,
+            &sii_name,
+            0,
+            COLLATION_NTOFS_ULONG,
+            4096,
+            cluster_size,
+        );
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::SECURE,
@@ -800,7 +842,7 @@ pub fn format_filesystem(
             false,
             0,
             0,
-            &[empty_data],
+            &[empty_data, sds_data, sdh_index_root, sii_index_root],
         )?;
         place_record(&mut mft_buf, rs, rec::SECURE, rec_bytes)?;
         sys_entries.push((rec::SECURE, "$Quota", false, 0, 0));
@@ -1458,6 +1500,152 @@ fn build_resident_unnamed(attr_type: u32, attr_id: u16, value: &[u8]) -> Vec<u8>
     if !value.is_empty() {
         buf[header_size..header_size + value.len()].copy_from_slice(value);
     }
+    buf
+}
+
+/// Build a resident attribute with a name (e.g. a named `$DATA` stream
+/// or a named view-index `$INDEX_ROOT`). `name_utf16` is the stream
+/// name as UTF-16 code units (without a NUL terminator).
+///
+/// Header layout (MS-FSCC §2.4.2.1 / NtfsResidentAttributeHeader):
+///   0x00 ty                  u32
+///   0x04 length              u32
+///   0x08 is_non_resident     u8   (0 for resident)
+///   0x09 name_length         u8   (in UTF-16 code units, not bytes)
+///   0x0A name_offset         u16
+///   0x0C flags               u16  (0)
+///   0x0E instance            u16  (attr_id)
+///   0x10 value_length        u32
+///   0x14 value_offset        u16
+///   0x16 indexed_flag        u8   (0)
+///   0x17 reserved            u8   (0)
+///   [name @ name_offset, name_length * 2 bytes]
+///   [value @ value_offset, value_length bytes]
+///
+/// All offsets are from the start of this attribute. The name is
+/// placed immediately after the 24-byte header and the value is
+/// placed after the name, both 8-aligned. The total attribute length
+/// is 8-aligned.
+fn build_resident_named(attr_type: u32, attr_id: u16, name_utf16: &[u16], value: &[u8]) -> Vec<u8> {
+    let header_size = 24usize;
+    let name_offset = header_size;
+    let name_bytes = name_utf16.len() * 2;
+    let value_offset = align8(name_offset + name_bytes);
+    let attr_length = align8(value_offset + value.len());
+    let mut buf = vec![0u8; attr_length];
+    buf[0..4].copy_from_slice(&attr_type.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 0;
+    buf[9] = name_utf16.len() as u8;
+    buf[10..12].copy_from_slice(&(name_offset as u16).to_le_bytes());
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+    buf[16..20].copy_from_slice(&(value.len() as u32).to_le_bytes());
+    buf[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes());
+    buf[22] = 0;
+    buf[23] = 0;
+    for (i, c) in name_utf16.iter().enumerate() {
+        let off = name_offset + i * 2;
+        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    }
+    if !value.is_empty() {
+        buf[value_offset..value_offset + value.len()].copy_from_slice(value);
+    }
+    buf
+}
+
+/// Build an EMPTY named `$INDEX_ROOT` view-index attribute (header
+/// only, no entries beyond the END sentinel). Used at S1 for
+/// `$Secure:$SDH` and `$Secure:$SII` — the indexes exist so the
+/// streams are openable, but have no entries yet (S2 populates them
+/// alongside `$SDS`).
+///
+/// INDEX_ROOT value layout (16-byte index-root header +
+/// 16-byte INDEX_HEADER + entries):
+///   +0x00 indexed_attr_type   u32   0 for view-indexes (no per-key
+///                                   $FILE_NAME-style attribute behind
+///                                   the keys)
+///   +0x04 collation_rule      u32
+///   +0x08 index_block_size    u32   (bytes)
+///   +0x0C clusters_per_index_block u8 (see comment in
+///         build_populated_index_root_attr for encoding)
+///   +0x0D..0x10 padding (3 bytes, zero)
+///   +0x10 first_entry_offset  u32   = 16 (entries start right after
+///                                   this header)
+///   +0x14 total_size_of_entries u32 = 16 + sizeof(end_entry) (= 16+16)
+///   +0x18 allocated_size_of_entries u32 = same as total_size_of_entries
+///   +0x1C flags                u8   = 0 (small-index, no children)
+///   +0x1D..0x20 padding (3 bytes, zero)
+///   +0x20 END entry (16 bytes: reference=0, entry_len=0x10,
+///                    stream_len=0, flags=0x02)
+fn build_empty_named_index_root_attr(
+    attr_id: u16,
+    name_utf16: &[u16],
+    indexed_attr_type: u32,
+    collation: u32,
+    index_block_size: u32,
+    cluster_size: u32,
+) -> Vec<u8> {
+    // 16 byte END index entry (file_reference=0, entry_len=0x10,
+    // stream_len=0, flags=0x02 LAST).
+    let mut end_entry = [0u8; 16];
+    end_entry[0..8].copy_from_slice(&0u64.to_le_bytes());
+    end_entry[8..10].copy_from_slice(&0x0010u16.to_le_bytes());
+    end_entry[10..12].copy_from_slice(&0u16.to_le_bytes());
+    end_entry[12..16].copy_from_slice(&0x00000002u32.to_le_bytes());
+
+    let header_size = 16usize + 8usize; // generic + resident
+    let name_offset = header_size;
+    let name_bytes = name_utf16.len() * 2;
+    let value_offset = align8(name_offset + name_bytes);
+    let ir_value_size = 16 + 16 + end_entry.len(); // ir_hdr + idx_hdr + END
+    let attr_length = align8(value_offset + ir_value_size);
+
+    let mut buf = vec![0u8; attr_length];
+    buf[0..4].copy_from_slice(&ATTR_INDEX_ROOT.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 0;
+    buf[9] = name_utf16.len() as u8;
+    buf[10..12].copy_from_slice(&(name_offset as u16).to_le_bytes());
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+    buf[16..20].copy_from_slice(&(ir_value_size as u32).to_le_bytes());
+    buf[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes());
+    buf[22] = 0;
+    buf[23] = 0;
+
+    for (i, c) in name_utf16.iter().enumerate() {
+        let off = name_offset + i * 2;
+        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    }
+
+    let v = value_offset;
+    buf[v..v + 4].copy_from_slice(&indexed_attr_type.to_le_bytes());
+    buf[v + 4..v + 8].copy_from_slice(&collation.to_le_bytes());
+    buf[v + 8..v + 12].copy_from_slice(&index_block_size.to_le_bytes());
+    // Same cpib encoding as build_populated_index_root_attr (see the
+    // long-form comment there for the byte-diff corroboration). $SDH
+    // and $SII never grow past INDEX_ROOT in the empty case, so the
+    // value is only consulted if a future $INDEX_ALLOCATION is added
+    // (sub-PR S2). Keep it consistent here so byte-diff against
+    // reference doesn't flag the field.
+    let cpib_byte: u8 = if cluster_size <= index_block_size {
+        (index_block_size / cluster_size) as u8
+    } else {
+        (index_block_size / 512) as u8
+    };
+    buf[v + 12] = cpib_byte;
+
+    let ih = v + 16;
+    buf[ih..ih + 4].copy_from_slice(&16u32.to_le_bytes()); // first_entry_offset
+    let used = 16u32 + end_entry.len() as u32;
+    buf[ih + 4..ih + 8].copy_from_slice(&used.to_le_bytes()); // total_size_of_entries
+    buf[ih + 8..ih + 12].copy_from_slice(&used.to_le_bytes()); // allocated_size_of_entries
+                                                               // flags byte at ih + 12 stays 0 (SMALL_INDEX / no children).
+
+    let entries_at = ih + 16;
+    buf[entries_at..entries_at + end_entry.len()].copy_from_slice(&end_entry);
+
     buf
 }
 
