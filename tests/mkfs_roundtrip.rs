@@ -330,6 +330,16 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
     ]);
     assert_eq!(sdh_hash_key, expected_hash, "$SDH entry key hash");
     assert_eq!(sdh_sid_key, 0x100, "$SDH entry key security_id");
+    // Regression — Iter J: view-index entries MUST carry a non-zero
+    // data_offset (+0x00 u16 LE) and data_length (+0x02 u16 LE),
+    // pointing at where in the entry the value bytes live. S2 first
+    // shipped these as zero (treating +0x00..0x08 as `file_reference`
+    // — the file-name-index convention, wrong for view indexes) and
+    // chkdsk read `Index $SDH in file 9 is corrupt`.
+    let sdh_data_offset = u16::from_le_bytes([e0[0], e0[1]]);
+    let sdh_data_length = u16::from_le_bytes([e0[2], e0[3]]);
+    assert_eq!(sdh_data_offset, 24, "$SDH entry data_offset must point at value (after 16B hdr + 8B key)");
+    assert_eq!(sdh_data_length, 20, "$SDH entry data_length must equal value length");
     // Value starts after key, 8-aligned. With 16-byte header + 8-byte
     // key = 24, next 8-aligned offset = 24.
     let val_off = 24usize;
@@ -346,6 +356,11 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
     let s0 = &sii_value[entries_off..];
     let s0_klen = u16::from_le_bytes([s0[10], s0[11]]) as usize;
     assert_eq!(s0_klen, 4, "$SII key length");
+    // Same view-index data_offset/data_length invariant as $SDH above.
+    let sii_data_offset = u16::from_le_bytes([s0[0], s0[1]]);
+    let sii_data_length = u16::from_le_bytes([s0[2], s0[3]]);
+    assert_eq!(sii_data_offset, 24, "$SII entry data_offset must point at value (after 16B hdr + 4B key + 4B align)");
+    assert_eq!(sii_data_length, 20, "$SII entry data_length must equal value length");
     let sii_sid = u32::from_le_bytes([s0[0x10], s0[0x11], s0[0x12], s0[0x13]]);
     assert_eq!(sii_sid, 0x100, "$SII entry key security_id");
     // Value at 8-aligned offset after key. Header 16 + key 4 = 20 → 24.
