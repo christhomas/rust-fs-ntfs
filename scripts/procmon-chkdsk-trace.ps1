@@ -118,7 +118,13 @@ if (-not $Letter) {
                     -NewDriveLetter $c -ErrorAction Stop
                 $Letter = "$c"
                 break
-            } catch { }
+            } catch {
+                # Letter may be reserved by another mount or refused by
+                # the partition state; try the next letter. Surface the
+                # reason at -Verbose for debugging without spamming the
+                # default log when the loop ultimately succeeds.
+                Write-Verbose "Set-Partition ${c}: failed: $($_.Exception.Message)"
+            }
         }
     }
 }
@@ -200,13 +206,15 @@ if (Test-Path $Csv) {
     # provider. Cheap pass: keep rows mentioning chkdsk or the drive
     # letter or the raw device path. Refinement can happen on the
     # build machine after the CSV is pulled back.
-    $matches = Select-String -Path $Csv -Pattern @(
+    # ($filterHits, not $matches -- the latter is a PowerShell
+    # automatic variable populated by the `-match` operator.)
+    $filterHits = Select-String -Path $Csv -Pattern @(
         'chkdsk',
         "${Letter}:",
         "PhysicalDrive$($Disk.Number)",
         "HarddiskVolume"
     ) -SimpleMatch -CaseSensitive:$false
-    $matches | ForEach-Object { $_.Line } | Set-Content -Path $FiltCsv
+    $filterHits | ForEach-Object { $_.Line } | Set-Content -Path $FiltCsv
 
     $AllRows  = (Get-Content $Csv | Measure-Object -Line).Lines
     $FiltRows = (Get-Content $FiltCsv -ErrorAction SilentlyContinue | Measure-Object -Line).Lines

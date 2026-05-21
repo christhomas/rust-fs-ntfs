@@ -20,17 +20,25 @@ This doc describes the harness for that capture.
 - PowerShell ≥ 5.
 - `qemu-img.exe` on PATH (`winget install cloudbase.qemu-img`).
 - Administrator (the script's VHDX mount + raw `\\.\PhysicalDrive`
-  write + Procmon driver-load all need elevation).
+  write + ETW kernel-session start all need elevation).
 
-The script auto-downloads `Procmon64.exe` from
-`live.sysinternals.com` on first run.
+The capture itself is driven by `wpr.exe` (Windows Performance
+Recorder, built into Windows 10/11). No external download required —
+Procmon's user-mode GUI app exits early under a non-interactive SSH
+session, which is why this script uses `wpr` instead.
 
 ## End-to-end flow
 
-From the build machine (typically the dev Mac / Linux box where this
-repo lives):
+Set environment variables for your VM up front and reuse them in
+the SSH/SCP commands below. Nothing here is checked into the repo;
+treat the host/user as private to your environment.
 
 ```bash
+# Adjust to your environment.
+export WIN_VM_USER=youruser
+export WIN_VM_HOST=192.0.2.10            # your Windows VM's IP/hostname
+export WIN_VM_KEY=~/.ssh/win-vm-key      # path to the private key
+
 # 1. Build rust-ntfs locally and produce an nfs.img to send to the VM.
 cargo build --release --bin rust-ntfs
 mkdir -p /tmp/procmon-input
@@ -38,19 +46,17 @@ mkdir -p /tmp/procmon-input
     --create-size 256M /tmp/procmon-input/nfs.img
 
 # 2. Copy the image + the trace script to the VM.
-#    Adjust the user/host/key to match your VM.
-VM=chris@192.168.213.147
-KEY=/path/to/vm/privatekey
-scp -i "$KEY" /tmp/procmon-input/nfs.img \
-              scripts/procmon-chkdsk-trace.ps1 \
-    "$VM":C:/trace/
+scp -i "$WIN_VM_KEY" \
+    /tmp/procmon-input/nfs.img scripts/procmon-chkdsk-trace.ps1 \
+    "$WIN_VM_USER@$WIN_VM_HOST":C:/trace/
 
 # 3. Run the trace.
-ssh -i "$KEY" "$VM" \
+ssh -i "$WIN_VM_KEY" "$WIN_VM_USER@$WIN_VM_HOST" \
     'powershell -ExecutionPolicy Bypass -File C:/trace/procmon-chkdsk-trace.ps1 -Image C:/trace/nfs.img -OutDir C:/trace/out'
 
 # 4. Pull the results back.
-scp -i "$KEY" "$VM":C:/trace/out/'chkdsk-*' /tmp/procmon-output/
+mkdir -p /tmp/procmon-output
+scp -i "$WIN_VM_KEY" "$WIN_VM_USER@$WIN_VM_HOST":C:/trace/out/'chkdsk-*' /tmp/procmon-output/
 ```
 
 ## What you get back
@@ -59,13 +65,14 @@ In `/tmp/procmon-output/`:
 
 | File | Contents |
 |---|---|
-| `chkdsk-readonly.txt`        | Stdout of `chkdsk DRIVE:` (no /F). Should report no problems. |
-| `chkdsk-readonly-exit.txt`   | The exit code. Expect 0. |
-| `chkdsk-scan.txt`            | Stdout of `chkdsk DRIVE: /scan`. Should show "found problems that must be fixed offline". |
-| `chkdsk-scan-exit.txt`       | The exit code. Expect 13. |
-| `chkdsk-trace.pml`           | Raw Procmon binary capture (open in Procmon GUI for the rich view). |
-| `chkdsk-trace-all.csv`       | Full CSV export of every captured event. Large. |
-| `chkdsk-trace-filtered.csv`  | `chkdsk.exe`-only events on the mounted drive. The diagnostic file. |
+| `chkdsk-readonly.txt`         | Stdout of `chkdsk DRIVE:` (no /F). Should report no problems. |
+| `chkdsk-readonly-exit.txt`    | The exit code. Expect 0. |
+| `chkdsk-scan.txt`             | Stdout of `chkdsk DRIVE: /scan`. Should show "found problems that must be fixed offline". |
+| `chkdsk-scan-exit.txt`        | The exit code. Expect 13. |
+| `chkdsk-trace.etl`            | Raw ETW binary capture. Open in Windows Performance Analyzer (WPA) for the rich view. |
+| `chkdsk-trace.csv`            | Full CSV export of every captured event. Large (50–100 MB typical). |
+| `chkdsk-trace-summary.xml`    | `tracerpt` per-provider event summary. Useful for sanity. |
+| `chkdsk-trace-filtered.csv`   | Rows mentioning chkdsk, the drive letter, or the volume's raw device path. The diagnostic file. |
 
 ## Reading `chkdsk-trace-filtered.csv`
 
@@ -126,10 +133,9 @@ capture for diffing.
 
 ## Iteration discipline
 
-Per
-[`/Users/christhomas/.claude/skills/corroborated-debug/SKILL.md`](../../.claude/skills/corroborated-debug/SKILL.md)
-"Mantra: What does the diff say?". Don't change `src/mkfs.rs` from a
+Mantra: "what does the diff say?" Don't change `src/mkfs.rs` from a
 hypothesis. Capture the trace, identify the byte chkdsk keys on, cite
 the public spec for that byte, change exactly that byte. Each
-iteration writes to `docs/chkdsk-improvement-findings.md` so the
-methodology survives.
+iteration writes to
+[`docs/chkdsk-improvement-findings.md`](./chkdsk-improvement-findings.md)
+so the methodology survives across sessions.
