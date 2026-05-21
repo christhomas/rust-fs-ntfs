@@ -166,6 +166,69 @@ fn format_and_parse_back() {
     assert!(result.is_none(), "should not find a nonexistent name");
 }
 
+/// Sub-PR S1: `$Secure` (rec 9) must carry the three named streams
+/// chkdsk's Iter H Procmon trace shows it opens before failing:
+///   * named `$DATA`        "$SDS" (resident, empty)
+///   * named `$INDEX_ROOT`  "$SDH" (resident, header-only)
+///   * named `$INDEX_ROOT`  "$SII" (resident, header-only)
+///
+/// At S1 all three are empty; S2 will populate `$SDS` with a canonical
+/// security-descriptor entry and add matching `$SDH`/`$SII` index
+/// entries. The point of S1 is just to make the streams openable so
+/// chkdsk path-resolution probes succeed.
+#[test]
+fn secure_record_has_sds_sdh_sii_named_streams() {
+    let mut dev = MemDev::new(VOL_SIZE);
+    format_filesystem(&mut dev, VOL_SIZE, 4096, 4096, Some("TESTVOL"), None)
+        .expect("format_filesystem");
+
+    let mut cursor = std::io::Cursor::new(&dev.buf);
+    let mut ntfs = Ntfs::new(&mut cursor).expect("Ntfs::new");
+    ntfs.read_upcase_table(&mut cursor).expect("upcase");
+
+    let secure = ntfs
+        .file(&mut cursor, KnownNtfsFileRecordNumber::Secure as u64)
+        .expect("open $Secure record");
+
+    let mut seen_sds = false;
+    let mut seen_sdh = false;
+    let mut seen_sii = false;
+    let mut attrs = secure.attributes();
+    while let Some(item) = attrs.next(&mut cursor) {
+        let item = item.expect("attr item");
+        let a = item.to_attribute().expect("to_attribute");
+        let ty = match a.ty() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let name = a
+            .name()
+            .expect("attr name")
+            .to_string()
+            .expect("attr name to_string");
+        match (ty, name.as_str()) {
+            (NtfsAttributeType::Data, "$SDS") => {
+                assert!(a.is_resident(), "$SDS must be resident at S1");
+                assert_eq!(a.value_length(), 0, "$SDS payload must be empty at S1");
+                seen_sds = true;
+            }
+            (NtfsAttributeType::IndexRoot, "$SDH") => {
+                assert!(a.is_resident(), "$SDH index-root must be resident");
+                seen_sdh = true;
+            }
+            (NtfsAttributeType::IndexRoot, "$SII") => {
+                assert!(a.is_resident(), "$SII index-root must be resident");
+                seen_sii = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(seen_sds, "rec 9 missing named-$DATA \"$SDS\"");
+    assert!(seen_sdh, "rec 9 missing named-$INDEX_ROOT \"$SDH\"");
+    assert!(seen_sii, "rec 9 missing named-$INDEX_ROOT \"$SII\"");
+}
+
 // --------------------------------------------------------------------------
 // C ABI smoke: drive `fs_ntfs_mkfs` with callbacks against a Vec-backed
 // context, then re-parse the resulting buffer.
