@@ -1916,8 +1916,7 @@ fn build_populated_named_index_root_attr(
 ///   +0x04 reserved      u32   = 0
 ///   +0x08 entry_length  u16   = total bytes incl. padding
 ///   +0x0A key_length    u16
-///   +0x0C flags         u16   = 0 (normal) or 0x02 (LAST)
-///   +0x0E reserved      u16   = 0
+///   +0x0C flags         u32   = 0 (normal) or 0x02 (LAST / INDEX_ENTRY_END)
 ///   +0x10 key           key_length bytes
 ///   +pad  value         value.len() bytes (at data_offset)
 /// ```
@@ -1930,12 +1929,23 @@ fn build_view_index_entry(key: &[u8], value: &[u8]) -> Vec<u8> {
     let entry_len = align8(value_off + value.len());
     let mut buf = vec![0u8; entry_len];
     // View-index union: data_offset + data_length, NOT file_reference.
-    buf[0..2].copy_from_slice(&(value_off as u16).to_le_bytes());
-    buf[2..4].copy_from_slice(&(value.len() as u16).to_le_bytes());
+    // u16 narrowing must fail loudly if a future caller's
+    // `value_off` or `value.len()` ever exceeds 65535 — those fields
+    // are u16-sized on disk per MS-FSCC §2.4.9, so silent truncation
+    // would produce a wrong on-disk layout. Current callers ($SDH/$SII
+    // with 4-/8-byte keys and 20-byte values) stay well under, but
+    // future view indexes ($O / $Q / etc.) could push higher.
+    let data_offset_u16 =
+        u16::try_from(value_off).expect("view-index data_offset overflows u16");
+    let data_length_u16 =
+        u16::try_from(value.len()).expect("view-index data_length overflows u16");
+    buf[0..2].copy_from_slice(&data_offset_u16.to_le_bytes());
+    buf[2..4].copy_from_slice(&data_length_u16.to_le_bytes());
     // buf[4..8] reserved (already zero).
     buf[8..10].copy_from_slice(&(entry_len as u16).to_le_bytes());
     buf[10..12].copy_from_slice(&(key_len as u16).to_le_bytes());
-    // flags (u16) + reserved (u16) — both zero for a normal entry.
+    // flags (u32) — only low 2 bits defined (0x01 HAS_SUBNODE,
+    // 0x02 LAST). Zero for a normal entry.
     buf[12..16].copy_from_slice(&0u32.to_le_bytes());
     buf[header..header + key_len].copy_from_slice(key);
     buf[value_off..value_off + value.len()].copy_from_slice(value);
