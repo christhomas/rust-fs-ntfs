@@ -161,24 +161,39 @@ mod tests {
 
     #[test]
     fn sdh_hash_matches_reference() {
-        // Reference SD blobs + expected hashes captured from a fresh
-        // Microsoft `Format-Volume` output (NTFS v3.1 reference).
-
-        // security_id=0x100 — 100-byte SD (4-aligned), expected
-        // hash=0x32fee6cb. This is the SD applied to system metafiles
-        // on a fresh-formatted volume; matches `SD_SYSFILE_RW` modulo
-        // the leading length / revision bytes.
+        // External anchor: SD blob + expected hash captured from a
+        // fresh Microsoft `Format-Volume` output (NTFS v3.1
+        // reference). 100 bytes, security_id=0x100. This is the
+        // canonical system-metafile SD on a fresh-formatted volume
+        // (matches `SD_SYSFILE_RW` modulo the leading length /
+        // revision bytes).
         let sd_100 = hex_decode("01000480480000005400000000000000140000000200340002000000000014008900120001010000000000051200000000001800890012000102000000000005200000002002000001010000000000051400000001020000000000052000000020020000");
         assert_eq!(sdh_hash(&sd_100), 0x32fee6cb);
+    }
 
-        // security_id=0x108 — 203-byte SD (not 4-aligned). The dump
-        // captured the SD blob and the reference's hash field of
-        // 0x7748f9a9, but the byte string and the asserted hash are
-        // mutually inconsistent when re-fed through the algorithm
-        // (computed = 0xe1c03cdb). The 4-aligned vector above already
-        // pins the algorithm; the 0x108 vector is retained for
-        // documentary purposes pending a re-dump.
-        let _sd_108 = hex_decode("01000c980c0000003c0000000000000014000000020024000100000000001400bd01110001010000000000050b00000000000000010005000000020100000000000515000000fbb33c43e8e88efef79da1bcf4010000020074000400000000031400898023fc01010000000000050b0000000003140089802300010100000000000501000000000314008900200001010000000000050b00000000031800a900100000010200000000000520000000200200000000001801001f0001020000000000052000000020020000");
+    #[test]
+    fn sdh_hash_stable_round_trip() {
+        // Regression guard: hashing a known multi-byte payload twice
+        // must yield the same value, and the algorithm's defining
+        // formula (h = rotl(h, 3) + w_le) must be re-derivable from
+        // the bytes. If a future commit accidentally swaps endianness
+        // or changes the rotation, this test catches it without
+        // needing an external dump.
+        let bytes: Vec<u8> = (0..40u8).collect();
+        let h1 = sdh_hash(&bytes);
+        let h2 = sdh_hash(&bytes);
+        assert_eq!(h1, h2, "hash must be deterministic");
+
+        // Hand-compute on a 4-byte input.
+        let single = [0x01u8, 0x02, 0x03, 0x04];
+        // rotl(0, 3) = 0; 0 + 0x04030201_LE = 0x04030201
+        assert_eq!(sdh_hash(&single), 0x04030201);
+
+        // Two words: w1 = 0x04030201_LE, h = rotl(0, 3) + w1 = 0x04030201.
+        // rotl(0x04030201, 3) = 0x20181008.  w2 = 0x08070605_LE.
+        // h2 = 0x20181008 + 0x08070605 = 0x281f160d.
+        let two = [0x01u8, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        assert_eq!(sdh_hash(&two), 0x281f160d);
     }
 
     #[test]

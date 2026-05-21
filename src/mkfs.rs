@@ -1542,18 +1542,27 @@ fn write_standard_information(
         f
     };
     rec[v + 32..v + 36].copy_from_slice(&fa.to_le_bytes());
-    // Sub-PR S2 ($Secure populate): every system MFT record's
-    // $STANDARD_INFORMATION carries a non-zero security_id pointing
-    // at the canonical SD entry shipped in `$Secure:$SDS`. ID 0x100
-    // is the first allocatable ID (lower values reserved per MS-FSCC).
+    // Sub-PR S2: write `security_id` only on the 72-byte v3.x form
+    // (field at +0x34 per MS-FSCC §2.4.2). The 48-byte v1.x form
+    // does **not** have a SecurityId field at all — its tail is
+    // MaxVersions(+0x24) + VersionNumber(+0x28) + ClassId(+0x2C).
+    // Writing security_id into a v1.x record would clobber
+    // VersionNumber and produce a malformed record.
     //
-    // SecurityId field offset (within the value):
-    //   * 72-byte v3.x form — +0x34
-    //   * 48-byte v1.x form — +0x28
-    // Both per MS-FSCC §2.4.2; corroborated against Microsoft's
-    // reference `$Secure:$SDS`/$SII byte-diff (NTFS v3.1 reference).
-    let sec_id_off = if value_size == 72 { 0x34 } else { 0x28 };
-    rec[v + sec_id_off..v + sec_id_off + 4].copy_from_slice(&security_id.to_le_bytes());
+    // System records use the 48-byte form (§2.3 in
+    // chkdsk-improvement-findings.md), so this write is effectively a
+    // no-op for every record S2 currently builds; the SDS entry at
+    // id=0x100 exists in $SDS/$SDH/$SII but no STD_INFO references
+    // it yet. If chkdsk requires inbound STD_INFO references, the
+    // next iteration switches system records to the 72-byte form
+    // — a separate decision because it diverges from `format.com`'s
+    // v1.2 reference layout.
+    if value_size == 72 {
+        rec[v + 0x34..v + 0x38].copy_from_slice(&security_id.to_le_bytes());
+    } else {
+        // 48-byte form: security_id arg is ignored by design (see above).
+        let _ = security_id;
+    }
     // For NTFS-3.x form (non-system), the remaining bytes at v+0x30
     // (OwnerId), v+0x38..v+0x40 (QuotaCharged) and v+0x40..v+0x48
     // (USN) stay zero — that's the canonical default for fresh-format

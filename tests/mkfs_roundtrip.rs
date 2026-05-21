@@ -353,10 +353,16 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
     let s_sds_size = u32::from_le_bytes(s0[sii_val_off + 16..sii_val_off + 20].try_into().unwrap());
     assert_eq!(s_sds_size, expected_sds_size, "$SII value sds_size");
 
-    // Spot-check system records' $STANDARD_INFORMATION.security_id.
-    // Per MS-FSCC §2.4.2 the SecurityId lives at value-relative offset
-    // 0x34 (72-byte v3.x form) or 0x28 (48-byte v1.x form). System
-    // records use the 48-byte form on a fresh format.
+    // Spot-check system records' `$STANDARD_INFORMATION` payload size.
+    // Per MS-FSCC §2.4.2 SecurityId lives at value-relative offset
+    // 0x34 in the 72-byte v3.x form; the 48-byte v1.x form does not
+    // have a SecurityId field (its tail is MaxVersions / VersionNumber
+    // / ClassId). System records currently use the 48-byte form (§2.3
+    // in chkdsk-improvement-findings.md), so S2 cannot make them
+    // reference the SDS entry — the $SDS/$SDH/$SII machinery exists
+    // but no STD_INFO points to it. If a future iteration switches
+    // system records to the 72-byte form, this test will need to
+    // assert SecurityId == 0x100 at offset 0x34.
     for rec_num in [0u64, 5u64, 9u64] {
         let f = ntfs.file(&mut cursor, rec_num).expect("open system rec");
         let mut std_attrs = f.attributes();
@@ -367,18 +373,10 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
             if a.ty().ok() != Some(NtfsAttributeType::StandardInformation) {
                 continue;
             }
-            let v = a.value(&mut cursor).expect("std-info value");
-            use std::io::Read;
-            let len = a.value_length() as usize;
-            let mut data = vec![0u8; len];
-            v.attach(&mut cursor)
-                .read_exact(&mut data)
-                .expect("read std-info");
-            let off = if data.len() >= 72 { 0x34 } else { 0x28 };
-            let sid = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
             assert_eq!(
-                sid, 0x100,
-                "rec {rec_num} $STD_INFO.security_id should be 0x100"
+                a.value_length(),
+                48,
+                "rec {rec_num} $STD_INFO must be 48-byte v1.x form (no SecurityId field)"
             );
             found = true;
             break;
