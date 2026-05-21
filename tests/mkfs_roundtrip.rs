@@ -362,12 +362,19 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
     let s0 = &sii_value[entries_off..];
     let s0_klen = u16::from_le_bytes([s0[10], s0[11]]) as usize;
     assert_eq!(s0_klen, 4, "$SII key length");
-    // Same view-index data_offset/data_length invariant as $SDH above.
+    // View-index value lives **immediately after the key** with no
+    // alignment padding — for `$SII` (key_len=4) that's offset 0x14,
+    // not 0x18. An earlier cut of `build_view_index_entry` `align8`d
+    // the value offset, which `$SDH` (key_len=8) silently tolerated
+    // but caused chkdsk to report `Index $SII in file 9 is corrupt`
+    // on the resulting `data_offset = 0x18 / entry_length = 0x30`
+    // layout. Reference `Format-Volume` byte-diff (Iter K) confirms
+    // no padding between key and value across 8 sampled entries.
     let sii_data_offset = u16::from_le_bytes([s0[0], s0[1]]);
     let sii_data_length = u16::from_le_bytes([s0[2], s0[3]]);
     assert_eq!(
-        sii_data_offset, 24,
-        "$SII entry data_offset must point at value (after 16B hdr + 4B key + 4B align)"
+        sii_data_offset, 0x14,
+        "$SII entry data_offset must point at value (after 16B hdr + 4B key, NO padding)"
     );
     assert_eq!(
         sii_data_length, 20,
@@ -375,8 +382,8 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
     );
     let sii_sid = u32::from_le_bytes([s0[0x10], s0[0x11], s0[0x12], s0[0x13]]);
     assert_eq!(sii_sid, 0x100, "$SII entry key security_id");
-    // Value at 8-aligned offset after key. Header 16 + key 4 = 20 → 24.
-    let sii_val_off = 24usize;
+    // Value at offset 0x14 (immediately after the 4-byte key).
+    let sii_val_off = 0x14usize;
     let s_sds_size = u32::from_le_bytes(s0[sii_val_off + 16..sii_val_off + 20].try_into().unwrap());
     assert_eq!(s_sds_size, expected_sds_size, "$SII value sds_size");
 
