@@ -242,6 +242,12 @@ history available via `git log` in the repo.
   instead of returning a hardcoded `(3, 1)`. Fresh-format volumes
   correctly report `(1, 2)` until `ntfs.sys` upgrades them on first
   mount.
+- `feat(fsck)`: `upgrade_volume_version` rewrites a fresh-format
+  `1.2 + UPGRADE_ON_MOUNT` volume to `3.1` with the flag cleared —
+  the same transition `ntfs.sys` does on first RW mount. Wired
+  into `fs_ntfs_mount_rw_with_fs_core_device` so RW mounts on
+  Mac/Linux apply it before the first mutation, paralleling
+  Windows behaviour.
 
 ### 2026-05-03
 

@@ -229,6 +229,28 @@ pub fn set_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
     set_dirty_io(&mut io)
 }
 
+/// Mimic `ntfs.sys`'s "upgrade on mount" behaviour on the given NTFS
+/// image. If `$Volume`'s `$VOLUME_INFORMATION` reports `major=1`,
+/// `minor=2` with the `UPGRADE_ON_MOUNT` flag (0x0004) set — the
+/// state Microsoft `format.com` (and our `mkfs`) stamps on a fresh
+/// format — rewrite the value to `major=3`, `minor=1` and clear the
+/// `UPGRADE_ON_MOUNT` flag.
+///
+/// Returns `Ok(true)` if the upgrade was applied, `Ok(false)` if the
+/// volume didn't match the fresh-format pattern (already upgraded,
+/// different version on disk, or `UPGRADE_ON_MOUNT` clear).
+///
+/// Running this from our driver before the first mutation means a
+/// volume formatted + edited on Mac/Linux looks "already upgraded"
+/// to Windows, parallel to what `ntfs.sys` would have done on first
+/// RW mount.
+pub fn upgrade_volume_version(path: impl AsRef<Path>) -> Result<bool, String> {
+    let p = path.as_ref();
+    log::info!(target: "fs_ntfs::fsck", "upgrade_volume_version path={}", p.display());
+    let mut io = PathIo::open(p)?;
+    upgrade_volume_version_io(&mut io)
+}
+
 /// Overwrite `$LogFile` with `0xFF` bytes so Windows / NTFS driver reinitialize
 /// it on next mount (matches comparable recovery behaviour). Returns the number of bytes
 /// overwritten.
@@ -306,6 +328,59 @@ pub fn set_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
     let new_flags = current_flags | NtfsVolumeFlags::IS_DIRTY.bits();
     io.write_all_at(flag_disk_offset, &new_flags.to_le_bytes())
         .map_err(|e| format!("write volume flags: {e}"))?;
+    io.sync().map_err(|e| format!("fsync: {e}"))?;
+    Ok(true)
+}
+
+/// `upgrade_volume_version` over an arbitrary `FsckIo`.
+///
+/// Layout reminder (MS-FSCC): `$VOLUME_INFORMATION` value is
+/// `reserved(8) + major(1) + minor(1) + flags(2)`. The major byte
+/// therefore sits at `flag_disk_offset - 2`. We read and write all
+/// four bytes (`major`, `minor`, `flags lo`, `flags hi`) in a single
+/// `read_exact_at` / `write_all_at` so the version and flags are
+/// guaranteed to come from the same on-disk snapshot.
+///
+/// **Atomicity caveat.** The single 4-byte write is atomic on any
+/// modern storage *provided the 4 bytes sit within a single 512-byte
+/// sector* — only then does the underlying device guarantee
+/// torn-write freedom. NTFS attribute headers and resident-value
+/// offsets are 8-byte aligned, so this holds for every conforming
+/// `$VOLUME_INFORMATION` layout in practice, but the `debug_assert!`
+/// below makes the requirement explicit rather than hoping a future
+/// layout change doesn't silently break the guarantee.
+pub fn upgrade_volume_version_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
+    // Discard `locate`'s flag read; we'll re-fetch in a single 4-byte
+    // read so version + flags share a snapshot (Greptile review on #36).
+    let (flag_disk_offset, _stale_flags) = locate_volume_flags_io(io)?;
+    let major_disk_offset = flag_disk_offset - 2;
+
+    debug_assert!(
+        major_disk_offset % 512 + 4 <= 512,
+        "$VOLUME_INFORMATION major..flags ({major_disk_offset}+4) straddles a 512-byte sector boundary; \
+         single-write atomicity guarantee no longer holds"
+    );
+
+    let mut vf = [0u8; 4];
+    io.read_exact_at(major_disk_offset, &mut vf)
+        .map_err(|e| format!("read volume version+flags: {e}"))?;
+    let (major, minor) = (vf[0], vf[1]);
+    let current_flags = u16::from_le_bytes([vf[2], vf[3]]);
+
+    let flags = NtfsVolumeFlags::from_bits_truncate(current_flags);
+    let needs_upgrade =
+        major == 1 && minor == 2 && flags.contains(NtfsVolumeFlags::UPGRADE_ON_MOUNT);
+    if !needs_upgrade {
+        return Ok(false);
+    }
+
+    let new_flags = current_flags & !NtfsVolumeFlags::UPGRADE_ON_MOUNT.bits();
+    let mut new_bytes = [0u8; 4];
+    new_bytes[0] = 3; // major
+    new_bytes[1] = 1; // minor
+    new_bytes[2..4].copy_from_slice(&new_flags.to_le_bytes());
+    io.write_all_at(major_disk_offset, &new_bytes)
+        .map_err(|e| format!("write volume version+flags: {e}"))?;
     io.sync().map_err(|e| format!("fsync: {e}"))?;
     Ok(true)
 }
@@ -463,4 +538,99 @@ fn read_u16_le_io<T: FsckIo>(io: &mut T, offset: u64) -> Result<u16, String> {
     let mut buf = [0u8; 2];
     io.read_exact_at(offset, &mut buf)?;
     Ok(u16::from_le_bytes(buf))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_io::BlockIo;
+    use crate::mkfs::format_filesystem;
+
+    /// Vec-backed dev that implements both `BlockIo` (so `mkfs` can
+    /// format into it) and `FsckIo` (so the upgrade path can act on
+    /// it). The two traits have identical method signatures; we just
+    /// delegate.
+    struct MemDev {
+        buf: Vec<u8>,
+    }
+
+    impl BlockIo for MemDev {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            let off = offset as usize;
+            buf.copy_from_slice(&self.buf[off..off + buf.len()]);
+            Ok(())
+        }
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            let off = offset as usize;
+            self.buf[off..off + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn size(&self) -> u64 {
+            self.buf.len() as u64
+        }
+    }
+
+    impl FsckIo for MemDev {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            <Self as BlockIo>::read_exact_at(self, offset, buf)
+        }
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            <Self as BlockIo>::write_all_at(self, offset, buf)
+        }
+        fn size(&self) -> u64 {
+            <Self as BlockIo>::size(self)
+        }
+    }
+
+    #[test]
+    fn upgrade_flips_fresh_mkfs_volume_to_3_1_and_clears_flag() {
+        // mkfs stamps every fresh volume as 1.2 with UPGRADE_ON_MOUNT
+        // set (matches Microsoft `format.com`). Confirm the upgrade
+        // helper rewrites that to 3.1 with the flag cleared.
+        const SIZE: u64 = 64 * 1024 * 1024;
+        let mut dev = MemDev {
+            buf: vec![0u8; SIZE as usize],
+        };
+        format_filesystem(
+            &mut dev as &mut dyn BlockIo,
+            SIZE,
+            4096,
+            4096,
+            Some("UPGTEST"),
+            Some(0xCAFEBABE),
+        )
+        .expect("format_filesystem");
+
+        // Pre-condition: fresh mkfs output is 1.2 + UPGRADE_ON_MOUNT.
+        {
+            let (_flag_off, flags_pre) = locate_volume_flags_io(&mut dev).unwrap();
+            assert!(
+                NtfsVolumeFlags::from_bits_truncate(flags_pre)
+                    .contains(NtfsVolumeFlags::UPGRADE_ON_MOUNT),
+                "fresh mkfs should set UPGRADE_ON_MOUNT"
+            );
+        }
+
+        // Apply.
+        let upgraded = upgrade_volume_version_io(&mut dev).expect("upgrade");
+        assert!(upgraded, "upgrade should fire on a fresh-format volume");
+
+        // Post: re-parse and verify version + flag. Scope the reader
+        // so the borrow on `dev` ends before the idempotency check.
+        {
+            let mut reader = IoReader::new(&mut dev);
+            let ntfs = Ntfs::new(&mut reader).expect("re-parse");
+            let vi = ntfs.volume_info(&mut reader).expect("read volume info");
+            assert_eq!(vi.major_version(), 3);
+            assert_eq!(vi.minor_version(), 1);
+            assert!(
+                !vi.flags().contains(NtfsVolumeFlags::UPGRADE_ON_MOUNT),
+                "UPGRADE_ON_MOUNT must be cleared post-upgrade"
+            );
+        }
+
+        // Idempotent: a second call is a no-op.
+        let again = upgrade_volume_version_io(&mut dev).expect("upgrade idempotent");
+        assert!(!again, "second upgrade call must be a no-op");
+    }
 }

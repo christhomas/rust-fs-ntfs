@@ -829,6 +829,27 @@ pub extern "C" fn fs_ntfs_mount_rw_with_fs_core_device(
         return std::ptr::null_mut();
     }
 
+    // Mimic `ntfs.sys`'s "upgrade on mount": if the volume was
+    // fresh-formatted (major=1, minor=2, UPGRADE_ON_MOUNT set —
+    // what Microsoft `format.com` and our `mkfs` produce), rewrite
+    // it to 3.1 with the flag cleared so volumes touched by our
+    // driver look "already upgraded" to Windows, parallel to what
+    // `ntfs.sys` would have done on first RW mount.
+    //
+    // Best-effort: log on failure but don't fail the mount. The
+    // volume is still usable in its pre-upgrade form.
+    if fs_core::BlockDevice::is_writable(&device) {
+        let mut fsck_io = FsCoreBlockIo {
+            device: device.clone(),
+            size,
+        };
+        match crate::fsck::upgrade_volume_version_io(&mut fsck_io) {
+            Ok(true) => log::info!(target: "fs_ntfs", "upgraded $VOLUME_INFORMATION 1.2 -> 3.1"),
+            Ok(false) => log::debug!(target: "fs_ntfs", "no $VOLUME_INFORMATION upgrade needed"),
+            Err(e) => log::warn!(target: "fs_ntfs", "$VOLUME_INFORMATION upgrade skipped: {e}"),
+        }
+    }
+
     let bridge = Box::new(FsNtfsHandle {
         ntfs,
         reader,
