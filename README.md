@@ -230,6 +230,14 @@ are documented there.
 Reverse chronological highlights from `git log`. Full per-commit
 history available via `git log` in the repo.
 
+### 2026-05-21
+
+- `chore(vendor)`: `am-fs-core` is now a git submodule at
+  `vendor/rust-fs-core` rather than an unmanaged `../rust-fs-core`
+  sibling path. Clone with `--recurse-submodules` (or
+  `git submodule update --init --recursive`) and the crate is
+  self-buildable — no side-by-side checkout required.
+
 ### 2026-05-03
 
 - `feat(observability)`: lifecycle events log via the `log` facade.

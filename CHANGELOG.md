@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Build / packaging
+
+- `am-fs-core` is now vendored as a git submodule at
+  `vendor/rust-fs-core` instead of an unmanaged `../rust-fs-core`
+  sibling path. A fresh `git clone --recurse-submodules` (or
+  `git submodule update --init --recursive` in an existing checkout)
+  is now sufficient to build — no manual side-by-side checkout
+  required. Cargo.toml's path dep now points at `vendor/rust-fs-core`.
+
 ## [0.1.2] — 2026-04-20
 
 ### Docs / packaging

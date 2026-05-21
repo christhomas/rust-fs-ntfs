@@ -33,12 +33,14 @@ ntfs = { version = "0.4", default-features = false, features = ["std"] }
 # stays quiet by default.
 log = "0.4"
 # Block-device trait surface shared with sister crates (qcow2 reader,
-# partition probe, future fs-* drivers). Local path dep until both crates
-# publish; flip to a published version on the first crates.io release.
+# partition probe, future fs-* drivers). Vendored as a git submodule at
+# vendor/rust-fs-core so consumers and CI get a self-contained checkout
+# via `git clone --recurse-submodules`; flip to a published version on
+# the first crates.io release.
 # Strictly additive — ntfs's existing BlockIo trait is unchanged; this
 # adds a bridge module so external `fs_core::BlockDevice` implementors
 # (a `Qcow2Reader`, a `SliceReader`, etc.) can be driven by ntfs.
-am-fs-core = { path = "../rust-fs-core" }
+am-fs-core = { path = "vendor/rust-fs-core" }
 
 [dev-dependencies]
 libtest-mimic = "0.7"

@@ -1,3 +1,6 @@
 [submodule "vendor/fs-test-harness"]
 	path = vendor/fs-test-harness
 	url = git@github.com:antimatter-studios/fs-test-harness.git
+[submodule "vendor/rust-fs-core"]
+	path = vendor/rust-fs-core
+	url = git@github.com:antimatter-studios/rust-fs-core.git
