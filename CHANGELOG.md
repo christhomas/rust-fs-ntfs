@@ -11,6 +11,16 @@
   is now sufficient to build — no manual side-by-side checkout
   required. Cargo.toml's path dep now points at `vendor/rust-fs-core`.
 
+### Fixed
+
+- `Filesystem::volume_info()` now reads `$VOLUME_INFORMATION` off
+  disk via upstream `ntfs.volume_info()` instead of returning a
+  hardcoded `(major: 3, minor: 1)`. A fresh-format volume produced
+  by `mkfs` correctly reads back as 1.2 (matches Microsoft
+  `format.com`; `ntfs.sys` upgrades to 3.1 on first RW mount). The
+  C ABI path (`fs_ntfs_get_volume_info`) was already reading the
+  real bytes; only the Rust facade was lying.
+
 ## [0.1.2] — 2026-04-20
 
 ### Docs / packaging
