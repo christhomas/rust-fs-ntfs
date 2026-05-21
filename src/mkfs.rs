@@ -154,13 +154,15 @@ const LOGFILE_CANONICAL_12K: &[u8] = include_bytes!("logfile-canonical-12k.bin")
 fn sd_for_system_record(rec_num: u32) -> &'static [u8] {
     match rec_num {
         rec::ROOT => SD_ROOT_DIR,
-        // $Extend (rec 11) would also be SYSFILE_RW per the reference,
-        // but main's layout leaves rec 11 unwritten (per agent-5442's
-        // iter14-v2 finding that confirmed $Extend at rec 11 with $I30
-        // is NOT the cause of frs.cxx 60f). The match arm therefore
-        // only needs the records build_system_record is actually
-        // called for.
-        rec::VOLUME | rec::SECURE => SD_SYSFILE_RW,
+        // $Volume(3), $Secure(9), $Extend(11) — writable system files.
+        // The §2.8 "rec 11 unwritten" decision (chkdsk-improvement-findings.md)
+        // is superseded by Iter H (§6.9): chkdsk /scan opens
+        // $Extend\$Reparse and $Extend\$RmMetadata\$TxfLog\$Tops, which
+        // requires $Extend to exist as a directory so the recursion has
+        // a parent to descend through. Sub-PR S3 restores rec 11 as a
+        // small directory with an empty $I30; S4/S5 will add the
+        // children chkdsk probes for.
+        rec::VOLUME | rec::SECURE | rec::EXTEND => SD_SYSFILE_RW,
         _ => SD_SYSFILE_RO,
     }
 }
@@ -181,11 +183,10 @@ mod rec {
     pub const BADCLUS: u32 = 8;
     pub const SECURE: u32 = 9;
     pub const UPCASE: u32 = 10;
-    #[allow(dead_code)] // Reserved slot; matches Microsoft's reference layout.
     pub const EXTEND: u32 = 11;
-    // Records 11..15 are reserved (no $FILE_NAME, not in root $I30).
-    // Microsoft format.com leaves these as in-use placeholder records;
-    // we leave them zero-bytes — see the iter14-v2 block in
+    // Records 12..15 are reserved (no $FILE_NAME, not in root $I30).
+    // Microsoft format.com leaves these as in-use 304-byte placeholder
+    // records — see build_reserved_placeholder + the loop in
     // format_filesystem.
 }
 
@@ -444,10 +445,10 @@ pub fn format_filesystem(
             &mp,
         )?;
         let bitmap_value_size = mft_records_capacity.div_ceil(8) as usize;
-        // Slots 0..10 are the canonical system files; slots 11..15 are
-        // the reserved-slot placeholders (see build_reserved_placeholder).
-        // All 16 slots ship IN_USE in Microsoft's reference output, so
-        // mark all 16 bits set.
+        // Slots 0..10 are the canonical system files; slot 11 is $Extend
+        // (Sub-PR S3); slots 12..15 are reserved-slot placeholders (see
+        // build_reserved_placeholder). All 16 slots ship IN_USE in
+        // Microsoft's reference output, so mark all 16 bits set.
         let mut allocated: Vec<u32> = (0u32..=10u32).collect();
         for slot in 11..mft_records_capacity.min(16) as u32 {
             allocated.push(slot);
@@ -841,16 +842,41 @@ pub fn format_filesystem(
         ));
     }
 
-    // record 11: NOT WRITTEN. Microsoft's reference rec 11 has no
-    // $FILE_NAME (link_count=0) and is not present in root's $I30.
-    // chkdsk's "scanning unindexed files for reconnect" stage hits an
-    // internal `frs.cxx 0x60f` error when our rec 11 is `$Extend` with
-    // a $FILE_NAME pointing to root and an entry in root's $I30. Per
-    // iter14-v2 byte-diff (`rust-fs-ntfs-diag/iter-20260502-025958/`,
-    // ref rec 11: STD_INFO+0x50+DATA, link_count=0, no $FILE_NAME).
+    // record 11: $Extend — directory shell with an empty $I30.
     //
-    // We leave the slot zero-bytes (not even FILE-magic). The MFT
-    // bitmap will not mark rec 11 as in use.
+    // Iter H findings (chkdsk-improvement-findings.md §6.9, 2026-05-21):
+    // chkdsk /scan opens $Extend\$Reparse:$R:$INDEX_ALLOCATION and
+    // $Extend\$RmMetadata\$TxfLog\$Tops:$T. Both require $Extend to
+    // exist as a directory so the recursion can descend through it.
+    //
+    // §2.8's "leave rec 11 unwritten" was correct *at the time* — before
+    // chkdsk's child-recursion was known — but Sub-PR S3 restores
+    // rec 11 as a small directory with an empty $I30 so the children
+    // landing in S4/S5 (`$Reparse`, `$RmMetadata`, …) have a parent.
+    //
+    // Layout: $STD_INFO + $FILE_NAME ("$Extend" → root) + $SD (RW) +
+    // $INDEX_ROOT '$I30' carrying just the LAST sentinel. is_dir=true
+    // sets the MFT-header IS_DIRECTORY flag (0x0002) and the
+    // $FILE_NAME.file_attributes FILE_ATTRIBUTE_DIRECTORY bit
+    // (0x10000000).
+    {
+        let index_block_size: u32 = 4096;
+        let mut entries_blob: Vec<u8> = Vec::new();
+        entries_blob.extend_from_slice(&build_index_entry(0, &[], true));
+        let index_root =
+            build_populated_index_root_attr(3, index_block_size, cluster_size, &entries_blob);
+        let rec_bytes = build_system_record(
+            &mft_record_layout,
+            rec::EXTEND,
+            "$Extend",
+            true,
+            0,
+            0,
+            &[index_root],
+        )?;
+        place_record(&mut mft_buf, rs, rec::EXTEND, rec_bytes)?;
+        sys_entries.push((rec::EXTEND, "$Extend", true, 0, 0));
+    }
 
     // record 5: root directory "." — built AFTER rec 0..4 and rec 6..11
     // so we have every system file's name + $DATA size to emit as
@@ -916,14 +942,10 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::ROOT, rec_bytes)?;
     }
 
-    // 11..15 reserved-slot placeholders (matches Microsoft format.com
-    // exactly — slot 11 left as a placeholder, NOT transformed into a
-    // real $Extend directory: matrix run-20260503-072644 confirmed
-    // reference's first 64 MFT records have no records past slot 15
-    // and rec 11 is just the 304-byte placeholder. /F's transformation
-    // of rec 11 is post-format chkdsk drift, not what fresh-formatted
-    // volumes ship.)
-    for slot in 11..mft_records_capacity.min(16) as u32 {
+    // 12..15 reserved-slot placeholders. Slot 11 is now $Extend (Sub-PR
+    // S3); slots 12..15 remain as 304-byte placeholders matching
+    // Microsoft format.com's first-64-MFT-records reference layout.
+    for slot in 12..mft_records_capacity.min(16) as u32 {
         let rec_bytes = build_reserved_placeholder(&mft_record_layout, slot)?;
         place_record(&mut mft_buf, rs, slot, rec_bytes)?;
     }
