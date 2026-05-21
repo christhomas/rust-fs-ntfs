@@ -83,12 +83,16 @@ fn format_and_parse_back() {
     assert_eq!(ntfs.cluster_size(), 4096);
     assert_eq!(ntfs.serial_number(), 0xDEADBEEF);
 
-    // Volume info: version 3.1, flags clear.
+    // Volume info: NTFS 1.2 with UPGRADE_ON_MOUNT flag set — matches
+    // what Microsoft `format.com` stamps on a fresh format. ntfs.sys
+    // rewrites this to 3.1 on first mount via UPGRADE_ON_MOUNT; mkfs
+    // intentionally produces the pre-upgrade state. See mkfs.rs's
+    // $VOLUME_INFORMATION block.
     let vi = ntfs
         .volume_info(&mut cursor)
         .expect("read $VOLUME_INFORMATION");
-    assert_eq!(vi.major_version(), 3);
-    assert_eq!(vi.minor_version(), 1);
+    assert_eq!(vi.major_version(), 1);
+    assert_eq!(vi.minor_version(), 2);
 
     // Volume name.
     let vol_name_opt = ntfs.volume_name(&mut cursor);
@@ -124,10 +128,15 @@ fn format_and_parse_back() {
         }
         names.push(key.name().to_string_lossy());
     }
+    // Slot 9 is named `$Quota` — that's the NTFS 3.x convention
+    // Microsoft `format.com` uses ($Secure lives under \$Extend on the
+    // volume). The legacy NTFS 1.x name was `$Secure` at slot 9;
+    // chkdsk explicitly repairs that name at non-4K cluster sizes. See
+    // mkfs.rs's record-9 builder.
     assert_eq!(
         names,
         vec![
-            "$AttrDef", "$BadClus", "$Bitmap", "$Boot", "$LogFile", "$MFT", "$MFTMirr", "$Secure",
+            "$AttrDef", "$BadClus", "$Bitmap", "$Boot", "$LogFile", "$MFT", "$MFTMirr", "$Quota",
             "$UpCase", "$Volume", ".",
         ],
         "root $I30 must list every system file in COLLATION_FILE_NAME order"
