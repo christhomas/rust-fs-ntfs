@@ -102,15 +102,16 @@ fn format_and_parse_back() {
     assert_eq!(name.name().to_string_lossy(), "TESTVOL");
 
     // Root directory's $I30 must contain entries for every system file
-    // (records 0..10 — main's layout leaves rec 11 unwritten per
-    // agent-5442's iter14-v2 finding) plus a self-entry for ".". This
-    // matches Microsoft format.com's output and the publicly documented
-    // NTFS layout. See iter13 in docs/chkdsk-findings.md: prior builds
-    // left the root index empty, which made chkdsk treat every system
-    // file as orphaned ("Detected orphaned file $X (N), should be
-    // recovered into directory file 5"). Entry order is COLLATION_FILE_NAME
-    // (case-insensitive UTF-16 with shorter-prefix-loses), which on
-    // pure-ASCII names reduces to ASCII-uppercase code-unit comparison.
+    // (records 0..11) plus a self-entry for ".". This matches Microsoft
+    // format.com's output and the publicly documented NTFS layout.
+    // See iter13 in docs/chkdsk-findings.md: prior builds left the root
+    // index empty, which made chkdsk treat every system file as
+    // orphaned. Sub-PR S3 (chkdsk-improvement-findings.md §6.9, Iter H)
+    // re-adds rec 11 ($Extend) as a directory shell so chkdsk /scan's
+    // recursion into $Extend\$Reparse and $Extend\$RmMetadata can find
+    // a parent. Entry order is COLLATION_FILE_NAME (case-insensitive
+    // UTF-16 with shorter-prefix-loses), which on pure-ASCII names
+    // reduces to ASCII-uppercase code-unit comparison.
     let root = ntfs.root_directory(&mut cursor).expect("root directory");
     let index = root
         .directory_index(&mut cursor)
@@ -136,8 +137,8 @@ fn format_and_parse_back() {
     assert_eq!(
         names,
         vec![
-            "$AttrDef", "$BadClus", "$Bitmap", "$Boot", "$LogFile", "$MFT", "$MFTMirr", "$Quota",
-            "$UpCase", "$Volume", ".",
+            "$AttrDef", "$BadClus", "$Bitmap", "$Boot", "$Extend", "$LogFile", "$MFT", "$MFTMirr",
+            "$Quota", "$UpCase", "$Volume", ".",
         ],
         "root $I30 must list every system file in COLLATION_FILE_NAME order"
     );
@@ -384,6 +385,69 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
         }
         assert!(found, "rec {rec_num} missing $STD_INFO");
     }
+}
+
+/// Sub-PR S3: rec 11 must be a directory shell named `$Extend` whose
+/// parent is the root (rec 5), with an empty `$I30` `$INDEX_ROOT` and
+/// the MFT-header IS_DIRECTORY flag set. Children of `$Extend` (e.g.
+/// `$Reparse`, `$RmMetadata`) land in S4/S5 — this test only asserts
+/// the directory shell.
+#[test]
+fn extend_record_is_empty_directory() {
+    let mut dev = MemDev::new(VOL_SIZE);
+    format_filesystem(
+        &mut dev,
+        VOL_SIZE,
+        4096,
+        4096,
+        Some("S3TEST"),
+        Some(0xCAFEBABE),
+    )
+    .expect("format_filesystem");
+
+    let mut cursor = std::io::Cursor::new(&dev.buf);
+    let ntfs = Ntfs::new(&mut cursor).expect("Ntfs::new on freshly formatted volume");
+
+    // Open rec 11 via the upstream crate.
+    let extend = ntfs.file(&mut cursor, 11).expect("open rec 11 ($Extend)");
+
+    // MFT header IS_DIRECTORY flag must be set.
+    assert!(
+        extend.is_directory(),
+        "rec 11 must have MFT header IS_DIRECTORY flag set"
+    );
+
+    // $FILE_NAME: name = "$Extend", parent_reference = (rec=5, root).
+    // System records use the Win32AndDos namespace (value 3) — the same
+    // convention every other system record in this layout uses.
+    let fname = extend
+        .name(&mut cursor, Some(NtfsFileNamespace::Win32AndDos), None)
+        .expect("rec 11 has a Win32AndDos $FILE_NAME")
+        .expect("read $FILE_NAME");
+    assert_eq!(fname.name().to_string_lossy(), "$Extend");
+    assert_eq!(
+        fname.parent_directory_reference().file_record_number(),
+        5,
+        "rec 11 parent must be root (rec 5)"
+    );
+    assert!(
+        fname.is_directory(),
+        "rec 11 $FILE_NAME.file_attributes must carry FILE_ATTRIBUTE_DIRECTORY"
+    );
+
+    // $I30 INDEX_ROOT exists (directory_index() succeeds) and is empty
+    // — the only entry is the LAST sentinel, which the upstream iterator
+    // does not surface, so `entries()` yields nothing.
+    let index = extend
+        .directory_index(&mut cursor)
+        .expect("$Extend must have $I30 $INDEX_ROOT");
+    let mut iter = index.entries();
+    let mut count = 0usize;
+    while let Some(entry) = iter.next(&mut cursor) {
+        let _ = entry.expect("entry iterates without error");
+        count += 1;
+    }
+    assert_eq!(count, 0, "$Extend $I30 must be empty (LAST sentinel only)");
 }
 
 // --------------------------------------------------------------------------
