@@ -33,7 +33,7 @@ fn run_inner(args: Vec<String>) -> Result<(), String> {
     let image = &args[0];
     let parent = &args[1];
     let basename = &args[2];
-    let fs = Filesystem::mount(image).map_err(|e| format!("mount {image}: {e}"))?;
+    let fs = Filesystem::mount_rw(image).map_err(|e| format!("mount {image}: {e}"))?;
     let rec = fs
         .create_file(parent, basename)
         .map_err(|e| format!("create {parent}/{basename}: {e}"))?;

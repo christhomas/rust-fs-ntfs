@@ -33,7 +33,7 @@ fn run_inner(args: Vec<String>) -> Result<(), String> {
     }
     let image = &args[0];
     let path = &args[1];
-    let fs = Filesystem::mount(image).map_err(|e| format!("mount {image}: {e}"))?;
+    let fs = Filesystem::mount_rw(image).map_err(|e| format!("mount {image}: {e}"))?;
     fs.unlink(path).map_err(|e| format!("unlink {path}: {e}"))?;
     println!("removed {path}");
     Ok(())

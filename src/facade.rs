@@ -117,6 +117,37 @@ impl Filesystem {
         Ok(Self { image })
     }
 
+    /// Open and validate the image, then apply `ntfs.sys`-style
+    /// "upgrade on mount" (`$VOLUME_INFORMATION` 1.2 -> 3.1, clear
+    /// `UPGRADE_ON_MOUNT`) best-effort. Use this when a mutation is
+    /// imminent — CLI write commands, RW FFI flows, anything that
+    /// will modify the volume. Read-only callers should use
+    /// [`mount`](Self::mount).
+    ///
+    /// Upgrade failure is logged at `warn` but doesn't fail the
+    /// mount; the volume is still usable in its pre-upgrade form.
+    pub fn mount_rw(path: impl AsRef<Path>) -> Result<Self, Error> {
+        let fs = Self::mount(path)?;
+        match fs.upgrade_volume_version() {
+            Ok(true) => log::info!(
+                target: "fs_ntfs::facade",
+                "upgraded $VOLUME_INFORMATION 1.2 -> 3.1 on {}",
+                fs.image.display()
+            ),
+            Ok(false) => log::debug!(
+                target: "fs_ntfs::facade",
+                "no $VOLUME_INFORMATION upgrade needed on {}",
+                fs.image.display()
+            ),
+            Err(e) => log::warn!(
+                target: "fs_ntfs::facade",
+                "$VOLUME_INFORMATION upgrade skipped on {}: {e}",
+                fs.image.display()
+            ),
+        }
+        Ok(fs)
+    }
+
     /// Absolute path of the backing image.
     pub fn image_path(&self) -> &Path {
         &self.image

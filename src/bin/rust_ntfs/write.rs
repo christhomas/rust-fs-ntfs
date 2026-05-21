@@ -44,7 +44,7 @@ fn run_inner(args: Vec<String>) -> Result<(), String> {
 
     let data = parse_data_source(&mut rest)?;
 
-    let fs = Filesystem::mount(&image).map_err(|e| format!("mount {image}: {e}"))?;
+    let fs = Filesystem::mount_rw(&image).map_err(|e| format!("mount {image}: {e}"))?;
     let new_size = fs
         .write_file_contents(&path, &data)
         .map_err(|e| format!("write {path}: {e}"))?;
