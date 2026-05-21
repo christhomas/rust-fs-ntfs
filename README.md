@@ -237,6 +237,11 @@ history available via `git log` in the repo.
   sibling path. Clone with `--recurse-submodules` (or
   `git submodule update --init --recursive`) and the crate is
   self-buildable — no side-by-side checkout required.
+- `fix(facade)`: `Filesystem::volume_info()` now reads the real
+  `$VOLUME_INFORMATION` bytes via upstream `ntfs.volume_info()`
+  instead of returning a hardcoded `(3, 1)`. Fresh-format volumes
+  correctly report `(1, 2)` until `ntfs.sys` upgrades them on first
+  mount.
 - `feat(fsck)`: `upgrade_volume_version` rewrites a fresh-format
   `1.2 + UPGRADE_ON_MOUNT` volume to `3.1` with the flag cleared —
   the same transition `ntfs.sys` does on first RW mount. Wired
