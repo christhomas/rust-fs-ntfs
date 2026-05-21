@@ -22,6 +22,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Install Rust
         # Keep in sync with rust-toolchain.toml. Explicit version here
         # guards against rust-toolchain.toml being deleted and silently
@@ -46,12 +48,21 @@ jobs:
       # allowlist in deny.toml, or if a yanked / advisory-flagged
       # version creeps in. Pairs with the project's "no GPL/LGPL/AGPL"
       # policy. Run once on ubuntu — license check doesn't vary by OS.
+      #
+      # Install on the runner (via taiki-e/install-action's prebuilt
+      # binary) instead of EmbarkStudios/cargo-deny-action. The Embark
+      # action runs in an Alpine docker image with rust 1.85-musl baked
+      # in, which fights rust-toolchain.toml's `1.94.1` pin — cargo
+      # inside the container tries to install `1.94.1-musl` and dies.
+      # Running on the runner reuses the toolchain installed above.
+      - name: Install cargo-deny
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
       - name: cargo-deny check
         if: matrix.os == 'ubuntu-latest'
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
-          arguments: --all-features
+        run: cargo deny --all-features check
 
       # clippy deferred: lib.rs FFI funcs need `unsafe` refactor before
       # `clippy -D warnings` can pass. Re-enable once resolved.
@@ -94,6 +105,8 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
@@ -140,6 +153,8 @@ jobs:
       github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
