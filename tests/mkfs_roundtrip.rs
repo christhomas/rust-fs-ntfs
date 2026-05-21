@@ -166,21 +166,38 @@ fn format_and_parse_back() {
     assert!(result.is_none(), "should not find a nonexistent name");
 }
 
-/// Sub-PR S1: `$Secure` (rec 9) must carry the three named streams
-/// chkdsk's Iter H Procmon trace shows it opens before failing:
-///   * named `$DATA`        "$SDS" (resident, empty)
-///   * named `$INDEX_ROOT`  "$SDH" (resident, header-only)
-///   * named `$INDEX_ROOT`  "$SII" (resident, header-only)
+/// Sub-PR S2: `$Secure` (rec 9) ships
+///   * named `$DATA`        "$SDS" — non-resident (primary at file
+///     offset 0, mirror at +0x40000), holding one canonical SD entry.
+///   * named `$INDEX_ROOT`  "$SDH" — populated with one entry mapping
+///     `(hash, security_id=0x100)` to the SDS offset/size pair.
+///   * named `$INDEX_ROOT`  "$SII" — populated with one entry keyed
+///     on `security_id = 0x100`.
 ///
-/// At S1 all three are empty; S2 will populate `$SDS` with a canonical
-/// security-descriptor entry and add matching `$SDH`/`$SII` index
-/// entries. The point of S1 is just to make the streams openable so
-/// chkdsk path-resolution probes succeed.
+/// In addition, every system MFT record's `$STANDARD_INFORMATION` now
+/// carries `security_id = 0x100` referencing that entry.
 #[test]
 fn secure_record_has_sds_sdh_sii_named_streams() {
+    use fs_ntfs::sds::{sdh_hash, SDS_HEADER_LEN, SDS_MIRROR_GAP};
+
     let mut dev = MemDev::new(VOL_SIZE);
     format_filesystem(&mut dev, VOL_SIZE, 4096, 4096, Some("TESTVOL"), None)
         .expect("format_filesystem");
+
+    // The canonical SD shipped at security_id=0x100 — same blob the
+    // mkfs path applies inline to every system record's
+    // $SECURITY_DESCRIPTOR attribute.
+    const SD_SYSFILE_RW: &[u8] = &[
+        0x01, 0x00, 0x04, 0x80, 0x48, 0x00, 0x00, 0x00, 0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x14, 0x00, 0x00, 0x00, 0x02, 0x00, 0x34, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x14, 0x00, 0x9f, 0x01, 0x12, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x12,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x9f, 0x01, 0x12, 0x00, 0x01, 0x02, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x01, 0x02, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x01, 0x02,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00,
+    ];
+    let expected_hash = sdh_hash(SD_SYSFILE_RW);
+    let expected_sds_size: u32 = SDS_HEADER_LEN + SD_SYSFILE_RW.len() as u32;
 
     let mut cursor = std::io::Cursor::new(&dev.buf);
     let mut ntfs = Ntfs::new(&mut cursor).expect("Ntfs::new");
@@ -193,6 +210,10 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
     let mut seen_sds = false;
     let mut seen_sdh = false;
     let mut seen_sii = false;
+    let mut sds_bytes: Vec<u8> = Vec::new();
+    let mut sdh_value: Vec<u8> = Vec::new();
+    let mut sii_value: Vec<u8> = Vec::new();
+
     let mut attrs = secure.attributes();
     while let Some(item) = attrs.next(&mut cursor) {
         let item = item.expect("attr item");
@@ -206,18 +227,46 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
             .expect("attr name")
             .to_string()
             .expect("attr name to_string");
+        use std::io::Read;
         match (ty, name.as_str()) {
             (NtfsAttributeType::Data, "$SDS") => {
-                assert!(a.is_resident(), "$SDS must be resident at S1");
-                assert_eq!(a.value_length(), 0, "$SDS payload must be empty at S1");
+                assert!(
+                    !a.is_resident(),
+                    "$SDS must be non-resident at S2 (one canonical entry + mirror)"
+                );
+                let sds_data_len = a.value_length();
+                assert!(
+                    sds_data_len >= SDS_MIRROR_GAP + expected_sds_size as u64,
+                    "$SDS data_length {sds_data_len} too small to hold primary + mirror"
+                );
+                let v = a.value(&mut cursor).expect("sds value");
+                let mut buf = vec![0u8; sds_data_len as usize];
+                v.attach(&mut cursor)
+                    .read_exact(&mut buf)
+                    .expect("read $SDS stream");
+                sds_bytes = buf;
                 seen_sds = true;
             }
             (NtfsAttributeType::IndexRoot, "$SDH") => {
-                assert!(a.is_resident(), "$SDH index-root must be resident");
+                assert!(a.is_resident(), "$SDH index-root must be resident at S2");
+                let total = a.value_length() as usize;
+                let v = a.value(&mut cursor).expect("sdh value");
+                let mut buf = vec![0u8; total];
+                v.attach(&mut cursor)
+                    .read_exact(&mut buf)
+                    .expect("read sdh");
+                sdh_value = buf;
                 seen_sdh = true;
             }
             (NtfsAttributeType::IndexRoot, "$SII") => {
-                assert!(a.is_resident(), "$SII index-root must be resident");
+                assert!(a.is_resident(), "$SII index-root must be resident at S2");
+                let total = a.value_length() as usize;
+                let v = a.value(&mut cursor).expect("sii value");
+                let mut buf = vec![0u8; total];
+                v.attach(&mut cursor)
+                    .read_exact(&mut buf)
+                    .expect("read sii");
+                sii_value = buf;
                 seen_sii = true;
             }
             _ => {}
@@ -227,6 +276,114 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
     assert!(seen_sds, "rec 9 missing named-$DATA \"$SDS\"");
     assert!(seen_sdh, "rec 9 missing named-$INDEX_ROOT \"$SDH\"");
     assert!(seen_sii, "rec 9 missing named-$INDEX_ROOT \"$SII\"");
+
+    // Primary entry at offset 0.
+    let hash_at_0 = u32::from_le_bytes([sds_bytes[0], sds_bytes[1], sds_bytes[2], sds_bytes[3]]);
+    let sid_at_0 = u32::from_le_bytes([sds_bytes[4], sds_bytes[5], sds_bytes[6], sds_bytes[7]]);
+    let off_at_0 = u64::from_le_bytes([
+        sds_bytes[8],
+        sds_bytes[9],
+        sds_bytes[10],
+        sds_bytes[11],
+        sds_bytes[12],
+        sds_bytes[13],
+        sds_bytes[14],
+        sds_bytes[15],
+    ]);
+    let size_at_0 =
+        u32::from_le_bytes([sds_bytes[16], sds_bytes[17], sds_bytes[18], sds_bytes[19]]);
+    assert_eq!(hash_at_0, expected_hash, "$SDS primary entry hash");
+    assert_eq!(sid_at_0, 0x100, "$SDS primary entry security_id");
+    assert_eq!(off_at_0, 0, "$SDS primary entry sds_offset");
+    assert_eq!(size_at_0, expected_sds_size, "$SDS primary entry sds_size");
+
+    // Mirror at +0x40000 — same bytes as primary header.
+    let m = SDS_MIRROR_GAP as usize;
+    assert_eq!(
+        &sds_bytes[m..m + 20],
+        &sds_bytes[..20],
+        "$SDS mirror header bytes must match primary"
+    );
+
+    // $SDH: parse the inline index. value layout is index-root header
+    // (16 bytes) + index header (16 bytes) + entries. The first entry
+    // is the populated one (16-byte header + 8-byte key + 20-byte
+    // value padded to 8 = 48 bytes), followed by a 16-byte LAST.
+    let entries_off = 32usize;
+    let e0 = &sdh_value[entries_off..];
+    let e0_len = u16::from_le_bytes([e0[8], e0[9]]) as usize;
+    let key_len = u16::from_le_bytes([e0[10], e0[11]]) as usize;
+    assert_eq!(key_len, 8, "$SDH key length");
+    let key_off = 0x10;
+    let sdh_hash_key = u32::from_le_bytes([
+        e0[key_off],
+        e0[key_off + 1],
+        e0[key_off + 2],
+        e0[key_off + 3],
+    ]);
+    let sdh_sid_key = u32::from_le_bytes([
+        e0[key_off + 4],
+        e0[key_off + 5],
+        e0[key_off + 6],
+        e0[key_off + 7],
+    ]);
+    assert_eq!(sdh_hash_key, expected_hash, "$SDH entry key hash");
+    assert_eq!(sdh_sid_key, 0x100, "$SDH entry key security_id");
+    // Value starts after key, 8-aligned. With 16-byte header + 8-byte
+    // key = 24, next 8-aligned offset = 24.
+    let val_off = 24usize;
+    let v_sds_off = u64::from_le_bytes(e0[val_off + 8..val_off + 16].try_into().unwrap());
+    let v_sds_size = u32::from_le_bytes(e0[val_off + 16..val_off + 20].try_into().unwrap());
+    assert_eq!(v_sds_off, 0, "$SDH value sds_offset");
+    assert_eq!(v_sds_size, expected_sds_size, "$SDH value sds_size");
+    // LAST sentinel: next entry has flags=0x02.
+    let last = &sdh_value[entries_off + e0_len..];
+    let last_flags = u32::from_le_bytes([last[12], last[13], last[14], last[15]]);
+    assert_eq!(last_flags & 0x02, 0x02, "$SDH LAST sentinel");
+
+    // $SII: key is 4-byte security_id, value mirrors $SDH's value.
+    let s0 = &sii_value[entries_off..];
+    let s0_klen = u16::from_le_bytes([s0[10], s0[11]]) as usize;
+    assert_eq!(s0_klen, 4, "$SII key length");
+    let sii_sid = u32::from_le_bytes([s0[0x10], s0[0x11], s0[0x12], s0[0x13]]);
+    assert_eq!(sii_sid, 0x100, "$SII entry key security_id");
+    // Value at 8-aligned offset after key. Header 16 + key 4 = 20 → 24.
+    let sii_val_off = 24usize;
+    let s_sds_size = u32::from_le_bytes(s0[sii_val_off + 16..sii_val_off + 20].try_into().unwrap());
+    assert_eq!(s_sds_size, expected_sds_size, "$SII value sds_size");
+
+    // Spot-check system records' $STANDARD_INFORMATION.security_id.
+    // Per MS-FSCC §2.4.2 the SecurityId lives at value-relative offset
+    // 0x34 (72-byte v3.x form) or 0x28 (48-byte v1.x form). System
+    // records use the 48-byte form on a fresh format.
+    for rec_num in [0u64, 5u64, 9u64] {
+        let f = ntfs.file(&mut cursor, rec_num).expect("open system rec");
+        let mut std_attrs = f.attributes();
+        let mut found = false;
+        while let Some(item) = std_attrs.next(&mut cursor) {
+            let item = item.expect("attr item");
+            let a = item.to_attribute().expect("to_attribute");
+            if a.ty().ok() != Some(NtfsAttributeType::StandardInformation) {
+                continue;
+            }
+            let v = a.value(&mut cursor).expect("std-info value");
+            use std::io::Read;
+            let len = a.value_length() as usize;
+            let mut data = vec![0u8; len];
+            v.attach(&mut cursor)
+                .read_exact(&mut data)
+                .expect("read std-info");
+            let off = if data.len() >= 72 { 0x34 } else { 0x28 };
+            let sid = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+            assert_eq!(
+                sid, 0x100,
+                "rec {rec_num} $STD_INFO.security_id should be 0x100"
+            );
+            found = true;
+            break;
+        }
+        assert!(found, "rec {rec_num} missing $STD_INFO");
+    }
 }
 
 // --------------------------------------------------------------------------
