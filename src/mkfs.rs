@@ -1922,10 +1922,22 @@ fn build_populated_named_index_root_attr(
 /// ```
 ///
 /// Returns the entry bytes (no extra padding outside `entry_length`).
+///
+/// **Iter K finding (chkdsk byte-diff against `Format-Volume`)**: the
+/// value lives **immediately after the key**, with no alignment padding
+/// in between. Only `entry_length` is rounded to 8 bytes. An earlier
+/// cut of this builder `align8`'d `value_off` too — for 8-byte keys
+/// that was a no-op (`$SDH`), but for 4-byte keys (`$SII`) it inserted
+/// 4 zero bytes between key and value, producing `data_offset = 0x18,
+/// entry_length = 0x30` instead of the reference's `0x14 / 0x28`.
+/// chkdsk's view-index parser flagged `Index $SII in file 9 is
+/// corrupt` on the resulting bytes. Removing the `value_off`
+/// alignment matches the reference byte-for-byte across 8 sampled
+/// entries from a fresh NTFS v3.1 `Format-Volume` dump.
 fn build_view_index_entry(key: &[u8], value: &[u8]) -> Vec<u8> {
     let header = 0x10usize;
     let key_len = key.len();
-    let value_off = align8(header + key_len);
+    let value_off = header + key_len;
     let entry_len = align8(value_off + value.len());
     let mut buf = vec![0u8; entry_len];
     // View-index union: data_offset + data_length, NOT file_reference.
