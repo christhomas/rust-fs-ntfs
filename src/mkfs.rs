@@ -57,6 +57,13 @@ const COLLATION_NTOFS_SECURITY_HASH: u32 = 0x12;
 // `COLLATION_NTOFS_ULONG = 0x10` per the same source. Used by
 // $SII and by `$Quota:$Q` and `$Quota:$O` (not relevant at S1).
 const COLLATION_NTOFS_ULONG: u32 = 0x10;
+// `COLLATION_NTOFS_ULONGS = 0x13` — collation rule for view indexes
+// keyed by an *array* of u32s (compared lexicographically). Used by
+// `$Extend\$Reparse:$R`, whose key is `{reparse_tag (u32),
+// file_record (u64 packed as two u32s)}`. Cite: Windows Internals 7e
+// ch. "NTFS On-Disk Structure" and MS-FSCC §2.4.9 collation rules. No
+// GPL'd NTFS source consulted.
+const COLLATION_NTOFS_ULONGS: u32 = 0x13;
 
 // ---------------------------------------------------------------------------
 // $SECURITY_DESCRIPTOR (0x50) blobs for system MFT records.
@@ -171,7 +178,10 @@ fn sd_for_system_record(rec_num: u32) -> &'static [u8] {
         // a parent to descend through. Sub-PR S3 restores rec 11 as a
         // small directory with an empty $I30; S4/S5 will add the
         // children chkdsk probes for.
-        rec::VOLUME | rec::SECURE | rec::EXTEND => SD_SYSFILE_RW,
+        // $Reparse (rec 16, Sub-PR S4) ships under $Extend as a
+        // writable system file. Reusing SD_SYSFILE_RW keeps the
+        // security_id 0x100 reference path (rec → $SDS) intact.
+        rec::VOLUME | rec::SECURE | rec::EXTEND | rec::REPARSE => SD_SYSFILE_RW,
         _ => SD_SYSFILE_RO,
     }
 }
@@ -197,6 +207,12 @@ mod rec {
     // Microsoft format.com leaves these as in-use 304-byte placeholder
     // records — see build_reserved_placeholder + the loop in
     // format_filesystem.
+    //
+    // Slot 16 is the first slot past the canonical 0..15 system range
+    // and is where Sub-PR S4 places `$Extend\$Reparse` (chkdsk's
+    // Iter H Procmon trace at chkdsk-improvement-findings.md §6.9
+    // shows /scan opens `$Extend\$Reparse:$R:$INDEX_ALLOCATION`).
+    pub const REPARSE: u32 = 16;
 }
 
 /// Format an NTFS volume in place over a [`BlockIo`].
@@ -498,10 +514,11 @@ pub fn format_filesystem(
         let bitmap_value_size = mft_records_capacity.div_ceil(8) as usize;
         // Slots 0..10 are the canonical system files; slot 11 is $Extend
         // (Sub-PR S3); slots 12..15 are reserved-slot placeholders (see
-        // build_reserved_placeholder). All 16 slots ship IN_USE in
-        // Microsoft's reference output, so mark all 16 bits set.
+        // build_reserved_placeholder); slot 16 is $Reparse (Sub-PR S4,
+        // parented to $Extend at rec 11). All slots ship IN_USE so
+        // chkdsk's Stage 1 MFT walk sees a contiguous in-use run.
         let mut allocated: Vec<u32> = (0u32..=10u32).collect();
-        for slot in 11..mft_records_capacity.min(16) as u32 {
+        for slot in 11..mft_records_capacity.min(17) as u32 {
             allocated.push(slot);
         }
         let mft_bitmap_value = make_mft_internal_bitmap(bitmap_value_size, &allocated);
@@ -1007,7 +1024,56 @@ pub fn format_filesystem(
         ));
     }
 
-    // record 11: $Extend — directory shell with an empty $I30.
+    // record 16: $Extend\$Reparse — empty `$R` view-index file.
+    //
+    // Iter H findings (chkdsk-improvement-findings.md §6.9, 2026-05-21):
+    // chkdsk /scan opens `$Extend\$Reparse:$R:$INDEX_ALLOCATION`. To
+    // reach that named stream chkdsk's NT-path walker must descend
+    // `$Extend` (rec 11, restored in S3) and resolve `$Reparse` to a
+    // real MFT record. Sub-PR S4 places that record here at slot 16
+    // — the first slot after the canonical 0..15 system range — so
+    // the recursion has a parseable target. The volume ships no
+    // reparse points, so the `$R` view-index is empty (header + LAST
+    // sentinel only).
+    //
+    // Layout: $STD_INFO + $FILE_NAME ("$Reparse" → $Extend rec 11) +
+    // $SD (RW) + named $INDEX_ROOT "$R" (empty view-index,
+    // indexed_attr_type=0, collation=COLLATION_NTOFS_ULONGS).
+    //
+    // No separate `$DATA` stream is emitted: the Iter H trace shows
+    // chkdsk opens `$Extend\$Reparse:$R:$INDEX_ALLOCATION`, not
+    // `$Extend\$Reparse:$R` directly, so the named `$INDEX_ROOT`
+    // alone is sufficient. The view-index `$INDEX_ALLOCATION` only
+    // materialises when entries spill out of `$INDEX_ROOT`; an empty
+    // index has no `$INDEX_ALLOCATION` and chkdsk tolerates that
+    // (same pattern as `$Secure:$SDH`/`$SII` after S1+S2).
+    {
+        let r_name: [u16; 2] = ['$' as u16, 'R' as u16];
+        let r_index_root = build_empty_named_index_root_attr(
+            3,
+            &r_name,
+            // View-index: no per-key $FILE_NAME-style attribute behind
+            // the keys, so indexed_attr_type = 0 (same as $SDH/$SII).
+            0,
+            COLLATION_NTOFS_ULONGS,
+            4096,
+            cluster_size,
+        );
+        let rec_bytes = build_system_record_with_parent(
+            &mft_record_layout,
+            rec::REPARSE,
+            rec::EXTEND,
+            "$Reparse",
+            false,
+            0,
+            0,
+            &[r_index_root],
+        )?;
+        place_record(&mut mft_buf, rs, rec::REPARSE, rec_bytes)?;
+    }
+
+    // record 11: $Extend — directory shell with `$I30` listing
+    // `$Reparse` (rec 16, Sub-PR S4).
     //
     // Iter H findings (chkdsk-improvement-findings.md §6.9, 2026-05-21):
     // chkdsk /scan opens $Extend\$Reparse:$R:$INDEX_ALLOCATION and
@@ -1015,18 +1081,37 @@ pub fn format_filesystem(
     // exist as a directory so the recursion can descend through it.
     //
     // §2.8's "leave rec 11 unwritten" was correct *at the time* — before
-    // chkdsk's child-recursion was known — but Sub-PR S3 restores
-    // rec 11 as a small directory with an empty $I30 so the children
-    // landing in S4/S5 (`$Reparse`, `$RmMetadata`, …) have a parent.
+    // chkdsk's child-recursion was known — but Sub-PR S3 restored
+    // rec 11 as a small directory with an empty $I30; Sub-PR S4 now
+    // fills in `$Reparse` as the first child. `$RmMetadata` lands in
+    // S5.
     //
     // Layout: $STD_INFO + $FILE_NAME ("$Extend" → root) + $SD (RW) +
-    // $INDEX_ROOT '$I30' carrying just the LAST sentinel. is_dir=true
-    // sets the MFT-header IS_DIRECTORY flag (0x0002) and the
-    // $FILE_NAME.file_attributes FILE_ATTRIBUTE_DIRECTORY bit
-    // (0x10000000).
+    // $INDEX_ROOT '$I30' carrying one entry ($Reparse → rec 16) plus
+    // the LAST sentinel. is_dir=true sets the MFT-header IS_DIRECTORY
+    // flag (0x0002) and the $FILE_NAME.file_attributes
+    // FILE_ATTRIBUTE_DIRECTORY bit (0x10000000).
     {
         let index_block_size: u32 = 4096;
+
+        // $Extend is the parent of every record in its $I30. The
+        // child's $FILE_NAME stream carries parent_reference =
+        // (rec=11, seq=11); ditto for the $I30 entry stream.
+        let parent_ref = encode_file_reference(rec::EXTEND as u64, rec::EXTEND as u16);
+
+        // Skeleton $FILE_NAME stream for $Reparse (same minimal form
+        // root's $I30 ships for non-$MFT system entries: parent_ref +
+        // name only, all other fields zeroed). See the rec 5 builder
+        // below for the reference.
+        let reparse_stream = build_skeleton_fn_stream(parent_ref, "$Reparse")?;
+        let reparse_entry = build_index_entry(
+            encode_file_reference(rec::REPARSE as u64, rec::REPARSE as u16),
+            &reparse_stream,
+            false,
+        );
+
         let mut entries_blob: Vec<u8> = Vec::new();
+        entries_blob.extend_from_slice(&reparse_entry);
         entries_blob.extend_from_slice(&build_index_entry(0, &[], true));
         let index_root =
             build_populated_index_root_attr(3, index_block_size, cluster_size, &entries_blob);
@@ -1250,6 +1335,32 @@ fn build_system_record(
     fn_data_real: u64,
     extra_attrs: &[Vec<u8>],
 ) -> Result<Vec<u8>, String> {
+    // Default parent for slots 0..11 is the root directory (rec 5,
+    // seq 5). Records nested under another system directory (e.g.
+    // `$Extend\$Reparse` at rec 16, parent = rec 11) use the
+    // `_with_parent` variant.
+    build_system_record_with_parent(
+        layout,
+        record_number,
+        rec::ROOT,
+        name,
+        is_dir,
+        fn_data_alloc,
+        fn_data_real,
+        extra_attrs,
+    )
+}
+
+fn build_system_record_with_parent(
+    layout: &MftLayout,
+    record_number: u32,
+    parent_record: u32,
+    name: &str,
+    is_dir: bool,
+    fn_data_alloc: u64,
+    fn_data_real: u64,
+    extra_attrs: &[Vec<u8>],
+) -> Result<Vec<u8>, String> {
     let rs = layout.record_size;
     let bps = layout.bytes_per_sector;
     if rs < 512 || !rs.is_multiple_of(bps as usize) {
@@ -1321,11 +1432,20 @@ fn build_system_record(
 
     let mut cursor = attrs_offset;
 
-    // Records 0..11 always live as children of the root directory. Use
-    // sequence=ROOT (5) for parent reference per NTFS convention. The
-    // root itself parents to itself (`.` is its own parent in NTFS),
-    // so the same encoding applies regardless of which record this is.
-    let parent_ref = encode_file_reference(rec::ROOT as u64, 5);
+    // Parent file-reference. For slots 0..11 the parent is the root
+    // directory (rec 5, seq 5) — `.` parents to itself per NTFS
+    // convention. Sub-PR S4 introduces nested system records (rec 16
+    // `$Reparse` parented to rec 11 `$Extend`) where the parent's
+    // sequence number must match the parent's own record header
+    // (`max(1, rec_num)` per the rec_seq encoding above), otherwise
+    // chkdsk reports "Incorrect information was detected in file
+    // record segment N".
+    let parent_seq: u16 = if parent_record == 0 {
+        1
+    } else {
+        parent_record as u16
+    };
+    let parent_ref = encode_file_reference(parent_record as u64, parent_seq);
 
     // Every system record references the single canonical SD entry
     // shipped in `$Secure:$SDS` (security_id = 0x100).
@@ -1750,9 +1870,9 @@ fn build_resident_named(attr_type: u32, attr_id: u16, name_utf16: &[u16], value:
 ///   +0x1D..0x20 padding (3 bytes, zero)
 ///   +0x20 END entry (16 bytes: reference=0, entry_len=0x10,
 ///                    stream_len=0, flags=0x02)
-#[allow(dead_code)] // S1 used this; S2 swaps to the populated variant
-                    // but the empty helper is retained as a fallback
-                    // and to keep the byte-layout reference handy.
+// Used by Sub-PR S4 for `$Extend\$Reparse:$R` (empty view-index on
+// a volume with no reparse points). S1 originally used this for
+// empty `$SDH`/`$SII`; S2 swapped those to the populated variant.
 fn build_empty_named_index_root_attr(
     attr_id: u16,
     name_utf16: &[u16],
