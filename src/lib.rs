@@ -654,6 +654,22 @@ pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle
         return std::ptr::null_mut();
     }
 
+    // Mimic `ntfs.sys`'s "upgrade on mount". Path-based mount is
+    // RW-capable (the mutator API reopens RW per call), so apply the
+    // 1.2 -> 3.1 upgrade best-effort. Failure is logged at `warn` and
+    // does not fail the mount.
+    match crate::fsck::upgrade_volume_version(path) {
+        Ok(true) => {
+            log::info!(target: "fs_ntfs", "upgraded $VOLUME_INFORMATION 1.2 -> 3.1 on {path}")
+        }
+        Ok(false) => {
+            log::debug!(target: "fs_ntfs", "no $VOLUME_INFORMATION upgrade needed on {path}")
+        }
+        Err(e) => {
+            log::warn!(target: "fs_ntfs", "$VOLUME_INFORMATION upgrade skipped on {path}: {e}")
+        }
+    }
+
     let bridge = Box::new(FsNtfsHandle {
         ntfs,
         reader,
@@ -692,6 +708,30 @@ pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) ->
     if let Err(e) = ntfs.read_upcase_table(&mut reader) {
         set_error(&format!("upcase table: {e}"));
         return std::ptr::null_mut();
+    }
+
+    // Mimic `ntfs.sys`'s "upgrade on mount". Only fire when the
+    // caller supplied a write callback — otherwise the mount is
+    // effectively RO and the upgrade write would fail. Best-effort;
+    // failure logged at `warn` and does not fail the mount.
+    if cfg.write.is_some() {
+        let mut io = CallbackBlockIo {
+            read_fn: cfg.read,
+            write_fn: cfg.write,
+            context: cfg.context,
+            size: cfg.size_bytes,
+        };
+        match crate::fsck::upgrade_volume_version_io(&mut io) {
+            Ok(true) => {
+                log::info!(target: "fs_ntfs", "upgraded $VOLUME_INFORMATION 1.2 -> 3.1 (callback mount)")
+            }
+            Ok(false) => {
+                log::debug!(target: "fs_ntfs", "no $VOLUME_INFORMATION upgrade needed (callback mount)")
+            }
+            Err(e) => {
+                log::warn!(target: "fs_ntfs", "$VOLUME_INFORMATION upgrade skipped (callback mount): {e}")
+            }
+        }
     }
 
     let bridge = Box::new(FsNtfsHandle {
@@ -925,6 +965,32 @@ impl crate::fsck::FsckIo for FsCoreBlockIo {
     }
     fn sync(&mut self) -> Result<(), String> {
         fs_core::BlockDevice::flush(&self.device).map_err(|e| e.to_string())
+    }
+}
+
+/// Same pattern as the `FsCoreBlockIo` impl above. Lets the
+/// upgrade-on-mount path drive a callback-backed volume via fsck's
+/// `FsckIo`. Bodies delegate straight to the underlying `BlockIo`
+/// impl in `block_io.rs`.
+///
+/// `sync` delegates explicitly even though both `FsckIo::sync` and
+/// `BlockIo::sync` default to `Ok(())` — the delegation is for
+/// future-proofing: if `BlockIo::sync` on `CallbackBlockIo` ever
+/// grows a real flush (e.g. a host-supplied flush callback), the
+/// fsck path picks it up automatically. Today it's still a no-op
+/// (callback-backed mounts let the host drain on its own barrier).
+impl crate::fsck::FsckIo for CallbackBlockIo {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        <Self as BlockIoTrait>::read_exact_at(self, offset, buf)
+    }
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        <Self as BlockIoTrait>::write_all_at(self, offset, buf)
+    }
+    fn size(&self) -> u64 {
+        <Self as BlockIoTrait>::size(self)
+    }
+    fn sync(&mut self) -> Result<(), String> {
+        <Self as BlockIoTrait>::sync(self)
     }
 }
 

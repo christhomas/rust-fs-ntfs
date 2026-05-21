@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `$VOLUME_INFORMATION` upgrade-on-mount now fires across **every**
+  RW entry point, not just `fs_ntfs_mount_rw_with_fs_core_device`.
+  Newly wired:
+  - `fs_ntfs_mount` (path-based; the path-mount is RW-capable since
+    mutators re-open RW per call).
+  - `fs_ntfs_mount_with_callbacks` when the caller supplied a `write`
+    callback (skipped otherwise — the mount is effectively RO).
+  - `Filesystem::mount_rw()` — new facade entry point that wraps
+    `mount` + `upgrade_volume_version`. The `rust-ntfs` CLI's
+    mutating commands (`touch`, `mkdir`, `rm`, `rmdir`, `write`)
+    switched to this; `ls` stays on `mount` since it's read-only.
+
+  All upgrade attempts remain best-effort: failure is logged at
+  `warn` and never fails the mount.
+
 ### Added
 
 - `fsck::upgrade_volume_version` (path + `FsckIo` variants) and
