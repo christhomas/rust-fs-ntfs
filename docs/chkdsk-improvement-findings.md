@@ -2216,14 +2216,17 @@ After [PR #39 (S1)](https://github.com/christhomas/rust-fs-ntfs/pull/39),
 [PR #40 (S3)](https://github.com/christhomas/rust-fs-ntfs/pull/40),
 and [PR #41 (S2)](https://github.com/christhomas/rust-fs-ntfs/pull/41)
 landed, re-ran `scripts/procmon-chkdsk-trace.ps1` on the same 256 MiB
-volume scenario.
+volume scenario. (PR-number / sub-PR-letter mismatch: S3 merged
+before S2 — S2 went through an extra review round to correct the
+48-byte `$STANDARD_INFORMATION` SecurityId offset, while S3 was a
+clean pass-through.)
 
 **Verdict moved from "exact nature unknown" to a named structural
 complaint.**
 
 Before S1+S2+S3:
 
-```
+```text
 chkdsk readonly  exit 0  ("found no problems")
 chkdsk /scan     exit 13 ("must be fixed offline")
 Event log        NTFS 55: "corruption detected, exact nature unknown"
@@ -2231,7 +2234,7 @@ Event log        NTFS 55: "corruption detected, exact nature unknown"
 
 After S1+S2+S3:
 
-```
+```text
 chkdsk readonly  exit 3   (errors found)
 chkdsk /scan     exit 11  (snapshot setup failed)
 
