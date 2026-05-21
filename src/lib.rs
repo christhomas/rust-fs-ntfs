@@ -49,6 +49,7 @@ pub mod mft_bitmap;
 pub mod mft_io;
 pub mod mkfs;
 pub mod record_build;
+pub mod sds;
 pub mod upcase;
 pub mod write;
 
