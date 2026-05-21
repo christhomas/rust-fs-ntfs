@@ -12,12 +12,22 @@ no-default-features = false
 feature-depth = 1
 
 [advisories]
+# version = 2 opts into cargo-deny's current schema (PR #611). Pre-v2
+# keys like `vulnerability`, `unmaintained`, `unsound`, `notice`,
+# `severity-threshold` were removed in 0.18; their behaviours are now
+# always-on.
+version = 2
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 ignore = []
 
 [licenses]
+# version = 2 — same migration as [advisories]. The pre-v2
+# `unlicensed`, `allow-osi-fsf-free`, `copyleft`, `default`, and
+# `deny` keys were removed; the allow-list below is now the sole
+# source of truth (anything not listed is denied).
+version = 2
 # Permissive licenses we accept. Anything outside this list fails the
 # check; explicit allowlist forces a deliberate choice for new
 # additions rather than silent inheritance.
@@ -34,10 +44,6 @@ allow = [
     "Zlib",
     "0BSD",
 ]
-# Explicit deny entries make the failure mode louder if a transitive
-# dep ever pulls one of these in. Listed verbatim so the message in
-# CI says "MPL-2.0 not allowed" rather than "license not in allowlist".
-deny = []
 confidence-threshold = 0.93
 exceptions = []
 
