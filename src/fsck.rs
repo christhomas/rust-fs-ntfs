@@ -336,20 +336,36 @@ pub fn set_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
 ///
 /// Layout reminder (MS-FSCC): `$VOLUME_INFORMATION` value is
 /// `reserved(8) + major(1) + minor(1) + flags(2)`. The major byte
-/// therefore sits at `flag_disk_offset - 2`. All four bytes
-/// (`major`, `minor`, `flags lo`, `flags hi`) are contiguous and
-/// well inside the MFT record, so a single 4-byte `write_all_at`
-/// is atomic on any modern storage and survives a crash without
-/// leaving a half-upgraded state (no `version=3.1` with
-/// `UPGRADE_ON_MOUNT` still set, which would be self-contradictory).
+/// therefore sits at `flag_disk_offset - 2`. We read and write all
+/// four bytes (`major`, `minor`, `flags lo`, `flags hi`) in a single
+/// `read_exact_at` / `write_all_at` so the version and flags are
+/// guaranteed to come from the same on-disk snapshot.
+///
+/// **Atomicity caveat.** The single 4-byte write is atomic on any
+/// modern storage *provided the 4 bytes sit within a single 512-byte
+/// sector* — only then does the underlying device guarantee
+/// torn-write freedom. NTFS attribute headers and resident-value
+/// offsets are 8-byte aligned, so this holds for every conforming
+/// `$VOLUME_INFORMATION` layout in practice, but the `debug_assert!`
+/// below makes the requirement explicit rather than hoping a future
+/// layout change doesn't silently break the guarantee.
 pub fn upgrade_volume_version_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
-    let (flag_disk_offset, current_flags) = locate_volume_flags_io(io)?;
+    // Discard `locate`'s flag read; we'll re-fetch in a single 4-byte
+    // read so version + flags share a snapshot (Greptile review on #36).
+    let (flag_disk_offset, _stale_flags) = locate_volume_flags_io(io)?;
     let major_disk_offset = flag_disk_offset - 2;
 
-    let mut version = [0u8; 2];
-    io.read_exact_at(major_disk_offset, &mut version)
-        .map_err(|e| format!("read volume version: {e}"))?;
-    let (major, minor) = (version[0], version[1]);
+    debug_assert!(
+        major_disk_offset % 512 + 4 <= 512,
+        "$VOLUME_INFORMATION major..flags ({major_disk_offset}+4) straddles a 512-byte sector boundary; \
+         single-write atomicity guarantee no longer holds"
+    );
+
+    let mut vf = [0u8; 4];
+    io.read_exact_at(major_disk_offset, &mut vf)
+        .map_err(|e| format!("read volume version+flags: {e}"))?;
+    let (major, minor) = (vf[0], vf[1]);
+    let current_flags = u16::from_le_bytes([vf[2], vf[3]]);
 
     let flags = NtfsVolumeFlags::from_bits_truncate(current_flags);
     let needs_upgrade =
