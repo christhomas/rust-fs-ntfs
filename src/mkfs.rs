@@ -317,8 +317,19 @@ pub mod rec {
     /// uniformly keeps the API symmetric and makes the rec 9 quirk
     /// hard to forget at the call site (no separate "secure name"
     /// helper to look for).
-    pub fn name(rec_num: u32, cluster_size: u32) -> &'static str {
-        match rec_num {
+    ///
+    /// # Return type
+    ///
+    /// Returns `Some(&'static str)` for known system MFT records
+    /// (0..=11 minus the reserved 5/12..15 placeholders that have
+    /// no $FILE_NAME) and `None` otherwise. Callers that know they
+    /// have a constant (`rec::SECURE`, …) should `.expect("…")` or
+    /// `.unwrap()`; callers that dispatch on a `u32` read off disk
+    /// can pattern-match without crashing the process. Returning
+    /// `Option` instead of panicking keeps `pub fn name` composable
+    /// for external crates (PR #47 review).
+    pub fn name(rec_num: u32, cluster_size: u32) -> Option<&'static str> {
+        Some(match rec_num {
             MFT => "$MFT",
             MFTMIRR => "$MFTMirr",
             LOGFILE => "$LogFile",
@@ -337,10 +348,8 @@ pub mod rec {
             }
             UPCASE => "$UpCase",
             EXTEND => "$Extend",
-            other => {
-                panic!("rec::name: unknown system MFT record number {other} (no canonical name)")
-            }
-        }
+            _ => return None,
+        })
     }
 }
 
@@ -726,7 +735,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::MFT,
-            rec::name(rec::MFT, cluster_size),
+            rec::name(rec::MFT, cluster_size).expect("known rec_num"),
             false,
             mft_data_size,
             mft_data_size,
@@ -735,7 +744,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::MFT, rec_bytes)?;
         sys_entries.push((
             rec::MFT,
-            rec::name(rec::MFT, cluster_size),
+            rec::name(rec::MFT, cluster_size).expect("known rec_num"),
             false,
             mft_data_size,
             mft_data_size,
@@ -762,7 +771,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::MFTMIRR,
-            rec::name(rec::MFTMIRR, cluster_size),
+            rec::name(rec::MFTMIRR, cluster_size).expect("known rec_num"),
             false,
             len_bytes,
             len_bytes,
@@ -771,7 +780,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::MFTMIRR, rec_bytes)?;
         sys_entries.push((
             rec::MFTMIRR,
-            rec::name(rec::MFTMIRR, cluster_size),
+            rec::name(rec::MFTMIRR, cluster_size).expect("known rec_num"),
             false,
             len_bytes,
             len_bytes,
@@ -798,7 +807,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::LOGFILE,
-            rec::name(rec::LOGFILE, cluster_size),
+            rec::name(rec::LOGFILE, cluster_size).expect("known rec_num"),
             false,
             len_bytes,
             len_bytes,
@@ -807,7 +816,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::LOGFILE, rec_bytes)?;
         sys_entries.push((
             rec::LOGFILE,
-            rec::name(rec::LOGFILE, cluster_size),
+            rec::name(rec::LOGFILE, cluster_size).expect("known rec_num"),
             false,
             len_bytes,
             len_bytes,
@@ -826,36 +835,45 @@ pub fn format_filesystem(
 
         // $VOLUME_INFORMATION value: reserved(8) + major(1) + minor(1) + flags(2)
         //
-        // Iter M 2026-05-22: byte-diff against a freshly-formatted Windows
-        // volume (`windows-fresh-256m.bin`, chkdsk exit 0 confirmed)
-        // shows `major=3, minor=1, flags=0x0080` (MODIFIED_BY_CHKDSK).
-        // An earlier comment here claimed Microsoft `format.com` stamps
-        // `1.2 / 0x0084` (UPGRADE_ON_MOUNT | MODIFIED_BY_CHKDSK), but that
-        // was cribbed from `test-disks/_fpr_project.img`, a
-        // post-test-rollback fixture with Stage 1 corruption — NOT a
-        // clean fresh-format reference. A clean Windows fresh format
-        // stamps 3.1 directly, no upgrade-on-mount dance.
+        // **What we actually write: `version 1.2 + flags 0x0080`**
+        // (MODIFIED_BY_CHKDSK per Tuxera public docs). This diverges
+        // from a clean Windows-fresh format (which stamps 3.1 / 0x0080)
+        // on the **version** only, for the reason below. The **flags**
+        // value matches Windows-fresh.
         //
-        // Setting `UPGRADE_ON_MOUNT` on a /scan snapshot mount causes
-        // ntfs.sys to raise NTFS Event 55 "corruption discovered, exact
-        // nature unknown" because the read-only snapshot can't complete
-        // the upgrade — chkdsk /scan then exits 13 even with all stages
-        // clean (Iter M 2026-05-22 trace).
-        // $VOLUME_INFORMATION = 1.2 + MODIFIED_BY_CHKDSK (0x0080).
+        // ## Why 1.2 and not 3.1
         //
-        // Iter M-3 hypothesis: a freshly-formatted Windows volume sets
-        // `MODIFIED_BY_CHKDSK` because Windows runs chkdsk implicitly
-        // at format-finalize time, marking the volume as "blessed".
-        // Without that flag, ntfs.sys's mount-path appears to queue a
-        // proactive scan (NTFS Event 55 / "Force Proactive Scan" /
-        // Normal severity / Property[3]=34) on every mount of our
-        // volume — chkdsk /scan then returns exit 13 even with
-        // Stage 1/2/3 all clean.
+        // Our system records ship v1.x `$STD_INFO` (48 bytes, no
+        // SecurityId field) throughout. Declaring v3.1 in
+        // $VOLUME_INFORMATION while still emitting v1.x STD_INFO
+        // creates an internal inconsistency that ntfs.sys flags as a
+        // **Critical** Event 55 ("Force Full Chkdsk" on rec 3
+        // $Volume) on every /scan snapshot mount (Iter M-1 trace,
+        // 2026-05-22). 1.2 + v1.x STD_INFO is self-consistent; 3.1
+        // would require us to also rewrite every system record's
+        // STD_INFO to the 72-byte v3.x form (with security_id =
+        // 0x100 / 0x101) — a strictly larger change deferred to a
+        // future iteration.
         //
-        // We keep major=1, minor=2 because our system records ship
-        // v1.x $STD_INFO (48 bytes); declaring 3.1 while still
-        // emitting v1.x STD_INFO introduces a separate (Critical-
-        // severity) Event 55 — Iter M-1 trace.
+        // ## Why 0x0080 (MODIFIED_BY_CHKDSK) and not 0x0000
+        //
+        // Windows runs chkdsk implicitly at format-finalize time,
+        // marking the volume as "blessed". Without this flag,
+        // ntfs.sys's mount path queues a proactive scan (Normal-
+        // severity Event 55 / "Force Proactive Scan" /
+        // Property[3]=34) on every mount, surfacing as chkdsk /scan
+        // exit 13 even with Stage 1/2/3 all clean (Iter M-3 trace).
+        //
+        // ## Why NOT 0x0084 (UPGRADE_ON_MOUNT | MODIFIED_BY_CHKDSK)
+        //
+        // An earlier version of this code emitted 0x0084, cribbed
+        // from `test-disks/_fpr_project.img`, a post-test-rollback
+        // fixture with Stage 1 corruption — NOT a clean fresh-format
+        // reference (Iter L revelation). UPGRADE_ON_MOUNT on a /scan
+        // snapshot mount drives ntfs.sys to a Critical Event 55
+        // because the read-only snapshot can't complete the upgrade.
+        // Dropping that bit eliminated the Critical Event 55 in the
+        // Iter M-2 trace.
         let mut vi = vec![0u8; 12];
         vi[8] = 1;
         vi[9] = 2;
@@ -871,7 +889,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::VOLUME,
-            rec::name(rec::VOLUME, cluster_size),
+            rec::name(rec::VOLUME, cluster_size).expect("known rec_num"),
             false,
             0,
             0,
@@ -880,7 +898,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::VOLUME, rec_bytes)?;
         sys_entries.push((
             rec::VOLUME,
-            rec::name(rec::VOLUME, cluster_size),
+            rec::name(rec::VOLUME, cluster_size).expect("known rec_num"),
             false,
             0,
             0,
@@ -921,7 +939,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::ATTRDEF,
-            rec::name(rec::ATTRDEF, cluster_size),
+            rec::name(rec::ATTRDEF, cluster_size).expect("known rec_num"),
             false,
             attrdef_clusters * cluster_size as u64,
             attrdef_blob.len() as u64,
@@ -930,7 +948,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::ATTRDEF, rec_bytes)?;
         sys_entries.push((
             rec::ATTRDEF,
-            rec::name(rec::ATTRDEF, cluster_size),
+            rec::name(rec::ATTRDEF, cluster_size).expect("known rec_num"),
             false,
             attrdef_clusters * cluster_size as u64,
             attrdef_blob.len() as u64,
@@ -961,7 +979,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::BITMAP,
-            rec::name(rec::BITMAP, cluster_size),
+            rec::name(rec::BITMAP, cluster_size).expect("known rec_num"),
             false,
             bitmap_clusters * cluster_size as u64,
             value_len,
@@ -970,7 +988,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::BITMAP, rec_bytes)?;
         sys_entries.push((
             rec::BITMAP,
-            rec::name(rec::BITMAP, cluster_size),
+            rec::name(rec::BITMAP, cluster_size).expect("known rec_num"),
             false,
             bitmap_clusters * cluster_size as u64,
             value_len,
@@ -999,7 +1017,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::BOOT,
-            rec::name(rec::BOOT, cluster_size),
+            rec::name(rec::BOOT, cluster_size).expect("known rec_num"),
             false,
             boot_clusters * cluster_size as u64,
             boot_value_len,
@@ -1008,7 +1026,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::BOOT, rec_bytes)?;
         sys_entries.push((
             rec::BOOT,
-            rec::name(rec::BOOT, cluster_size),
+            rec::name(rec::BOOT, cluster_size).expect("known rec_num"),
             false,
             boot_clusters * cluster_size as u64,
             boot_value_len,
@@ -1053,7 +1071,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::BADCLUS,
-            rec::name(rec::BADCLUS, cluster_size),
+            rec::name(rec::BADCLUS, cluster_size).expect("known rec_num"),
             false,
             0,
             0,
@@ -1062,7 +1080,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::BADCLUS, rec_bytes)?;
         sys_entries.push((
             rec::BADCLUS,
-            rec::name(rec::BADCLUS, cluster_size),
+            rec::name(rec::BADCLUS, cluster_size).expect("known rec_num"),
             false,
             0,
             0,
@@ -1205,7 +1223,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::SECURE,
-            rec::name(rec::SECURE, cluster_size),
+            rec::name(rec::SECURE, cluster_size).expect("known rec_num"),
             false,
             0,
             0,
@@ -1214,7 +1232,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::SECURE, rec_bytes)?;
         sys_entries.push((
             rec::SECURE,
-            rec::name(rec::SECURE, cluster_size),
+            rec::name(rec::SECURE, cluster_size).expect("known rec_num"),
             false,
             0,
             0,
@@ -1261,7 +1279,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::UPCASE,
-            rec::name(rec::UPCASE, cluster_size),
+            rec::name(rec::UPCASE, cluster_size).expect("known rec_num"),
             false,
             upcase_clusters * cluster_size as u64,
             upcase_value_bytes,
@@ -1270,7 +1288,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::UPCASE, rec_bytes)?;
         sys_entries.push((
             rec::UPCASE,
-            rec::name(rec::UPCASE, cluster_size),
+            rec::name(rec::UPCASE, cluster_size).expect("known rec_num"),
             false,
             upcase_clusters * cluster_size as u64,
             upcase_value_bytes,
@@ -1307,7 +1325,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::EXTEND,
-            rec::name(rec::EXTEND, cluster_size),
+            rec::name(rec::EXTEND, cluster_size).expect("known rec_num"),
             true,
             0,
             0,
@@ -1316,7 +1334,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::EXTEND, rec_bytes)?;
         sys_entries.push((
             rec::EXTEND,
-            rec::name(rec::EXTEND, cluster_size),
+            rec::name(rec::EXTEND, cluster_size).expect("known rec_num"),
             true,
             0,
             0,
@@ -1339,7 +1357,13 @@ pub fn format_filesystem(
     // vs ours = 0x30 bytes (just the LAST sentinel).
     {
         let index_block_size: u32 = 4096;
-        sys_entries.push((rec::ROOT, rec::name(rec::ROOT, cluster_size), true, 0, 0));
+        sys_entries.push((
+            rec::ROOT,
+            rec::name(rec::ROOT, cluster_size).expect("known rec_num"),
+            true,
+            0,
+            0,
+        ));
         sys_entries.sort_by(|a, b| collate_file_name(a.1, b.1));
 
         // Every system $FILE_NAME's parent is the root directory at

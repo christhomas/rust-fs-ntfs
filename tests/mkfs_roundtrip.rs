@@ -142,18 +142,18 @@ fn format_and_parse_back() {
     assert_eq!(
         names,
         vec![
-            rec::name(rec::ATTRDEF, 4096),
-            rec::name(rec::BADCLUS, 4096),
-            rec::name(rec::BITMAP, 4096),
-            rec::name(rec::BOOT, 4096),
-            rec::name(rec::EXTEND, 4096),
-            rec::name(rec::LOGFILE, 4096),
-            rec::name(rec::MFT, 4096),
-            rec::name(rec::MFTMIRR, 4096),
-            rec::name(rec::SECURE, 4096),
-            rec::name(rec::UPCASE, 4096),
-            rec::name(rec::VOLUME, 4096),
-            rec::name(rec::ROOT, 4096),
+            rec::name(rec::ATTRDEF, 4096).expect("known rec_num"),
+            rec::name(rec::BADCLUS, 4096).expect("known rec_num"),
+            rec::name(rec::BITMAP, 4096).expect("known rec_num"),
+            rec::name(rec::BOOT, 4096).expect("known rec_num"),
+            rec::name(rec::EXTEND, 4096).expect("known rec_num"),
+            rec::name(rec::LOGFILE, 4096).expect("known rec_num"),
+            rec::name(rec::MFT, 4096).expect("known rec_num"),
+            rec::name(rec::MFTMIRR, 4096).expect("known rec_num"),
+            rec::name(rec::SECURE, 4096).expect("known rec_num"),
+            rec::name(rec::UPCASE, 4096).expect("known rec_num"),
+            rec::name(rec::VOLUME, 4096).expect("known rec_num"),
+            rec::name(rec::ROOT, 4096).expect("known rec_num"),
         ],
         "root $I30 must list every system file in COLLATION_FILE_NAME order"
     );
@@ -496,7 +496,10 @@ fn extend_record_is_empty_directory() {
         .name(&mut cursor, Some(NtfsFileNamespace::Win32AndDos), None)
         .expect("rec 11 has a Win32AndDos $FILE_NAME")
         .expect("read $FILE_NAME");
-    assert_eq!(fname.name().to_string_lossy(), rec::name(rec::EXTEND, 4096));
+    assert_eq!(
+        fname.name().to_string_lossy(),
+        rec::name(rec::EXTEND, 4096).expect("known rec_num")
+    );
     assert_eq!(
         fname.parent_directory_reference().file_record_number(),
         5,
