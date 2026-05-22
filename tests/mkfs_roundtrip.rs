@@ -423,11 +423,15 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
 /// `$Extend` whose parent is the root (rec 5), with the MFT-header
 /// IS_DIRECTORY flag set. Its `$I30` is *empty* (just the LAST
 /// sentinel) — Iter L 2026-05-22 verified against a freshly-formatted
-/// Windows volume that chkdsk readonly + /scan both exit 0 when
-/// $Extend's children are absent. Shipping any partial subset (e.g.
-/// $RmMetadata without the full $TxfLog + $TxfLog.blf +
-/// $TxfLogContainer.. family) drives the kernel TxF resource manager
-/// to fail (Event 136) and raises Event 55 "corruption discovered".
+/// Windows volume that **chkdsk readonly exits 0** when $Extend's
+/// children are absent. (chkdsk `/scan` still exits 13 with NTFS
+/// Event 55 "exact nature unknown" — the same baseline that pre-dated
+/// the S1..S5 work; Event 136 "TxF metadata reset" is *gone*, which
+/// is what removing the partial hierarchy bought us.) Shipping any
+/// partial subset (e.g. $RmMetadata without the full $TxfLog +
+/// $TxfLog.blf + $TxfLogContainer.. family) drives the kernel TxF
+/// resource manager to fail (Event 136) and raises Event 55
+/// "corruption discovered".
 #[test]
 fn extend_record_is_empty_directory() {
     let mut dev = MemDev::new(VOL_SIZE);
@@ -494,14 +498,37 @@ fn extend_record_is_empty_directory() {
     );
 }
 
+/// Read the MFT base offset + record size from the BPB so the
+/// zero-slot assertions below stay load-bearing if the test's
+/// cluster/record params ever drift. NTFS BPB (sector 0):
+///   * `bytes_per_sector` (u16 @ 0x0B)
+///   * `sectors_per_cluster` (u8 @ 0x0D)
+///   * `mft_lcn` (u64 @ 0x30)
+///   * `clusters_per_mft_record` (i8 @ 0x40)
+///     positive ⇒ clusters per record;
+///     negative ⇒ `record_size = 1 << -value` bytes (used when the
+///     record is smaller than one cluster).
+fn mft_layout_from_bpb(buf: &[u8]) -> (usize, usize) {
+    let bps = u16::from_le_bytes([buf[0x0B], buf[0x0C]]) as usize;
+    let spc = buf[0x0D] as usize;
+    let cluster_size = bps * spc;
+    let mut mft_lcn_bytes = [0u8; 8];
+    mft_lcn_bytes.copy_from_slice(&buf[0x30..0x38]);
+    let mft_lcn = u64::from_le_bytes(mft_lcn_bytes) as usize;
+    let cpmr = buf[0x40] as i8;
+    let record_size = if cpmr >= 0 {
+        cpmr as usize * cluster_size
+    } else {
+        1usize << (-(cpmr as i32) as u32)
+    };
+    (mft_lcn * cluster_size, record_size)
+}
+
 /// Iter L revision (was Sub-PR S4): rec 16 must be a zeroed MFT slot
-/// — Microsoft `format.com` leaves it unused (byte-corroborated
-/// against test-disks/_fpr_project.img rec 16 at file offset 0x14000,
-/// 1024 bytes of zeros). The Iter H trace showed chkdsk probing for
-/// `$Extend\$Reparse:$R:$INDEX_ALLOCATION`, but the probe is
-/// optimistic and tolerates ENOENT; populating rec 16 actually made
-/// chkdsk report rec 11's $I30 as inconsistent. See Iter L trace
-/// 2026-05-22.
+/// — populating it (with `$Reparse` as a file under `$Extend`) drove
+/// chkdsk Stage 2 to report rec 11's $I30 inconsistent. Microsoft
+/// `format.com`'s freshly-formatted volume also leaves rec 16
+/// unallocated. See Iter L trace 2026-05-22.
 #[test]
 fn reparse_slot_is_zeroed() {
     let mut dev = MemDev::new(VOL_SIZE);
@@ -515,17 +542,11 @@ fn reparse_slot_is_zeroed() {
     )
     .expect("format_filesystem");
 
-    // Rec 16 lives at MFT-file offset = mft_lcn * cluster_size +
-    // 16 * record_size. With cluster=4096 and record=4096, MFT starts
-    // at LCN 4 (file offset 0x4000) so rec 16 sits at 0x14000. The
-    // whole slot must be zero bytes — no FILE magic, no attributes.
-    let mft_offset_rec16: usize = 0x14000;
-    let record_size: usize = 4096;
+    let (mft_offset, record_size) = mft_layout_from_bpb(&dev.buf);
+    let rec16 = mft_offset + 16 * record_size;
     assert!(
-        dev.buf[mft_offset_rec16..mft_offset_rec16 + record_size]
-            .iter()
-            .all(|&b| b == 0),
-        "rec 16 must be a zeroed MFT slot (matches MS reference)"
+        dev.buf[rec16..rec16 + record_size].iter().all(|&b| b == 0),
+        "rec 16 must be a zeroed MFT slot (BPB-derived offset {rec16:#x})"
     );
 }
 
@@ -534,8 +555,10 @@ fn reparse_slot_is_zeroed() {
 /// after Iter L (2026-05-22) trace showed shipping a partial TxF
 /// hierarchy at format time drove the kernel TxF resource manager to
 /// fail to start (NTFS Event 136), surfacing Event 55 "corruption
-/// discovered" and chkdsk /scan exit 13. Empty $Extend = clean
-/// chkdsk readonly + /scan.
+/// discovered" and chkdsk /scan exit 13. Empty $Extend restores
+/// **readonly chkdsk** to exit 0; `/scan` still reports Event 55
+/// only (no Event 136) — Event 55 is the original "exact nature
+/// unknown" baseline that pre-dated the S1..S5 work.
 #[test]
 fn extend_child_slots_17_19_are_zeroed() {
     let mut dev = MemDev::new(VOL_SIZE);
@@ -549,13 +572,12 @@ fn extend_child_slots_17_19_are_zeroed() {
     )
     .expect("format_filesystem");
 
-    // MFT starts at LCN 4 = file offset 0x4000 with cluster_size=4096
-    // and record_size=4096. Slots 17/18/19 live at +0x11000/+0x12000/+0x13000.
+    let (mft_offset, record_size) = mft_layout_from_bpb(&dev.buf);
     for rec in 17u32..=19u32 {
-        let off = 0x4000usize + (rec as usize) * 4096;
+        let off = mft_offset + (rec as usize) * record_size;
         assert!(
-            dev.buf[off..off + 4096].iter().all(|&b| b == 0),
-            "rec {rec} must be a zeroed MFT slot at offset {off:#x}"
+            dev.buf[off..off + record_size].iter().all(|&b| b == 0),
+            "rec {rec} must be a zeroed MFT slot (BPB-derived offset {off:#x})"
         );
     }
 }

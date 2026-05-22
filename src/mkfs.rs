@@ -175,16 +175,22 @@ fn sd_for_system_record(rec_num: u32) -> &'static [u8] {
     }
 }
 
-/// Win32 + DOS namespace value for `$FILE_NAME` (MS-FSCC §2.4.4).
-/// Used on every name we currently ship: root, the canonical 0..10
-/// system files, and `$Extend` itself. All these names fit DOS 8.3.
+/// `$FILE_NAME` namespace values (MS-FSCC §2.4.4).
 ///
-/// Any future `$Extend` descendant we add will need `POSIX` (0)
-/// instead — Iter L 2026-05-22 byte truth (clean Windows-format
-/// reference) showed every `$Extend` child uses POSIX namespace, and
-/// shipping an 11-char name like `$RmMetadata` with `WIN32_DOS`
-/// makes chkdsk Stage 2 reject it ("An invalid filename X (11) was
-/// found in directory B").
+/// * `WIN32_DOS` (3) is used on every name we currently ship: root,
+///   the canonical 0..10 system files, and `$Extend` itself. All
+///   these names fit DOS 8.3.
+/// * `POSIX` (0) is the value any future `$Extend` descendant must
+///   pass to `write_file_name` / `build_file_name_stream` — Iter L
+///   2026-05-22 byte truth (clean Windows-format reference) showed
+///   every `$Extend` child uses POSIX namespace, and shipping an
+///   11-char name like `$RmMetadata` with `WIN32_DOS` makes chkdsk
+///   Stage 2 reject it ("An invalid filename X (11) was found in
+///   directory B"). Defined here (despite no current call site) so
+///   the rule documented above is self-enforcing at the call site
+///   the day we re-introduce those records.
+#[allow(dead_code)] // Reserved for future $Extend descendants; see docstring above.
+const NAMESPACE_POSIX: u8 = 0;
 const NAMESPACE_WIN32_DOS: u8 = 3;
 
 /// MFT record numbers we populate (must match NTFS reservations).
@@ -1284,9 +1290,9 @@ fn build_system_record(
     extra_attrs: &[Vec<u8>],
 ) -> Result<Vec<u8>, String> {
     // Default parent for slots 0..11 is the root directory (rec 5,
-    // seq 5). Records nested under another system directory (e.g.
-    // `$Extend\$Reparse` at rec 16, parent = rec 11) use the
-    // `_with_parent` variant.
+    // seq 5). Records nested under another system directory use the
+    // `_with_parent` variant. None ship at format time today; future
+    // `$Extend` descendants would be the typical caller.
     build_system_record_with_parent(
         layout,
         record_number,
