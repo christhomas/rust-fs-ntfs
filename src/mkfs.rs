@@ -57,13 +57,6 @@ const COLLATION_NTOFS_SECURITY_HASH: u32 = 0x12;
 // `COLLATION_NTOFS_ULONG = 0x10` per the same source. Used by
 // $SII and by `$Quota:$Q` and `$Quota:$O` (not relevant at S1).
 const COLLATION_NTOFS_ULONG: u32 = 0x10;
-// `COLLATION_NTOFS_ULONGS = 0x13` — collation rule for view indexes
-// keyed by an *array* of u32s (compared lexicographically). Used by
-// `$Extend\$Reparse:$R`, whose key is `{reparse_tag (u32),
-// file_record (u64 packed as two u32s)}`. Cite: Windows Internals 7e
-// ch. "NTFS On-Disk Structure" and MS-FSCC §2.4.9 collation rules. No
-// GPL'd NTFS source consulted.
-const COLLATION_NTOFS_ULONGS: u32 = 0x13;
 
 // ---------------------------------------------------------------------------
 // $SECURITY_DESCRIPTOR (0x50) blobs for system MFT records.
@@ -167,26 +160,31 @@ const SD_ROOT_DIR: &[u8] = &[
 const LOGFILE_CANONICAL_12K: &[u8] = include_bytes!("logfile-canonical-12k.bin");
 
 /// Pick the canonical SD blob for a given system MFT record.
+/// $Volume (3), $Secure (9), $Extend (11) — writable system files (the
+/// SYSFILE_RW descriptor); all others get the read-only variant. Sub-PR
+/// S3 restored rec 11 as a directory shell with an empty `$I30`; Iter L
+/// (2026-05-22) chkdsk-trace truth showed shipping any $Extend children
+/// at format time drives the kernel TxF resource manager to fail to
+/// start (Event 136), surfacing Event 55 "corruption discovered"
+/// + chkdsk /scan exit 13. So `$Extend` stays empty here.
 fn sd_for_system_record(rec_num: u32) -> &'static [u8] {
     match rec_num {
         rec::ROOT => SD_ROOT_DIR,
-        // $Volume(3), $Secure(9), $Extend(11) — writable system files.
-        // The §2.8 "rec 11 unwritten" decision (chkdsk-improvement-findings.md)
-        // is superseded by Iter H (§6.9): chkdsk /scan opens
-        // $Extend\$Reparse and $Extend\$RmMetadata\$TxfLog\$Tops, which
-        // requires $Extend to exist as a directory so the recursion has
-        // a parent to descend through. Sub-PR S3 restores rec 11 as a
-        // small directory with an empty $I30; S4/S5 will add the
-        // children chkdsk probes for.
-        // $Reparse (rec 16, Sub-PR S4) ships under $Extend as a
-        // writable system file. Reusing SD_SYSFILE_RW keeps the
-        // security_id 0x100 reference path (rec → $SDS) intact.
-        rec::VOLUME | rec::SECURE | rec::EXTEND | rec::REPARSE => SD_SYSFILE_RW,
+        rec::VOLUME | rec::SECURE | rec::EXTEND => SD_SYSFILE_RW,
         _ => SD_SYSFILE_RO,
     }
 }
 
-/// Win32 + DOS namespace value for $FILE_NAME.
+/// Win32 + DOS namespace value for `$FILE_NAME` (MS-FSCC §2.4.4).
+/// Used on every name we currently ship: root, the canonical 0..10
+/// system files, and `$Extend` itself. All these names fit DOS 8.3.
+///
+/// Any future `$Extend` descendant we add will need `POSIX` (0)
+/// instead — Iter L 2026-05-22 byte truth (clean Windows-format
+/// reference) showed every `$Extend` child uses POSIX namespace, and
+/// shipping an 11-char name like `$RmMetadata` with `WIN32_DOS`
+/// makes chkdsk Stage 2 reject it ("An invalid filename X (11) was
+/// found in directory B").
 const NAMESPACE_WIN32_DOS: u8 = 3;
 
 /// MFT record numbers we populate (must match NTFS reservations).
@@ -208,11 +206,14 @@ mod rec {
     // records — see build_reserved_placeholder + the loop in
     // format_filesystem.
     //
-    // Slot 16 is the first slot past the canonical 0..15 system range
-    // and is where Sub-PR S4 places `$Extend\$Reparse` (chkdsk's
-    // Iter H Procmon trace at chkdsk-improvement-findings.md §6.9
-    // shows /scan opens `$Extend\$Reparse:$R:$INDEX_ALLOCATION`).
-    pub const REPARSE: u32 = 16;
+    // Slots 16+ are LEFT FREE (zeroed MFT slots, MFT bitmap bit 0).
+    // Iter L (2026-05-22) verified against a freshly-formatted Windows
+    // volume that $Extend's children ($Quota, $ObjId, $Reparse,
+    // $RmMetadata, …) are created lazily by the NT kernel on first
+    // need; provisioning them at format time drives the kernel TxF
+    // resource manager to fail to start (Event 136) and chkdsk /scan
+    // exits 13 ("must be fixed offline"). Empty $Extend = clean
+    // chkdsk readonly + /scan.
 }
 
 /// Format an NTFS volume in place over a [`BlockIo`].
@@ -513,12 +514,16 @@ pub fn format_filesystem(
         )?;
         let bitmap_value_size = mft_records_capacity.div_ceil(8) as usize;
         // Slots 0..10 are the canonical system files; slot 11 is $Extend
-        // (Sub-PR S3); slots 12..15 are reserved-slot placeholders (see
-        // build_reserved_placeholder); slot 16 is $Reparse (Sub-PR S4,
-        // parented to $Extend at rec 11). All slots ship IN_USE so
-        // chkdsk's Stage 1 MFT walk sees a contiguous in-use run.
+        // (Sub-PR S3, empty $I30 after Iter L); slots 12..15 are
+        // reserved-slot placeholders (see build_reserved_placeholder).
+        // Slots 16+ are LEFT FREE — Iter L 2026-05-22 byte truth (clean
+        // Windows-format reference + chkdsk /scan exit 0) shows
+        // shipping any $Extend children at format time drives the
+        // kernel TxF resource manager to fail. Marking a free slot
+        // as in-use while it carries zero bytes also raises chkdsk's
+        // "master file table's (MFT) BITMAP attribute is incorrect".
         let mut allocated: Vec<u32> = (0u32..=10u32).collect();
-        for slot in 11..mft_records_capacity.min(17) as u32 {
+        for slot in 11..mft_records_capacity.min(16) as u32 {
             allocated.push(slot);
         }
         let mft_bitmap_value = make_mft_internal_bitmap(bitmap_value_size, &allocated);
@@ -1024,94 +1029,30 @@ pub fn format_filesystem(
         ));
     }
 
-    // record 16: $Extend\$Reparse — empty `$R` view-index file.
+    // record 11: $Extend — directory shell with an *empty* `$I30`.
     //
-    // Iter H findings (chkdsk-improvement-findings.md §6.9, 2026-05-21):
-    // chkdsk /scan opens `$Extend\$Reparse:$R:$INDEX_ALLOCATION`. To
-    // reach that named stream chkdsk's NT-path walker must descend
-    // `$Extend` (rec 11, restored in S3) and resolve `$Reparse` to a
-    // real MFT record. Sub-PR S4 places that record here at slot 16
-    // — the first slot after the canonical 0..15 system range — so
-    // the recursion has a parseable target. The volume ships no
-    // reparse points, so the `$R` view-index is empty (header + LAST
-    // sentinel only).
-    //
-    // Layout: $STD_INFO + $FILE_NAME ("$Reparse" → $Extend rec 11) +
-    // $SD (RW) + named $INDEX_ROOT "$R" (empty view-index,
-    // indexed_attr_type=0, collation=COLLATION_NTOFS_ULONGS).
-    //
-    // No separate `$DATA` stream is emitted: the Iter H trace shows
-    // chkdsk opens `$Extend\$Reparse:$R:$INDEX_ALLOCATION`, not
-    // `$Extend\$Reparse:$R` directly, so the named `$INDEX_ROOT`
-    // alone is sufficient. The view-index `$INDEX_ALLOCATION` only
-    // materialises when entries spill out of `$INDEX_ROOT`; an empty
-    // index has no `$INDEX_ALLOCATION` and chkdsk tolerates that
-    // (same pattern as `$Secure:$SDH`/`$SII` after S1+S2).
-    {
-        let r_name: [u16; 2] = ['$' as u16, 'R' as u16];
-        let r_index_root = build_empty_named_index_root_attr(
-            3,
-            &r_name,
-            // View-index: no per-key $FILE_NAME-style attribute behind
-            // the keys, so indexed_attr_type = 0 (same as $SDH/$SII).
-            0,
-            COLLATION_NTOFS_ULONGS,
-            4096,
-            cluster_size,
-        );
-        let rec_bytes = build_system_record_with_parent(
-            &mft_record_layout,
-            rec::REPARSE,
-            rec::EXTEND,
-            "$Reparse",
-            false,
-            0,
-            0,
-            &[r_index_root],
-        )?;
-        place_record(&mut mft_buf, rs, rec::REPARSE, rec_bytes)?;
-    }
-
-    // record 11: $Extend — directory shell with `$I30` listing
-    // `$Reparse` (rec 16, Sub-PR S4).
-    //
-    // Iter H findings (chkdsk-improvement-findings.md §6.9, 2026-05-21):
-    // chkdsk /scan opens $Extend\$Reparse:$R:$INDEX_ALLOCATION and
-    // $Extend\$RmMetadata\$TxfLog\$Tops:$T. Both require $Extend to
-    // exist as a directory so the recursion can descend through it.
-    //
-    // §2.8's "leave rec 11 unwritten" was correct *at the time* — before
-    // chkdsk's child-recursion was known — but Sub-PR S3 restored
-    // rec 11 as a small directory with an empty $I30; Sub-PR S4 now
-    // fills in `$Reparse` as the first child. `$RmMetadata` lands in
-    // S5.
+    // Iter L finding (2026-05-22, byte-diff + chkdsk trace against
+    // `windows-fresh-256m.bin`, a freshly-`format.com`'d 256 MiB NTFS
+    // volume): chkdsk readonly + /scan exit 0 on a Windows fresh
+    // volume in which `$Extend` is a directory whose $I30 enumerates
+    // children populated lazily by the NT kernel ($Quota, $ObjId,
+    // $Reparse, $RmMetadata, …). Shipping any of those *incompletely*
+    // (e.g. $RmMetadata\$TxfLog\$Tops without $TxfLog.blf + the two
+    // $TxfLogContainer files) drives the kernel TxF resource manager
+    // to fail to start (Event 136), which in turn raises Event 55
+    // ("corruption discovered, exact nature unknown") and chkdsk
+    // /scan exit 13. Shipping NONE of them — leaving $Extend's $I30
+    // empty — lets the kernel build the hierarchy lazily on first
+    // need and keeps both chkdsk readonly *and* /scan clean.
     //
     // Layout: $STD_INFO + $FILE_NAME ("$Extend" → root) + $SD (RW) +
-    // $INDEX_ROOT '$I30' carrying one entry ($Reparse → rec 16) plus
-    // the LAST sentinel. is_dir=true sets the MFT-header IS_DIRECTORY
-    // flag (0x0002) and the $FILE_NAME.file_attributes
-    // FILE_ATTRIBUTE_DIRECTORY bit (0x10000000).
+    // $INDEX_ROOT '$I30' carrying only the LAST sentinel. is_dir=true
+    // sets the MFT-header IS_DIRECTORY flag (0x0002) and the
+    // $FILE_NAME.file_attributes FILE_ATTRIBUTE_DIRECTORY bit
+    // (0x10000000).
     {
         let index_block_size: u32 = 4096;
-
-        // $Extend is the parent of every record in its $I30. The
-        // child's $FILE_NAME stream carries parent_reference =
-        // (rec=11, seq=11); ditto for the $I30 entry stream.
-        let parent_ref = encode_file_reference(rec::EXTEND as u64, rec::EXTEND as u16);
-
-        // Skeleton $FILE_NAME stream for $Reparse (same minimal form
-        // root's $I30 ships for non-$MFT system entries: parent_ref +
-        // name only, all other fields zeroed). See the rec 5 builder
-        // below for the reference.
-        let reparse_stream = build_skeleton_fn_stream(parent_ref, "$Reparse")?;
-        let reparse_entry = build_index_entry(
-            encode_file_reference(rec::REPARSE as u64, rec::REPARSE as u16),
-            &reparse_stream,
-            false,
-        );
-
         let mut entries_blob: Vec<u8> = Vec::new();
-        entries_blob.extend_from_slice(&reparse_entry);
         entries_blob.extend_from_slice(&build_index_entry(0, &[], true));
         let index_root =
             build_populated_index_root_attr(3, index_block_size, cluster_size, &entries_blob);
@@ -1127,6 +1068,12 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::EXTEND, rec_bytes)?;
         sys_entries.push((rec::EXTEND, "$Extend", true, 0, 0));
     }
+
+    // Iter L: records 16..19 are intentionally LEFT as zeroed MFT
+    // slots. Windows fresh format puts no children directly at these
+    // slots — see the comment in `mod rec` above for the full Iter L
+    // rationale (TxF Event 136 + Event 55 if $RmMetadata machinery is
+    // shipped partial). The MFT bitmap below excludes them.
 
     // record 5: root directory "." — built AFTER rec 0..4 and rec 6..11
     // so we have every system file's name + $DATA size to emit as
@@ -1167,6 +1114,7 @@ pub fn format_filesystem(
                     true,
                     alloc,
                     real,
+                    NAMESPACE_WIN32_DOS,
                 )?
             } else {
                 build_skeleton_fn_stream(parent_ref, name)?
@@ -1461,6 +1409,7 @@ fn build_system_record_with_parent(
         true,
         fn_data_alloc,
         fn_data_real,
+        NAMESPACE_WIN32_DOS,
     )?;
 
     // $SECURITY_DESCRIPTOR (0x50) — required on every system MFT record.
@@ -1702,6 +1651,7 @@ fn write_file_name(
     is_system: bool,
     data_alloc: u64,
     data_real: u64,
+    namespace: u8,
 ) -> Result<usize, String> {
     let utf16: Vec<u16> = name.encode_utf16().collect();
     if utf16.is_empty() || utf16.len() > 255 {
@@ -1760,7 +1710,7 @@ fn write_file_name(
     rec[v + 56..v + 60].copy_from_slice(&fa.to_le_bytes());
     rec[v + 60..v + 64].copy_from_slice(&0u32.to_le_bytes());
     rec[v + 64] = utf16.len() as u8;
-    rec[v + 65] = NAMESPACE_WIN32_DOS;
+    rec[v + 65] = namespace;
     for (i, c) in utf16.iter().enumerate() {
         let off = v + 66 + i * 2;
         rec[off..off + 2].copy_from_slice(&c.to_le_bytes());
@@ -1843,104 +1793,6 @@ fn build_resident_named(attr_type: u32, attr_id: u16, name_utf16: &[u16], value:
     if !value.is_empty() {
         buf[value_offset..value_offset + value.len()].copy_from_slice(value);
     }
-    buf
-}
-
-/// Build an EMPTY named `$INDEX_ROOT` view-index attribute (header
-/// only, no entries beyond the END sentinel). Used at S1 for
-/// `$Secure:$SDH` and `$Secure:$SII` — the indexes exist so the
-/// streams are openable, but have no entries yet (S2 populates them
-/// alongside `$SDS`).
-///
-/// INDEX_ROOT value layout (16-byte index-root header +
-/// 16-byte INDEX_HEADER + entries):
-///   +0x00 indexed_attr_type   u32   0 for view-indexes (no per-key
-///                                   $FILE_NAME-style attribute behind
-///                                   the keys)
-///   +0x04 collation_rule      u32
-///   +0x08 index_block_size    u32   (bytes)
-///   +0x0C clusters_per_index_block u8 (see comment in
-///         build_populated_index_root_attr for encoding)
-///   +0x0D..0x10 padding (3 bytes, zero)
-///   +0x10 first_entry_offset  u32   = 16 (entries start right after
-///                                   this header)
-///   +0x14 total_size_of_entries u32 = 16 + sizeof(end_entry) (= 16+16)
-///   +0x18 allocated_size_of_entries u32 = same as total_size_of_entries
-///   +0x1C flags                u8   = 0 (small-index, no children)
-///   +0x1D..0x20 padding (3 bytes, zero)
-///   +0x20 END entry (16 bytes: reference=0, entry_len=0x10,
-///                    stream_len=0, flags=0x02)
-// Used by Sub-PR S4 for `$Extend\$Reparse:$R` (empty view-index on
-// a volume with no reparse points). S1 originally used this for
-// empty `$SDH`/`$SII`; S2 swapped those to the populated variant.
-fn build_empty_named_index_root_attr(
-    attr_id: u16,
-    name_utf16: &[u16],
-    indexed_attr_type: u32,
-    collation: u32,
-    index_block_size: u32,
-    cluster_size: u32,
-) -> Vec<u8> {
-    // 16 byte END index entry (file_reference=0, entry_len=0x10,
-    // stream_len=0, flags=0x02 LAST).
-    let mut end_entry = [0u8; 16];
-    end_entry[0..8].copy_from_slice(&0u64.to_le_bytes());
-    end_entry[8..10].copy_from_slice(&0x0010u16.to_le_bytes());
-    end_entry[10..12].copy_from_slice(&0u16.to_le_bytes());
-    end_entry[12..16].copy_from_slice(&0x00000002u32.to_le_bytes());
-
-    let header_size = 16usize + 8usize; // generic + resident
-    let name_offset = header_size;
-    let name_bytes = name_utf16.len() * 2;
-    let value_offset = align8(name_offset + name_bytes);
-    let ir_value_size = 16 + 16 + end_entry.len(); // ir_hdr + idx_hdr + END
-    let attr_length = align8(value_offset + ir_value_size);
-
-    let mut buf = vec![0u8; attr_length];
-    buf[0..4].copy_from_slice(&ATTR_INDEX_ROOT.to_le_bytes());
-    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
-    buf[8] = 0;
-    buf[9] = name_utf16.len() as u8;
-    buf[10..12].copy_from_slice(&(name_offset as u16).to_le_bytes());
-    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
-    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
-    buf[16..20].copy_from_slice(&(ir_value_size as u32).to_le_bytes());
-    buf[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes());
-    buf[22] = 0;
-    buf[23] = 0;
-
-    for (i, c) in name_utf16.iter().enumerate() {
-        let off = name_offset + i * 2;
-        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
-    }
-
-    let v = value_offset;
-    buf[v..v + 4].copy_from_slice(&indexed_attr_type.to_le_bytes());
-    buf[v + 4..v + 8].copy_from_slice(&collation.to_le_bytes());
-    buf[v + 8..v + 12].copy_from_slice(&index_block_size.to_le_bytes());
-    // Same cpib encoding as build_populated_index_root_attr (see the
-    // long-form comment there for the byte-diff corroboration). $SDH
-    // and $SII never grow past INDEX_ROOT in the empty case, so the
-    // value is only consulted if a future $INDEX_ALLOCATION is added
-    // (sub-PR S2). Keep it consistent here so byte-diff against
-    // reference doesn't flag the field.
-    let cpib_byte: u8 = if cluster_size <= index_block_size {
-        (index_block_size / cluster_size) as u8
-    } else {
-        (index_block_size / 512) as u8
-    };
-    buf[v + 12] = cpib_byte;
-
-    let ih = v + 16;
-    buf[ih..ih + 4].copy_from_slice(&16u32.to_le_bytes()); // first_entry_offset
-    let used = 16u32 + end_entry.len() as u32;
-    buf[ih + 4..ih + 8].copy_from_slice(&used.to_le_bytes()); // total_size_of_entries
-    buf[ih + 8..ih + 12].copy_from_slice(&used.to_le_bytes()); // allocated_size_of_entries
-                                                               // flags byte at ih + 12 stays 0 (SMALL_INDEX / no children).
-
-    let entries_at = ih + 16;
-    buf[entries_at..entries_at + end_entry.len()].copy_from_slice(&end_entry);
-
     buf
 }
 
@@ -2103,6 +1955,7 @@ fn build_file_name_stream(
     is_system: bool,
     data_alloc: u64,
     data_real: u64,
+    namespace: u8,
 ) -> Result<Vec<u8>, String> {
     let utf16: Vec<u16> = name.encode_utf16().collect();
     if utf16.is_empty() || utf16.len() > 255 {
@@ -2126,7 +1979,7 @@ fn build_file_name_stream(
     buf[56..60].copy_from_slice(&fa.to_le_bytes());
     buf[60..64].copy_from_slice(&0u32.to_le_bytes());
     buf[64] = utf16.len() as u8;
-    buf[65] = NAMESPACE_WIN32_DOS;
+    buf[65] = namespace;
     for (i, c) in utf16.iter().enumerate() {
         let off = 66 + i * 2;
         buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
