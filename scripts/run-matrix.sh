@@ -27,7 +27,10 @@
 set -uo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$repo_root"
+cd "$repo_root" || {
+    echo "[run-matrix] fatal: cannot cd to repo_root=$repo_root" >&2
+    exit 1
+}
 
 # Allow `--keep-images` to opt out of cleanup. Strip it before
 # forwarding so the harness runner doesn't see an unknown flag.
@@ -41,7 +44,12 @@ for arg in "$@"; do
 done
 
 cleanup_diskimages() {
-    local rc=$?
+    # Captures the script's about-to-exit code; cleanup runs purely
+    # for the side-effect (file deletion), then bash exits with this
+    # code on its own. We do NOT call `exit "$rc"` here — doing that
+    # inside an EXIT trap is redundant (bash exits with $? after the
+    # trap returns anyway) and previously caused a re-fire when the
+    # trap was also armed for signals.
     if [ "$keep_images" -eq 1 ]; then
         echo "[run-matrix] --keep-images set; leaving diskimages/ in place" >&2
         return
@@ -54,14 +62,18 @@ cleanup_diskimages() {
             find "$repo_root/diskimages" -maxdepth 1 -name '*.img' -type f -delete
         fi
     fi
-    # Re-emit the harness's exit code so a `set -e` caller still sees it.
-    exit "$rc"
 }
 
-# Trap on every common termination path. EXIT covers normal-exit and
-# error-exit; INT/TERM/HUP/QUIT cover signals that wouldn't otherwise
-# trigger EXIT cleanly (e.g. SIGINT during a long step).
-trap cleanup_diskimages EXIT INT TERM HUP QUIT
+# Single EXIT trap does all the work. The signal traps re-raise as
+# `exit <128 + signum>` (the conventional code for that signal), which
+# flows into the EXIT trap once. Trapping cleanup_diskimages directly
+# on signals AND on EXIT would double-fire it (PR #48 review,
+# greptile-apps[bot]).
+trap cleanup_diskimages EXIT
+trap 'exit 130' INT   # 128 + SIGINT  (2)
+trap 'exit 143' TERM  # 128 + SIGTERM (15)
+trap 'exit 129' HUP   # 128 + SIGHUP  (1)
+trap 'exit 131' QUIT  # 128 + SIGQUIT (3)
 
 # Forward to the real runner.
 bash "$repo_root/vendor/fs-test-harness/scripts/run-tests.sh" "${forwarded_args[@]+"${forwarded_args[@]}"}"
