@@ -433,7 +433,13 @@ pub fn build_file_name_index_entry(
     e[k + 56..k + 60].copy_from_slice(&fa.to_le_bytes());
     e[k + 60..k + 64].copy_from_slice(&0u32.to_le_bytes()); // ea/reparse
     e[k + FN_NAME_LENGTH_OFFSET] = utf16.len() as u8;
-    e[k + FN_NAMESPACE_OFFSET] = 3; // Win32+DOS
+    // The index entry's embedded $FILE_NAME copy must agree with the
+    // MFT record's $FILE_NAME on namespace. Hardcoding WIN32_AND_DOS
+    // here made chkdsk Stage 2 emit "Index entry X in index $I30 of
+    // file M is incorrect" for any non-8.3 user name (matrix scenario
+    // mac-format-mac-write-win-repeat-mount-3-win-chkdsk 2026-05-23,
+    // after the MFT-side namespace fix landed).
+    e[k + FN_NAMESPACE_OFFSET] = crate::record_build::fn_namespace_for(name);
     for (i, c) in utf16.iter().enumerate() {
         let off = k + FN_NAME_OFFSET + i * 2;
         e[off..off + 2].copy_from_slice(&c.to_le_bytes());
