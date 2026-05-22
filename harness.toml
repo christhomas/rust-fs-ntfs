@@ -68,8 +68,14 @@ packages = []
 # Allocate an empty {scenario.volume_params.size_mib}-MiB file at
 # {scenario.image} on the host. Equivalent to what tests/matrix.rs
 # currently does inline before each mac:format step.
+#
+# Images live under `diskimages/` (per scenario.image, which we
+# committed-prefix in test-matrix.json) — the `mkdir -p` ensures the
+# directory exists on a clean checkout. Cleanup of the directory's
+# contents happens in `scripts/run-matrix.sh` via an EXIT trap, so a
+# Ctrl-C or test failure still wipes the .img files.
 host = "host"
-command = "dd if=/dev/zero of={scenario.image} bs=1m count={scenario.volume_params.size_mib} status=none"
+command = "mkdir -p \"$(dirname {scenario.image})\" && dd if=/dev/zero of={scenario.image} bs=1m count={scenario.volume_params.size_mib} status=none"
 expect_exit = 0
 
 [ops.mac-format]
