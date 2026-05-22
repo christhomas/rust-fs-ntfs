@@ -60,9 +60,45 @@ const ATTR_FILE_NAME: u32 = 0x30;
 const ATTR_DATA: u32 = 0x80;
 const ATTR_END_MARKER: u32 = 0xFFFF_FFFF;
 
-/// Namespace for a synthesized $FILE_NAME. Value 3 = "Win32 + DOS" (most
-/// compatible — Windows treats one entry as both the Win32 and DOS name).
+/// `$FILE_NAME.namespace` values per MS-FSCC §2.4.4. Picking the
+/// wrong value for a given name is what chkdsk reports as
+/// "An invalid filename X (N) was found in directory M / All
+/// filenames for File N are invalid / Minor file name errors"
+/// (matrix scenario `mac-format-mac-write-win-repeat-mount-3-win-chkdsk`
+/// 2026-05-23). Conventions we have to match:
+///
+/// * `POSIX` (0) — case-sensitive, no DOS alias required. We use it
+///   for long user names because it sidesteps the WIN32+DOS pairing
+///   requirement.
+/// * `WIN32` (1) — case-preserving, requires a paired DOS namespace
+///   entry with the 8.3 short name. Avoided here because we'd have
+///   to also synthesise the short name + emit a second $FILE_NAME.
+/// * `DOS` (2) — the 8.3 short name half of a WIN32+DOS pair.
+/// * `WIN32_AND_DOS` (3) — the name fits 8.3 *and* is the unique
+///   user-visible representation. Strict DOS-8.3 rule:
+///   ≤ 8 stem chars + ≤ 3 extension chars, no other dots, all
+///   chars valid in DOS short names. chkdsk rejects this namespace
+///   on names that don't fit (e.g. "persistent.txt" — 10-char stem).
+const FILE_NAME_NAMESPACE_POSIX: u8 = 0;
 const FILE_NAME_NAMESPACE_WIN32_AND_DOS: u8 = 3;
+
+/// Pick a `$FILE_NAME.namespace` for a user-supplied basename.
+/// Returns `WIN32_AND_DOS` when the name fits the DOS 8.3 envelope,
+/// `POSIX` otherwise. chkdsk Stage 2 rejects WIN32_AND_DOS on a name
+/// that doesn't fit ("An invalid filename X (N) was found in
+/// directory M"); see also `mkfs::NAMESPACE_POSIX` doc-comment which
+/// records the same rule for the system metafile path.
+pub fn fn_namespace_for(name: &str) -> u8 {
+    let (stem, ext) = match name.find('.') {
+        Some(i) => (&name[..i], &name[i + 1..]),
+        None => (name, ""),
+    };
+    if stem.chars().count() <= 8 && ext.chars().count() <= 3 && !ext.contains('.') {
+        FILE_NAME_NAMESPACE_WIN32_AND_DOS
+    } else {
+        FILE_NAME_NAMESPACE_POSIX
+    }
+}
 
 /// Build an MFT record for a regular file. Returns the clean (unfixed-up)
 /// buffer. Caller must apply fixup before writing to disk.
@@ -142,6 +178,7 @@ pub fn build_directory_record(
         &utf16,
         nt_time,
         /* is_dir */ true,
+        fn_namespace_for(name),
     );
     cursor = write_empty_index_root(&mut rec, cursor, 2, index_block_size, bytes_per_sector)?;
 
@@ -312,6 +349,7 @@ fn build_record_inner(
         &utf16,
         nt_time,
         is_dir,
+        fn_namespace_for(name),
     );
     cursor = write_empty_data(&mut rec, cursor, 2);
 
@@ -722,7 +760,7 @@ pub fn build_file_name_attribute(
     buf[v + 56..v + 60].copy_from_slice(&fa.to_le_bytes());
     buf[v + 60..v + 64].copy_from_slice(&0u32.to_le_bytes());
     buf[v + 64] = utf16.len() as u8;
-    buf[v + 65] = FILE_NAME_NAMESPACE_WIN32_AND_DOS;
+    buf[v + 65] = fn_namespace_for(name);
     for (i, c) in utf16.iter().enumerate() {
         let off = v + 66 + i * 2;
         buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
@@ -738,6 +776,7 @@ fn write_file_name(
     name_utf16: &[u16],
     nt_time: u64,
     is_dir: bool,
+    namespace: u8,
 ) -> usize {
     let header_size = 24usize;
     let key_fixed = 0x42usize; // parent_ref(8) + 4 times(32) + alloc_size(8) + real_size(8) + attr(4) + reparse/ea(4) + name_len(1) + namespace(1)
@@ -771,8 +810,8 @@ fn write_file_name(
     rec[v + 56..v + 60].copy_from_slice(&fa.to_le_bytes()); // file_attributes
     rec[v + 60..v + 64].copy_from_slice(&0u32.to_le_bytes()); // ea/reparse
     rec[v + 64] = name_utf16.len() as u8; // name_length
-    rec[v + 65] = FILE_NAME_NAMESPACE_WIN32_AND_DOS; // namespace
-                                                     // name
+    rec[v + 65] = namespace;
+    // name
     for (i, c) in name_utf16.iter().enumerate() {
         let off = v + 66 + i * 2;
         rec[off..off + 2].copy_from_slice(&c.to_le_bytes());
