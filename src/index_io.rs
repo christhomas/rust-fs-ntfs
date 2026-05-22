@@ -20,6 +20,15 @@ pub const IH_FLAG_HAS_SUBNODES: u8 = 0x01;
 /// Offsets inside `INDEX_HEADER`:
 const IH_FIRST_ENTRY_OFFSET: usize = 0;
 const IH_TOTAL_SIZE_OF_ENTRIES: usize = 4;
+/// Offset of `allocated_size_of_entries` within `INDEX_HEADER`.
+/// Spec invariant: `allocated_size >= total_size`. When we grow the
+/// $INDEX_ROOT's resident value (insert path), both fields move
+/// together — only updating `total_size` makes ntfs.sys raise
+/// Event 55 "A corruption was found in a file system index
+/// structure ... :$I30:$INDEX_ROOT" against rec 5 (Iter "Group A"
+/// trace 2026-05-23, scenario
+/// `mac-format-mkdir-set-dirty-win-chkdsk`).
+const IH_ALLOCATED_SIZE_OF_ENTRIES: usize = 8;
 
 /// Offsets inside an index entry.
 const IE_FILE_REFERENCE: usize = 0x00;
@@ -542,11 +551,18 @@ pub fn insert_entry_into_index_root_with_collation(
     // Copy the new entry in.
     record[insertion_point..insertion_point + entry_bytes.len()].copy_from_slice(entry_bytes);
 
-    // Bump total_size in INDEX_HEADER.
+    // Bump both `total_size` and `allocated_size` in INDEX_HEADER.
+    // For a resident $INDEX_ROOT every entry byte is part of the
+    // allocated region (no slack — the attribute's resident value
+    // size IS the alloc size). They must stay equal; updating only
+    // `total_size` violates the spec invariant
+    // `allocated_size >= total_size` and trips Event 55 on mount.
     let ih_start2 = attr_val_start + IR_INDEX_HEADER_OFFSET;
-    let new_total_size = (total_size + entry_bytes.len()) as u32;
+    let new_size = (total_size + entry_bytes.len()) as u32;
     record[ih_start2 + IH_TOTAL_SIZE_OF_ENTRIES..ih_start2 + IH_TOTAL_SIZE_OF_ENTRIES + 4]
-        .copy_from_slice(&new_total_size.to_le_bytes());
+        .copy_from_slice(&new_size.to_le_bytes());
+    record[ih_start2 + IH_ALLOCATED_SIZE_OF_ENTRIES..ih_start2 + IH_ALLOCATED_SIZE_OF_ENTRIES + 4]
+        .copy_from_slice(&new_size.to_le_bytes());
 
     Ok(())
 }

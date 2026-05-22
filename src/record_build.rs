@@ -145,8 +145,12 @@ pub fn build_directory_record(
     );
     cursor = write_empty_index_root(&mut rec, cursor, 2, index_block_size, bytes_per_sector)?;
 
+    // END marker is 4 bytes magic + 4 bytes attribute_length=0 — see
+    // the matching comment in `build_regular_file_record` above.
+    // chkdsk's "First free byte offset corrected" complaint also fires
+    // against new directories without the +8 inclusion.
     rec[cursor..cursor + 4].copy_from_slice(&ATTR_END_MARKER.to_le_bytes());
-    cursor += 4;
+    cursor += 8;
     rec[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4].copy_from_slice(&(cursor as u32).to_le_bytes());
 
     Ok(rec)
@@ -311,9 +315,15 @@ fn build_record_inner(
     );
     cursor = write_empty_data(&mut rec, cursor, 2);
 
-    // End marker.
+    // End marker. NTFS spec records the END marker as 4 bytes of
+    // 0xFFFFFFFF *followed by* 4 bytes of `attribute_length = 0` —
+    // the END "attribute" is technically 8 bytes total, even though
+    // only the first 4 are the magic. chkdsk reports
+    // `First free byte offset corrected in file record segment N`
+    // when `used_size` includes only the 4-byte magic. Match
+    // `mkfs::build_system_record` (cursor += 8 there).
     rec[cursor..cursor + 4].copy_from_slice(&ATTR_END_MARKER.to_le_bytes());
-    cursor += 4;
+    cursor += 8;
     let bytes_used = cursor as u32;
     rec[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4].copy_from_slice(&bytes_used.to_le_bytes());
 
@@ -688,7 +698,16 @@ pub fn build_file_name_attribute(
     buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
     buf[16..20].copy_from_slice(&(value_size as u32).to_le_bytes());
     buf[20..22].copy_from_slice(&(header_size as u16).to_le_bytes());
-    buf[22] = 0;
+    // indexed_flag = 1 on every $FILE_NAME attribute. Without this byte
+    // chkdsk reports `Attribute record (30, "") from file record
+    // segment N is corrupt` against every newly-created file/dir
+    // (matrix scenarios `mac-format-mkdir-set-dirty-win-chkdsk`,
+    // `mac-format-write-set-dirty-win-chkdsk`,
+    // `mac-format-mac-write-win-repeat-mount-3-win-chkdsk`). Same
+    // finding as `mkfs::write_file_name`'s comment, originally
+    // corroborated against `format.com`'s reference output in CI
+    // iter8 — this builder predates that fix and was missing it.
+    buf[22] = 1;
     buf[23] = 0;
 
     let v = header_size;
@@ -734,7 +753,10 @@ fn write_file_name(
     rec[at + 14..at + 16].copy_from_slice(&attr_id.to_le_bytes());
     rec[at + 16..at + 20].copy_from_slice(&(value_size as u32).to_le_bytes());
     rec[at + 20..at + 22].copy_from_slice(&(header_size as u16).to_le_bytes());
-    rec[at + 22] = 0;
+    // indexed_flag = 1: see comment on `build_file_name_attribute`
+    // above for the same fix — chkdsk reports `Attribute record (30,
+    // "") is corrupt` when it differs.
+    rec[at + 22] = 1;
     rec[at + 23] = 0;
     // Value
     let v = at + header_size;

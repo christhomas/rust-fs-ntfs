@@ -216,17 +216,129 @@ function Mount-VhdAndGetLetter {
     return "$letter"
 }
 
+# Read the partition contents out of the mounted VHD's raw device
+# and write them back over the .img file. The inverse of the byte
+# stream `Initialize-VhdFromImg` does on the way in — without this
+# the .img on the VM stays at whatever bytes it had at ship-to-vm
+# time (zeros for `win-format-*` scenarios), even though the VHD
+# wrapper now holds the win-* op's writes. The result: `ship-to-host`
+# would pull back a stale .img that doesn't reflect anything Windows
+# did, and the follow-on mac-* ops (mac-enumerate, mac-rm, …) all
+# fail on the zero-filled buffer.
+#
+# Symmetric with `Initialize-VhdFromImg`'s write loop: takes the disk
+# offline to break the volume-layer file lock, opens
+# `\\.\PhysicalDriveN` raw, seeks to the partition offset, reads
+# `(Get-Item .img).Length` bytes back into the .img, sets the disk
+# online again. Sector-aligned reads with a buffered loop.
+#
+# Idempotent for read-only ops (chkdsk readonly etc.) — the partition
+# bytes match what was streamed in, so the .img stays byte-identical.
+# We accept the wasted IO for the read-only case to keep the
+# Dismount-VhdAndCleanup contract uniform: "after this returns, the
+# .img file reflects the post-op state of the volume."
+function Sync-VhdToImg {
+    param(
+        [Parameter(Mandatory=$true)] [string]$Vhd,
+        [Parameter(Mandatory=$true)] [string]$ImagePath
+    )
+
+    # The VHD must still be attached (mounted as a disk image) for
+    # the raw \\.\PhysicalDriveN path to resolve. Callers should run
+    # this before `Dismount-VhdAndCleanup`.
+    $mountedImg = Get-DiskImage -ImagePath $Vhd -EA SilentlyContinue
+    if (-not $mountedImg -or -not $mountedImg.Attached) {
+        throw "Sync-VhdToImg: VHD not attached: $Vhd"
+    }
+    $disk = Get-Disk -Number $mountedImg.Number
+    $part = Get-Partition -DiskNumber $disk.Number |
+        Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
+    if (-not $part) {
+        throw "Sync-VhdToImg: no data partition on disk $($disk.Number)"
+    }
+    $imgSize = (Get-Item $ImagePath).Length
+    if ($part.Size -lt $imgSize) {
+        throw ("Sync-VhdToImg: partition smaller than .img " +
+               "(part=$($part.Size) img=$imgSize)")
+    }
+
+    # Same offline/raw-handle/online dance as Initialize-VhdFromImg's
+    # write phase. Without this Windows holds an exclusive volume
+    # handle that makes the raw open fail with "Access is denied."
+    Set-Disk -Number $disk.Number -IsOffline $true
+    $readFailed = $false
+    try {
+        $rawPath = "\\.\PhysicalDrive$($disk.Number)"
+        $src = [System.IO.File]::Open($rawPath, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            try {
+                $dst = [System.IO.File]::Open($ImagePath, [System.IO.FileMode]::Open,
+                    [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+                try {
+                    $src.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+                    $sectorSize = $disk.PhysicalSectorSize
+                    $bufSize = 16MB
+                    $buf = New-Object byte[] $bufSize
+                    $remaining = $imgSize
+                    while ($remaining -gt 0) {
+                        # Raw device reads must be sector-aligned; the
+                        # tail chunk reads more than `remaining` and we
+                        # only persist the first `remaining` bytes to
+                        # the .img.
+                        $request = [int][Math]::Min($bufSize, [Math]::Ceiling($remaining / $sectorSize) * $sectorSize)
+                        $n = $src.Read($buf, 0, $request)
+                        if ($n -le 0) { break }
+                        $writeLen = [int][Math]::Min($n, $remaining)
+                        $dst.Write($buf, 0, $writeLen)
+                        $remaining -= $writeLen
+                    }
+                    $dst.Flush($true)
+                } finally { $dst.Close() }
+            } catch {
+                $readFailed = $true
+                throw
+            }
+        } finally { $src.Close() }
+    } finally {
+        if ($readFailed) {
+            Set-Disk -Number $disk.Number -IsOffline $false -EA SilentlyContinue
+        } else {
+            Set-Disk -Number $disk.Number -IsOffline $false -EA Stop
+        }
+    }
+}
+
 # Tear down a VHD wrapper (best-effort dismount + remove the file).
 # `KeepImage=$true` leaves the source .img and the .vhd in place so a
 # follow-on op in the same scenario can mount them again. The final op
 # in the scenario should use KeepImage=$false (or call Remove-ScenarioImage
 # explicitly) to avoid leaving GiB-sized artefacts on the VM.
+#
+# **`SyncBack`** (default `$true`): before dismount, copy the
+# partition bytes out of `\\.\PhysicalDriveN` back to the `.img` file
+# so the `.img` reflects the post-op state of the volume. This is the
+# fix for `win-format-*` scenarios where the win-* op's writes land
+# in the VHD wrapper and never propagate to the `.img` — see
+# `Sync-VhdToImg` for the full rationale. Callers that are sure the
+# op was strictly read-only (no volume metadata updates, no
+# last-access timestamps) can pass `$false` to skip the sync IO, but
+# the default is safe-and-redundant rather than fast-and-wrong.
 function Dismount-VhdAndCleanup {
     param(
         [Parameter(Mandatory=$true)] [string]$Vhd,
         [Parameter(Mandatory=$true)] [string]$ImagePath,
-        [bool]$KeepImage = $false
+        [bool]$KeepImage = $false,
+        [bool]$SyncBack = $true
     )
+
+    if ($SyncBack) {
+        try {
+            Sync-VhdToImg -Vhd $Vhd -ImagePath $ImagePath
+        } catch {
+            Write-Warning "Sync-VhdToImg failed (continuing with dismount): $_"
+        }
+    }
 
     try {
         Get-DiskImage -ImagePath $Vhd -EA SilentlyContinue |
