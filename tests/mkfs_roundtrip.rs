@@ -132,34 +132,28 @@ fn format_and_parse_back() {
         }
         names.push(key.name().to_string_lossy());
     }
-    // Slot 9 is named `$Secure` — corroborated against a
-    // freshly-formatted Windows volume (`windows-fresh-256m.bin`,
-    // Iter M 2026-05-22 byte truth) where rec 9's $FILE_NAME reads
-    // "$Secure" and root's $I30 lists "$Secure → rec9". $Quota lives
-    // under `\$Extend` at rec 24 on a real Windows volume (and we
-    // don't ship $Extend children at format time per Iter L). An
-    // earlier comment here mis-attributed "$Quota" at slot 9 to a
-    // "NTFS 3.x convention" — that was incorrect; $Secure is the
-    // canonical name in every NTFS 3.x layout.
-    // Pull names from `rec::name()` instead of typing the strings in
-    // the test — that way a typo in the canonical table (`$Sercure`
-    // vs `$Secure`) gets caught at compile time on both sides instead
-    // of producing a green test against a broken volume.
+    // Slot 9 is named `$Secure` at this test's cluster_size = 4096.
+    // At smaller cluster sizes (512, 1024) chkdsk expects `$Quota`
+    // instead — see `mkfs::rec::name`'s docstring for the full Iter M
+    // matrix-trace rationale. Pulling the names from `rec::name()`
+    // routes both sides of this assertion through that single source
+    // of truth, so a typo / wrong-cluster-size choice can't produce
+    // a green test against a broken volume.
     assert_eq!(
         names,
         vec![
-            rec::name(rec::ATTRDEF),
-            rec::name(rec::BADCLUS),
-            rec::name(rec::BITMAP),
-            rec::name(rec::BOOT),
-            rec::name(rec::EXTEND),
-            rec::name(rec::LOGFILE),
-            rec::name(rec::MFT),
-            rec::name(rec::MFTMIRR),
-            rec::name(rec::SECURE),
-            rec::name(rec::UPCASE),
-            rec::name(rec::VOLUME),
-            rec::name(rec::ROOT),
+            rec::name(rec::ATTRDEF, 4096),
+            rec::name(rec::BADCLUS, 4096),
+            rec::name(rec::BITMAP, 4096),
+            rec::name(rec::BOOT, 4096),
+            rec::name(rec::EXTEND, 4096),
+            rec::name(rec::LOGFILE, 4096),
+            rec::name(rec::MFT, 4096),
+            rec::name(rec::MFTMIRR, 4096),
+            rec::name(rec::SECURE, 4096),
+            rec::name(rec::UPCASE, 4096),
+            rec::name(rec::VOLUME, 4096),
+            rec::name(rec::ROOT, 4096),
         ],
         "root $I30 must list every system file in COLLATION_FILE_NAME order"
     );
@@ -502,7 +496,7 @@ fn extend_record_is_empty_directory() {
         .name(&mut cursor, Some(NtfsFileNamespace::Win32AndDos), None)
         .expect("rec 11 has a Win32AndDos $FILE_NAME")
         .expect("read $FILE_NAME");
-    assert_eq!(fname.name().to_string_lossy(), rec::name(rec::EXTEND));
+    assert_eq!(fname.name().to_string_lossy(), rec::name(rec::EXTEND, 4096));
     assert_eq!(
         fname.parent_directory_reference().file_record_number(),
         5,
