@@ -645,18 +645,40 @@ pub fn format_filesystem(
 
         // $VOLUME_INFORMATION value: reserved(8) + major(1) + minor(1) + flags(2)
         //
-        // Microsoft `format.com` stamps `major=1, minor=2, flags=0x0084`
-        // (UPGRADE_ON_MOUNT | MODIFIED_BY_CHKDSK) on every fresh-format
-        // output — verified across multiple sizes in matrix runs
-        // run-20260503-015932 and run-20260503-024058. Match this
-        // byte-for-byte. Reference's volume passes `chkdsk /scan` with
-        // these values; flagging v3.1 directly causes chkdsk readonly
-        // to flag corruption (ntfs.sys does not expect a fully-upgraded
-        // volume from a fresh format).
+        // Iter M 2026-05-22: byte-diff against a freshly-formatted Windows
+        // volume (`windows-fresh-256m.bin`, chkdsk exit 0 confirmed)
+        // shows `major=3, minor=1, flags=0x0080` (MODIFIED_BY_CHKDSK).
+        // An earlier comment here claimed Microsoft `format.com` stamps
+        // `1.2 / 0x0084` (UPGRADE_ON_MOUNT | MODIFIED_BY_CHKDSK), but that
+        // was cribbed from `test-disks/_fpr_project.img`, a
+        // post-test-rollback fixture with Stage 1 corruption — NOT a
+        // clean fresh-format reference. A clean Windows fresh format
+        // stamps 3.1 directly, no upgrade-on-mount dance.
+        //
+        // Setting `UPGRADE_ON_MOUNT` on a /scan snapshot mount causes
+        // ntfs.sys to raise NTFS Event 55 "corruption discovered, exact
+        // nature unknown" because the read-only snapshot can't complete
+        // the upgrade — chkdsk /scan then exits 13 even with all stages
+        // clean (Iter M 2026-05-22 trace).
+        // $VOLUME_INFORMATION = 1.2 + MODIFIED_BY_CHKDSK (0x0080).
+        //
+        // Iter M-3 hypothesis: a freshly-formatted Windows volume sets
+        // `MODIFIED_BY_CHKDSK` because Windows runs chkdsk implicitly
+        // at format-finalize time, marking the volume as "blessed".
+        // Without that flag, ntfs.sys's mount-path appears to queue a
+        // proactive scan (NTFS Event 55 / "Force Proactive Scan" /
+        // Normal severity / Property[3]=34) on every mount of our
+        // volume — chkdsk /scan then returns exit 13 even with
+        // Stage 1/2/3 all clean.
+        //
+        // We keep major=1, minor=2 because our system records ship
+        // v1.x $STD_INFO (48 bytes); declaring 3.1 while still
+        // emitting v1.x STD_INFO introduces a separate (Critical-
+        // severity) Event 55 — Iter M-1 trace.
         let mut vi = vec![0u8; 12];
         vi[8] = 1;
         vi[9] = 2;
-        vi[10..12].copy_from_slice(&0x0084u16.to_le_bytes());
+        vi[10..12].copy_from_slice(&0x0080u16.to_le_bytes());
         let volume_info_attr = build_resident_unnamed(ATTR_VOLUME_INFORMATION, 4, &vi);
 
         // Empty $DATA at attr_id=5 to satisfy callers that look one up.
@@ -990,14 +1012,14 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::SECURE,
-            "$Quota",
+            "$Secure",
             false,
             0,
             0,
             &[empty_data, sds_data, sdh_index_root, sii_index_root],
         )?;
         place_record(&mut mft_buf, rs, rec::SECURE, rec_bytes)?;
-        sys_entries.push((rec::SECURE, "$Quota", false, 0, 0));
+        sys_entries.push((rec::SECURE, "$Secure", false, 0, 0));
     }
 
     // record 10: $UpCase
@@ -1016,6 +1038,27 @@ pub fn format_filesystem(
             (upcase_clusters as i64) - 1,
             &mp,
         )?;
+
+        // Iter M-2 2026-05-22: $UpCase:$Info named resident $DATA
+        // stream (32 bytes). A freshly-formatted Windows volume
+        // (`windows-fresh-256m.bin`, chkdsk exit 0 confirmed) carries
+        // this stream on rec 10:
+        //   +0x00 u32  total length of this stream = 0x20
+        //   +0x04 u32  reserved (0)
+        //   +0x08 u64  CRC64 of the $UpCase table content
+        //   +0x10 u8[16] reserved (zero)
+        // Our $UpCase content is byte-identical to Windows' canonical
+        // 128 KiB table (verified md5 match Iter M-2), so the same hash
+        // (0xDADC_7E77_6B1B_690C, little-endian on disk) applies. The
+        // absence of `$Info` is one of the structural divergences
+        // ntfs.sys's /scan-only checks flag as "exact nature unknown"
+        // — Event 55 raised at every mount.
+        let mut info_value = vec![0u8; 32];
+        info_value[0..4].copy_from_slice(&0x20u32.to_le_bytes());
+        info_value[8..16].copy_from_slice(&0xDADC_7E77_6B1B_690Cu64.to_le_bytes());
+        let info_name: [u16; 5] = ['$' as u16, 'I' as u16, 'n' as u16, 'f' as u16, 'o' as u16];
+        let info_attr = build_resident_named(ATTR_DATA, 4, &info_name, &info_value);
+
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::UPCASE,
@@ -1023,7 +1066,7 @@ pub fn format_filesystem(
             false,
             upcase_clusters * cluster_size as u64,
             upcase_value_bytes,
-            &[data_attr],
+            &[data_attr, info_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::UPCASE, rec_bytes)?;
         sys_entries.push((
@@ -1772,8 +1815,6 @@ fn build_resident_unnamed(attr_type: u32, attr_id: u16, value: &[u8]) -> Vec<u8>
 /// placed immediately after the 24-byte header and the value is
 /// placed after the name, both 8-aligned. The total attribute length
 /// is 8-aligned.
-#[allow(dead_code)] // Reserved for future named-stream attributes; kept
-                    // alongside `build_resident_unnamed` for symmetry.
 fn build_resident_named(attr_type: u32, attr_id: u16, name_utf16: &[u16], value: &[u8]) -> Vec<u8> {
     let header_size = 24usize;
     let name_offset = header_size;

@@ -83,11 +83,14 @@ fn format_and_parse_back() {
     assert_eq!(ntfs.cluster_size(), 4096);
     assert_eq!(ntfs.serial_number(), 0xDEADBEEF);
 
-    // Volume info: NTFS 1.2 with UPGRADE_ON_MOUNT flag set — matches
-    // what Microsoft `format.com` stamps on a fresh format. ntfs.sys
-    // rewrites this to 3.1 on first mount via UPGRADE_ON_MOUNT; mkfs
-    // intentionally produces the pre-upgrade state. See mkfs.rs's
-    // $VOLUME_INFORMATION block.
+    // Volume info: NTFS 1.2 with NO flags (no UPGRADE_ON_MOUNT).
+    // Iter M-2: keep version 1.2 to match our v1.x $STD_INFO across
+    // system records (mixing v3 in $VOLUME_INFORMATION with v1.x
+    // STD_INFO triggers ntfs.sys Event 55 "corruption discovered,
+    // exact nature unknown"). The UPGRADE_ON_MOUNT dance was a
+    // misread from a dirty fixture (`test-disks/_fpr_project.img`);
+    // a clean 1.2 volume without that flag is also acceptable to
+    // ntfs.sys.
     let vi = ntfs
         .volume_info(&mut cursor)
         .expect("read $VOLUME_INFORMATION");
@@ -129,16 +132,20 @@ fn format_and_parse_back() {
         }
         names.push(key.name().to_string_lossy());
     }
-    // Slot 9 is named `$Quota` — that's the NTFS 3.x convention
-    // Microsoft `format.com` uses ($Secure lives under \$Extend on the
-    // volume). The legacy NTFS 1.x name was `$Secure` at slot 9;
-    // chkdsk explicitly repairs that name at non-4K cluster sizes. See
-    // mkfs.rs's record-9 builder.
+    // Slot 9 is named `$Secure` — corroborated against a
+    // freshly-formatted Windows volume (`windows-fresh-256m.bin`,
+    // Iter M 2026-05-22 byte truth) where rec 9's $FILE_NAME reads
+    // "$Secure" and root's $I30 lists "$Secure → rec9". $Quota lives
+    // under `\$Extend` at rec 24 on a real Windows volume (and we
+    // don't ship $Extend children at format time per Iter L). An
+    // earlier comment here mis-attributed "$Quota" at slot 9 to a
+    // "NTFS 3.x convention" — that was incorrect; $Secure is the
+    // canonical name in every NTFS 3.x layout.
     assert_eq!(
         names,
         vec![
             "$AttrDef", "$BadClus", "$Bitmap", "$Boot", "$Extend", "$LogFile", "$MFT", "$MFTMirr",
-            "$Quota", "$UpCase", "$Volume", ".",
+            "$Secure", "$UpCase", "$Volume", ".",
         ],
         "root $I30 must list every system file in COLLATION_FILE_NAME order"
     );
@@ -148,17 +155,34 @@ fn format_and_parse_back() {
     let upcase_file = ntfs
         .file(&mut cursor, KnownNtfsFileRecordNumber::UpCase as u64)
         .expect("open $UpCase record");
-    let mut found_data = false;
+    let mut found_unnamed_data = false;
+    let mut found_info_stream = false;
     let mut attrs = upcase_file.attributes();
     while let Some(item) = attrs.next(&mut cursor) {
         let item = item.expect("attr item");
         let a = item.to_attribute().expect("to_attribute");
-        if a.ty().ok() == Some(NtfsAttributeType::Data) {
+        if a.ty().ok() != Some(NtfsAttributeType::Data) {
+            continue;
+        }
+        let name = a
+            .name()
+            .expect("attr name")
+            .to_string()
+            .expect("attr name to_string");
+        if name.is_empty() {
+            // The 128 KiB UpCase table itself.
             assert_eq!(a.value_length(), 128 * 1024);
-            found_data = true;
+            found_unnamed_data = true;
+        } else if name == "$Info" {
+            // 32-byte resident named stream (Iter M-2): carries the
+            // CRC64 of the UpCase table content + reserved zeros.
+            assert!(a.is_resident(), "$UpCase:$Info must be resident");
+            assert_eq!(a.value_length(), 32);
+            found_info_stream = true;
         }
     }
-    assert!(found_data, "$UpCase $DATA missing");
+    assert!(found_unnamed_data, "$UpCase unnamed $DATA missing");
+    assert!(found_info_stream, "$UpCase:$Info named stream missing");
 
     // Looking up a nonexistent name in the root index should not panic
     // (just return None / Err).

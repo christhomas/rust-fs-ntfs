@@ -584,9 +584,15 @@ mod tests {
 
     #[test]
     fn upgrade_flips_fresh_mkfs_volume_to_3_1_and_clears_flag() {
-        // mkfs stamps every fresh volume as 1.2 with UPGRADE_ON_MOUNT
-        // set (matches Microsoft `format.com`). Confirm the upgrade
-        // helper rewrites that to 3.1 with the flag cleared.
+        // Iter M 2026-05-22: mkfs now stamps 3.1 directly (Iter L
+        // byte-truth confirmed `format.com` does this on fresh
+        // volumes; the earlier "1.2 + UPGRADE_ON_MOUNT" claim came
+        // from a dirty fixture image and caused chkdsk /scan exit 13
+        // on snapshot mounts). The `upgrade_volume_version_io`
+        // helper still exists to cover externally-provided 1.2
+        // volumes, so this test manually downgrades a freshly-mkfs'd
+        // volume to 1.2 + UPGRADE_ON_MOUNT before exercising the
+        // upgrade.
         const SIZE: u64 = 64 * 1024 * 1024;
         let mut dev = MemDev {
             buf: vec![0u8; SIZE as usize],
@@ -601,19 +607,35 @@ mod tests {
         )
         .expect("format_filesystem");
 
-        // Pre-condition: fresh mkfs output is 1.2 + UPGRADE_ON_MOUNT.
+        // Downgrade in place: locate the flags field, then overwrite
+        // major/minor/flags with 1.2 + UPGRADE_ON_MOUNT.
+        {
+            let (flag_off, _) = locate_volume_flags_io(&mut dev).unwrap();
+            let major_off = flag_off - 2;
+            let upgrade_flags = NtfsVolumeFlags::UPGRADE_ON_MOUNT.bits();
+            let mut buf = [0u8; 4];
+            buf[0] = 1;
+            buf[1] = 2;
+            buf[2..4].copy_from_slice(&upgrade_flags.to_le_bytes());
+            FsckIo::write_all_at(&mut dev, major_off, &buf).expect("downgrade write");
+        }
+
+        // Pre-condition: downgrade succeeded — 1.2 + UPGRADE_ON_MOUNT.
         {
             let (_flag_off, flags_pre) = locate_volume_flags_io(&mut dev).unwrap();
             assert!(
                 NtfsVolumeFlags::from_bits_truncate(flags_pre)
                     .contains(NtfsVolumeFlags::UPGRADE_ON_MOUNT),
-                "fresh mkfs should set UPGRADE_ON_MOUNT"
+                "manually downgraded volume should carry UPGRADE_ON_MOUNT"
             );
         }
 
         // Apply.
         let upgraded = upgrade_volume_version_io(&mut dev).expect("upgrade");
-        assert!(upgraded, "upgrade should fire on a fresh-format volume");
+        assert!(
+            upgraded,
+            "upgrade should fire on a downgraded 1.2 + UPGRADE_ON_MOUNT volume"
+        );
 
         // Post: re-parse and verify version + flag. Scope the reader
         // so the borrow on `dev` ends before the idempotency check.
@@ -632,5 +654,47 @@ mod tests {
         // Idempotent: a second call is a no-op.
         let again = upgrade_volume_version_io(&mut dev).expect("upgrade idempotent");
         assert!(!again, "second upgrade call must be a no-op");
+    }
+
+    #[test]
+    fn fresh_mkfs_volume_is_1_2_without_upgrade_flag() {
+        // Iter M-2 2026-05-22: a fresh mkfs volume is now 1.2 with NO
+        // flags set (no UPGRADE_ON_MOUNT). This is internally
+        // consistent with our v1.x $STD_INFO across system records;
+        // mixing v3.1 in $VOLUME_INFORMATION while still emitting
+        // v1.x STD_INFO triggers ntfs.sys Event 55. Since
+        // UPGRADE_ON_MOUNT is clear, `upgrade_volume_version_io`
+        // is a no-op.
+        const SIZE: u64 = 64 * 1024 * 1024;
+        let mut dev = MemDev {
+            buf: vec![0u8; SIZE as usize],
+        };
+        format_filesystem(
+            &mut dev as &mut dyn BlockIo,
+            SIZE,
+            4096,
+            4096,
+            Some("FRSH12"),
+            Some(0xCAFEBABE),
+        )
+        .expect("format_filesystem");
+
+        {
+            let mut reader = IoReader::new(&mut dev);
+            let ntfs = Ntfs::new(&mut reader).expect("re-parse");
+            let vi = ntfs.volume_info(&mut reader).expect("read volume info");
+            assert_eq!(vi.major_version(), 1);
+            assert_eq!(vi.minor_version(), 2);
+            assert!(
+                !vi.flags().contains(NtfsVolumeFlags::UPGRADE_ON_MOUNT),
+                "fresh mkfs must NOT set UPGRADE_ON_MOUNT (Iter M-2)"
+            );
+        }
+
+        let upgraded = upgrade_volume_version_io(&mut dev).expect("upgrade");
+        assert!(
+            !upgraded,
+            "upgrade helper must be a no-op on a 1.2 volume without UPGRADE_ON_MOUNT"
+        );
     }
 }
