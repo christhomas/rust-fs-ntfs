@@ -193,8 +193,11 @@ fn sd_for_system_record(rec_num: u32) -> &'static [u8] {
 const NAMESPACE_POSIX: u8 = 0;
 const NAMESPACE_WIN32_DOS: u8 = 3;
 
-/// MFT record numbers we populate (must match NTFS reservations).
-mod rec {
+/// MFT record numbers + canonical names for the system metafiles we
+/// populate. Pair the constants with [`rec::name`] so callers never
+/// re-type the magic strings (`"$Secure"` vs `"$Sercure"` would
+/// otherwise compile fine and produce a broken volume).
+pub mod rec {
     pub const MFT: u32 = 0;
     pub const MFTMIRR: u32 = 1;
     pub const LOGFILE: u32 = 2;
@@ -220,6 +223,175 @@ mod rec {
     // resource manager to fail to start (Event 136) and chkdsk /scan
     // exits 13 ("must be fixed offline"). Empty $Extend = clean
     // chkdsk readonly + /scan.
+
+    /// Canonical NTFS name for each system MFT record (root → "."
+    /// per filesystem convention; everything else is `$Name`). This
+    /// is the single source of truth — every call site that needs
+    /// `"$Secure"` or `"$MFT"` must go through this so a typo cannot
+    /// produce a broken-but-compiling volume.
+    ///
+    /// # Rec 9: `$Secure` vs `$Quota` — the cluster-size quirk
+    ///
+    /// **`cluster_size` matters for rec 9 only.** All other system
+    /// records have a single canonical name; rec 9's name depends on
+    /// the volume's cluster size:
+    ///
+    /// | cluster_size  | rec 9 name | matrix scenarios verified |
+    /// |---------------|-----------|---------------------------|
+    /// | 512 B         | `$Quota`  | `mac-format-cluster-512`    |
+    /// | 1 KiB         | `$Quota`  | `mac-format-cluster-1k`     |
+    /// | 4 KiB         | `$Secure` | `mac-format-basic-256mib`, `windows-fresh-256m.bin` |
+    /// | 8 KiB         | `$Secure` | `mac-format-cluster-8k`     |
+    /// | 64 KiB        | `$Secure` | `mac-format-cluster-64k`    |
+    ///
+    /// The split is sharp at exactly 4 KiB.
+    ///
+    /// ## How we know
+    ///
+    /// On any `cluster_size < 4096` volume that names rec 9 `$Secure`,
+    /// chkdsk Stage 2 reports — and "auto-repairs" — the name:
+    ///
+    /// ```text
+    /// Stage 2: Examining file name linkage ...
+    /// Deleting invalid system file name $Secure (9) in directory 5.
+    /// Repairing invalid system file name $Quota (9) in directory 5.
+    /// Correcting system file name errors in file 9.
+    /// Index entry $Secure in index $I30 of file 5 is incorrect.
+    /// ```
+    ///
+    /// chkdsk has hard-coded knowledge that rec 9 must be named
+    /// `$Quota` at small cluster sizes — even though the file at
+    /// rec 9 carries the `$SDH` / `$SII` / `$SDS` streams that are
+    /// the *security-descriptor catalog*, not quota tracking. The
+    /// name is purely conventional; the on-disk contents and the
+    /// well-known record number (9) are what actually identify the
+    /// file to the NT kernel.
+    ///
+    /// ## Why this most likely exists (empirically-grounded guess)
+    ///
+    /// NTFS's well-known-record reservations have shifted across
+    /// versions:
+    ///
+    /// * NTFS 1.x (NT 3.x / NT 4.x) shipped rec 9 as `$Quota`,
+    ///   tracking per-user disk quotas. There was no centralised
+    ///   security-descriptor catalog yet — every file carried an
+    ///   inline `$SECURITY_DESCRIPTOR` attribute (rec 9 had nothing
+    ///   to do with security).
+    /// * NTFS 3.0 (Windows 2000) introduced `$Secure` at the same
+    ///   well-known slot 9 and moved every file's security
+    ///   descriptor into the new central `$SDS` catalog (referenced
+    ///   by `$STD_INFO.SecurityId`). Per-user quotas moved to
+    ///   `\$Extend\$Quota` (where the matrix's Windows-fresh dump
+    ///   does in fact find rec 24 named `$Quota`, parent rec 11
+    ///   = `$Extend`).
+    /// * Default cluster size jumped from 512 B / 1 KiB on small
+    ///   NT-era disks to 4 KiB around the NTFS 3.x transition
+    ///   (matching the typical x86 page size).
+    ///
+    /// Whoever wrote chkdsk apparently keys the rec 9 name on a
+    /// "this looks like an NTFS-1.x-era volume" heuristic, and
+    /// `cluster_size < 4096` is the heuristic they picked. Probably
+    /// because small-cluster NTFS in the wild is almost exclusively
+    /// legacy media imaged from NT-era systems, and renaming
+    /// `$Secure` → `$Quota` is what those volumes need to round-trip
+    /// through chkdsk without "corruption" complaints.
+    ///
+    /// (This is informed speculation. The chkdsk behaviour is what's
+    /// testable; the *why* is what fits the historical fingerprint.
+    /// Without ntfs.sys / chkdsk.exe PDB symbols we can't read the
+    /// actual branch, only observe its effect.)
+    ///
+    /// ## Why we pre-emptively name correctly instead of letting
+    /// ## chkdsk "auto-repair"
+    ///
+    /// chkdsk's repair is non-idempotent in the matrix sense: it
+    /// renames the file, but in doing so flips the volume's "needs
+    /// fix offline" flag and returns exit 3 / 13. The matrix
+    /// scenarios require chkdsk to **exit 0** on a freshly-formatted
+    /// volume, which means our output has to match chkdsk's
+    /// already-correct expectation byte-for-byte. So we emit
+    /// whichever name chkdsk would have rewritten *to*, depending
+    /// on cluster size.
+    ///
+    /// All non-SECURE records ignore `cluster_size`; passing it
+    /// uniformly keeps the API symmetric and makes the rec 9 quirk
+    /// hard to forget at the call site (no separate "secure name"
+    /// helper to look for).
+    ///
+    /// # Return type
+    ///
+    /// Returns `Some(&'static str)` for known system MFT records
+    /// (0..=11 minus the reserved 5/12..15 placeholders that have
+    /// no $FILE_NAME) and `None` otherwise. Callers that know they
+    /// have a constant (`rec::SECURE`, …) should `.expect("…")` or
+    /// `.unwrap()`; callers that dispatch on a `u32` read off disk
+    /// can pattern-match without crashing the process. Returning
+    /// `Option` instead of panicking keeps `pub fn name` composable
+    /// for external crates (PR #47 review).
+    pub fn name(rec_num: u32, cluster_size: u32) -> Option<&'static str> {
+        Some(match rec_num {
+            MFT => "$MFT",
+            MFTMIRR => "$MFTMirr",
+            LOGFILE => "$LogFile",
+            VOLUME => "$Volume",
+            ATTRDEF => "$AttrDef",
+            ROOT => ".",
+            BITMAP => "$Bitmap",
+            BOOT => "$Boot",
+            BADCLUS => "$BadClus",
+            SECURE => {
+                if cluster_size < 4096 {
+                    "$Quota"
+                } else {
+                    "$Secure"
+                }
+            }
+            UPCASE => "$UpCase",
+            EXTEND => "$Extend",
+            _ => return None,
+        })
+    }
+}
+
+/// Named NTFS attribute stream identifiers. These are the **named**
+/// `$DATA` / `$INDEX_ROOT` / `$INDEX_ALLOCATION` / `$BITMAP` streams
+/// we emit at format time AND read back at runtime. Centralising
+/// them here makes the spellings review-able in one place and
+/// prevents typos at call sites (both write-path `mkfs` and
+/// read-path `index_io` / `idx_block` go through this module).
+pub mod stream {
+    /// `$BadClus:$Bad` — non-resident sparse $DATA carrying the
+    /// volume's bad-cluster bitmap. Empty at fresh format.
+    pub const BAD: &str = "$Bad";
+
+    /// `$Secure:$SDS` — non-resident $DATA carrying every security
+    /// descriptor on the volume (mirrored at +0x40000).
+    pub const SDS: &str = "$SDS";
+
+    /// `$Secure:$SDH` — INDEX_ROOT (+ optional INDEX_ALLOCATION) for
+    /// the security-descriptor-by-hash view index.
+    pub const SDH: &str = "$SDH";
+
+    /// `$Secure:$SII` — INDEX_ROOT (+ optional INDEX_ALLOCATION) for
+    /// the security-descriptor-by-id view index.
+    pub const SII: &str = "$SII";
+
+    /// `$UpCase:$Info` — 32-byte resident $DATA carrying the CRC64
+    /// of the $UpCase table (Iter M-2 byte truth).
+    pub const INFO: &str = "$Info";
+
+    /// `$I30` — every directory's file-name index. Used as both the
+    /// INDEX_ROOT attribute name and the INDEX_ALLOCATION /
+    /// BITMAP / etc. stream name when the directory grows.
+    pub const I30: &str = "$I30";
+
+    /// UTF-16-LE encoding of a stream name. NTFS attribute headers
+    /// store names as raw UTF-16 code units (no NUL); this is the
+    /// one place that conversion happens, so a typo upstream can't
+    /// produce a malformed-but-compiling name buffer.
+    pub fn utf16(name: &str) -> Vec<u16> {
+        name.encode_utf16().collect()
+    }
 }
 
 /// Format an NTFS volume in place over a [`BlockIo`].
@@ -563,14 +735,20 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::MFT,
-            "$MFT",
+            rec::name(rec::MFT, cluster_size).expect("known rec_num"),
             false,
             mft_data_size,
             mft_data_size,
             &[data_attr, bitmap_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::MFT, rec_bytes)?;
-        sys_entries.push((rec::MFT, "$MFT", false, mft_data_size, mft_data_size));
+        sys_entries.push((
+            rec::MFT,
+            rec::name(rec::MFT, cluster_size).expect("known rec_num"),
+            false,
+            mft_data_size,
+            mft_data_size,
+        ));
     }
 
     // record 1: $MFTMirr  — non-resident $DATA pointing at mftmirr_lcn.
@@ -593,14 +771,20 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::MFTMIRR,
-            "$MFTMirr",
+            rec::name(rec::MFTMIRR, cluster_size).expect("known rec_num"),
             false,
             len_bytes,
             len_bytes,
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::MFTMIRR, rec_bytes)?;
-        sys_entries.push((rec::MFTMIRR, "$MFTMirr", false, len_bytes, len_bytes));
+        sys_entries.push((
+            rec::MFTMIRR,
+            rec::name(rec::MFTMIRR, cluster_size).expect("known rec_num"),
+            false,
+            len_bytes,
+            len_bytes,
+        ));
     }
 
     // record 2: $LogFile
@@ -623,14 +807,20 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::LOGFILE,
-            "$LogFile",
+            rec::name(rec::LOGFILE, cluster_size).expect("known rec_num"),
             false,
             len_bytes,
             len_bytes,
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::LOGFILE, rec_bytes)?;
-        sys_entries.push((rec::LOGFILE, "$LogFile", false, len_bytes, len_bytes));
+        sys_entries.push((
+            rec::LOGFILE,
+            rec::name(rec::LOGFILE, cluster_size).expect("known rec_num"),
+            false,
+            len_bytes,
+            len_bytes,
+        ));
     }
 
     // record 3: $Volume
@@ -645,18 +835,49 @@ pub fn format_filesystem(
 
         // $VOLUME_INFORMATION value: reserved(8) + major(1) + minor(1) + flags(2)
         //
-        // Microsoft `format.com` stamps `major=1, minor=2, flags=0x0084`
-        // (UPGRADE_ON_MOUNT | MODIFIED_BY_CHKDSK) on every fresh-format
-        // output — verified across multiple sizes in matrix runs
-        // run-20260503-015932 and run-20260503-024058. Match this
-        // byte-for-byte. Reference's volume passes `chkdsk /scan` with
-        // these values; flagging v3.1 directly causes chkdsk readonly
-        // to flag corruption (ntfs.sys does not expect a fully-upgraded
-        // volume from a fresh format).
+        // **What we actually write: `version 1.2 + flags 0x0080`**
+        // (MODIFIED_BY_CHKDSK per Tuxera public docs). This diverges
+        // from a clean Windows-fresh format (which stamps 3.1 / 0x0080)
+        // on the **version** only, for the reason below. The **flags**
+        // value matches Windows-fresh.
+        //
+        // ## Why 1.2 and not 3.1
+        //
+        // Our system records ship v1.x `$STD_INFO` (48 bytes, no
+        // SecurityId field) throughout. Declaring v3.1 in
+        // $VOLUME_INFORMATION while still emitting v1.x STD_INFO
+        // creates an internal inconsistency that ntfs.sys flags as a
+        // **Critical** Event 55 ("Force Full Chkdsk" on rec 3
+        // $Volume) on every /scan snapshot mount (Iter M-1 trace,
+        // 2026-05-22). 1.2 + v1.x STD_INFO is self-consistent; 3.1
+        // would require us to also rewrite every system record's
+        // STD_INFO to the 72-byte v3.x form (with security_id =
+        // 0x100 / 0x101) — a strictly larger change deferred to a
+        // future iteration.
+        //
+        // ## Why 0x0080 (MODIFIED_BY_CHKDSK) and not 0x0000
+        //
+        // Windows runs chkdsk implicitly at format-finalize time,
+        // marking the volume as "blessed". Without this flag,
+        // ntfs.sys's mount path queues a proactive scan (Normal-
+        // severity Event 55 / "Force Proactive Scan" /
+        // Property[3]=34) on every mount, surfacing as chkdsk /scan
+        // exit 13 even with Stage 1/2/3 all clean (Iter M-3 trace).
+        //
+        // ## Why NOT 0x0084 (UPGRADE_ON_MOUNT | MODIFIED_BY_CHKDSK)
+        //
+        // An earlier version of this code emitted 0x0084, cribbed
+        // from `test-disks/_fpr_project.img`, a post-test-rollback
+        // fixture with Stage 1 corruption — NOT a clean fresh-format
+        // reference (Iter L revelation). UPGRADE_ON_MOUNT on a /scan
+        // snapshot mount drives ntfs.sys to a Critical Event 55
+        // because the read-only snapshot can't complete the upgrade.
+        // Dropping that bit eliminated the Critical Event 55 in the
+        // Iter M-2 trace.
         let mut vi = vec![0u8; 12];
         vi[8] = 1;
         vi[9] = 2;
-        vi[10..12].copy_from_slice(&0x0084u16.to_le_bytes());
+        vi[10..12].copy_from_slice(&0x0080u16.to_le_bytes());
         let volume_info_attr = build_resident_unnamed(ATTR_VOLUME_INFORMATION, 4, &vi);
 
         // Empty $DATA at attr_id=5 to satisfy callers that look one up.
@@ -668,14 +889,20 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::VOLUME,
-            "$Volume",
+            rec::name(rec::VOLUME, cluster_size).expect("known rec_num"),
             false,
             0,
             0,
             &combined,
         )?;
         place_record(&mut mft_buf, rs, rec::VOLUME, rec_bytes)?;
-        sys_entries.push((rec::VOLUME, "$Volume", false, 0, 0));
+        sys_entries.push((
+            rec::VOLUME,
+            rec::name(rec::VOLUME, cluster_size).expect("known rec_num"),
+            false,
+            0,
+            0,
+        ));
     }
 
     // record 4: $AttrDef (canonical NTFS 3.1, 2400 bytes / 15 entries)
@@ -712,7 +939,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::ATTRDEF,
-            "$AttrDef",
+            rec::name(rec::ATTRDEF, cluster_size).expect("known rec_num"),
             false,
             attrdef_clusters * cluster_size as u64,
             attrdef_blob.len() as u64,
@@ -721,7 +948,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::ATTRDEF, rec_bytes)?;
         sys_entries.push((
             rec::ATTRDEF,
-            "$AttrDef",
+            rec::name(rec::ATTRDEF, cluster_size).expect("known rec_num"),
             false,
             attrdef_clusters * cluster_size as u64,
             attrdef_blob.len() as u64,
@@ -752,7 +979,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::BITMAP,
-            "$Bitmap",
+            rec::name(rec::BITMAP, cluster_size).expect("known rec_num"),
             false,
             bitmap_clusters * cluster_size as u64,
             value_len,
@@ -761,7 +988,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::BITMAP, rec_bytes)?;
         sys_entries.push((
             rec::BITMAP,
-            "$Bitmap",
+            rec::name(rec::BITMAP, cluster_size).expect("known rec_num"),
             false,
             bitmap_clusters * cluster_size as u64,
             value_len,
@@ -790,7 +1017,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::BOOT,
-            "$Boot",
+            rec::name(rec::BOOT, cluster_size).expect("known rec_num"),
             false,
             boot_clusters * cluster_size as u64,
             boot_value_len,
@@ -799,7 +1026,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::BOOT, rec_bytes)?;
         sys_entries.push((
             rec::BOOT,
-            "$Boot",
+            rec::name(rec::BOOT, cluster_size).expect("known rec_num"),
             false,
             boot_clusters * cluster_size as u64,
             boot_value_len,
@@ -829,7 +1056,7 @@ pub fn format_filesystem(
         let bad_mp = encode_runs(&bad_runs)?;
         let bad_attr = build_nonresident_attribute(
             ATTR_DATA,
-            Some("$Bad"),
+            Some(stream::BAD),
             4,
             bad_clusters * cluster_size as u64,
             bad_clusters * cluster_size as u64,
@@ -844,14 +1071,20 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::BADCLUS,
-            "$BadClus",
+            rec::name(rec::BADCLUS, cluster_size).expect("known rec_num"),
             false,
             0,
             0,
             &[empty_data, bad_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::BADCLUS, rec_bytes)?;
-        sys_entries.push((rec::BADCLUS, "$BadClus", false, 0, 0));
+        sys_entries.push((
+            rec::BADCLUS,
+            rec::name(rec::BADCLUS, cluster_size).expect("known rec_num"),
+            false,
+            0,
+            0,
+        ));
     }
 
     // record 9: $Secure — minimal resident stub. Real NTFS has $SDS /
@@ -886,8 +1119,8 @@ pub fn format_filesystem(
         // layout; S1 makes those three opens succeed. Index-block
         // size is 4 KiB (the same value the populated `$I30` uses).
         let empty_data = build_resident_unnamed(ATTR_DATA, 3, &[]);
-        let sdh_name: [u16; 4] = ['$' as u16, 'S' as u16, 'D' as u16, 'H' as u16];
-        let sii_name: [u16; 4] = ['$' as u16, 'S' as u16, 'I' as u16, 'I' as u16];
+        let sdh_name = stream::utf16(stream::SDH);
+        let sii_name = stream::utf16(stream::SII);
 
         // Sub-PR S2: $SDS becomes non-resident with one canonical SD
         // entry at offset 0 and its mirror at file offset 0x40000.
@@ -936,7 +1169,7 @@ pub fn format_filesystem(
         let sds_last_vcn = gap_vcn as i64;
         let sds_data = build_nonresident_attribute(
             ATTR_DATA,
-            Some("$SDS"),
+            Some(stream::SDS),
             4,
             sds_data_len,
             sds_alloc_len,
@@ -990,14 +1223,20 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::SECURE,
-            "$Quota",
+            rec::name(rec::SECURE, cluster_size).expect("known rec_num"),
             false,
             0,
             0,
             &[empty_data, sds_data, sdh_index_root, sii_index_root],
         )?;
         place_record(&mut mft_buf, rs, rec::SECURE, rec_bytes)?;
-        sys_entries.push((rec::SECURE, "$Quota", false, 0, 0));
+        sys_entries.push((
+            rec::SECURE,
+            rec::name(rec::SECURE, cluster_size).expect("known rec_num"),
+            false,
+            0,
+            0,
+        ));
     }
 
     // record 10: $UpCase
@@ -1016,19 +1255,40 @@ pub fn format_filesystem(
             (upcase_clusters as i64) - 1,
             &mp,
         )?;
+
+        // Iter M-2 2026-05-22: $UpCase:$Info named resident $DATA
+        // stream (32 bytes). A freshly-formatted Windows volume
+        // (`windows-fresh-256m.bin`, chkdsk exit 0 confirmed) carries
+        // this stream on rec 10:
+        //   +0x00 u32  total length of this stream = 0x20
+        //   +0x04 u32  reserved (0)
+        //   +0x08 u64  CRC64 of the $UpCase table content
+        //   +0x10 u8[16] reserved (zero)
+        // Our $UpCase content is byte-identical to Windows' canonical
+        // 128 KiB table (verified md5 match Iter M-2), so the same hash
+        // (0xDADC_7E77_6B1B_690C, little-endian on disk) applies. The
+        // absence of `$Info` is one of the structural divergences
+        // ntfs.sys's /scan-only checks flag as "exact nature unknown"
+        // — Event 55 raised at every mount.
+        let mut info_value = vec![0u8; 32];
+        info_value[0..4].copy_from_slice(&0x20u32.to_le_bytes());
+        info_value[8..16].copy_from_slice(&0xDADC_7E77_6B1B_690Cu64.to_le_bytes());
+        let info_name = stream::utf16(stream::INFO);
+        let info_attr = build_resident_named(ATTR_DATA, 4, &info_name, &info_value);
+
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::UPCASE,
-            "$UpCase",
+            rec::name(rec::UPCASE, cluster_size).expect("known rec_num"),
             false,
             upcase_clusters * cluster_size as u64,
             upcase_value_bytes,
-            &[data_attr],
+            &[data_attr, info_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::UPCASE, rec_bytes)?;
         sys_entries.push((
             rec::UPCASE,
-            "$UpCase",
+            rec::name(rec::UPCASE, cluster_size).expect("known rec_num"),
             false,
             upcase_clusters * cluster_size as u64,
             upcase_value_bytes,
@@ -1065,14 +1325,20 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::EXTEND,
-            "$Extend",
+            rec::name(rec::EXTEND, cluster_size).expect("known rec_num"),
             true,
             0,
             0,
             &[index_root],
         )?;
         place_record(&mut mft_buf, rs, rec::EXTEND, rec_bytes)?;
-        sys_entries.push((rec::EXTEND, "$Extend", true, 0, 0));
+        sys_entries.push((
+            rec::EXTEND,
+            rec::name(rec::EXTEND, cluster_size).expect("known rec_num"),
+            true,
+            0,
+            0,
+        ));
     }
 
     // Iter L: records 16..19 are intentionally LEFT as zeroed MFT
@@ -1091,7 +1357,13 @@ pub fn format_filesystem(
     // vs ours = 0x30 bytes (just the LAST sentinel).
     {
         let index_block_size: u32 = 4096;
-        sys_entries.push((rec::ROOT, ".", true, 0, 0));
+        sys_entries.push((
+            rec::ROOT,
+            rec::name(rec::ROOT, cluster_size).expect("known rec_num"),
+            true,
+            0,
+            0,
+        ));
         sys_entries.sort_by(|a, b| collate_file_name(a.1, b.1));
 
         // Every system $FILE_NAME's parent is the root directory at
@@ -1772,8 +2044,6 @@ fn build_resident_unnamed(attr_type: u32, attr_id: u16, value: &[u8]) -> Vec<u8>
 /// placed immediately after the 24-byte header and the value is
 /// placed after the name, both 8-aligned. The total attribute length
 /// is 8-aligned.
-#[allow(dead_code)] // Reserved for future named-stream attributes; kept
-                    // alongside `build_resident_unnamed` for symmetry.
 fn build_resident_named(attr_type: u32, attr_id: u16, name_utf16: &[u16], value: &[u8]) -> Vec<u8> {
     let header_size = 24usize;
     let name_offset = header_size;
@@ -2078,8 +2348,7 @@ fn build_populated_index_root_attr(
     buf[22] = 0;
     buf[23] = 0;
 
-    let i30: [u16; 4] = ['$' as u16, 'I' as u16, '3' as u16, '0' as u16];
-    for (i, c) in i30.iter().enumerate() {
+    for (i, c) in stream::utf16(stream::I30).iter().enumerate() {
         let off = name_offset + i * 2;
         buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
     }

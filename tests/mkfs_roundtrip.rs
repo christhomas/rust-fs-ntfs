@@ -8,7 +8,7 @@ use std::os::raw::c_int;
 use std::sync::Mutex;
 
 use fs_ntfs::block_io::BlockIo;
-use fs_ntfs::mkfs::format_filesystem;
+use fs_ntfs::mkfs::{format_filesystem, rec, stream};
 use fs_ntfs::{fs_ntfs_mkfs, FsNtfsBlockdevCfg};
 
 use ntfs::indexes::NtfsFileNameIndex;
@@ -83,11 +83,14 @@ fn format_and_parse_back() {
     assert_eq!(ntfs.cluster_size(), 4096);
     assert_eq!(ntfs.serial_number(), 0xDEADBEEF);
 
-    // Volume info: NTFS 1.2 with UPGRADE_ON_MOUNT flag set — matches
-    // what Microsoft `format.com` stamps on a fresh format. ntfs.sys
-    // rewrites this to 3.1 on first mount via UPGRADE_ON_MOUNT; mkfs
-    // intentionally produces the pre-upgrade state. See mkfs.rs's
-    // $VOLUME_INFORMATION block.
+    // Volume info: NTFS 1.2 with NO flags (no UPGRADE_ON_MOUNT).
+    // Iter M-2: keep version 1.2 to match our v1.x $STD_INFO across
+    // system records (mixing v3 in $VOLUME_INFORMATION with v1.x
+    // STD_INFO triggers ntfs.sys Event 55 "corruption discovered,
+    // exact nature unknown"). The UPGRADE_ON_MOUNT dance was a
+    // misread from a dirty fixture (`test-disks/_fpr_project.img`);
+    // a clean 1.2 volume without that flag is also acceptable to
+    // ntfs.sys.
     let vi = ntfs
         .volume_info(&mut cursor)
         .expect("read $VOLUME_INFORMATION");
@@ -129,16 +132,28 @@ fn format_and_parse_back() {
         }
         names.push(key.name().to_string_lossy());
     }
-    // Slot 9 is named `$Quota` — that's the NTFS 3.x convention
-    // Microsoft `format.com` uses ($Secure lives under \$Extend on the
-    // volume). The legacy NTFS 1.x name was `$Secure` at slot 9;
-    // chkdsk explicitly repairs that name at non-4K cluster sizes. See
-    // mkfs.rs's record-9 builder.
+    // Slot 9 is named `$Secure` at this test's cluster_size = 4096.
+    // At smaller cluster sizes (512, 1024) chkdsk expects `$Quota`
+    // instead — see `mkfs::rec::name`'s docstring for the full Iter M
+    // matrix-trace rationale. Pulling the names from `rec::name()`
+    // routes both sides of this assertion through that single source
+    // of truth, so a typo / wrong-cluster-size choice can't produce
+    // a green test against a broken volume.
     assert_eq!(
         names,
         vec![
-            "$AttrDef", "$BadClus", "$Bitmap", "$Boot", "$Extend", "$LogFile", "$MFT", "$MFTMirr",
-            "$Quota", "$UpCase", "$Volume", ".",
+            rec::name(rec::ATTRDEF, 4096).expect("known rec_num"),
+            rec::name(rec::BADCLUS, 4096).expect("known rec_num"),
+            rec::name(rec::BITMAP, 4096).expect("known rec_num"),
+            rec::name(rec::BOOT, 4096).expect("known rec_num"),
+            rec::name(rec::EXTEND, 4096).expect("known rec_num"),
+            rec::name(rec::LOGFILE, 4096).expect("known rec_num"),
+            rec::name(rec::MFT, 4096).expect("known rec_num"),
+            rec::name(rec::MFTMIRR, 4096).expect("known rec_num"),
+            rec::name(rec::SECURE, 4096).expect("known rec_num"),
+            rec::name(rec::UPCASE, 4096).expect("known rec_num"),
+            rec::name(rec::VOLUME, 4096).expect("known rec_num"),
+            rec::name(rec::ROOT, 4096).expect("known rec_num"),
         ],
         "root $I30 must list every system file in COLLATION_FILE_NAME order"
     );
@@ -148,17 +163,34 @@ fn format_and_parse_back() {
     let upcase_file = ntfs
         .file(&mut cursor, KnownNtfsFileRecordNumber::UpCase as u64)
         .expect("open $UpCase record");
-    let mut found_data = false;
+    let mut found_unnamed_data = false;
+    let mut found_info_stream = false;
     let mut attrs = upcase_file.attributes();
     while let Some(item) = attrs.next(&mut cursor) {
         let item = item.expect("attr item");
         let a = item.to_attribute().expect("to_attribute");
-        if a.ty().ok() == Some(NtfsAttributeType::Data) {
+        if a.ty().ok() != Some(NtfsAttributeType::Data) {
+            continue;
+        }
+        let name = a
+            .name()
+            .expect("attr name")
+            .to_string()
+            .expect("attr name to_string");
+        if name.is_empty() {
+            // The 128 KiB UpCase table itself.
             assert_eq!(a.value_length(), 128 * 1024);
-            found_data = true;
+            found_unnamed_data = true;
+        } else if name == stream::INFO {
+            // 32-byte resident named stream (Iter M-2): carries the
+            // CRC64 of the UpCase table content + reserved zeros.
+            assert!(a.is_resident(), "$UpCase:$Info must be resident");
+            assert_eq!(a.value_length(), 32);
+            found_info_stream = true;
         }
     }
-    assert!(found_data, "$UpCase $DATA missing");
+    assert!(found_unnamed_data, "$UpCase unnamed $DATA missing");
+    assert!(found_info_stream, "$UpCase:$Info named stream missing");
 
     // Looking up a nonexistent name in the root index should not panic
     // (just return None / Err).
@@ -230,7 +262,7 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
             .expect("attr name to_string");
         use std::io::Read;
         match (ty, name.as_str()) {
-            (NtfsAttributeType::Data, "$SDS") => {
+            (NtfsAttributeType::Data, n) if n == stream::SDS => {
                 assert!(
                     !a.is_resident(),
                     "$SDS must be non-resident at S2 (one canonical entry + mirror)"
@@ -248,7 +280,7 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
                 sds_bytes = buf;
                 seen_sds = true;
             }
-            (NtfsAttributeType::IndexRoot, "$SDH") => {
+            (NtfsAttributeType::IndexRoot, n) if n == stream::SDH => {
                 assert!(a.is_resident(), "$SDH index-root must be resident at S2");
                 let total = a.value_length() as usize;
                 let v = a.value(&mut cursor).expect("sdh value");
@@ -259,7 +291,7 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
                 sdh_value = buf;
                 seen_sdh = true;
             }
-            (NtfsAttributeType::IndexRoot, "$SII") => {
+            (NtfsAttributeType::IndexRoot, n) if n == stream::SII => {
                 assert!(a.is_resident(), "$SII index-root must be resident at S2");
                 let total = a.value_length() as usize;
                 let v = a.value(&mut cursor).expect("sii value");
@@ -464,7 +496,10 @@ fn extend_record_is_empty_directory() {
         .name(&mut cursor, Some(NtfsFileNamespace::Win32AndDos), None)
         .expect("rec 11 has a Win32AndDos $FILE_NAME")
         .expect("read $FILE_NAME");
-    assert_eq!(fname.name().to_string_lossy(), "$Extend");
+    assert_eq!(
+        fname.name().to_string_lossy(),
+        rec::name(rec::EXTEND, 4096).expect("known rec_num")
+    );
     assert_eq!(
         fname.parent_directory_reference().file_record_number(),
         5,

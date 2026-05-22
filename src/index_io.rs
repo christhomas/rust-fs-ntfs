@@ -7,6 +7,7 @@
 //! 7th ed. ch. "NTFS On-Disk Structure" and MS-FSCC.
 
 use crate::attr_io::{self, AttrType};
+use crate::mkfs::stream;
 
 /// Offsets inside `$INDEX_ROOT`'s resident value.
 /// Layout: `INDEX_ROOT_HEADER (16 bytes) + INDEX_HEADER (16 bytes) + entries…`.
@@ -64,7 +65,7 @@ pub struct IndexEntryLocation {
 /// searched here — this primitive only works for small directories
 /// whose index fits entirely in `$INDEX_ROOT`.
 pub fn find_index_entry(record: &[u8], wanted: &str) -> Result<Option<IndexEntryLocation>, String> {
-    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some("$I30"))
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
         .ok_or_else(|| "$INDEX_ROOT:$I30 not found".to_string())?;
     if !ir.is_resident {
         return Err("$INDEX_ROOT is non-resident (impossible per spec)".to_string());
@@ -145,7 +146,7 @@ pub fn find_index_entry(record: &[u8], wanted: &str) -> Result<Option<IndexEntry
 /// True if the resident `$INDEX_ROOT:$I30` has any non-LAST entries.
 /// Used by `rmdir` to verify a directory is empty.
 pub fn index_root_has_real_entries(record: &[u8]) -> Result<bool, String> {
-    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some("$I30"))
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
         .ok_or_else(|| "$INDEX_ROOT:$I30 not found".to_string())?;
     if !ir.is_resident {
         return Err("$INDEX_ROOT unexpectedly non-resident".to_string());
@@ -182,7 +183,7 @@ pub fn index_root_has_real_entries(record: &[u8]) -> Result<bool, String> {
 /// `Some(flags)` if the record contains `$INDEX_ROOT:$I30`,
 /// otherwise `None`.
 pub fn index_root_flags(record: &[u8]) -> Option<u8> {
-    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some("$I30"))?;
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))?;
     if !ir.is_resident {
         return None;
     }
@@ -326,7 +327,7 @@ pub fn remove_index_entry(
 ) -> Result<(), String> {
     let (ih_start, _ir_attr_offset) = match block_kind {
         BlockKind::IndexRoot => {
-            let ir = attr_io::find_attribute(buf, AttrType::IndexRoot, Some("$I30"))
+            let ir = attr_io::find_attribute(buf, AttrType::IndexRoot, Some(stream::I30))
                 .ok_or_else(|| "$INDEX_ROOT:$I30 missing".to_string())?;
             let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
             (
@@ -366,7 +367,7 @@ pub fn remove_index_entry(
     // For $INDEX_ROOT, also shrink the resident attribute so bytes_used
     // in the MFT record stays in sync.
     if matches!(block_kind, BlockKind::IndexRoot) {
-        let ir = attr_io::find_attribute(buf, AttrType::IndexRoot, Some("$I30"))
+        let ir = attr_io::find_attribute(buf, AttrType::IndexRoot, Some(stream::I30))
             .ok_or("$INDEX_ROOT re-find failed")?;
         let old_val_len = ir.resident_value_length.ok_or("no value_length")?;
         let new_val_len = old_val_len.saturating_sub(entry.length as u32);
@@ -462,7 +463,7 @@ pub fn insert_entry_into_index_root_with_collation(
     new_name: &str,
     upcase: Option<&crate::upcase::UpcaseTable>,
 ) -> Result<(), String> {
-    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some("$I30"))
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
         .ok_or_else(|| "$INDEX_ROOT:$I30 missing".to_string())?;
     let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
     let old_val_len = ir.resident_value_length.ok_or("no value_length")? as usize;
@@ -526,7 +527,7 @@ pub fn insert_entry_into_index_root_with_collation(
     // Recompute the attribute value start (resize shifted nothing
     // because we grew by an amount that preserves existing attr offset —
     // but compute defensively anyway).
-    let ir2 = attr_io::find_attribute(record, AttrType::IndexRoot, Some("$I30"))
+    let ir2 = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
         .ok_or("$INDEX_ROOT vanished")?;
     let val_off2 = ir2.resident_value_offset.ok_or("no value_offset")? as usize;
     let attr_val_start = ir2.attr_offset + val_off2;

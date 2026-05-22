@@ -584,9 +584,15 @@ mod tests {
 
     #[test]
     fn upgrade_flips_fresh_mkfs_volume_to_3_1_and_clears_flag() {
-        // mkfs stamps every fresh volume as 1.2 with UPGRADE_ON_MOUNT
-        // set (matches Microsoft `format.com`). Confirm the upgrade
-        // helper rewrites that to 3.1 with the flag cleared.
+        // Iter M-final 2026-05-22: a fresh mkfs volume stamps
+        // `version 1.2 + flags 0x0080` (no UPGRADE_ON_MOUNT) — see
+        // `fresh_mkfs_volume_is_1_2_with_modified_by_chkdsk_flag`
+        // for the rationale. The `upgrade_volume_version_io` helper
+        // exists to cover externally-supplied 1.2 + UPGRADE_ON_MOUNT
+        // volumes (e.g. imaged from a Windows volume mid-mount, or
+        // produced by an older mkfs that pre-dated the Iter M fix),
+        // so this test manually downgrades a freshly-mkfs'd volume
+        // before exercising the upgrade path.
         const SIZE: u64 = 64 * 1024 * 1024;
         let mut dev = MemDev {
             buf: vec![0u8; SIZE as usize],
@@ -601,19 +607,35 @@ mod tests {
         )
         .expect("format_filesystem");
 
-        // Pre-condition: fresh mkfs output is 1.2 + UPGRADE_ON_MOUNT.
+        // Downgrade in place: locate the flags field, then overwrite
+        // major/minor/flags with 1.2 + UPGRADE_ON_MOUNT.
+        {
+            let (flag_off, _) = locate_volume_flags_io(&mut dev).unwrap();
+            let major_off = flag_off - 2;
+            let upgrade_flags = NtfsVolumeFlags::UPGRADE_ON_MOUNT.bits();
+            let mut buf = [0u8; 4];
+            buf[0] = 1;
+            buf[1] = 2;
+            buf[2..4].copy_from_slice(&upgrade_flags.to_le_bytes());
+            FsckIo::write_all_at(&mut dev, major_off, &buf).expect("downgrade write");
+        }
+
+        // Pre-condition: downgrade succeeded — 1.2 + UPGRADE_ON_MOUNT.
         {
             let (_flag_off, flags_pre) = locate_volume_flags_io(&mut dev).unwrap();
             assert!(
                 NtfsVolumeFlags::from_bits_truncate(flags_pre)
                     .contains(NtfsVolumeFlags::UPGRADE_ON_MOUNT),
-                "fresh mkfs should set UPGRADE_ON_MOUNT"
+                "manually downgraded volume should carry UPGRADE_ON_MOUNT"
             );
         }
 
         // Apply.
         let upgraded = upgrade_volume_version_io(&mut dev).expect("upgrade");
-        assert!(upgraded, "upgrade should fire on a fresh-format volume");
+        assert!(
+            upgraded,
+            "upgrade should fire on a downgraded 1.2 + UPGRADE_ON_MOUNT volume"
+        );
 
         // Post: re-parse and verify version + flag. Scope the reader
         // so the borrow on `dev` ends before the idempotency check.
@@ -632,5 +654,82 @@ mod tests {
         // Idempotent: a second call is a no-op.
         let again = upgrade_volume_version_io(&mut dev).expect("upgrade idempotent");
         assert!(!again, "second upgrade call must be a no-op");
+    }
+
+    /// Iter M-final 2026-05-22: a fresh mkfs volume stamps
+    /// `$VOLUME_INFORMATION` = `version 1.2 + flags 0x0080`. Each
+    /// half of that has its own rationale and its own failure mode
+    /// if changed — both deserve a positive assertion here:
+    ///
+    /// * **`version = 1.2`** — we keep v1.x to match our v1.x
+    ///   `$STD_INFO` across every system record. Declaring v3.1 in
+    ///   `$VOLUME_INFORMATION` while still emitting v1.x STD_INFO
+    ///   created an internal inconsistency that ntfs.sys flagged as
+    ///   a Critical Event 55 ("Force Full Chkdsk" on rec 3 $Volume)
+    ///   on every /scan snapshot mount (Iter M-1 trace).
+    ///
+    /// * **`flags = 0x0080`** — this is `MODIFIED_BY_CHKDSK` per the
+    ///   public NTFS docs (and what a clean Windows-fresh format
+    ///   stamps). The bit signals "this volume has been blessed by
+    ///   chkdsk at least once"; without it, ntfs.sys's mount path
+    ///   queues a proactive scan (Normal-severity Event 55 / "Force
+    ///   Proactive Scan") on every mount, surfacing as chkdsk /scan
+    ///   exit 13 even with all stages clean.
+    ///
+    /// NB: the upstream `ntfs` crate's `NtfsVolumeFlags` enum
+    /// defines `MODIFIED_BY_CHKDSK = 0x8000`, which disagrees with
+    /// both Tuxera's public NTFS docs and our Windows-fresh dump
+    /// (both 0x0080). We assert the raw bit value rather than going
+    /// through the crate constant so this test stays correct
+    /// regardless of which interpretation is right.
+    ///
+    /// Also implies `upgrade_volume_version_io` is a no-op on the
+    /// fresh-format output (since UPGRADE_ON_MOUNT is clear).
+    #[test]
+    fn fresh_mkfs_volume_is_1_2_with_modified_by_chkdsk_flag() {
+        const SIZE: u64 = 64 * 1024 * 1024;
+        const EXPECTED_FLAGS: u16 = 0x0080; // MODIFIED_BY_CHKDSK per Tuxera public docs.
+        let mut dev = MemDev {
+            buf: vec![0u8; SIZE as usize],
+        };
+        format_filesystem(
+            &mut dev as &mut dyn BlockIo,
+            SIZE,
+            4096,
+            4096,
+            Some("FRSH12"),
+            Some(0xCAFEBABE),
+        )
+        .expect("format_filesystem");
+
+        {
+            let mut reader = IoReader::new(&mut dev);
+            let ntfs = Ntfs::new(&mut reader).expect("re-parse");
+            let vi = ntfs.volume_info(&mut reader).expect("read volume info");
+            assert_eq!(vi.major_version(), 1);
+            assert_eq!(vi.minor_version(), 2);
+            assert!(
+                !vi.flags().contains(NtfsVolumeFlags::UPGRADE_ON_MOUNT),
+                "fresh mkfs must NOT set UPGRADE_ON_MOUNT (Iter M-2)"
+            );
+        }
+        // Read the raw 2-byte flags field directly from the device.
+        // The upstream `NtfsVolumeFlags::from_bits_truncate` strips
+        // any bit it doesn't know about (its enum is missing
+        // 0x0080), so `vi.flags().bits()` returns 0 even when we
+        // wrote 0x0080. Going through `locate_volume_flags_io` gets
+        // the true on-disk byte.
+        let (_, raw_flags) = locate_volume_flags_io(&mut dev).expect("locate $VOLUME_INFORMATION");
+        assert_eq!(
+            raw_flags, EXPECTED_FLAGS,
+            "fresh mkfs must stamp exactly {EXPECTED_FLAGS:#06x} (MODIFIED_BY_CHKDSK); \
+             without this bit ntfs.sys raises Event 55 on every mount"
+        );
+
+        let upgraded = upgrade_volume_version_io(&mut dev).expect("upgrade");
+        assert!(
+            !upgraded,
+            "upgrade helper must be a no-op on a 1.2 volume without UPGRADE_ON_MOUNT"
+        );
     }
 }
