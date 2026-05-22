@@ -33,6 +33,12 @@ docs/archive
 nfs.img
 nfs-*.img
 
+# Test-harness scenario disk images. Each scenario in test-matrix.json
+# points at diskimages/nfs-<scenario>.img, allocated by `init-image`
+# and wiped by scripts/run-matrix.sh's EXIT trap. The directory itself
+# is created on demand; nothing in it is worth committing.
+/diskimages/
+
 # Matrix test diagnostics — pulled from the Windows VM by
 # scripts/test-windows-matrix.sh into test-diagnostics/run-<ts>/.
 # Contains binary MFT dumps, chkdsk transcripts, NTFS event log;
