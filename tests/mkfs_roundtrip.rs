@@ -419,12 +419,21 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
     }
 }
 
-/// Sub-PR S3 + S4: rec 11 must be a directory shell named `$Extend`
-/// whose parent is the root (rec 5), with the MFT-header IS_DIRECTORY
-/// flag set. After S4 the `$I30` contains exactly one entry —
-/// `$Reparse` (pointing at rec 16) — plus the LAST sentinel.
+/// Sub-PR S3 + Iter L final: rec 11 must be a directory shell named
+/// `$Extend` whose parent is the root (rec 5), with the MFT-header
+/// IS_DIRECTORY flag set. Its `$I30` is *empty* (just the LAST
+/// sentinel) — Iter L 2026-05-22 verified against a freshly-formatted
+/// Windows volume that **chkdsk readonly exits 0** when $Extend's
+/// children are absent. (chkdsk `/scan` still exits 13 with NTFS
+/// Event 55 "exact nature unknown" — the same baseline that pre-dated
+/// the S1..S5 work; Event 136 "TxF metadata reset" is *gone*, which
+/// is what removing the partial hierarchy bought us.) Shipping any
+/// partial subset (e.g. $RmMetadata without the full $TxfLog +
+/// $TxfLog.blf + $TxfLogContainer.. family) drives the kernel TxF
+/// resource manager to fail (Event 136) and raises Event 55
+/// "corruption discovered".
 #[test]
-fn extend_record_is_directory_with_reparse() {
+fn extend_record_is_empty_directory() {
     let mut dev = MemDev::new(VOL_SIZE);
     format_filesystem(
         &mut dev,
@@ -466,9 +475,9 @@ fn extend_record_is_directory_with_reparse() {
         "rec 11 $FILE_NAME.file_attributes must carry FILE_ATTRIBUTE_DIRECTORY"
     );
 
-    // $I30 INDEX_ROOT exists (directory_index() succeeds) and lists
-    // exactly one real entry: `$Reparse` → rec 16. The LAST sentinel
-    // is consumed by the upstream iterator and not surfaced.
+    // $I30 INDEX_ROOT exists (directory_index() succeeds) but is
+    // empty — only the LAST sentinel, which the upstream iterator
+    // consumes and never surfaces.
     let index = extend
         .directory_index(&mut cursor)
         .expect("$Extend must have $I30 $INDEX_ROOT");
@@ -483,23 +492,45 @@ fn extend_record_is_directory_with_reparse() {
         let mft_ref = entry.file_reference().file_record_number();
         entries.push((key.name().to_string_lossy(), mft_ref));
     }
-    assert_eq!(
-        entries,
-        vec![("$Reparse".to_string(), 16)],
-        "$Extend $I30 must list exactly $Reparse → rec 16 after S4"
+    assert!(
+        entries.is_empty(),
+        "$Extend $I30 must be empty at format time (Iter L final); got {entries:?}"
     );
 }
 
-/// Sub-PR S4: rec 16 must be a file named `$Reparse` parented to rec
-/// 11 (`$Extend`), carrying an empty named `$INDEX_ROOT` "$R"
-/// (view-index). chkdsk's Iter H Procmon trace shows /scan opens
-/// `$Extend\$Reparse:$R:$INDEX_ALLOCATION` and currently gets
-/// STATUS_OBJECT_PATH_NOT_FOUND; S4 makes that open resolve to a
-/// parseable empty view-index.
-#[test]
-fn reparse_record_is_empty_r_view_index() {
-    use std::io::Read;
+/// Read the MFT base offset + record size from the BPB so the
+/// zero-slot assertions below stay load-bearing if the test's
+/// cluster/record params ever drift. NTFS BPB (sector 0):
+///   * `bytes_per_sector` (u16 @ 0x0B)
+///   * `sectors_per_cluster` (u8 @ 0x0D)
+///   * `mft_lcn` (u64 @ 0x30)
+///   * `clusters_per_mft_record` (i8 @ 0x40)
+///     positive ⇒ clusters per record;
+///     negative ⇒ `record_size = 1 << -value` bytes (used when the
+///     record is smaller than one cluster).
+fn mft_layout_from_bpb(buf: &[u8]) -> (usize, usize) {
+    let bps = u16::from_le_bytes([buf[0x0B], buf[0x0C]]) as usize;
+    let spc = buf[0x0D] as usize;
+    let cluster_size = bps * spc;
+    let mut mft_lcn_bytes = [0u8; 8];
+    mft_lcn_bytes.copy_from_slice(&buf[0x30..0x38]);
+    let mft_lcn = u64::from_le_bytes(mft_lcn_bytes) as usize;
+    let cpmr = buf[0x40] as i8;
+    let record_size = if cpmr >= 0 {
+        cpmr as usize * cluster_size
+    } else {
+        1usize << (-(cpmr as i32) as u32)
+    };
+    (mft_lcn * cluster_size, record_size)
+}
 
+/// Iter L revision (was Sub-PR S4): rec 16 must be a zeroed MFT slot
+/// — populating it (with `$Reparse` as a file under `$Extend`) drove
+/// chkdsk Stage 2 to report rec 11's $I30 inconsistent. Microsoft
+/// `format.com`'s freshly-formatted volume also leaves rec 16
+/// unallocated. See Iter L trace 2026-05-22.
+#[test]
+fn reparse_slot_is_zeroed() {
     let mut dev = MemDev::new(VOL_SIZE);
     format_filesystem(
         &mut dev,
@@ -511,108 +542,44 @@ fn reparse_record_is_empty_r_view_index() {
     )
     .expect("format_filesystem");
 
-    let mut cursor = std::io::Cursor::new(&dev.buf);
-    let ntfs = Ntfs::new(&mut cursor).expect("Ntfs::new on freshly formatted volume");
-
-    let reparse = ntfs.file(&mut cursor, 16).expect("open rec 16 ($Reparse)");
-
-    // $FILE_NAME: name = "$Reparse", parent = (rec=11, $Extend), namespace
-    // = Win32AndDos (3). This is the Win32 + DOS double-namespace single
-    // entry every system record uses; system names are pure ASCII so a
-    // separate DOS short name isn't required.
-    let fname = reparse
-        .name(&mut cursor, Some(NtfsFileNamespace::Win32AndDos), None)
-        .expect("rec 16 has a Win32AndDos $FILE_NAME")
-        .expect("read $FILE_NAME");
-    assert_eq!(fname.name().to_string_lossy(), "$Reparse");
-    assert_eq!(
-        fname.parent_directory_reference().file_record_number(),
-        11,
-        "rec 16 parent must be $Extend (rec 11)"
-    );
+    let (mft_offset, record_size) = mft_layout_from_bpb(&dev.buf);
+    let rec16 = mft_offset + 16 * record_size;
     assert!(
-        !fname.is_directory(),
-        "$Reparse is a file (view-index host), not a directory"
+        dev.buf[rec16..rec16 + record_size].iter().all(|&b| b == 0),
+        "rec 16 must be a zeroed MFT slot (BPB-derived offset {rec16:#x})"
     );
+}
 
-    // The MFT-header IS_DIRECTORY flag must NOT be set (the record
-    // hosts a view-index, not a $FILE_NAME index).
-    assert!(
-        !reparse.is_directory(),
-        "rec 16 must not have MFT header IS_DIRECTORY flag set"
-    );
+/// Iter L final: slots 17/18/19 must be zeroed MFT slots — the
+/// $RmMetadata / $TxfLog / $Tops chain from Sub-PR S5 was removed
+/// after Iter L (2026-05-22) trace showed shipping a partial TxF
+/// hierarchy at format time drove the kernel TxF resource manager to
+/// fail to start (NTFS Event 136), surfacing Event 55 "corruption
+/// discovered" and chkdsk /scan exit 13. Empty $Extend restores
+/// **readonly chkdsk** to exit 0; `/scan` still reports Event 55
+/// only (no Event 136) — Event 55 is the original "exact nature
+/// unknown" baseline that pre-dated the S1..S5 work.
+#[test]
+fn extend_child_slots_17_19_are_zeroed() {
+    let mut dev = MemDev::new(VOL_SIZE);
+    format_filesystem(
+        &mut dev,
+        VOL_SIZE,
+        4096,
+        4096,
+        Some("ITERL"),
+        Some(0xFEEDFACE),
+    )
+    .expect("format_filesystem");
 
-    // Walk the attributes: must find exactly one named `$INDEX_ROOT
-    // "$R"`, resident, with a zero-entry payload (just the index-root
-    // header + index header + LAST sentinel — 16+16+16 = 48 bytes).
-    let mut found_r_index_root = false;
-    let mut seen_data_stream = false;
-    let mut attrs = reparse.attributes();
-    while let Some(item) = attrs.next(&mut cursor) {
-        let item = item.expect("attr item");
-        let a = item.to_attribute().expect("to_attribute");
-        let ty = match a.ty() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        let name = a
-            .name()
-            .expect("attr name")
-            .to_string()
-            .expect("attr name to_string");
-        match (ty, name.as_str()) {
-            (NtfsAttributeType::IndexRoot, "$R") => {
-                assert!(
-                    a.is_resident(),
-                    "$R $INDEX_ROOT must be resident at S4 (empty view-index)"
-                );
-                let total = a.value_length() as usize;
-                let v = a.value(&mut cursor).expect("$R value");
-                let mut buf = vec![0u8; total];
-                v.attach(&mut cursor).read_exact(&mut buf).expect("read $R");
-                // INDEX_ROOT body: indexed_attr_type(4) + collation(4)
-                // + index_block_size(4) + cpib(1) + 3 pad + index_header(16)
-                // + entries. Empty index = exactly one LAST sentinel
-                // (16 bytes). Total = 16 + 16 + 16 = 48.
-                assert_eq!(buf.len(), 48, "$R INDEX_ROOT empty form = 48 bytes");
-                let indexed_attr_type = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-                assert_eq!(
-                    indexed_attr_type, 0,
-                    "$R indexed_attr_type=0 (view-index, no per-key $FILE_NAME)"
-                );
-                let collation = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
-                assert_eq!(
-                    collation, 0x13,
-                    "$R collation = COLLATION_NTOFS_ULONGS (0x13)"
-                );
-                let index_block_size = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
-                assert_eq!(index_block_size, 4096, "$R index_block_size = 4096");
-                // LAST sentinel at offset 32: entry_len = 0x10, flags = 0x02.
-                let last_entry_len = u16::from_le_bytes([buf[32 + 8], buf[32 + 9]]);
-                assert_eq!(last_entry_len, 0x10, "$R LAST entry length");
-                let last_flags =
-                    u32::from_le_bytes([buf[32 + 12], buf[32 + 13], buf[32 + 14], buf[32 + 15]]);
-                assert_eq!(last_flags & 0x02, 0x02, "$R LAST sentinel flags");
-                found_r_index_root = true;
-            }
-            (NtfsAttributeType::Data, _) => {
-                // S4 explicitly defaults to no separate $DATA stream
-                // for $Reparse — the Iter H trace shows chkdsk opens
-                // `$Extend\$Reparse:$R:$INDEX_ALLOCATION`, not
-                // `$Extend\$Reparse:$R` itself.
-                seen_data_stream = true;
-            }
-            _ => {}
-        }
+    let (mft_offset, record_size) = mft_layout_from_bpb(&dev.buf);
+    for rec in 17u32..=19u32 {
+        let off = mft_offset + (rec as usize) * record_size;
+        assert!(
+            dev.buf[off..off + record_size].iter().all(|&b| b == 0),
+            "rec {rec} must be a zeroed MFT slot (BPB-derived offset {off:#x})"
+        );
     }
-    assert!(
-        found_r_index_root,
-        "rec 16 missing named $INDEX_ROOT \"$R\""
-    );
-    assert!(
-        !seen_data_stream,
-        "rec 16 must not carry any $DATA stream at S4"
-    );
 }
 
 // --------------------------------------------------------------------------
