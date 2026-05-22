@@ -193,8 +193,11 @@ fn sd_for_system_record(rec_num: u32) -> &'static [u8] {
 const NAMESPACE_POSIX: u8 = 0;
 const NAMESPACE_WIN32_DOS: u8 = 3;
 
-/// MFT record numbers we populate (must match NTFS reservations).
-mod rec {
+/// MFT record numbers + canonical names for the system metafiles we
+/// populate. Pair the constants with [`rec::name`] so callers never
+/// re-type the magic strings (`"$Secure"` vs `"$Sercure"` would
+/// otherwise compile fine and produce a broken volume).
+pub mod rec {
     pub const MFT: u32 = 0;
     pub const MFTMIRR: u32 = 1;
     pub const LOGFILE: u32 = 2;
@@ -220,6 +223,72 @@ mod rec {
     // resource manager to fail to start (Event 136) and chkdsk /scan
     // exits 13 ("must be fixed offline"). Empty $Extend = clean
     // chkdsk readonly + /scan.
+
+    /// Canonical NTFS name for each system MFT record (root → "."
+    /// per filesystem convention; everything else is `$Name`). This
+    /// is the single source of truth — every call site that needs
+    /// "$Secure" or "$MFT" must go through this so a typo cannot
+    /// produce a broken-but-compiling volume.
+    pub fn name(rec_num: u32) -> &'static str {
+        match rec_num {
+            MFT => "$MFT",
+            MFTMIRR => "$MFTMirr",
+            LOGFILE => "$LogFile",
+            VOLUME => "$Volume",
+            ATTRDEF => "$AttrDef",
+            ROOT => ".",
+            BITMAP => "$Bitmap",
+            BOOT => "$Boot",
+            BADCLUS => "$BadClus",
+            SECURE => "$Secure",
+            UPCASE => "$UpCase",
+            EXTEND => "$Extend",
+            other => {
+                panic!("rec::name: unknown system MFT record number {other} (no canonical name)")
+            }
+        }
+    }
+}
+
+/// Named NTFS attribute stream identifiers. These are the **named**
+/// `$DATA` / `$INDEX_ROOT` / `$INDEX_ALLOCATION` / `$BITMAP` streams
+/// we emit at format time AND read back at runtime. Centralising
+/// them here makes the spellings review-able in one place and
+/// prevents typos at call sites (both write-path `mkfs` and
+/// read-path `index_io` / `idx_block` go through this module).
+pub mod stream {
+    /// `$BadClus:$Bad` — non-resident sparse $DATA carrying the
+    /// volume's bad-cluster bitmap. Empty at fresh format.
+    pub const BAD: &str = "$Bad";
+
+    /// `$Secure:$SDS` — non-resident $DATA carrying every security
+    /// descriptor on the volume (mirrored at +0x40000).
+    pub const SDS: &str = "$SDS";
+
+    /// `$Secure:$SDH` — INDEX_ROOT (+ optional INDEX_ALLOCATION) for
+    /// the security-descriptor-by-hash view index.
+    pub const SDH: &str = "$SDH";
+
+    /// `$Secure:$SII` — INDEX_ROOT (+ optional INDEX_ALLOCATION) for
+    /// the security-descriptor-by-id view index.
+    pub const SII: &str = "$SII";
+
+    /// `$UpCase:$Info` — 32-byte resident $DATA carrying the CRC64
+    /// of the $UpCase table (Iter M-2 byte truth).
+    pub const INFO: &str = "$Info";
+
+    /// `$I30` — every directory's file-name index. Used as both the
+    /// INDEX_ROOT attribute name and the INDEX_ALLOCATION /
+    /// BITMAP / etc. stream name when the directory grows.
+    pub const I30: &str = "$I30";
+
+    /// UTF-16-LE encoding of a stream name. NTFS attribute headers
+    /// store names as raw UTF-16 code units (no NUL); this is the
+    /// one place that conversion happens, so a typo upstream can't
+    /// produce a malformed-but-compiling name buffer.
+    pub fn utf16(name: &str) -> Vec<u16> {
+        name.encode_utf16().collect()
+    }
 }
 
 /// Format an NTFS volume in place over a [`BlockIo`].
@@ -563,14 +632,20 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::MFT,
-            "$MFT",
+            rec::name(rec::MFT),
             false,
             mft_data_size,
             mft_data_size,
             &[data_attr, bitmap_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::MFT, rec_bytes)?;
-        sys_entries.push((rec::MFT, "$MFT", false, mft_data_size, mft_data_size));
+        sys_entries.push((
+            rec::MFT,
+            rec::name(rec::MFT),
+            false,
+            mft_data_size,
+            mft_data_size,
+        ));
     }
 
     // record 1: $MFTMirr  — non-resident $DATA pointing at mftmirr_lcn.
@@ -593,14 +668,20 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::MFTMIRR,
-            "$MFTMirr",
+            rec::name(rec::MFTMIRR),
             false,
             len_bytes,
             len_bytes,
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::MFTMIRR, rec_bytes)?;
-        sys_entries.push((rec::MFTMIRR, "$MFTMirr", false, len_bytes, len_bytes));
+        sys_entries.push((
+            rec::MFTMIRR,
+            rec::name(rec::MFTMIRR),
+            false,
+            len_bytes,
+            len_bytes,
+        ));
     }
 
     // record 2: $LogFile
@@ -623,14 +704,20 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::LOGFILE,
-            "$LogFile",
+            rec::name(rec::LOGFILE),
             false,
             len_bytes,
             len_bytes,
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::LOGFILE, rec_bytes)?;
-        sys_entries.push((rec::LOGFILE, "$LogFile", false, len_bytes, len_bytes));
+        sys_entries.push((
+            rec::LOGFILE,
+            rec::name(rec::LOGFILE),
+            false,
+            len_bytes,
+            len_bytes,
+        ));
     }
 
     // record 3: $Volume
@@ -690,14 +777,14 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::VOLUME,
-            "$Volume",
+            rec::name(rec::VOLUME),
             false,
             0,
             0,
             &combined,
         )?;
         place_record(&mut mft_buf, rs, rec::VOLUME, rec_bytes)?;
-        sys_entries.push((rec::VOLUME, "$Volume", false, 0, 0));
+        sys_entries.push((rec::VOLUME, rec::name(rec::VOLUME), false, 0, 0));
     }
 
     // record 4: $AttrDef (canonical NTFS 3.1, 2400 bytes / 15 entries)
@@ -734,7 +821,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::ATTRDEF,
-            "$AttrDef",
+            rec::name(rec::ATTRDEF),
             false,
             attrdef_clusters * cluster_size as u64,
             attrdef_blob.len() as u64,
@@ -743,7 +830,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::ATTRDEF, rec_bytes)?;
         sys_entries.push((
             rec::ATTRDEF,
-            "$AttrDef",
+            rec::name(rec::ATTRDEF),
             false,
             attrdef_clusters * cluster_size as u64,
             attrdef_blob.len() as u64,
@@ -774,7 +861,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::BITMAP,
-            "$Bitmap",
+            rec::name(rec::BITMAP),
             false,
             bitmap_clusters * cluster_size as u64,
             value_len,
@@ -783,7 +870,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::BITMAP, rec_bytes)?;
         sys_entries.push((
             rec::BITMAP,
-            "$Bitmap",
+            rec::name(rec::BITMAP),
             false,
             bitmap_clusters * cluster_size as u64,
             value_len,
@@ -812,7 +899,7 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::BOOT,
-            "$Boot",
+            rec::name(rec::BOOT),
             false,
             boot_clusters * cluster_size as u64,
             boot_value_len,
@@ -821,7 +908,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::BOOT, rec_bytes)?;
         sys_entries.push((
             rec::BOOT,
-            "$Boot",
+            rec::name(rec::BOOT),
             false,
             boot_clusters * cluster_size as u64,
             boot_value_len,
@@ -851,7 +938,7 @@ pub fn format_filesystem(
         let bad_mp = encode_runs(&bad_runs)?;
         let bad_attr = build_nonresident_attribute(
             ATTR_DATA,
-            Some("$Bad"),
+            Some(stream::BAD),
             4,
             bad_clusters * cluster_size as u64,
             bad_clusters * cluster_size as u64,
@@ -866,14 +953,14 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::BADCLUS,
-            "$BadClus",
+            rec::name(rec::BADCLUS),
             false,
             0,
             0,
             &[empty_data, bad_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::BADCLUS, rec_bytes)?;
-        sys_entries.push((rec::BADCLUS, "$BadClus", false, 0, 0));
+        sys_entries.push((rec::BADCLUS, rec::name(rec::BADCLUS), false, 0, 0));
     }
 
     // record 9: $Secure — minimal resident stub. Real NTFS has $SDS /
@@ -908,8 +995,8 @@ pub fn format_filesystem(
         // layout; S1 makes those three opens succeed. Index-block
         // size is 4 KiB (the same value the populated `$I30` uses).
         let empty_data = build_resident_unnamed(ATTR_DATA, 3, &[]);
-        let sdh_name: [u16; 4] = ['$' as u16, 'S' as u16, 'D' as u16, 'H' as u16];
-        let sii_name: [u16; 4] = ['$' as u16, 'S' as u16, 'I' as u16, 'I' as u16];
+        let sdh_name = stream::utf16(stream::SDH);
+        let sii_name = stream::utf16(stream::SII);
 
         // Sub-PR S2: $SDS becomes non-resident with one canonical SD
         // entry at offset 0 and its mirror at file offset 0x40000.
@@ -958,7 +1045,7 @@ pub fn format_filesystem(
         let sds_last_vcn = gap_vcn as i64;
         let sds_data = build_nonresident_attribute(
             ATTR_DATA,
-            Some("$SDS"),
+            Some(stream::SDS),
             4,
             sds_data_len,
             sds_alloc_len,
@@ -1012,14 +1099,14 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::SECURE,
-            "$Secure",
+            rec::name(rec::SECURE),
             false,
             0,
             0,
             &[empty_data, sds_data, sdh_index_root, sii_index_root],
         )?;
         place_record(&mut mft_buf, rs, rec::SECURE, rec_bytes)?;
-        sys_entries.push((rec::SECURE, "$Secure", false, 0, 0));
+        sys_entries.push((rec::SECURE, rec::name(rec::SECURE), false, 0, 0));
     }
 
     // record 10: $UpCase
@@ -1056,13 +1143,13 @@ pub fn format_filesystem(
         let mut info_value = vec![0u8; 32];
         info_value[0..4].copy_from_slice(&0x20u32.to_le_bytes());
         info_value[8..16].copy_from_slice(&0xDADC_7E77_6B1B_690Cu64.to_le_bytes());
-        let info_name: [u16; 5] = ['$' as u16, 'I' as u16, 'n' as u16, 'f' as u16, 'o' as u16];
+        let info_name = stream::utf16(stream::INFO);
         let info_attr = build_resident_named(ATTR_DATA, 4, &info_name, &info_value);
 
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::UPCASE,
-            "$UpCase",
+            rec::name(rec::UPCASE),
             false,
             upcase_clusters * cluster_size as u64,
             upcase_value_bytes,
@@ -1071,7 +1158,7 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, rec::UPCASE, rec_bytes)?;
         sys_entries.push((
             rec::UPCASE,
-            "$UpCase",
+            rec::name(rec::UPCASE),
             false,
             upcase_clusters * cluster_size as u64,
             upcase_value_bytes,
@@ -1108,14 +1195,14 @@ pub fn format_filesystem(
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::EXTEND,
-            "$Extend",
+            rec::name(rec::EXTEND),
             true,
             0,
             0,
             &[index_root],
         )?;
         place_record(&mut mft_buf, rs, rec::EXTEND, rec_bytes)?;
-        sys_entries.push((rec::EXTEND, "$Extend", true, 0, 0));
+        sys_entries.push((rec::EXTEND, rec::name(rec::EXTEND), true, 0, 0));
     }
 
     // Iter L: records 16..19 are intentionally LEFT as zeroed MFT
@@ -1134,7 +1221,7 @@ pub fn format_filesystem(
     // vs ours = 0x30 bytes (just the LAST sentinel).
     {
         let index_block_size: u32 = 4096;
-        sys_entries.push((rec::ROOT, ".", true, 0, 0));
+        sys_entries.push((rec::ROOT, rec::name(rec::ROOT), true, 0, 0));
         sys_entries.sort_by(|a, b| collate_file_name(a.1, b.1));
 
         // Every system $FILE_NAME's parent is the root directory at
@@ -2119,8 +2206,7 @@ fn build_populated_index_root_attr(
     buf[22] = 0;
     buf[23] = 0;
 
-    let i30: [u16; 4] = ['$' as u16, 'I' as u16, '3' as u16, '0' as u16];
-    for (i, c) in i30.iter().enumerate() {
+    for (i, c) in stream::utf16(stream::I30).iter().enumerate() {
         let off = name_offset + i * 2;
         buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
     }

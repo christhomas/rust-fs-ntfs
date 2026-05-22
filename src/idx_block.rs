@@ -14,6 +14,7 @@ use crate::data_runs::{self, DataRun};
 use crate::mft_io::{
     apply_fixup_on_read_magic, apply_fixup_on_write_magic, read_mft_record_io, BootParams,
 };
+use crate::mkfs::stream;
 
 use std::path::Path;
 
@@ -72,7 +73,7 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
     let (params, record) = read_mft_record_io(io, parent_record_number)?;
 
     // Get block_size from $INDEX_ROOT:$I30.
-    let ir = attr_io::find_attribute(&record, AttrType::IndexRoot, Some("$I30"))
+    let ir = attr_io::find_attribute(&record, AttrType::IndexRoot, Some(stream::I30))
         .ok_or_else(|| "$INDEX_ROOT:$I30 not found on parent".to_string())?;
     let ir_val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
     let ir_data_start = ir.attr_offset + ir_val_off;
@@ -87,7 +88,7 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
     }
 
     // Get $INDEX_ALLOCATION:$I30 data runs.
-    let ia = attr_io::find_attribute(&record, AttrType::IndexAllocation, Some("$I30"))
+    let ia = attr_io::find_attribute(&record, AttrType::IndexAllocation, Some(stream::I30))
         .ok_or_else(|| "$INDEX_ALLOCATION:$I30 not found".to_string())?;
     if ia.is_resident {
         return Err("$INDEX_ALLOCATION unexpectedly resident".to_string());
@@ -100,7 +101,7 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
     let data_length = ia.non_resident_value_length.ok_or("no value_length")?;
 
     // Get $Bitmap:$I30.
-    let bm_attr = attr_io::find_attribute(&record, AttrType::Bitmap, Some("$I30"))
+    let bm_attr = attr_io::find_attribute(&record, AttrType::Bitmap, Some(stream::I30))
         .ok_or_else(|| "$Bitmap:$I30 not found".to_string())?;
     let bitmap = if bm_attr.is_resident {
         let off = bm_attr.resident_value_offset.ok_or("no value_offset")? as usize;

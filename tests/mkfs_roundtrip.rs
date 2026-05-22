@@ -8,7 +8,7 @@ use std::os::raw::c_int;
 use std::sync::Mutex;
 
 use fs_ntfs::block_io::BlockIo;
-use fs_ntfs::mkfs::format_filesystem;
+use fs_ntfs::mkfs::{format_filesystem, rec, stream};
 use fs_ntfs::{fs_ntfs_mkfs, FsNtfsBlockdevCfg};
 
 use ntfs::indexes::NtfsFileNameIndex;
@@ -141,11 +141,25 @@ fn format_and_parse_back() {
     // earlier comment here mis-attributed "$Quota" at slot 9 to a
     // "NTFS 3.x convention" — that was incorrect; $Secure is the
     // canonical name in every NTFS 3.x layout.
+    // Pull names from `rec::name()` instead of typing the strings in
+    // the test — that way a typo in the canonical table (`$Sercure`
+    // vs `$Secure`) gets caught at compile time on both sides instead
+    // of producing a green test against a broken volume.
     assert_eq!(
         names,
         vec![
-            "$AttrDef", "$BadClus", "$Bitmap", "$Boot", "$Extend", "$LogFile", "$MFT", "$MFTMirr",
-            "$Secure", "$UpCase", "$Volume", ".",
+            rec::name(rec::ATTRDEF),
+            rec::name(rec::BADCLUS),
+            rec::name(rec::BITMAP),
+            rec::name(rec::BOOT),
+            rec::name(rec::EXTEND),
+            rec::name(rec::LOGFILE),
+            rec::name(rec::MFT),
+            rec::name(rec::MFTMIRR),
+            rec::name(rec::SECURE),
+            rec::name(rec::UPCASE),
+            rec::name(rec::VOLUME),
+            rec::name(rec::ROOT),
         ],
         "root $I30 must list every system file in COLLATION_FILE_NAME order"
     );
@@ -173,7 +187,7 @@ fn format_and_parse_back() {
             // The 128 KiB UpCase table itself.
             assert_eq!(a.value_length(), 128 * 1024);
             found_unnamed_data = true;
-        } else if name == "$Info" {
+        } else if name == stream::INFO {
             // 32-byte resident named stream (Iter M-2): carries the
             // CRC64 of the UpCase table content + reserved zeros.
             assert!(a.is_resident(), "$UpCase:$Info must be resident");
@@ -254,7 +268,7 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
             .expect("attr name to_string");
         use std::io::Read;
         match (ty, name.as_str()) {
-            (NtfsAttributeType::Data, "$SDS") => {
+            (NtfsAttributeType::Data, n) if n == stream::SDS => {
                 assert!(
                     !a.is_resident(),
                     "$SDS must be non-resident at S2 (one canonical entry + mirror)"
@@ -272,7 +286,7 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
                 sds_bytes = buf;
                 seen_sds = true;
             }
-            (NtfsAttributeType::IndexRoot, "$SDH") => {
+            (NtfsAttributeType::IndexRoot, n) if n == stream::SDH => {
                 assert!(a.is_resident(), "$SDH index-root must be resident at S2");
                 let total = a.value_length() as usize;
                 let v = a.value(&mut cursor).expect("sdh value");
@@ -283,7 +297,7 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
                 sdh_value = buf;
                 seen_sdh = true;
             }
-            (NtfsAttributeType::IndexRoot, "$SII") => {
+            (NtfsAttributeType::IndexRoot, n) if n == stream::SII => {
                 assert!(a.is_resident(), "$SII index-root must be resident at S2");
                 let total = a.value_length() as usize;
                 let v = a.value(&mut cursor).expect("sii value");
@@ -488,7 +502,7 @@ fn extend_record_is_empty_directory() {
         .name(&mut cursor, Some(NtfsFileNamespace::Win32AndDos), None)
         .expect("rec 11 has a Win32AndDos $FILE_NAME")
         .expect("read $FILE_NAME");
-    assert_eq!(fname.name().to_string_lossy(), "$Extend");
+    assert_eq!(fname.name().to_string_lossy(), rec::name(rec::EXTEND));
     assert_eq!(
         fname.parent_directory_reference().file_record_number(),
         5,
