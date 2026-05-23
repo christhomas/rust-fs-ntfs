@@ -413,6 +413,33 @@ pub fn build_resident_ea_attribute(attr_id: u16, packed: &[u8]) -> Result<Vec<u8
 
 /// Shared builder for resident unnamed attributes: 24-byte header +
 /// value + padding to 8.
+/// Build a resident `$VOLUME_NAME` (type 0x60) attribute carrying
+/// the volume label as raw UTF-16 little-endian bytes. NTFS labels
+/// are capped at 32 UTF-16 code units (64 bytes) by convention —
+/// modern Windows tools refuse to display longer labels — but the
+/// on-disk format places no length cap, so callers responsible for
+/// validation. Pass `label_utf16` already encoded; the empty slice
+/// produces an empty-but-present attribute (NOT a removed one — use
+/// the `remove_volume_label` writer for that semantic).
+pub fn build_resident_volume_name_attribute(attr_id: u16, label_utf16: &[u8]) -> Vec<u8> {
+    let header_size = 24usize;
+    let attr_length = align8(header_size + label_utf16.len());
+    let mut buf = vec![0u8; attr_length];
+    buf[0..4].copy_from_slice(&0x60u32.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 0; // resident
+    buf[9] = 0; // name_length (unnamed)
+    buf[10..12].copy_from_slice(&(header_size as u16).to_le_bytes());
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+    buf[16..20].copy_from_slice(&(label_utf16.len() as u32).to_le_bytes());
+    buf[20..22].copy_from_slice(&(header_size as u16).to_le_bytes());
+    buf[22] = 0;
+    buf[23] = 0;
+    buf[header_size..header_size + label_utf16.len()].copy_from_slice(label_utf16);
+    buf
+}
+
 fn build_resident_unnamed_attribute(
     attr_type: u32,
     attr_id: u16,

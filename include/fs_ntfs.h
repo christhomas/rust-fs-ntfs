@@ -247,6 +247,35 @@ int fs_ntfs_get_volume_info(fs_ntfs_fs_t *fs,
 int fs_ntfs_get_volume_info_v2(fs_ntfs_fs_t *fs,
                                    fs_ntfs_volume_info_v2_t *info);
 
+/*
+ * Set the volume label on an unmounted NTFS image. Pass NULL or an
+ * empty string to remove the $VOLUME_NAME attribute entirely. The
+ * label is UTF-8; this function encodes to UTF-16 LE on disk. NTFS
+ * conventionally caps labels at 32 UTF-16 code units; longer labels
+ * are rejected with -1.
+ *
+ * IMPORTANT: the image must NOT be mounted by Windows / ntfs.sys
+ * concurrently — same constraint as fs_ntfs_clear_dirty / fsck. Use
+ * the mounted-handle API for live volumes (TODO; not yet provided).
+ *
+ * Returns 0 on success, -1 on error (call fs_ntfs_last_error for
+ * details).
+ */
+int fs_ntfs_set_volume_label(const char *image, const char *label);
+
+/*
+ * Read the volume label from an unmounted NTFS image into out_buf
+ * (UTF-8 bytes, NO trailing NUL written — caller may add their own).
+ * Returns the number of bytes written, or -1 on error.
+ *
+ * Returns 0 when the volume has no label (the $VOLUME_NAME attribute
+ * is absent or zero-length). If the on-disk label is longer than
+ * out_buf_len, the result is silently truncated and the truncated
+ * length is returned; no error. Allocate at least 128 bytes for the
+ * full label (32 UTF-16 code units × up to 4 UTF-8 bytes each).
+ */
+int fs_ntfs_read_volume_label(const char *image, char *out_buf, size_t out_buf_len);
+
 /* ---- File attributes ---- */
 
 /*

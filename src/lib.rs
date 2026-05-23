@@ -1201,6 +1201,79 @@ pub extern "C" fn fs_ntfs_get_volume_info_v2(
     0
 }
 
+/// Set the volume label on an unmounted NTFS image. Empty `label`
+/// removes the `$VOLUME_NAME` attribute entirely. Returns 0 on
+/// success, -1 on error (e.g. label too long, or image cannot be
+/// opened for writing). NTFS labels are conventionally capped at 32
+/// UTF-16 code units; longer labels are rejected.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_set_volume_label(
+    image: *const c_char,
+    label: *const c_char,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_set_volume_label: null or non-UTF-8 image");
+        return -1;
+    };
+    let label_str = if label.is_null() {
+        ""
+    } else {
+        match unsafe { CStr::from_ptr(label) }.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                set_error("fs_ntfs_set_volume_label: non-UTF-8 label");
+                return -1;
+            }
+        }
+    };
+    match write::set_volume_label(std::path::Path::new(img), label_str) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Read the volume label from an unmounted NTFS image into `out_buf`
+/// (UTF-8, no terminating NUL written by this function — caller is
+/// responsible for null-termination if needed). Returns the number of
+/// UTF-8 bytes written on success (0 if the volume has no label),
+/// or -1 on error.
+///
+/// If the on-disk label is longer than `out_buf_len`, the result is
+/// truncated and the truncated byte count is returned; no error is
+/// signalled. Callers wanting the full label should pre-size
+/// `out_buf` to at least 128 bytes (32 UTF-16 code units * up to 4
+/// UTF-8 bytes each).
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_read_volume_label(
+    image: *const c_char,
+    out_buf: *mut c_char,
+    out_buf_len: usize,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_read_volume_label: null or non-UTF-8 image");
+        return -1;
+    };
+    if out_buf.is_null() {
+        set_error("fs_ntfs_read_volume_label: null out_buf");
+        return -1;
+    }
+    match write::read_volume_label(std::path::Path::new(img)) {
+        Ok(label) => {
+            let bytes = label.as_bytes();
+            let n = std::cmp::min(bytes.len(), out_buf_len);
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf as *mut u8, n) };
+            n as c_int
+        }
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stat
 // ---------------------------------------------------------------------------

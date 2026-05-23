@@ -1639,6 +1639,111 @@ pub fn read_file_names_io<T: BlockIo + ?Sized>(
     Ok(out)
 }
 
+/// Maximum volume-label length per Microsoft tools convention: 32
+/// UTF-16 code units (64 bytes on disk). The on-disk format places no
+/// length cap, but Windows Explorer / Disk Management refuse to
+/// display labels longer than this.
+pub const VOLUME_LABEL_MAX_UTF16: usize = 32;
+
+/// Read the volume label from `$Volume:$VOLUME_NAME`. Returns the
+/// decoded UTF-8 string. Returns an empty `String` if the volume has
+/// no label set (the `$VOLUME_NAME` attribute is absent or
+/// zero-length).
+pub fn read_volume_label(image: &Path) -> Result<String, String> {
+    let mut io = PathIo::open_ro(image)?;
+    read_volume_label_io(&mut io)
+}
+
+pub fn read_volume_label_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<String, String> {
+    // $Volume is at MFT slot 3 per canonical NTFS layout.
+    let (_, record) = read_mft_record_io(io, 3)?;
+    let Some(loc) = attr_io::find_attribute(&record, AttrType::VolumeName, None) else {
+        return Ok(String::new());
+    };
+    if !loc.is_resident {
+        return Err("$VOLUME_NAME is non-resident (unexpected)".to_string());
+    }
+    let val_off = loc.attr_offset
+        + loc
+            .resident_value_offset
+            .ok_or("$VOLUME_NAME has no value_offset")? as usize;
+    let val_len = loc.resident_value_length.unwrap_or(0) as usize;
+    if val_off + val_len > record.len() {
+        return Err(format!(
+            "$VOLUME_NAME range out of record (val_off={val_off}, val_len={val_len})"
+        ));
+    }
+    if val_len == 0 || val_len.is_multiple_of(2).then_some(()).is_none() {
+        return Ok(String::new());
+    }
+    let utf16: Vec<u16> = record[val_off..val_off + val_len]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    Ok(String::from_utf16_lossy(&utf16))
+}
+
+/// Set the volume label on the `$Volume` MFT record (slot 3).
+/// Passes the new label through UTF-16 encoding; an empty string
+/// removes the `$VOLUME_NAME` attribute entirely (no zero-length
+/// attribute left behind — Windows tools treat both states as
+/// "unnamed" so the simpler representation is to omit the attribute).
+///
+/// Returns `Err` if the encoded label exceeds
+/// [`VOLUME_LABEL_MAX_UTF16`] code units.
+pub fn set_volume_label(image: &Path, label: &str) -> Result<(), String> {
+    let mut io = PathIo::open_rw(image)?;
+    set_volume_label_io(&mut io, label)
+}
+
+pub fn set_volume_label_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    label: &str,
+) -> Result<(), String> {
+    let label_utf16: Vec<u16> = label.encode_utf16().collect();
+    if label_utf16.len() > VOLUME_LABEL_MAX_UTF16 {
+        return Err(format!(
+            "volume label too long: {} UTF-16 code units (max {})",
+            label_utf16.len(),
+            VOLUME_LABEL_MAX_UTF16
+        ));
+    }
+    let mut label_bytes: Vec<u8> = Vec::with_capacity(label_utf16.len() * 2);
+    for c in &label_utf16 {
+        label_bytes.extend_from_slice(&c.to_le_bytes());
+    }
+    update_mft_record_io(io, 3, |record| {
+        if label_bytes.is_empty() {
+            // Empty label: remove the $VOLUME_NAME attribute entirely.
+            if let Some(loc) = attr_io::find_attribute(record, AttrType::VolumeName, None) {
+                let old_len = loc.attr_length;
+                let bytes_used = u32::from_le_bytes([
+                    record[0x18], record[0x19], record[0x1A], record[0x1B],
+                ]) as usize;
+                record.copy_within(loc.attr_offset + old_len..bytes_used, loc.attr_offset);
+                for byte in &mut record[bytes_used - old_len..bytes_used] {
+                    *byte = 0;
+                }
+                let new_bu = (bytes_used - old_len) as u32;
+                record[0x18..0x1C].copy_from_slice(&new_bu.to_le_bytes());
+            }
+            return Ok(());
+        }
+        if let Some(loc) = attr_io::find_attribute(record, AttrType::VolumeName, None) {
+            let attr_id = loc.attribute_id;
+            let new_attr =
+                crate::record_build::build_resident_volume_name_attribute(attr_id, &label_bytes);
+            crate::attr_resize::replace_attribute(record, loc.attr_offset, &new_attr)?;
+        } else {
+            let attr_id = crate::attr_resize::allocate_attribute_id(record);
+            let new_attr =
+                crate::record_build::build_resident_volume_name_attribute(attr_id, &label_bytes);
+            crate::attr_resize::insert_attribute_before_end(record, &new_attr)?;
+        }
+        Ok(())
+    })
+}
+
 /// Read the 16-byte object ID (`$OBJECT_ID` attribute value) for a
 /// file. Returns `Ok(None)` if the file has no `$OBJECT_ID`.
 pub fn read_object_id(image: &Path, file_path: &str) -> Result<Option<[u8; 16]>, String> {
