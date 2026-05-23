@@ -629,6 +629,31 @@ int fs_ntfs_write_reparse_point(const char *image, const char *path,
 int fs_ntfs_remove_reparse_point(const char *image, const char *path);
 
 /*
+ * Read a file's $REPARSE_POINT attribute as raw (tag, data). Unlike
+ * fs_ntfs_readlink (symlink/mount-point only), this exposes the raw
+ * payload for any reparse type.
+ *
+ * On success: writes the 32-bit reparse tag to *out_tag, writes the
+ * actual data length (excluding the 8-byte REPARSE_DATA_BUFFER header)
+ * to *out_data_len, and — if out_data_len <= out_buf_len — copies the
+ * data bytes into out_buf[0..out_data_len]. *out_data_len is always
+ * written so callers can size-query (pass out_buf=NULL, out_buf_len=0).
+ *
+ * Returns:
+ *    1 — attribute present, data fully copied
+ *    2 — attribute present but out_buf_len too small (truncated)
+ *    0 — no $REPARSE_POINT attribute on this file
+ *   -1 — error (see fs_ntfs_last_error)
+ *
+ * out_tag and out_data_len must be non-NULL. out_buf may be NULL only
+ * when out_buf_len == 0.
+ */
+int fs_ntfs_read_reparse_point(const char *image, const char *path,
+                               uint32_t *out_tag,
+                               void *out_buf, size_t out_buf_len,
+                               size_t *out_data_len);
+
+/*
  * Create a symlink at `parent_path/basename` pointing at `target`.
  * `relative` non-zero for a relative target. Returns the new MFT
  * record number on success, -1 on error.

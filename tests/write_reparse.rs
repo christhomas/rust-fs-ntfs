@@ -153,3 +153,57 @@ fn upstream_mounts_after_reparse_churn() {
     let vi = ntfs.volume_info(&mut r).expect("volume_info");
     assert!(vi.major_version() >= 3);
 }
+
+#[test]
+fn read_reparse_point_roundtrips_tag_and_data() {
+    let img = working_copy("read_rt");
+    let data: &[u8] = b"opaque.third.party.payload";
+    let tag: u32 = 0xA000_0017; // arbitrary non-symlink tag
+    write::write_reparse_point(Path::new(&img), "/Documents/readme.txt", tag, data)
+        .expect("write_reparse_point");
+
+    let rp = write::read_reparse_point(Path::new(&img), "/Documents/readme.txt")
+        .expect("read_reparse_point")
+        .expect("attribute should exist");
+    assert_eq!(rp.reparse_tag, tag);
+    assert_eq!(rp.data, data);
+}
+
+#[test]
+fn read_reparse_point_returns_none_when_absent() {
+    let img = working_copy("read_none");
+    let result = write::read_reparse_point(Path::new(&img), "/Documents/readme.txt")
+        .expect("read_reparse_point");
+    assert!(result.is_none(), "expected None, got {result:?}");
+}
+
+#[test]
+fn read_reparse_point_after_replace_reflects_new_payload() {
+    let img = working_copy("read_replace");
+    write::write_reparse_point(Path::new(&img), "/Documents/readme.txt", 0xA000_000C, b"first")
+        .unwrap();
+    write::write_reparse_point(
+        Path::new(&img),
+        "/Documents/readme.txt",
+        0xA000_0003,
+        b"second longer payload",
+    )
+    .unwrap();
+    let rp = write::read_reparse_point(Path::new(&img), "/Documents/readme.txt")
+        .unwrap()
+        .unwrap();
+    assert_eq!(rp.reparse_tag, 0xA000_0003);
+    assert_eq!(rp.data, b"second longer payload");
+}
+
+#[test]
+fn read_reparse_point_handles_empty_data() {
+    let img = working_copy("read_empty");
+    write::write_reparse_point(Path::new(&img), "/Documents/readme.txt", 0xA000_0099, b"")
+        .expect("write_reparse_point with empty data");
+    let rp = write::read_reparse_point(Path::new(&img), "/Documents/readme.txt")
+        .unwrap()
+        .unwrap();
+    assert_eq!(rp.reparse_tag, 0xA000_0099);
+    assert!(rp.data.is_empty());
+}
