@@ -1536,6 +1536,109 @@ pub fn read_attributes_io<T: BlockIo + ?Sized>(
     Ok(crate::attr_io::describe_attributes(&record))
 }
 
+/// One entry returned by [`read_file_names`] — a single `$FILE_NAME`
+/// attribute on a file's MFT record. NTFS files often carry multiple
+/// `$FILE_NAME` attributes — one per namespace (POSIX / WIN32 / DOS /
+/// WIN32_AND_DOS) — when the long Win32 name doesn't fit DOS 8.3.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileNameRecord {
+    /// `$FILE_NAME.namespace` byte at value +0x41 per MS-FSCC §2.4.4:
+    /// `0 = POSIX`, `1 = WIN32`, `2 = DOS`, `3 = WIN32_AND_DOS`.
+    pub namespace: u8,
+    /// The decoded UTF-16 name (lossy on invalid surrogates).
+    pub name: String,
+    /// `$FILE_NAME.parent_directory_reference` (low 48 bits = MFT
+    /// record number, high 16 = sequence). The caller can decode via
+    /// `(parent_ref & 0xFFFF_FFFF_FFFF) as u64` to get the parent
+    /// record number.
+    pub parent_reference: u64,
+    /// `$FILE_NAME.file_attributes` (the denormalised copy of the
+    /// SI bits — useful for spotting per-file flags like
+    /// `FILE_ATTRIBUTE_DIRECTORY` (0x10000000) without re-reading SI).
+    pub file_attributes: u32,
+}
+
+/// List every `$FILE_NAME` attribute on a file's MFT record. Returns
+/// one entry per attribute, in record order — so a file with separate
+/// WIN32 + DOS names ships two entries, while a single WIN32_AND_DOS
+/// name ships one.
+///
+/// Useful for diagnostic tooling (e.g. confirming that a runtime
+/// `create_file` emitted the right namespace for a long name), for
+/// the case-sensitive-dir investigation, and for visualising how
+/// `$FILE_NAME` entries differ between system records (where mkfs
+/// uses skeleton streams) and user records.
+pub fn read_file_names(image: &Path, file_path: &str) -> Result<Vec<FileNameRecord>, String> {
+    let mut io = PathIo::open_ro(image)?;
+    read_file_names_io(&mut io, file_path)
+}
+
+pub fn read_file_names_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+) -> Result<Vec<FileNameRecord>, String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let (_, record) = read_mft_record_io(io, rec)?;
+
+    let mut out = Vec::new();
+    for loc in attr_io::iter_attributes(&record) {
+        if loc.type_code != AttrType::FileName as u32 {
+            continue;
+        }
+        if !loc.is_resident {
+            // $FILE_NAME is required to be resident per MS-FSCC; a
+            // non-resident one would itself be a corruption we don't
+            // want to silently elide. Skip it but flag in the error
+            // string of the next caller if surprising. For now: skip.
+            continue;
+        }
+        let val_off =
+            loc.attr_offset + loc.resident_value_offset.ok_or("$FILE_NAME no value_offset")? as usize;
+        let val_len = loc.resident_value_length.unwrap_or(0) as usize;
+        // $FILE_NAME value layout per MS-FSCC §2.4.4:
+        //   +0x00 parent_directory_reference (u64)
+        //   +0x08..+0x40 timestamps + sizes + attributes
+        //   +0x40 name_length (u8, UTF-16 code units)
+        //   +0x41 namespace (u8)
+        //   +0x42..+0x42+2*name_length name bytes
+        if val_len < 0x42 {
+            continue;
+        }
+        let v = val_off;
+        if v + val_len > record.len() {
+            continue;
+        }
+        let parent_reference = u64::from_le_bytes([
+            record[v], record[v + 1], record[v + 2], record[v + 3],
+            record[v + 4], record[v + 5], record[v + 6], record[v + 7],
+        ]);
+        let file_attributes = u32::from_le_bytes([
+            record[v + 0x38],
+            record[v + 0x39],
+            record[v + 0x3A],
+            record[v + 0x3B],
+        ]);
+        let name_length = record[v + 0x40] as usize;
+        let namespace = record[v + 0x41];
+        let name_bytes_end = v + 0x42 + name_length * 2;
+        if name_bytes_end > v + val_len {
+            continue;
+        }
+        let utf16: Vec<u16> = record[v + 0x42..name_bytes_end]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let name = String::from_utf16_lossy(&utf16);
+        out.push(FileNameRecord {
+            namespace,
+            name,
+            parent_reference,
+            file_attributes,
+        });
+    }
+    Ok(out)
+}
+
 /// Read the 16-byte object ID (`$OBJECT_ID` attribute value) for a
 /// file. Returns `Ok(None)` if the file has no `$OBJECT_ID`.
 pub fn read_object_id(image: &Path, file_path: &str) -> Result<Option<[u8; 16]>, String> {
