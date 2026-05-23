@@ -47,7 +47,7 @@ lose their fail-fast paths automatically.
 
 ---
 
-### W2.5 — long-filename / attribute-list edge case (flag only)
+### W2.5 — long-filename / attribute-list edge case
 
 Resident-only attributes that could outgrow an MFT record:
 
@@ -59,12 +59,19 @@ Resident-only attributes that could outgrow an MFT record:
   `$ATTRIBUTE_LIST` (extension record), not promotion.
 - `$ATTRIBUTE_LIST` itself can be non-resident if it grows.
 
-Today neither path is implemented. The realistic exposure is small
-(record sizes are 4096 bytes by default, capacity ~3700 bytes after
-fixed overhead). Suggested next step is a negative test that creates
-a file with a 255-character UTF-16 name + several hard links and
-verifies we either fit (likely) or fail loudly (not silently
-corrupt).
+**Bounds guard shipped** (2026-05-23): `build_regular_file_record`
+and `build_directory_record` in `src/record_build.rs` now return
+`Err("record overflow: …")` if the END-marker write would land
+past `record_size`. Prevents the previous silent buffer-overrun.
+
+**Still outstanding**: the `$ATTRIBUTE_LIST` extension-record
+mechanism — i.e. the constructive answer to "OK, the attributes
+don't fit, so spill some to a satellite record." Not yet exercised
+in practice (4096-byte records have ~3700 bytes capacity which is
+hard to exhaust with the attributes we currently emit). Suggested
+next step when this becomes needed: a negative test creating a file
+with a 255-character UTF-16 name + several hard links, plus the
+`$ATTRIBUTE_LIST` extension-record builder.
 
 ### W2.6 — MFT self-growth
 
@@ -275,18 +282,19 @@ mis-read `name`. Bump SO version on the next release.
 
 ### §2.4 Large-volume boot-sector paths
 
-**Today**: all fixtures are 16–64 MiB. Cluster size 4 KiB with
-512-byte sectors. Well-tested only for this exact shape.
-
-**Fix**: fixture matrix — add 512-MiB + 2-GiB fixtures; cluster
-sizes 512 / 4096 / 65536; sector sizes 512 / 4096 (Advanced
-Format). Probably catches 2–3 subtle off-by-ones. ~200 LOC of
-`_vm-builder` changes plus fresh tests.
+**Largely subsumed (2026-05-23 audit)**: the test matrix now
+exercises 1 GiB, 4 GiB (cluster 4k + 64k), and 16 GiB (cluster 4k)
+volumes alongside the original 32–64 MiB fixtures — see
+`test-matrix.json` for `mac-format-large-1gib`,
+`mac-format-volume-{4gib,16gib}-*`, and
+`mac-format-volume-32mib-cluster-512`. The 4 KiB-sector
+("Advanced Format") axis isn't exercised yet; that's the remaining
+gap, smaller in scope than the original "add a fixture matrix" item.
 
 ### §2.5 Dirent eager materialization
 
 **Today**: `fs_ntfs_dir_open` reads every entry into a `Vec`
-(`src/lib.rs` ~825-862).
+(`src/lib.rs:1175-1265`; iterator struct at `src/lib.rs:415`).
 
 **Problem**: 270 MB on a 1M-entry directory. FSKit OOMs. Eager
 materialization also blocks the first `readdir` by seconds and
@@ -295,8 +303,11 @@ visibly stalls Finder on large dirs. (Cross-referenced in STATUS.md
 memory".)
 
 **Fix**: lazy iterator holding upstream's `NtfsIndexEntries` +
-reader reference. Lifetime plumbing is awkward but bounded. ~100
-LOC.
+reader reference. C-ABI shape change: store the upstream iterator
+inside `FsNtfsDirIter` and advance it in `fs_ntfs_dir_next`
+(`src/lib.rs:1286`). Lifetime plumbing is awkward but bounded.
+~100 LOC. Add a ≥100k-entry stress fixture (none exists today) for
+the baseline.
 
 ---
 
@@ -362,14 +373,14 @@ path; multi-day. The bisection / Procmon work is hours).
 
 ### §3.2 NTFS compression (LZNT1)
 
-- **Read**: upstream `ntfs` 0.4 does not expose LZNT1 decompression.
-  `fs_ntfs_read_file` on a compressed file today returns whatever
-  `NtfsAttributeValue::read` produces, which is the raw (still-
-  compressed) bytes — silent garbage, not a clear error. Cheap
-  improvement worth doing first: detect `$DATA.flags & 0xFF != 0`
-  (`compression_unit` non-zero) in `fs_ntfs_read_file` and return
-  a clear error ("file is compressed; LZNT1 decompression not yet
-  supported") so callers know.
+- **Read — detect-and-error shipped** (2026-05-23): `fs_ntfs_read_file`
+  inspects `data_attr.flags()` for `COMPRESSED` (0x0001) or
+  `ENCRYPTED` (0x4000) and returns a clear error ("file is
+  compressed (LZNT1); decompression not yet supported" /
+  "file is encrypted ($EFS); decryption not supported") instead of
+  returning raw compressed bytes. Upstream `ntfs` 0.4 still doesn't
+  decompress, so a real LZNT1 decoder is what's actually missing
+  for read support.
 - **Write**: we refuse anything with the compression flag set
   (`src/write.rs:255–266`). Writing new compressed data means
   emitting LZNT1-encoded chunks per `compression_unit`. ~800 LOC —
@@ -391,54 +402,79 @@ free tail clusters; hole-punching frees middle clusters.
 
 ### §3.4 `$SECURITY_DESCRIPTOR` writes
 
-`$Secure` / `$SDS` lookup is a separate rabbit hole (stream of SIDs
-+ ACEs, shared across files by `security_id` in SI). Minimal
-version: let the caller OR bits into SI's `file_attributes` (we
-already do READONLY via `set_file_attributes`); punt on full ACL
-support.
+**Minimal version (FILE_ATTRIBUTE_READONLY via
+`set_file_attributes`) is shipped** — see `src/write.rs:131-192`
++ the W1.3 entry in `STATUS.md`. Callers can flip the READONLY
+bit today.
+
+What's left is **full ACL support**: a `set_file_security` /
+`set_security_id` surface that points the per-file
+`$STANDARD_INFORMATION.security_id` at an `$SDS` entry. We now ship
+a populated `$Secure:$SDS` with one canonical SD (the system-files
+DACL; see `src/mkfs.rs:1090-1240`), but there's no runtime API for
+adding new SD entries or rewriting an existing file's
+`security_id`. Non-trivial because adding a SD entry means appending
+to `$SDS`, updating `$SDH` (hash-keyed) + `$SII` (ID-keyed) view
+indexes, and growing the security_id counter.
 
 ### §3.5 `$OBJECT_ID` write side
 
 16-byte GUID per file, used by DLT (Distributed Link Tracking).
-Read side already shipped (`fs_ntfs_read_object_id` +
-`Filesystem::object_id`). Write/builder side — creating a
+Read side already shipped (`fs_ntfs_read_object_id` at
+`src/write.rs:1425-1463`). Write/builder side — creating a
 `$OBJECT_ID` attribute on a file that has none — is still pending.
-A few lines of attribute-builder code.
+~30-40 LOC for the minimal GUID-only version (insert via `attr_io`,
+mirror the read bounds-check). Extended attributes
+(BirthVolume/BirthObject/BirthDomain) deferred.
 
 ### §3.7 Non-resident named streams + EAs
 
-For the rare but possible case of a multi-MiB alternate data
-stream or a huge EA payload. Same mechanics as the generic
-non-resident promotion already shipped (W2.3 / former §2.3).
-Tracked alongside "W4 polish" above.
+**Already shipped** via `write_named_stream_io` at
+`src/write.rs:1735-1762`: the resident write path catches
+"insufficient space" / "exceeds" / "no room" errors, deletes the
+resident attribute, and calls `promote_attribute_to_nonresident_io`
+(`src/write.rs:1741-1758`). Single-pass native synthesis (build
+non-resident directly, skip the resident-then-promote round-trip)
+is an optional optimisation, not blocking.
 
 ### §3.8 WOF (Windows Overlay Filter) decompression
 
 Modern Windows 10/11 volumes have most of `C:\Windows\` stored as
 empty unnamed `$DATA` + `IO_REPARSE_TAG_WOF` (0x80000017) +
-`WofCompressedData` ADS. Without WOF support, reading `notepad.exe`
-returns 0 bytes. **Silent data loss on every modern volume.**
+`WofCompressedData` ADS. Without WOF *decompression*, reading
+`notepad.exe` from such a volume would return 0 bytes.
 
-Today we recognise the tag in the reparse-dispatch switch
-(`src/lib.rs:575–609`) but fall through to "leave file_type alone"
-and read the empty unnamed `$DATA` as-is, hence the 0 bytes. Cheap
-improvement: in `fs_ntfs_read_file`, detect tag 0x80000017 on a
-file and return a clear error ("WOF-compressed; not yet supported")
-so callers know.
+**Detect-and-error shipped** (`src/lib.rs:fs_ntfs_read_file`):
+`fs_ntfs_read_file` now walks the file's attributes, finds any
+`$REPARSE_POINT`, reads the 4-byte tag, and returns a clear error
+("file is WOF-compressed (IO_REPARSE_TAG_WOF); decompression not
+yet supported") when the tag is 0x80000017. No more silent zero
+returns.
 
-Real fix requires XPRESS4K/8K/16K + LZX decompression of the
-`WofCompressedData` ADS. Third-party crate (`ms-compress`) does it;
-bindings would be ~200 LOC. Listed as the biggest single
-read-correctness gap in STATUS.md cross-check "#### WOF (Windows
-Overlay Filter) compression not supported".
+**Real decompression** is still outstanding: requires XPRESS4K/8K/16K
++ LZX decoding of the `WofCompressedData` ADS. Third-party crate
+(`ms-compress`) does it; bindings would be ~200 LOC. Listed as the
+biggest single read-correctness gap in STATUS.md cross-check
+"#### WOF (Windows Overlay Filter) compression not supported".
 
 ### §3.9 Case-sensitive directory flag
 
-`FILE_CASE_SENSITIVE_DIR` (WSL / Docker-Desktop). Our writes never
-set it; our reads never check it. On a dev volume with
-case-sensitive subdirs, we collapse `foo.txt` and `FOO.TXT` to
-whichever the B-tree finds first. (STATUS.md cross-check
-"#### Per-directory case-sensitivity flag ignored".)
+`FILE_CASE_SENSITIVE_DIR` (0x00010000 in `$FILE_NAME.file_attributes`,
+Win10 1803+; WSL / Docker-Desktop set it). Our writes never set it;
+our reads never check it. The `$UpCase`-table-based comparator at
+`src/index_io.rs:671-685` (`compare_names`) is unconditionally
+case-insensitive; on a dev volume with case-sensitive subdirs we
+would collapse `foo.txt` and `FOO.TXT` to whichever the B-tree finds
+first.
+
+Smallest useful step (~35 LOC, no on-disk change):
+
+- Read side: when opening a directory, check its
+  `$FILE_NAME.file_attributes` bit. Pass a `case_sensitive: bool`
+  flag down to `index_io::find_index_entry` / `compare_names`; when
+  true, use ordinal UTF-16 comparison instead of the upcase fold.
+- Write side: same flag plumbing into `insert_entry_into_*` — pass
+  `None` for the upcase table when the directory is case-sensitive.
 
 ---
 
@@ -561,40 +597,16 @@ Zlib / CC0 / 0BSD. Anything outside fails the build. Yanked
 versions and unknown registries also rejected. Pairs with the
 project-wide "no GPL/LGPL/AGPL" rule.
 
-### §5.9 Test-matrix Stage A — 2 GiB raw-write cap
+### §5.9 Test-matrix Stage A — 2 GiB raw-write cap (resolved in v2 harness)
 
-**Status**: known gap; `scripts/run-scenario.ps1` Stage A throws on
-images >2 GiB ("PS ReadAllBytes / chunked-WriteFile both fail past
-2 GiB; this scenario needs further work"). See the inline TODO in
-the same file.
-
-**What's known**:
-
-- `[System.IO.File]::ReadAllBytes` is hard-capped at 2 GiB by
-  PowerShell's CLR — no go for the 4 GiB / 16 GiB Tier-1 scenarios.
-- A chunked `FileStream` write to `\\.\PhysicalDrive$N` fails with
-  "Access to the path is denied." — likely alignment /
-  `FILE_FLAG_NO_BUFFERING` requirements that the chunked path
-  doesn't satisfy. The smaller-volume bulk path works because
-  Windows accepts the single `WriteFile` call as a whole-buffer
-  transfer.
-
-**Productive next moves**:
-
-1. Open the raw device with `CreateFile` + `FILE_FLAG_NO_BUFFERING`
-   and align both buffer + offset to the device's logical sector
-   size. Try a 16 MiB sector-aligned chunk loop.
-2. Skip the wrapper VHDX entirely for >2 GiB volumes — `qemu-img
-   convert -O vhdx -o subformat=fixed,partitioning=gpt` may produce
-   a partitioned VHDX directly without the raw-write step. Worth
-   a prototype.
-3. Use a temporary loop-mounted RAM disk on the VM to stage the
-   image, then `Move-Item` to the partition. Avoids the
-   PhysicalDrive write entirely.
-
-**Effort estimate**: small (~2-4 h) once one of the above is
-chosen and prototyped on the VM. Blocks Tier-1 scenarios
-`mac-format-volume-{4gib-cluster-4k,4gib-cluster-64k,16gib-cluster-4k}`.
+**Resolved (2026-05-23 audit)**: the v2 harness
+(`scripts/v2/_lib.ps1`) replaced `[System.IO.File]::ReadAllBytes`
+with a 16 MiB chunked `FileStream.Write()` loop. Tier-1 4 GiB +
+16 GiB scenarios (`mac-format-volume-4gib-cluster-{4k,64k}`,
+`mac-format-volume-16gib-cluster-4k`) now stream through that path
+and pass in the 42-scenario matrix. The original `scripts/run-scenario.ps1`
+(Stage A 2 GiB cap) is no longer used; this entry is kept for
+audit trail of how the limit was actually lifted.
 
 ### §5.10 Test-matrix — op-by-op chkdsk interleaving
 
@@ -670,18 +682,24 @@ multi-record atomicity. A crash mid-create can leave:
 - MFT record populated, no bitmap bit — allocator may reuse the
   slot, overwriting the record.
 
-**Fix options**:
+**Current ordering** (verified at `src/write.rs:900-966`):
+1. `mft_bitmap::allocate_io` — bitmap bit set first.
+2. `update_mft_record_io` — MFT record body + sync.
+3. `insert_entry_in_parent_io` — parent index entry + sync.
 
-- **Stricter ordering**: MFT record → bitmap bit → index entry. A
-  crash at any point leaks at worst the MFT record allocation. We
-  already mostly do this.
+A crash after step 1 leaves a "claimed but empty" slot (free bit
+reused on next allocate; the unfilled bytes get overwritten). A
+crash after step 2 leaves a leaked allocation, recoverable by
+`fs_ntfs_fsck`. The current ordering is the **stricter-ordering**
+option from "fix options" below; it's already in place.
+
+**Fix options** (for stronger guarantees than the current ordering):
+
 - **Intention log**: write a tiny "I'm about to X" record in a
   dedicated scratch attribute, replay on mount. Essentially
   mini-journal. ~500 LOC.
-
-(Phase W5 / `$LogFile` writeback + replay covered above is the
-full-journaling alternative; intentionally skipped per the original
-W5 decision.)
+- Phase W5 / `$LogFile` writeback + replay is the full-journaling
+  alternative; intentionally skipped per the original W5 decision.
 
 ### §6.4 Tracing hooks (resolved at lifecycle layer)
 

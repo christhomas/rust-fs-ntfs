@@ -182,6 +182,14 @@ pub fn build_directory_record(
     );
     cursor = write_empty_index_root(&mut rec, cursor, 2, index_block_size, bytes_per_sector)?;
 
+    // W2.5 — bounds guard, same rationale as `build_record_inner`.
+    if cursor + 8 > record_size {
+        return Err(format!(
+            "record overflow: attributes consumed {} bytes, no room for 8-byte END marker in {}-byte record",
+            cursor, record_size
+        ));
+    }
+
     // END marker is 4 bytes magic + 4 bytes attribute_length=0 — see
     // the matching comment in `build_regular_file_record` above.
     // chkdsk's "First free byte offset corrected" complaint also fires
@@ -352,6 +360,20 @@ fn build_record_inner(
         fn_namespace_for(name),
     );
     cursor = write_empty_data(&mut rec, cursor, 2);
+
+    // W2.5 — bounds guard. The resident-only attributes above
+    // (`$STANDARD_INFORMATION` + `$FILE_NAME` + `$DATA`) plus the
+    // 8-byte END marker must all fit in `record_size`. The
+    // realistic exposure is small (4096-byte records have ~3700
+    // bytes free), but a 1024-byte record + a 255-UTF-16-char name
+    // + hard links could exhaust. Fail loudly before writing the
+    // END marker would overflow.
+    if cursor + 8 > record_size {
+        return Err(format!(
+            "record overflow: attributes consumed {} bytes, no room for 8-byte END marker in {}-byte record",
+            cursor, record_size
+        ));
+    }
 
     // End marker. NTFS spec records the END marker as 4 bytes of
     // 0xFFFFFFFF *followed by* 4 bytes of `attribute_length = 0` —

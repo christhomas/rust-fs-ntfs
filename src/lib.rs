@@ -1358,6 +1358,51 @@ pub extern "C" fn fs_ntfs_read_file(
         }
     };
 
+    // §3.2 NTFS LZNT1 compression: upstream `ntfs` 0.4 does not
+    // decompress LZNT1, so reading the bytes of a compressed `$DATA`
+    // would silently return the raw compressed stream — garbage to
+    // the caller. Fail loudly until we ship a real decompressor (see
+    // docs/FUTURE_FEATURES.md §3.2).
+    let attr_flags = data_attr.flags();
+    if attr_flags.contains(ntfs::NtfsAttributeFlags::COMPRESSED) {
+        set_error("file is compressed (LZNT1); decompression not yet supported");
+        return -1;
+    }
+    if attr_flags.contains(ntfs::NtfsAttributeFlags::ENCRYPTED) {
+        set_error("file is encrypted ($EFS); decryption not supported");
+        return -1;
+    }
+
+    // §3.8 WOF (Windows Overlay Filter): a WOF-compressed file's
+    // unnamed `$DATA` is empty + sparse and the real bytes live in a
+    // `WofCompressedData` ADS, with the file carrying an
+    // `IO_REPARSE_TAG_WOF` (0x80000017) `$REPARSE_POINT`. Reading the
+    // empty unnamed `$DATA` today would return 0 bytes — also silent
+    // data loss. Detect via the reparse tag and fail loudly until we
+    // ship XPRESS/LZX decompression (see docs/FUTURE_FEATURES.md §3.8).
+    for attr_res in file.attributes_raw() {
+        let a = match attr_res {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        if a.ty().ok() != Some(NtfsAttributeType::ReparsePoint) {
+            continue;
+        }
+        if let Ok(mut v) = a.value(&mut bridge.reader) {
+            let mut tag_buf = [0u8; 4];
+            if v.read(&mut bridge.reader, &mut tag_buf).is_ok() {
+                let tag = u32::from_le_bytes(tag_buf);
+                if tag == 0x8000_0017 {
+                    set_error(
+                        "file is WOF-compressed (IO_REPARSE_TAG_WOF); decompression not yet supported",
+                    );
+                    return -1;
+                }
+            }
+        }
+        break;
+    }
+
     let mut data_value = match data_attr.value(&mut bridge.reader) {
         Ok(v) => v,
         Err(e) => {
