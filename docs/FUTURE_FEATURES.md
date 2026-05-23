@@ -431,22 +431,29 @@ POSIX `fallocate(FALLOC_FL_PUNCH_HOLE)`-style:
 sparse in the data runs, free the clusters. Current truncate can
 free tail clusters; hole-punching frees middle clusters.
 
-### §3.4 `$SECURITY_DESCRIPTOR` writes
+### §3.4 `$SECURITY_DESCRIPTOR` writes — partial (2026-05-23)
 
 **Minimal version (FILE_ATTRIBUTE_READONLY via
 `set_file_attributes`) is shipped** — see `src/write.rs:131-192`
 + the W1.3 entry in `STATUS.md`. Callers can flip the READONLY
 bit today.
 
-What's left is **full ACL support**: a `set_file_security` /
-`set_security_id` surface that points the per-file
-`$STANDARD_INFORMATION.security_id` at an `$SDS` entry. We now ship
-a populated `$Secure:$SDS` with one canonical SD (the system-files
-DACL; see `src/mkfs.rs:1090-1240`), but there's no runtime API for
-adding new SD entries or rewriting an existing file's
-`security_id`. Non-trivial because adding a SD entry means appending
-to `$SDS`, updating `$SDH` (hash-keyed) + `$SII` (ID-keyed) view
-indexes, and growing the security_id counter.
+**`set_security_id` shipped** on branch `feature/set-security-id`
+(commit 2a68b09): runtime-created files can be pointed at the
+existing `$Secure:$SDS` catalog entry (id 0x100 = the canonical
+system-files DACL that mkfs ships). 12 tests cover roundtrip,
+72-byte / 48-byte SI form distinction, missing-file errors, the
+C-ABI surface (`fs_ntfs_set_security_id` /
+`fs_ntfs_read_security_id`), and upstream remount-after-write. The
+48-byte v1.x SI form (used by the qemu+Alpine fixture pipeline for
+`ntfs-basic.img`) is correctly rejected — it has no `security_id`
+field at all.
+
+What's left is **adding new SD entries**: the API today only
+retargets a file at an existing entry; it can't append a new SD
+to `$Secure:$SDS` / update `$SDH` / `$SII` / grow the security_id
+counter. That's substantively more work and the natural follow-up
+once a caller hits the limit of "everything maps to id 0x100".
 
 ### §3.5 `$OBJECT_ID` write side — shipped (2026-05-23)
 
@@ -462,14 +469,23 @@ C ABI: `fs_ntfs_write_object_id` + `fs_ntfs_remove_object_id`.
 9 tests in `tests/object_id.rs` cover roundtrip, replace,
 remove-idempotence, and the C-ABI surface; all green.
 
-**Still outstanding** at this section's level:
+Extended 64-byte form (Birth-volume / Birth-object / Birth-domain
+GUIDs per MS-FSCC §2.4.6) **also shipped** on branch
+`feature/objid-extended` (commit b4a1344, rebased on top of
+feature/objid-write): `build_resident_object_id_attribute_full`,
+`write_object_id_extended(_io)`, `read_object_id_extended(_io)`
+returning an `ObjectIdExtended { object_id, birth_ids:
+Option<...> }` struct. C ABI:
+`fs_ntfs_write_object_id_extended` + `fs_ntfs_read_object_id_extended`
+with caller-side truncation when out_buf_len < 64. 10 extra tests
+cover roundtrip, short-form-no-Birth-IDs, extended-then-short
+shrinks correctly, short-read-of-extended, and the C-ABI parallels.
 
-- Extended attributes (BirthVolume / BirthObject / BirthDomain
-  GUIDs from MS-FSCC §2.4.6): grow `value_size` from 16 to 64
-  and accept three more `[u8; 16]` parameters. The mandatory
-  16-byte prefix is what modern Windows requires for
-  `FSCTL_GET_OBJECT_ID` roundtrips, so the prefix-only writer
-  is functionally complete; the Birth-IDs are a refinement.
+§3.5 is now functionally complete; what's outstanding is the
+**parent's $I30 index entry** when a file gets a fresh `$OBJECT_ID`
+(no DLT lookup index until that's added; OS-level use cases
+needing FSCTL_GET_OBJECT_ID still work because they go through the
+MFT record, not the index).
 
 ### §3.7 Non-resident named streams + EAs
 
@@ -549,6 +565,45 @@ unconditionally; existing matrix scenarios don't carry the flag,
 so the lack of wire-through has no observable effect on what we
 ship. The primitive lets the wire-through land in a single small
 follow-up PR once #1 is settled.
+
+### §3.10 Runtime volume-label writer — shipped (2026-05-23)
+
+Symmetric to mkfs's `-L LABEL` flag: `set_volume_label(image,
+&str)` / `fs_ntfs_set_volume_label(image, label)` updates
+`$Volume`'s `$VOLUME_NAME` (attr 0x60) at MFT slot 3. Empty
+string / NULL removes the attribute entirely. `read_volume_label`
++ `fs_ntfs_read_volume_label` is the symmetric reader. Hard-cap at
+32 UTF-16 code units per Microsoft tools' convention; longer
+labels rejected with `Err("volume label too long: …")`.
+
+Shipped on `feature/set-volume-label` (commit c1eb03a). 11 tests
+cover roundtrip, empty-removes, max-length, too-long rejection,
+mixed-Unicode (BMP + non-BMP), upstream remount after write and
+after remove, plus C-ABI parallels. No on-disk format change
+beyond what mkfs already produces.
+
+### §3.11 Diagnostic-helper read APIs — shipped (2026-05-23)
+
+A family of read-only helpers added during this session to
+support byte-diff investigations (S4 `$Reparse`, case-sensitive
+flag bit-position research, multi-namespace files, etc.). All
+ship on small focused branches; tests live alongside.
+
+| API | Branch / commit | What it returns |
+|---|---|---|
+| `read_attributes` / `describe_attributes` | `feature/read-attribute-list` c54d817 | List of `AttrDescription { type_code, type_name, name, attr_offset, attr_length, is_resident, value_length }` for every attribute on a file's MFT record |
+| `read_file_names` | `feature/read-file-names` fd03f26 | One `FileNameRecord { namespace, name, parent_reference, file_attributes }` per `$FILE_NAME` on the file |
+| `read_security_id` | `feature/set-security-id` 2a68b09 (shipped alongside the writer) | `Option<u32>` — `None` for the 48-byte v1.x SI form, `Some(id)` for 72-byte v3.x |
+| `read_object_id_extended` | `feature/objid-extended` b4a1344 | `Option<ObjectIdExtended>` with full 64-byte form (object_id + Birth GUIDs) when present |
+| `read_volume_label` | `feature/set-volume-label` c1eb03a | `String` (UTF-8); empty if `$VOLUME_NAME` absent |
+| `fs_ntfs_get_volume_info_v2` | `feature/volume-info-v2` 7d64f3f | `FsNtfsVolumeInfoV2` adding `volume_flags` / `is_dirty` / `mft_record_size` / `bytes_per_sector` on top of v1 |
+
+These don't ship as a unified "diagnostics module" — each lives in
+the natural place (write.rs for the path-based functions, attr_io
+for the attribute walker). They share the same pattern: open
+read-only, resolve path → record number, parse the attribute, return
+a structured Rust value. Most have C-ABI wrappers for use from
+external tools.
 
 ---
 
