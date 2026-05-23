@@ -371,6 +371,37 @@ to `scan == 0` once the differentiator is found.
 **Effort estimate**: medium-to-large (S1–S5 is the most-promising
 path; multi-day. The bisection / Procmon work is hours).
 
+**S4 investigation update (2026-05-23)**: two S4 attempts on branch
+`feature/s4-extend-reparse` (commits 278c676 and 712566a) shipped
+`$Reparse` at MFT slot 16 — first as resident `$INDEX_ROOT $R`
+only, then as non-resident `$INDEX_ALLOCATION $R` + `$BITMAP $R` +
+HAS_SUBNODES root. Both rejected by chkdsk readonly with `Index $R
+in file 10 is corrupt` / `Error detected in index $R for file 10`
+(where `10` is hex = slot 16).
+
+Background-agent byte-level investigation of the reference image
+(`nfs-win-format-mac-enumerate-empty.img`, parsed by walking the
+$MFT data runs to find rec 26 carrying `$FILE_NAME` = "$Reparse")
+showed the reference's `$Reparse`:
+
+* Lives at **MFT slot 26**, not slot 16. Microsoft places $Extend
+  children at slots determined by allocation order, not by
+  canonical convention.
+* Carries **flags = 0x0D** (IN_USE | bit 0x04 | bit 0x08), not 0x05
+  or 0x09 that S4-v1/v2 used.
+* Ships the `$R` index as a **resident-only `$INDEX_ROOT`**, NO
+  `$INDEX_ALLOCATION` and NO `$BITMAP`. Procmon's observation that
+  chkdsk opens `\Device\…\$Extend\$Reparse:$R:$INDEX_ALLOCATION`
+  is most likely a speculative open of a potential non-resident
+  stream that chkdsk tolerates failing.
+
+S4-v3 should drop the non-resident machinery, place `$Reparse` at
+slot 26 (or wherever follows the canonical 0..15 reserved range
+naturally), and use flags 0x0D. The `read_attributes` /
+`describe_attributes` helper on `feature/read-attribute-list`
+(commit c54d817) was built specifically to make this byte-diff
+investigation easier next iteration.
+
 ### §3.2 NTFS compression (LZNT1)
 
 - **Read — detect-and-error shipped** (2026-05-23): `fs_ntfs_read_file`
@@ -486,10 +517,28 @@ equality, prefix ordering, and non-ASCII code-point ordering.
 **Wire-through still needed**:
 
 1. Pin the actual bit position of FILE_ATTRIBUTE_CASE_SENSITIVE_DIR
-   within file_attributes — third-party documentation circulates
-   multiple values (`0x10000`, `0x80000000`, and others). The
-   only authoritative path is a byte-diff against a reference
-   WSL / Docker-Desktop NTFS volume.
+   within file_attributes. Investigation 2026-05-23 confirmed
+   **the value is contested**:
+   * This repo's docs claim `0x00010000`, which matches Windows
+     SDK `winnt.h`'s `FILE_ATTRIBUTE_VIRTUAL` ("reserved for
+     system use") — interesting overlap but no Microsoft source
+     documents the per-directory case-sensitivity flag at that
+     bit.
+   * Microsoft Learn / MS-FSCC §2.6 publishes file-attribute
+     constants up to `0x00400000` and **does not list a
+     case-sensitive-dir bit** at any value.
+   * Third-party reverse-engineering notes circulate
+     `0x00010000`, `0x80000000`, and a separate `$STANDARD_INFORMATION`
+     extension slot (not file_attributes at all).
+   * Microsoft WSL docs document the *user-facing* feature
+     (`fsutil file setCaseSensitiveInfo`) but deliberately don't
+     disclose the on-disk encoding.
+
+   The only authoritative path is a **byte-diff against a real
+   WSL or Docker-Desktop NTFS volume**: create a directory with
+   `fsutil file setCaseSensitiveInfo <path> enable`, then compare
+   its `$FILE_NAME.file_attributes` and `$STANDARD_INFORMATION.file_attributes`
+   bytes against a sibling normal directory to identify the bit.
 2. Thread `case_sensitive: bool` through `find_index_entry` /
    `insert_entry_into_index_root` / the INDX-block variants.
 3. At every lookup site, read the parent directory's flag and pick
