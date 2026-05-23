@@ -522,7 +522,199 @@ unlink /hello.txt → inspect_ntfs lists 13.
 
 iter16 in [chkdsk-findings.md](./chkdsk-findings.md). Commit [9a640c5].
 
-## Outstanding — `frs.cxx 0x60f` chkdsk ceiling and Windows write refusal
+## Bug 9 — runtime `$FILE_NAME` `indexed_flag` zero on freshly created records (iter N, 2026-05-23)
+
+### Symptom
+
+`chkdsk DRIVE:` after a `mac:format → mac:mkdir foo → win:chkdsk`
+sequence reports:
+
+```
+Stage 1: Examining basic file system structure ...
+Attribute record (30, "") from file record segment 24 is corrupt.
+Errors found.  CHKDSK cannot continue in read-only mode.
+```
+
+Matrix scenarios: `mac-format-mkdir-set-dirty-win-chkdsk`,
+`mac-format-write-set-dirty-win-chkdsk`,
+`mac-format-mac-write-win-repeat-mount-3-win-chkdsk`.
+
+### Root cause
+
+Bug 1 was fixed on the `mkfs` path (system records 0..0xB) but the
+**runtime** code that synthesises new MFT records for
+`fs_ntfs_create_file` / `fs_ntfs_mkdir` / hard-link / rename — i.e.
+`src/record_build.rs` — had its own copy of the same wrong layout
+and wrote `indexed_flag = 0` on every freshly created file's
+`$FILE_NAME`.
+
+### Fix
+
+`src/record_build.rs::build_file_name_attribute` (`buf[v + 22] = 1`)
+and `write_file_name` (`rec[at + 22] = 1`). Same byte, same value
+as Bug 1 — just the second code path was missed.
+
+### Iteration
+
+Iter N. Commit [def4088].
+
+## Bug 10 — runtime MFT `bytes_used` off by 4 (iter N, 2026-05-23)
+
+### Symptom
+
+After Bug 9 fixed, `chkdsk` reports:
+
+```
+First free byte offset corrected in file record segment 24.
+```
+
+on records produced by runtime `create_file` / `mkdir`.
+
+### Root cause
+
+Same off-by-four as Bug 2, in the second code path:
+`src/record_build.rs::build_regular_file_record` and
+`build_directory_record` both advanced `cursor` by 4 (just the
+`0xFFFFFFFF` end-marker magic) instead of 8 (magic + the
+`attribute_length = 0` u32 trailer) before computing `bytes_used`.
+
+### Fix
+
+Both builders now `cursor += 8` after writing the END marker.
+
+### Iteration
+
+Iter N. Commit [def4088].
+
+## Bug 11 — `INDEX_HEADER.allocated_size_of_entries` not bumped on insert (iter N, 2026-05-23)
+
+### Symptom
+
+After Bugs 9–10 fixed, Windows Event Log emitted Event 55:
+
+```
+A corruption was found in a file system index structure on
+volume %hs. The file reference number is N, the name is "...",
+the index name is $I30, and the attribute type is $INDEX_ROOT.
+```
+
+on volumes that had had files/dirs added at runtime.
+
+### Diagnostic
+
+Byte-diff of `$INDEX_ROOT.value`'s `INDEX_HEADER`:
+
+| Field                              | Pre-insert | Post-insert (ours) | Spec invariant |
+|------------------------------------|------------|--------------------|----------------|
+| `total_size_of_entries`   (+0x04)  | 0x4b8      | 0x518              | OK             |
+| `allocated_size_of_entries` (+0x08)| 0x4b8      | **0x4b8**          | **must ≥ total** |
+
+`allocated_size` was being left at its pre-insert value while
+`total_size` grew.
+
+### Root cause
+
+`src/index_io.rs::insert_entry_into_index_root_with_collation`
+updated `IH_TOTAL_SIZE_OF_ENTRIES` but not
+`IH_ALLOCATED_SIZE_OF_ENTRIES`. NTFS spec requires
+`allocated ≥ total`; chkdsk + ntfs.sys treat `allocated < total`
+as corruption.
+
+### Fix
+
+Compute `new_size = total_size + entry_bytes.len()` once; write
+it to both `IH_TOTAL_SIZE_OF_ENTRIES` and
+`IH_ALLOCATED_SIZE_OF_ENTRIES`.
+
+### Iteration
+
+Iter N. Commit [def4088].
+
+## Bug 12 — `$FILE_NAME.namespace` hardcoded to WIN32_AND_DOS (iter N, 2026-05-23)
+
+### Symptom
+
+`chkdsk DRIVE:` on a volume with a runtime-created file
+`/persistent.txt` (stem 10 chars > 8) reported:
+
+```
+Stage 2: Examining file name linkage ...
+An invalid filename persistent.txt (18) was found in directory 5.
+All filenames for File 18 are invalid.
+Minor file name errors were detected in file 18.
+Index entry persistent.txt in index $I30 of file 5 is incorrect.
+```
+
+Matrix scenario: `mac-format-mac-write-win-repeat-mount-3-win-chkdsk`.
+
+### Root cause
+
+The MFT side of `$FILE_NAME` (in `src/record_build.rs`) was always
+writing `namespace = 3` (WIN32_AND_DOS), which per MS-FSCC §2.4.4
+requires the name to fit DOS 8.3 (stem ≤ 8 chars, ext ≤ 3 chars,
+no extra dots). `persistent.txt` doesn't fit; chkdsk Stage 2
+rejects the attribute.
+
+### Fix
+
+Add a helper `record_build::fn_namespace_for(name: &str) -> u8`
+that returns `WIN32_AND_DOS` (3) when the name fits 8.3 and
+`POSIX` (0) otherwise. Route `build_file_name_attribute` and
+`write_file_name`'s callers through it.
+
+This mirrors the rule already documented for the mkfs-side
+`$Extend` children (`mkfs.rs::NAMESPACE_POSIX`).
+
+### Iteration
+
+Iter N. Commit [73a9a1c].
+
+## Bug 13 — index entry's embedded `$FILE_NAME.namespace` disagrees with MFT side (iter N, 2026-05-23)
+
+### Symptom
+
+After Bug 12 fixed, the "invalid filename" error on the MFT-side
+`$FILE_NAME` disappeared, but chkdsk Stage 2 still reported:
+
+```
+Index entry persistent.txt in index $I30 of file 5 is incorrect.
+```
+
+### Root cause
+
+Each `$I30` entry embeds its own copy of the `$FILE_NAME` value.
+After Bug 12 the MFT-record copy used POSIX (0) for non-8.3 names,
+but `src/index_io.rs::build_file_name_index_entry` still
+hardcoded `e[k + FN_NAMESPACE_OFFSET] = 3`. chkdsk validates that
+the two copies agree.
+
+### Fix
+
+Same `record_build::fn_namespace_for(name)` helper used by Bug 12,
+applied at the index-entry build site too.
+
+### Iteration
+
+Iter N. Commit [4f8bbdb].
+
+## Outstanding — `frs.cxx 0x60f` chkdsk `/scan` ceiling and Windows write refusal
+
+**State as of 2026-05-23**: after Bugs 1–13 fixed,
+`chkdsk DRIVE:` (readonly) exits 0 cleanly across the matrix.
+**`chkdsk DRIVE: /scan` still exits 13** — i.e. the ceiling
+described below is still active, just on the `/scan` lane only.
+The matrix `clean` verdict shape accepts
+`readonly == 0 AND scan ∈ {0, 11, 13}` so the matrix passes;
+tightening to `scan == 0` requires the working theory below to be
+worked through.
+
+The historical block below was written before Bugs 9–13 landed and
+described the residual state of those iterations (`Stage 1 clean`,
+`Stage 2 clean`, then internal assertion). The exact stdout has
+since changed — current `/scan` exits 13 without printing the
+`frs.cxx 60f` line in its captured stdout. The Procmon work
+described in implementation-plan-secure-and-extend.md (Iter H) is
+the most-promising path to identify what `/scan` actually keys on.
 
 After Bugs 1–8 fixed, the eight scenarios `tiny-32mib`, `small-64mib`,
 `basic-256mib`, `large-1gib`, `label-empty/32chars/cjk/latin1` all

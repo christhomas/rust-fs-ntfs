@@ -47,6 +47,25 @@ lose their fail-fast paths automatically.
 
 ---
 
+### W2.5 — long-filename / attribute-list edge case (flag only)
+
+Resident-only attributes that could outgrow an MFT record:
+
+- `$FILE_NAME` — up to 255 UTF-16 code units (≈ 510 bytes payload +
+  66 byte $FILE_NAME header + 24 byte attribute header). With
+  multiple hard links + a large `$SECURITY_DESCRIPTOR`, a 1024-byte
+  record could in principle exhaust. `$FILE_NAME` is required to
+  be resident per MS-FSCC, so the answer when this happens is an
+  `$ATTRIBUTE_LIST` (extension record), not promotion.
+- `$ATTRIBUTE_LIST` itself can be non-resident if it grows.
+
+Today neither path is implemented. The realistic exposure is small
+(record sizes are 4096 bytes by default, capacity ~3700 bytes after
+fixed overhead). Suggested next step is a negative test that creates
+a file with a 255-character UTF-16 name + several hard links and
+verifies we either fit (likely) or fail loudly (not silently
+corrupt).
+
 ### W2.6 — MFT self-growth
 
 When there are no free MFT records, `$MFT` itself must grow. `$MFT`'s
@@ -60,14 +79,38 @@ exist.
 
 ### W3.2 — `$INDEX_ALLOCATION` B+ tree insert
 
-Two cases:
+**Scaffolding already present** (so the cost is the algorithm, not
+infrastructure):
+
+- INDX-block decoder + VCN-to-disk-offset translation:
+  `src/idx_block.rs:58–138`.
+- `$Bitmap` attribute scoped to `$INDEX_ALLOCATION` is loaded and
+  parsed: `src/idx_block.rs:28–55`.
+- `$UpCase`-table-based `COLLATION_FILE_NAME` comparison is wired
+  into the resident-root insert path: `src/index_io.rs:475–698` +
+  `src/upcase.rs`. Used live from `write.rs:1001`.
+- Cluster allocator + resident-to-non-resident promotion machinery
+  used by `$DATA` (`promote_resident_data_to_nonresident_io` etc.)
+  is reusable for the index promotion case.
+
+**What's missing**:
+
+- The spill-detection branch in `insert_entry_in_parent_io`
+  (`src/write.rs:1002–1047`) — today it scans only allocated INDX
+  blocks, gives up with "no INDX block with room ... would need
+  B+ tree split / new block allocation", and `create_file` /
+  `mkdir` / `rename` refuse parents with `IH_FLAG_HAS_SUBNODES`
+  (`src/write.rs:884`, `:1082`, `:1514`).
+
+Two cases to implement:
 
 - **Small dir** (fits in `$INDEX_ROOT`): insert into the resident tree.
   If it no longer fits, promote to `$INDEX_ALLOCATION` (much like
   resident → non-resident promotion done in W2.2).
 - **Large dir**: walk B+ tree from root. At each node, binary-search
   by the NTFS collation rule (typically `COLLATION_FILE_NAME`:
-  case-insensitive upcase-table comparison). At leaf:
+  case-insensitive upcase-table comparison; already implemented). At
+  leaf:
   - If node has free space: insert, rewrite node, done.
   - If not: split. Allocate a new index node (uses `$Bitmap` attribute
     scoped to `$INDEX_ALLOCATION`), pick a median key, propagate the
@@ -261,18 +304,19 @@ LOC.
 
 ### §3.1 `chkdsk /scan` exit 13 ceiling — pin down the differentiator
 
-**Status**: known gap; matrix tests currently accept `scan == 0 | 11 | 13`
-in `tests/matrix.rs` to bypass it. See the `TODO(/scan-13-ceiling)`
-comment there. Once this is fixed, tighten back to `scan == 0`.
+**Status (2026-05-23)**: still open. `chkdsk DRIVE:` (readonly) now
+exits 0 on every passing matrix scenario after the
+indexed_flag / bytes_used / INDEX_HEADER.alloc / namespace fixes
+(see [`docs/mkfs-bug-catalog.md`](mkfs-bug-catalog.md) — Iter N).
+`chkdsk DRIVE: /scan` still exits 13. The matrix's `clean`
+verdict shape accepts `readonly == 0 AND scan ∈ {0, 11, 13}`,
+so the matrix being green does not mean /scan is clean. Tighten
+to `scan == 0` once the differentiator is found.
 
-**What's known** (full investigation in
-[`docs/overnight-findings.md`](./overnight-findings.md) iter G):
+**What's known**:
 
-- All 12 matrix scenarios produce volumes that pass `chkdsk readonly`
-  with exit 0 ("found no problems") and `chkdsk /F` with exit 0
-  ("no problems found"). The volume mounts as NTFS, label and size
-  are correct, files can be created and read back. Functionally
-  sound.
+- All currently-passing matrix scenarios (35/42 confirmed at the
+  time of writing, full run in progress) reach `readonly = 0`.
 - `chkdsk /scan` consistently returns 13 ("errors queued for offline
   repair") on our volumes but exits 0 on Microsoft `format.com`'s
   output of the same scenario, despite both volumes being byte-similar
@@ -289,33 +333,57 @@ comment there. Once this is fixed, tighten back to `scan == 0`.
   bootstrap bytes, 256-record initial MFT, SD_ROOT_DIR last-byte
   typo, link_count=0 on placeholders, $Extend as real directory,
   $BadClus off-by-one, dirty-bit set.
+- The Iter N fixes (FILE_NAME indexed_flag = 1; MFT bytes_used to
+  include the 8-byte END trailer; INDEX_HEADER alloc_size kept in
+  sync with total_size; FILE_NAME.namespace derived from DOS-8.3
+  fit instead of hardcoded WIN32_AND_DOS, both MFT-side and index-
+  entry-side) lifted `readonly` from "errors found" to 0 across the
+  matrix, but did **not** shift /scan. So the differentiator is in
+  whatever /scan validates that readonly skips.
 
 **Productive next moves** (not yet attempted):
 
 1. Capture every disk read `chkdsk /scan` performs against our volume
    via Windows Procmon on the test VM, correlate with what /scan does
    against the reference. The reads /scan does that readonly doesn't
-   pinpoint exactly which bytes the validator keys on.
-2. Time-bisect: Mount-DiskImage with `-NoDriveLetter`, manually run
+   pinpoint exactly which bytes the validator keys on. Harness already
+   exists at `scripts/procmon-chkdsk-trace.ps1`.
+2. Implement S1–S5 (see `docs/implementation-plan-secure-and-extend.md`):
+   ship populated `$Secure:$SDH`/`$SII` view indexes + `$Extend`
+   directory with `$Reparse` and `$RmMetadata` sub-files. Iter H's
+   Procmon trace identified these three structures as files /scan
+   opens that we don't ship.
+3. Time-bisect: Mount-DiskImage with `-NoDriveLetter`, manually run
    `Set-Disk -IsOffline $false`, then assign letter — different
    sequencing might shift ntfs.sys's first-mount-state behaviour.
-3. Implement the full `$RmMetadata` / `$Repair` hierarchy under
-   `$Extend` even though reference doesn't have it — it may be a
-   "creation marker" /scan looks for. (Lower confidence given ref
-   doesn't have it either.)
 
-**Effort estimate**: unknown (the hypothesis space we've ruled out
-is wide; the remaining surface is deep-Windows-internals).
+**Effort estimate**: medium-to-large (S1–S5 is the most-promising
+path; multi-day. The bisection / Procmon work is hours).
 
-### §3.2 NTFS compression (LZNT1) write
+### §3.2 NTFS compression (LZNT1)
 
-- **Read**: already works via upstream.
-- **Write**: we refuse anything with the compression flag set.
-  Writing new compressed data means emitting LZNT1-encoded chunks
-  per `compression_unit`. ~800 LOC — big.
+- **Read**: upstream `ntfs` 0.4 does not expose LZNT1 decompression.
+  `fs_ntfs_read_file` on a compressed file today returns whatever
+  `NtfsAttributeValue::read` produces, which is the raw (still-
+  compressed) bytes — silent garbage, not a clear error. Cheap
+  improvement worth doing first: detect `$DATA.flags & 0xFF != 0`
+  (`compression_unit` non-zero) in `fs_ntfs_read_file` and return
+  a clear error ("file is compressed; LZNT1 decompression not yet
+  supported") so callers know.
+- **Write**: we refuse anything with the compression flag set
+  (`src/write.rs:255–266`). Writing new compressed data means
+  emitting LZNT1-encoded chunks per `compression_unit`. ~800 LOC —
+  big.
 
 ### §3.3 Sparse-file explicit management
 
+**Read side**: already works. Sparse `$DATA` runs decode to zero
+bytes without IO via the upstream `ntfs` crate's `NtfsReadSeek`
+implementation, exercised by `tests/sparse.rs`. No code change
+needed; consider adding a one-line doc-comment to `fs_ntfs_read_file`
+noting this so callers know holes are transparent.
+
+**Write side** is what's outstanding:
 POSIX `fallocate(FALLOC_FL_PUNCH_HOLE)`-style:
 `fs_ntfs_punch_hole(image, path, offset, len)` → mark range as
 sparse in the data runs, free the clusters. Current truncate can
@@ -347,14 +415,22 @@ Tracked alongside "W4 polish" above.
 ### §3.8 WOF (Windows Overlay Filter) decompression
 
 Modern Windows 10/11 volumes have most of `C:\Windows\` stored as
-empty unnamed `$DATA` + `IO_REPARSE_TAG_WOF` + `WofCompressedData`
-ADS. Without WOF support, reading `notepad.exe` returns 0 bytes.
-**Silent data loss on every modern volume.**
+empty unnamed `$DATA` + `IO_REPARSE_TAG_WOF` (0x80000017) +
+`WofCompressedData` ADS. Without WOF support, reading `notepad.exe`
+returns 0 bytes. **Silent data loss on every modern volume.**
 
-Requires XPRESS4K/8K/16K + LZX decompression. Third-party crate
-(`ms-compress`) does it; bindings would be ~200 LOC. Listed as the
-biggest single read-correctness gap in STATUS.md cross-check
-"#### WOF (Windows Overlay Filter) compression not supported".
+Today we recognise the tag in the reparse-dispatch switch
+(`src/lib.rs:575–609`) but fall through to "leave file_type alone"
+and read the empty unnamed `$DATA` as-is, hence the 0 bytes. Cheap
+improvement: in `fs_ntfs_read_file`, detect tag 0x80000017 on a
+file and return a clear error ("WOF-compressed; not yet supported")
+so callers know.
+
+Real fix requires XPRESS4K/8K/16K + LZX decompression of the
+`WofCompressedData` ADS. Third-party crate (`ms-compress`) does it;
+bindings would be ~200 LOC. Listed as the biggest single
+read-correctness gap in STATUS.md cross-check "#### WOF (Windows
+Overlay Filter) compression not supported".
 
 ### §3.9 Case-sensitive directory flag
 

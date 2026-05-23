@@ -152,10 +152,19 @@ exit codes that matter:
 - 2 = restart required
 - 3 = could not check (read-only mode's "errors found")
 - 11 = chkdsk-internal error (e.g. `frs.cxx 60f`)
+- 13 = `/scan` lane: "errors found, queued for offline repair". `/scan`
+  surfaces a different set of validators from readonly; we are
+  currently still at 13 on the `/scan` lane even though readonly
+  exits 0 across the matrix (as of 2026-05-23, post-Iter N — see
+  `mkfs-bug-catalog.md` Bugs 9–13).
 
 `chkdsk DRIVE:` (read-only) gives **more useful diagnostic output**
 than `chkdsk DRIVE: /scan` on a small volume. `/scan` requires
-shadow-copy storage, which fails on volumes under ~256 MiB.
+shadow-copy storage, which fails on volumes under ~256 MiB. On
+volumes that do support `/scan` (≥256 MiB), it sometimes flags
+structural issues that readonly does not — we don't yet have a
+complete model of the differentiator (see
+[`FUTURE_FEATURES.md`](FUTURE_FEATURES.md) §3.1).
 
 ### 1.5 Linux test contract — what every commit must preserve
 
@@ -218,6 +227,28 @@ reimplementations.
   `mac-format-basic-256mib` path passes all byte-diffs we can produce;
   the cluster-size axis surfaces distinct failures (§4.3 in the
   Outstanding section).
+
+### 1.8 Current chkdsk state ledger (2026-05-23, post-Iter N)
+
+This is a snapshot of where the validator stands today. The rest of
+section 2 is an iteration-by-iteration history; if it disagrees with
+this ledger, the ledger is current. Updated in place after each
+matrix run.
+
+| Lane                  | State          | Notes |
+|-----------------------|----------------|-------|
+| `chkdsk DRIVE:` (readonly) | **exit 0 (clean)** across the matrix | Lifted from "Stage 1/2 errors" by Iter N (Bugs 9–13 in `mkfs-bug-catalog.md`). |
+| `chkdsk DRIVE: /scan` | exit 13 (errors queued for offline repair) | Ceiling unchanged by Iter N. Differentiator vs `format.com`'s output still unknown; Procmon-tracing path identified (`implementation-plan-secure-and-extend.md` Iter H). |
+| `chkdsk DRIVE: /F`    | exit 0 after modifying the volume | /F adds `$Secure:$SDH/$SII` content, transforms `$Extend` into a real dir, drops `$SD` on system records. Post-/F `/scan` then exits 0. |
+| Mount + read          | works | Volume mounts as NTFS, label + size correct, files listable + readable. |
+| Mount + write         | refused with Win32 1450 `ERROR_NO_SYSTEM_RESOURCES` | Same root cause family as the `/scan` ceiling; expected to fall out of the S1–S5 plan. |
+| Event log (mount-time) | Event 55 / 130 / 137 NOT fired | We previously triggered Event 55 by mispositioning the backup boot sector; that bug is fixed (Bug 7). |
+
+The `frs.cxx 60f` line is no longer printed in the captured `/scan`
+stdout. It may or may not still be the underlying assertion — the
+absence of the line doesn't prove the ceiling moved, since `/scan`
+suppresses chkdsk-internal diagnostics. The exit code is what we
+track; it remains 13.
 
 ---
 
