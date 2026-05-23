@@ -1420,6 +1420,34 @@ pub fn create_symlink_io<T: BlockIo + ?Sized>(
     Ok(rec)
 }
 
+/// Describe every attribute in a file's MFT record. Returns a
+/// list of [`crate::attr_io::AttrDescription`] — type code + decoded
+/// name + dimensions, suitable for human inspection / diagnostics
+/// (e.g. matching what reference volumes ship vs. what our mkfs
+/// emits when investigating chkdsk disagreements).
+///
+/// Does NOT follow `$ATTRIBUTE_LIST` extension records — callers
+/// interested in the full attribute set of a multi-record file must
+/// chase those references explicitly. For files that fit in a single
+/// MFT record (the common case in this crate today), this returns
+/// the complete picture.
+pub fn read_attributes(
+    image: &Path,
+    file_path: &str,
+) -> Result<Vec<crate::attr_io::AttrDescription>, String> {
+    let mut io = PathIo::open_ro(image)?;
+    read_attributes_io(&mut io, file_path)
+}
+
+pub fn read_attributes_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+) -> Result<Vec<crate::attr_io::AttrDescription>, String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let (_, record) = read_mft_record_io(io, rec)?;
+    Ok(crate::attr_io::describe_attributes(&record))
+}
+
 /// Read the 16-byte object ID (`$OBJECT_ID` attribute value) for a
 /// file. Returns `Ok(None)` if the file has no `$OBJECT_ID`.
 pub fn read_object_id(image: &Path, file_path: &str) -> Result<Option<[u8; 16]>, String> {

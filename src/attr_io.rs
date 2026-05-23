@@ -126,6 +126,113 @@ pub fn attr_name_equals(record: &[u8], loc: &AttrLocation, want: &str) -> bool {
     }
 }
 
+/// A debug-oriented description of a single attribute on disk —
+/// suitable for human inspection and diagnostics. Used by
+/// [`describe_attributes`] / `fs_ntfs_describe_attributes` to dump
+/// what's in a file's MFT record for $Reparse byte-diff research
+/// and $ATTRIBUTE_LIST debugging.
+///
+/// This struct is the *narrative* shape of an attribute (its name +
+/// dimensions); it's NOT a parser intermediate. Code that needs to
+/// operate on the bytes should use [`AttrLocation`] from
+/// [`iter_attributes`] instead.
+#[derive(Debug, Clone)]
+pub struct AttrDescription {
+    pub type_code: u32,
+    /// The well-known name for this attribute type ("$STANDARD_INFORMATION"
+    /// / "$FILE_NAME" / "$DATA" / ...) when recognised, or `"?(0xNN)"`
+    /// for unknown types.
+    pub type_name: String,
+    /// Stream name decoded from UTF-16 LE (empty for unnamed
+    /// attributes), or `Err(decode_message)` if the bytes don't form
+    /// valid UTF-16. Returning the lossy decode lets the caller see
+    /// what was there even when the name is malformed.
+    pub name: String,
+    pub attribute_id: u16,
+    /// Byte offset of the attribute header within the MFT record.
+    pub attr_offset: usize,
+    pub attr_length: usize,
+    pub is_resident: bool,
+    /// Resident attributes: the value length declared in the
+    /// resident-form header. Non-resident: the `data_length` from the
+    /// non-resident header.
+    pub value_length: u64,
+}
+
+/// Human-readable name for a small set of well-known NTFS attribute
+/// type codes per MS-FSCC §2.4.
+fn attr_type_name(type_code: u32) -> String {
+    match type_code {
+        0x10 => "$STANDARD_INFORMATION".to_string(),
+        0x20 => "$ATTRIBUTE_LIST".to_string(),
+        0x30 => "$FILE_NAME".to_string(),
+        0x40 => "$OBJECT_ID".to_string(),
+        0x50 => "$SECURITY_DESCRIPTOR".to_string(),
+        0x60 => "$VOLUME_NAME".to_string(),
+        0x70 => "$VOLUME_INFORMATION".to_string(),
+        0x80 => "$DATA".to_string(),
+        0x90 => "$INDEX_ROOT".to_string(),
+        0xA0 => "$INDEX_ALLOCATION".to_string(),
+        0xB0 => "$BITMAP".to_string(),
+        0xC0 => "$REPARSE_POINT".to_string(),
+        0xD0 => "$EA_INFORMATION".to_string(),
+        0xE0 => "$EA".to_string(),
+        0x100 => "$LOGGED_UTILITY_STREAM".to_string(),
+        other => format!("?(0x{other:x})"),
+    }
+}
+
+/// Decode an attribute's UTF-16 LE name field to a Rust `String`,
+/// returning lossy decoding rather than failing so the caller still
+/// sees what's there.
+fn decode_attr_name(record: &[u8], loc: &AttrLocation) -> String {
+    if loc.name_length == 0 {
+        return String::new();
+    }
+    let start = loc.attr_offset + loc.name_offset as usize;
+    let nbytes = loc.name_length as usize * 2;
+    if start + nbytes > record.len() {
+        return format!("<out-of-record: off={start}, len={nbytes}>");
+    }
+    let u16s: Vec<u16> = record[start..start + nbytes]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    String::from_utf16_lossy(&u16s)
+}
+
+/// Build a list of [`AttrDescription`]s for every attribute in a
+/// raw MFT record buffer. Useful for matching what reference
+/// volumes ship vs. what our mkfs emits when chasing chkdsk
+/// disagreements (see `feature/s4-extend-reparse` — the
+/// $Reparse byte-diff investigation needs exactly this view of
+/// "what attributes does the reference's rec 26 actually carry?").
+///
+/// Does NOT follow `$ATTRIBUTE_LIST` extension records — the caller
+/// must call `describe_attributes` again on each extension record's
+/// bytes. Today no code in this crate emits extension records, so
+/// this is forward-compatible: the function reports the extension
+/// record's presence via its $ATTRIBUTE_LIST entry, the caller
+/// chases the file_reference + reads that record explicitly.
+pub fn describe_attributes(record: &[u8]) -> Vec<AttrDescription> {
+    iter_attributes(record)
+        .map(|loc| AttrDescription {
+            type_code: loc.type_code,
+            type_name: attr_type_name(loc.type_code),
+            name: decode_attr_name(record, &loc),
+            attribute_id: loc.attribute_id,
+            attr_offset: loc.attr_offset,
+            attr_length: loc.attr_length,
+            is_resident: loc.is_resident,
+            value_length: if loc.is_resident {
+                loc.resident_value_length.unwrap_or(0) as u64
+            } else {
+                loc.non_resident_value_length.unwrap_or(0)
+            },
+        })
+        .collect()
+}
+
 /// Offsets within an attribute header. Named constants so the arithmetic
 /// in this module doesn't depend on magic numbers elsewhere.
 pub mod attr_off {
