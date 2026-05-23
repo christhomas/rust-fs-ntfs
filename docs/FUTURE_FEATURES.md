@@ -417,15 +417,28 @@ adding new SD entries or rewriting an existing file's
 to `$SDS`, updating `$SDH` (hash-keyed) + `$SII` (ID-keyed) view
 indexes, and growing the security_id counter.
 
-### §3.5 `$OBJECT_ID` write side
+### §3.5 `$OBJECT_ID` write side — shipped (2026-05-23)
 
 16-byte GUID per file, used by DLT (Distributed Link Tracking).
-Read side already shipped (`fs_ntfs_read_object_id` at
-`src/write.rs:1425-1463`). Write/builder side — creating a
-`$OBJECT_ID` attribute on a file that has none — is still pending.
-~30-40 LOC for the minimal GUID-only version (insert via `attr_io`,
-mirror the read bounds-check). Extended attributes
-(BirthVolume/BirthObject/BirthDomain) deferred.
+Read side: `fs_ntfs_read_object_id` at `src/write.rs:1425-1463`.
+Write side **shipped** on branch `feature/objid-write` (commit
+5751fde) and ready to merge: `record_build::build_resident_object_id_attribute`
+emits a 16-byte-payload resident `$OBJECT_ID` (attr type 0x40),
+and `write::{write,remove}_object_id` follow the existing
+reparse-point pattern (find → replace-in-place if present,
+otherwise allocate-id + insert-before-end; remove is idempotent).
+C ABI: `fs_ntfs_write_object_id` + `fs_ntfs_remove_object_id`.
+9 tests in `tests/object_id.rs` cover roundtrip, replace,
+remove-idempotence, and the C-ABI surface; all green.
+
+**Still outstanding** at this section's level:
+
+- Extended attributes (BirthVolume / BirthObject / BirthDomain
+  GUIDs from MS-FSCC §2.4.6): grow `value_size` from 16 to 64
+  and accept three more `[u8; 16]` parameters. The mandatory
+  16-byte prefix is what modern Windows requires for
+  `FSCTL_GET_OBJECT_ID` roundtrips, so the prefix-only writer
+  is functionally complete; the Birth-IDs are a refinement.
 
 ### §3.7 Non-resident named streams + EAs
 
@@ -457,24 +470,36 @@ returns.
 biggest single read-correctness gap in STATUS.md cross-check
 "#### WOF (Windows Overlay Filter) compression not supported".
 
-### §3.9 Case-sensitive directory flag
+### §3.9 Case-sensitive directory flag — primitive shipped (2026-05-23), wire-through pending
 
-`FILE_CASE_SENSITIVE_DIR` (0x00010000 in `$FILE_NAME.file_attributes`,
-Win10 1803+; WSL / Docker-Desktop set it). Our writes never set it;
-our reads never check it. The `$UpCase`-table-based comparator at
-`src/index_io.rs:671-685` (`compare_names`) is unconditionally
-case-insensitive; on a dev volume with case-sensitive subdirs we
-would collapse `foo.txt` and `FOO.TXT` to whichever the B-tree finds
-first.
+`FILE_CASE_SENSITIVE_DIR` is the per-directory case-sensitive flag
+(Win10 1803+; WSL / Docker-Desktop set it on container-image
+directories). Inside such a directory `foo.txt` and `FOO.TXT` are
+distinct files.
 
-Smallest useful step (~35 LOC, no on-disk change):
+**Shipped** on branch `feature/case-sensitive-dir` (commit 6f1d09b):
+`index_io::compare_names_ordinal(a: &[u16], b: &[u16]) -> Ordering`,
+the byte-for-byte UTF-16 comparator a case-sensitive directory
+should use. 4 unit tests cover case distinction, exact-bytes
+equality, prefix ordering, and non-ASCII code-point ordering.
 
-- Read side: when opening a directory, check its
-  `$FILE_NAME.file_attributes` bit. Pass a `case_sensitive: bool`
-  flag down to `index_io::find_index_entry` / `compare_names`; when
-  true, use ordinal UTF-16 comparison instead of the upcase fold.
-- Write side: same flag plumbing into `insert_entry_into_*` — pass
-  `None` for the upcase table when the directory is case-sensitive.
+**Wire-through still needed**:
+
+1. Pin the actual bit position of FILE_ATTRIBUTE_CASE_SENSITIVE_DIR
+   within file_attributes — third-party documentation circulates
+   multiple values (`0x10000`, `0x80000000`, and others). The
+   only authoritative path is a byte-diff against a reference
+   WSL / Docker-Desktop NTFS volume.
+2. Thread `case_sensitive: bool` through `find_index_entry` /
+   `insert_entry_into_index_root` / the INDX-block variants.
+3. At every lookup site, read the parent directory's flag and pick
+   the right comparator.
+
+Today the `compare_names` (case-insensitive) path is used
+unconditionally; existing matrix scenarios don't carry the flag,
+so the lack of wire-through has no observable effect on what we
+ship. The primitive lets the wire-through land in a single small
+follow-up PR once #1 is settled.
 
 ---
 
