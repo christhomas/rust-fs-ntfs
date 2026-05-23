@@ -680,6 +680,33 @@ int64_t fs_ntfs_write_file(const char *image, const char *path,
 int fs_ntfs_set_file_attributes(const char *image, const char *path,
                    uint32_t add_flags, uint32_t remove_flags);
 
+/*
+ * Read the file's $STANDARD_INFORMATION.security_id (the index into
+ * $Secure:$SDS / $Secure:$SII). Writes the 32-bit value to *out.
+ * Returns:
+ *    1  — security_id read into *out
+ *    0  — file's $STANDARD_INFORMATION is the 48-byte v1.x form (no
+ *         security_id field). *out is set to 0.
+ *   -1  — error
+ */
+int fs_ntfs_read_security_id(const char *image, const char *path,
+                             uint32_t *out);
+
+/*
+ * Point a file at an existing $Secure:$SDS entry by writing the
+ * security_id field in its $STANDARD_INFORMATION. mkfs ships the
+ * canonical system-files DACL at id 0x100; pointing a runtime-created
+ * file there grants the same ACL. Adding new SD entries is a separate
+ * (larger) piece of work — this writer only retargets.
+ *
+ * Requires the file's $STANDARD_INFORMATION to be in the 72-byte
+ * NTFS 3.x form. System files written by mkfs use the 48-byte v1.x
+ * form and cannot be retargeted via this API. Returns 0 on success,
+ * -1 on error.
+ */
+int fs_ntfs_set_security_id(const char *image, const char *path,
+                            uint32_t security_id);
+
 /* ---- Handle-based mutation API (`_h` siblings) ---- */
 
 /*

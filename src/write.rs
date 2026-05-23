@@ -42,6 +42,11 @@ const SI_MFT_MODIFICATION: usize = 0x10;
 const SI_ACCESS: usize = 0x18;
 const SI_FILE_ATTRIBUTES: usize = 0x20;
 
+/// `$STANDARD_INFORMATION.security_id` offset (NTFS 3.x form only —
+/// the 48-byte v1.x form omits this field). u32 at value bytes
+/// 0x34..0x38 per MS-FSCC §2.4.2.
+const SI_SECURITY_ID: usize = 0x34;
+
 /// Set file times on the file at `file_path`. Only modifies
 /// `$STANDARD_INFORMATION`; does not touch the duplicate times in the
 /// parent directory's `$FILE_NAME` index (Windows itself only updates
@@ -122,6 +127,89 @@ pub mod file_attr {
     pub const NORMAL: u32 = 0x0000_0080;
     pub const TEMPORARY: u32 = 0x0000_0100;
     pub const NOT_CONTENT_INDEXED: u32 = 0x0000_2000;
+}
+
+/// Read the `security_id` field from a file's `$STANDARD_INFORMATION`.
+/// Returns `Ok(None)` if the file's `$STANDARD_INFORMATION` value uses
+/// the 48-byte NTFS 1.x form (which omits the security_id field) —
+/// only the 72-byte NTFS 3.x form has it.
+///
+/// The returned `u32` is the index into `$Secure:$SDS` / `$Secure:$SII`;
+/// `0` is "no security descriptor assigned" (treated as the default
+/// inherited DACL), and `0x100` is the canonical entry mkfs ships for
+/// system files.
+pub fn read_security_id(path: &Path, file_path: &str) -> Result<Option<u32>, String> {
+    let mut io = PathIo::open_ro(path)?;
+    read_security_id_io(&mut io, file_path)
+}
+
+pub fn read_security_id_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+) -> Result<Option<u32>, String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let (_, record) = read_mft_record_io(io, rec)?;
+    let loc = attr_io::find_attribute(&record, AttrType::StandardInformation, None)
+        .ok_or_else(|| "$STANDARD_INFORMATION not found".to_string())?;
+    let data_start = attr_io::resident_value_start(&loc)
+        .ok_or_else(|| "$STANDARD_INFORMATION not resident".to_string())?;
+    let value_length = loc.resident_value_length.ok_or("no value length")? as usize;
+    if value_length < SI_SECURITY_ID + 4 {
+        // 48-byte v1.x form: security_id field is absent. Caller can
+        // either accept this as "default DACL" or call set_security_id
+        // to grow the attribute to 72 bytes.
+        return Ok(None);
+    }
+    let off = data_start + SI_SECURITY_ID;
+    let id = u32::from_le_bytes([record[off], record[off + 1], record[off + 2], record[off + 3]]);
+    Ok(Some(id))
+}
+
+/// Write the `security_id` field in `$STANDARD_INFORMATION`. The
+/// `security_id` is an index into `$Secure:$SDS` / `$Secure:$SII`;
+/// mkfs ships a single canonical entry at `0x100` (the system-files
+/// DACL), so a typical use is `set_security_id(image, path, 0x100)`
+/// to point a runtime-created file at that catalog entry.
+///
+/// Requires the file's `$STANDARD_INFORMATION` to be in the 72-byte
+/// NTFS 3.x form. Runtime-created files (via `create_file` /
+/// `mkdir`) ship that form unconditionally; system files written by
+/// mkfs use the 48-byte NTFS 1.x form and can't be retargeted via
+/// this API (`security_id` field is absent). Returns
+/// `Err("STANDARD_INFORMATION too small …")` in that case.
+///
+/// NOTE: this writer assumes the new `security_id` already has a
+/// corresponding entry in `$Secure:$SDS` / `$SDH` / `$SII`. Adding
+/// new SD entries is a larger piece of work (§3.4 "full ACL
+/// support") — this API is the minimal "point a file at the
+/// existing catalog entry" surface.
+pub fn set_security_id(path: &Path, file_path: &str, security_id: u32) -> Result<(), String> {
+    let mut io = PathIo::open_rw(path)?;
+    set_security_id_io(&mut io, file_path, security_id)
+}
+
+pub fn set_security_id_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    security_id: u32,
+) -> Result<(), String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    update_mft_record_io(io, rec, |record| {
+        let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
+            .ok_or_else(|| "$STANDARD_INFORMATION not found".to_string())?;
+        let data_start = attr_io::resident_value_start(&loc)
+            .ok_or_else(|| "$STANDARD_INFORMATION not resident".to_string())?;
+        let value_length = loc.resident_value_length.ok_or("no value length")? as usize;
+        if value_length < SI_SECURITY_ID + 4 {
+            return Err(format!(
+                "$STANDARD_INFORMATION too small for security_id: {value_length} bytes (need ≥ {})",
+                SI_SECURITY_ID + 4
+            ));
+        }
+        let off = data_start + SI_SECURITY_ID;
+        record[off..off + 4].copy_from_slice(&security_id.to_le_bytes());
+        Ok(())
+    })
 }
 
 /// Modify the `file_attributes` field in `$STANDARD_INFORMATION`. Bits in

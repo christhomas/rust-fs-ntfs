@@ -2483,6 +2483,78 @@ pub extern "C" fn fs_ntfs_write_file(
     }
 }
 
+/// Read the file's `$STANDARD_INFORMATION.security_id` (the index into
+/// `$Secure:$SDS` / `$Secure:$SII`). Writes the 32-bit value to `*out`.
+/// Returns:
+///    1  — security_id read into `*out`
+///    0  — file's $STANDARD_INFORMATION is the 48-byte v1.x form (no
+///         security_id field). `*out` is set to 0.
+///   -1  — error
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_read_security_id(
+    image: *const c_char,
+    path: *const c_char,
+    out: *mut u32,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_read_security_id: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(fp) = cstr_to_path(path) else {
+        set_error("fs_ntfs_read_security_id: null or non-UTF-8 path");
+        return -1;
+    };
+    if out.is_null() {
+        set_error("fs_ntfs_read_security_id: null out");
+        return -1;
+    }
+    match write::read_security_id(std::path::Path::new(img), fp) {
+        Ok(Some(id)) => {
+            unsafe { *out = id };
+            1
+        }
+        Ok(None) => {
+            unsafe { *out = 0 };
+            0
+        }
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Point a file at an existing `$Secure:$SDS` entry by writing the
+/// `security_id` field in its `$STANDARD_INFORMATION`. mkfs ships
+/// the canonical system-files DACL at id `0x100`; pointing a runtime-
+/// created file there grants the same ACL. Adding new SD entries is
+/// a separate (larger) piece of work — this writer only retargets.
+///
+/// Requires the file's $STANDARD_INFORMATION to be in the 72-byte
+/// NTFS 3.x form. Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_set_security_id(
+    image: *const c_char,
+    path: *const c_char,
+    security_id: u32,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_set_security_id: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(fp) = cstr_to_path(path) else {
+        set_error("fs_ntfs_set_security_id: null or non-UTF-8 path");
+        return -1;
+    };
+    match write::set_security_id(std::path::Path::new(img), fp, security_id) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Add / remove bits in `$STANDARD_INFORMATION.file_attributes`. Bits in
 /// `add_flags` are ORed on; bits in `remove_flags` are ANDed off.
 /// Overlap is rejected. Returns 0 on success, -1 on error.
