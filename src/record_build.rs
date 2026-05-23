@@ -488,6 +488,40 @@ pub fn build_resident_reparse_point_attribute(
 }
 
 const ATTR_REPARSE_POINT: u32 = 0xC0;
+const ATTR_OBJECT_ID: u32 = 0x40;
+
+/// Build a resident `$OBJECT_ID` (type 0x40) attribute carrying a
+/// 16-byte GUID. Per MS-FSCC §2.4.6 the on-disk layout starts with the
+/// `object_id` GUID and may optionally carry three more 16-byte GUIDs
+/// (`birth_volume_id`, `birth_object_id`, `birth_domain_id`); this
+/// builder emits only the mandatory 16-byte prefix, which is all
+/// modern Windows volumes need for the file to round-trip via
+/// `FSCTL_GET_OBJECT_ID`. Extended fields can be added later by
+/// growing `value_size` to 32/48/64.
+pub fn build_resident_object_id_attribute(
+    attr_id: u16,
+    object_id: &[u8; 16],
+) -> Vec<u8> {
+    let header_size = 24usize;
+    let value_offset = header_size;
+    let value_size = 16usize;
+    let attr_length = align8(value_offset + value_size);
+
+    let mut buf = vec![0u8; attr_length];
+    buf[0..4].copy_from_slice(&ATTR_OBJECT_ID.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 0; // resident
+    buf[9] = 0; // name_length
+    buf[10..12].copy_from_slice(&(value_offset as u16).to_le_bytes());
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes()); // flags
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+    buf[16..20].copy_from_slice(&(value_size as u32).to_le_bytes());
+    buf[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes());
+    buf[22] = 0; // indexed_flag
+    buf[23] = 0;
+    buf[value_offset..value_offset + 16].copy_from_slice(object_id);
+    buf
+}
 
 /// Common reparse tags (MS-FSCC 2.1.2).
 pub mod reparse_tag {

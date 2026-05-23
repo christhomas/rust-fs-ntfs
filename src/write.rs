@@ -1578,6 +1578,72 @@ pub fn read_object_id_io<T: BlockIo + ?Sized>(
     Ok(Some(out))
 }
 
+/// Write a 16-byte `$OBJECT_ID` to a file. Adds the attribute if absent,
+/// replaces the existing value in place if present.
+pub fn write_object_id(
+    image: &Path,
+    file_path: &str,
+    object_id: &[u8; 16],
+) -> Result<(), String> {
+    let mut io = PathIo::open_rw(image)?;
+    write_object_id_io(&mut io, file_path, object_id)
+}
+
+pub fn write_object_id_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    object_id: &[u8; 16],
+) -> Result<(), String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    update_mft_record_io(io, rec, |record| {
+        if let Some(loc) = attr_io::find_attribute(record, AttrType::ObjectId, None) {
+            let attr_id = loc.attribute_id;
+            let new_attr =
+                crate::record_build::build_resident_object_id_attribute(attr_id, object_id);
+            crate::attr_resize::replace_attribute(record, loc.attr_offset, &new_attr)?;
+        } else {
+            let attr_id = crate::attr_resize::allocate_attribute_id(record);
+            let new_attr =
+                crate::record_build::build_resident_object_id_attribute(attr_id, object_id);
+            crate::attr_resize::insert_attribute_before_end(record, &new_attr)?;
+        }
+        Ok(())
+    })
+}
+
+/// Remove the `$OBJECT_ID` attribute. Returns `Ok(false)` if the file
+/// had no `$OBJECT_ID` (idempotent — not an error). Returns `Ok(true)`
+/// if an attribute was removed.
+pub fn remove_object_id(image: &Path, file_path: &str) -> Result<bool, String> {
+    let mut io = PathIo::open_rw(image)?;
+    remove_object_id_io(&mut io, file_path)
+}
+
+pub fn remove_object_id_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+) -> Result<bool, String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let mut removed = false;
+    update_mft_record_io(io, rec, |record| {
+        let Some(loc) = attr_io::find_attribute(record, AttrType::ObjectId, None) else {
+            return Ok(());
+        };
+        let old_len = loc.attr_length;
+        let bytes_used =
+            u32::from_le_bytes([record[0x18], record[0x19], record[0x1A], record[0x1B]]) as usize;
+        record.copy_within(loc.attr_offset + old_len..bytes_used, loc.attr_offset);
+        for byte in &mut record[bytes_used - old_len..bytes_used] {
+            *byte = 0;
+        }
+        let new_bu = (bytes_used - old_len) as u32;
+        record[0x18..0x1C].copy_from_slice(&new_bu.to_le_bytes());
+        removed = true;
+        Ok(())
+    })?;
+    Ok(removed)
+}
+
 /// Add a new hard link to an existing file. The new link lives at
 /// `new_parent_path/new_basename`. The target file's MFT record gains
 /// a new `$FILE_NAME` attribute and its hard-link count is incremented;

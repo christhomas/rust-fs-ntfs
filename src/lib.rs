@@ -2296,6 +2296,63 @@ pub extern "C" fn fs_ntfs_read_object_id(
     }
 }
 
+/// Write a file's 16-byte `$OBJECT_ID` from `in_buf[0..16]`. Adds the
+/// attribute if absent, replaces in place if present. Returns 0 on
+/// success, -1 on error. `in_buf` must be at least 16 bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_write_object_id(
+    image: *const c_char,
+    path: *const c_char,
+    in_buf: *const u8,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_write_object_id: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_write_object_id: null or non-UTF-8 path");
+        return -1;
+    };
+    if in_buf.is_null() {
+        set_error("fs_ntfs_write_object_id: null in_buf");
+        return -1;
+    }
+    let mut object_id = [0u8; 16];
+    unsafe { std::ptr::copy_nonoverlapping(in_buf, object_id.as_mut_ptr(), 16) };
+    match write::write_object_id(std::path::Path::new(img), p, &object_id) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Remove a file's `$OBJECT_ID` attribute. Idempotent: returns 0
+/// whether or not the attribute was present beforehand. Returns -1
+/// on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_remove_object_id(
+    image: *const c_char,
+    path: *const c_char,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_remove_object_id: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_remove_object_id: null or non-UTF-8 path");
+        return -1;
+    };
+    match write::remove_object_id(std::path::Path::new(img), p) {
+        Ok(_removed) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Add a hard link `new_parent_path/new_basename` pointing at the
 /// same file as `existing_path`. Returns 0 on success, -1 on error.
 /// Refuses directories. The target file's hard-link count is

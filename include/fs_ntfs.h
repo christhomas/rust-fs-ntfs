@@ -350,6 +350,28 @@ int fs_ntfs_read_object_id(const char *image,
                            uint8_t *out_buf);
 
 /*
+ * Set a file's 16-byte $OBJECT_ID (GUID) from in_buf. Adds the
+ * attribute if absent, replaces in place if present. The GUID is
+ * stored verbatim — no byte-order reinterpretation. Returns 0 on
+ * success, -1 on error. in_buf must point to at least 16 bytes.
+ *
+ * Extended fields (birth volume / object / domain IDs, MS-FSCC §2.4.6)
+ * are NOT written by this entry point; only the mandatory 16-byte
+ * prefix. Modern Windows volumes accept the short form for
+ * FSCTL_GET_OBJECT_ID round-trips.
+ */
+int fs_ntfs_write_object_id(const char *image,
+                            const char *path,
+                            const uint8_t *in_buf);
+
+/*
+ * Remove a file's $OBJECT_ID attribute. Idempotent — returns 0
+ * whether or not the attribute existed. Returns -1 on error.
+ */
+int fs_ntfs_remove_object_id(const char *image,
+                             const char *path);
+
+/*
  * Clear the VOLUME_IS_DIRTY flag on an NTFS image so Windows / FSKit /
  * other NTFS drivers will remount it. Must NOT be called on a volume
  * that is currently mounted.
