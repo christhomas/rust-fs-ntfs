@@ -2328,6 +2328,121 @@ pub extern "C" fn fs_ntfs_write_object_id(
     }
 }
 
+/// Write the 64-byte extended `$OBJECT_ID` carrying the mandatory
+/// `object_id` (16 bytes from `in_buf`) plus the three optional DLT
+/// Birth GUIDs (16 bytes each from `birth_volume`, `birth_object`,
+/// `birth_domain`). All four pointers must be non-null and reference
+/// at least 16 readable bytes. Adds the attribute if absent,
+/// replaces in place if present. Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_write_object_id_extended(
+    image: *const c_char,
+    path: *const c_char,
+    in_buf: *const u8,
+    birth_volume: *const u8,
+    birth_object: *const u8,
+    birth_domain: *const u8,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_write_object_id_extended: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_write_object_id_extended: null or non-UTF-8 path");
+        return -1;
+    };
+    if in_buf.is_null()
+        || birth_volume.is_null()
+        || birth_object.is_null()
+        || birth_domain.is_null()
+    {
+        set_error("fs_ntfs_write_object_id_extended: null GUID pointer");
+        return -1;
+    }
+    let mut object_id = [0u8; 16];
+    let mut bv = [0u8; 16];
+    let mut bo = [0u8; 16];
+    let mut bd = [0u8; 16];
+    unsafe {
+        std::ptr::copy_nonoverlapping(in_buf, object_id.as_mut_ptr(), 16);
+        std::ptr::copy_nonoverlapping(birth_volume, bv.as_mut_ptr(), 16);
+        std::ptr::copy_nonoverlapping(birth_object, bo.as_mut_ptr(), 16);
+        std::ptr::copy_nonoverlapping(birth_domain, bd.as_mut_ptr(), 16);
+    }
+    match write::write_object_id_extended(
+        std::path::Path::new(img),
+        p,
+        &object_id,
+        &bv,
+        &bo,
+        &bd,
+    ) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Read the full `$OBJECT_ID` attribute into `out_buf`. Caller passes
+/// the buffer length in `out_buf_len` (must be ≥ 16; pass 64 to also
+/// receive the Birth GUIDs when present). On success, returns the
+/// number of bytes written (16 or 64); on absent attribute, 0; on
+/// error, -1.
+///
+/// If `out_buf_len < 64` but the on-disk attribute is the 64-byte
+/// extended form, only the first 16 bytes (`object_id`) are written
+/// and 16 is returned — the Birth GUIDs are silently truncated.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_read_object_id_extended(
+    image: *const c_char,
+    path: *const c_char,
+    out_buf: *mut u8,
+    out_buf_len: usize,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_read_object_id_extended: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_read_object_id_extended: null or non-UTF-8 path");
+        return -1;
+    };
+    if out_buf.is_null() {
+        set_error("fs_ntfs_read_object_id_extended: null out_buf");
+        return -1;
+    }
+    if out_buf_len < 16 {
+        set_error("fs_ntfs_read_object_id_extended: out_buf_len < 16");
+        return -1;
+    }
+    match write::read_object_id_extended(std::path::Path::new(img), p) {
+        Ok(Some(ext)) => {
+            unsafe { std::ptr::copy_nonoverlapping(ext.object_id.as_ptr(), out_buf, 16) };
+            if let Some((bv, bo, bd)) = ext.birth_ids {
+                if out_buf_len >= 64 {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bv.as_ptr(), out_buf.add(16), 16);
+                        std::ptr::copy_nonoverlapping(bo.as_ptr(), out_buf.add(32), 16);
+                        std::ptr::copy_nonoverlapping(bd.as_ptr(), out_buf.add(48), 16);
+                    }
+                    64
+                } else {
+                    16
+                }
+            } else {
+                16
+            }
+        }
+        Ok(None) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Remove a file's `$OBJECT_ID` attribute. Idempotent: returns 0
 /// whether or not the attribute was present beforehand. Returns -1
 /// on error.

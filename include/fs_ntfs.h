@@ -365,6 +365,41 @@ int fs_ntfs_write_object_id(const char *image,
                             const uint8_t *in_buf);
 
 /*
+ * Write a full 64-byte $OBJECT_ID carrying the mandatory object_id
+ * plus the three DLT (Distributed Link Tracking) Birth GUIDs per
+ * MS-FSCC §2.4.6: birth_volume_id, birth_object_id, birth_domain_id.
+ * All four pointers must point to at least 16 readable bytes. Adds
+ * the attribute if absent, replaces in place if present. Returns 0
+ * on success, -1 on error.
+ */
+int fs_ntfs_write_object_id_extended(const char *image,
+                                     const char *path,
+                                     const uint8_t *in_buf,
+                                     const uint8_t *birth_volume,
+                                     const uint8_t *birth_object,
+                                     const uint8_t *birth_domain);
+
+/*
+ * Read the full $OBJECT_ID into out_buf, decoding Birth GUIDs when
+ * present. Caller passes out_buf_len (must be >= 16; pass 64 to also
+ * receive Birth GUIDs).
+ *
+ * Returns:
+ *   16  — short form only (object_id); no Birth GUIDs on disk
+ *   64  — extended form (object_id + 3x birth_*); out_buf_len was >= 64
+ *    0  — file has no $OBJECT_ID attribute
+ *   -1  — error
+ *
+ * If on-disk is extended (64 bytes) but out_buf_len < 64, only the
+ * first 16 bytes are written and 16 is returned (Birth GUIDs are
+ * silently dropped).
+ */
+int fs_ntfs_read_object_id_extended(const char *image,
+                                    const char *path,
+                                    uint8_t *out_buf,
+                                    size_t out_buf_len);
+
+/*
  * Remove a file's $OBJECT_ID attribute. Idempotent — returns 0
  * whether or not the attribute existed. Returns -1 on error.
  */

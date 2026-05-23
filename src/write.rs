@@ -1578,8 +1578,76 @@ pub fn read_object_id_io<T: BlockIo + ?Sized>(
     Ok(Some(out))
 }
 
+/// Result of [`read_object_id_extended`]: the file's `$OBJECT_ID`
+/// attribute decoded as the full 64-byte form when present, or the
+/// 16-byte-only form when the Birth GUIDs are absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectIdExtended {
+    pub object_id: [u8; 16],
+    /// `Some((bv, bo, bd))` when the on-disk attribute is the
+    /// 64-byte extended form; `None` for the 16-byte short form.
+    pub birth_ids: Option<([u8; 16], [u8; 16], [u8; 16])>,
+}
+
+/// Read the full `$OBJECT_ID` attribute, decoding the optional Birth
+/// GUIDs (MS-FSCC §2.4.6) when present. Returns:
+///   * `Ok(None)` — file has no `$OBJECT_ID` attribute.
+///   * `Ok(Some(ext))` — attribute present. `ext.birth_ids` is
+///     `Some(...)` when `value_length == 64`, `None` otherwise.
+pub fn read_object_id_extended(
+    image: &Path,
+    file_path: &str,
+) -> Result<Option<ObjectIdExtended>, String> {
+    let mut io = PathIo::open_ro(image)?;
+    read_object_id_extended_io(&mut io, file_path)
+}
+
+pub fn read_object_id_extended_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+) -> Result<Option<ObjectIdExtended>, String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let (_, record) = read_mft_record_io(io, rec)?;
+    let Some(loc) = attr_io::find_attribute(&record, AttrType::ObjectId, None) else {
+        return Ok(None);
+    };
+    if !loc.is_resident {
+        return Err("$OBJECT_ID is non-resident (unexpected)".to_string());
+    }
+    let val_off = loc.attr_offset
+        + loc
+            .resident_value_offset
+            .ok_or("$OBJECT_ID has no value_offset")? as usize;
+    let val_len = loc.resident_value_length.unwrap_or(0) as usize;
+    if val_len < 16 {
+        return Err(format!("$OBJECT_ID value too short: {val_len} bytes"));
+    }
+    if val_off.checked_add(val_len).is_none_or(|end| end > record.len()) {
+        return Err(format!(
+            "$OBJECT_ID value range out of record: val_off={val_off}, val_len={val_len}, record_len={}",
+            record.len()
+        ));
+    }
+    let mut object_id = [0u8; 16];
+    object_id.copy_from_slice(&record[val_off..val_off + 16]);
+    let birth_ids = if val_len >= 64 {
+        let mut bv = [0u8; 16];
+        let mut bo = [0u8; 16];
+        let mut bd = [0u8; 16];
+        bv.copy_from_slice(&record[val_off + 16..val_off + 32]);
+        bo.copy_from_slice(&record[val_off + 32..val_off + 48]);
+        bd.copy_from_slice(&record[val_off + 48..val_off + 64]);
+        Some((bv, bo, bd))
+    } else {
+        None
+    };
+    Ok(Some(ObjectIdExtended { object_id, birth_ids }))
+}
+
 /// Write a 16-byte `$OBJECT_ID` to a file. Adds the attribute if absent,
-/// replaces the existing value in place if present.
+/// replaces the existing value in place if present. To also write the
+/// 48 bytes of DLT Birth-volume / Birth-object / Birth-domain GUIDs
+/// (MS-FSCC §2.4.6), use [`write_object_id_extended`].
 pub fn write_object_id(
     image: &Path,
     file_path: &str,
@@ -1594,17 +1662,73 @@ pub fn write_object_id_io<T: BlockIo + ?Sized>(
     file_path: &str,
     object_id: &[u8; 16],
 ) -> Result<(), String> {
+    write_object_id_inner(io, file_path, object_id, None)
+}
+
+/// Write a 64-byte extended `$OBJECT_ID` carrying the mandatory
+/// `object_id` plus the three optional DLT Birth GUIDs
+/// (`birth_volume_id`, `birth_object_id`, `birth_domain_id`).
+/// Adds the attribute if absent, replaces in place if present.
+///
+/// DLT (Distributed Link Tracking, the Windows shortcut-resolution
+/// service) uses the Birth fields to chase moved files across
+/// volumes and machines. Most consumers don't read them; the
+/// 16-byte short form from `write_object_id` is functionally
+/// equivalent for the common case.
+pub fn write_object_id_extended(
+    image: &Path,
+    file_path: &str,
+    object_id: &[u8; 16],
+    birth_volume_id: &[u8; 16],
+    birth_object_id: &[u8; 16],
+    birth_domain_id: &[u8; 16],
+) -> Result<(), String> {
+    let mut io = PathIo::open_rw(image)?;
+    write_object_id_extended_io(
+        &mut io,
+        file_path,
+        object_id,
+        birth_volume_id,
+        birth_object_id,
+        birth_domain_id,
+    )
+}
+
+pub fn write_object_id_extended_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    object_id: &[u8; 16],
+    birth_volume_id: &[u8; 16],
+    birth_object_id: &[u8; 16],
+    birth_domain_id: &[u8; 16],
+) -> Result<(), String> {
+    write_object_id_inner(
+        io,
+        file_path,
+        object_id,
+        Some((birth_volume_id, birth_object_id, birth_domain_id)),
+    )
+}
+
+fn write_object_id_inner<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    object_id: &[u8; 16],
+    birth_ids: Option<(&[u8; 16], &[u8; 16], &[u8; 16])>,
+) -> Result<(), String> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     update_mft_record_io(io, rec, |record| {
         if let Some(loc) = attr_io::find_attribute(record, AttrType::ObjectId, None) {
             let attr_id = loc.attribute_id;
-            let new_attr =
-                crate::record_build::build_resident_object_id_attribute(attr_id, object_id);
+            let new_attr = crate::record_build::build_resident_object_id_attribute_full(
+                attr_id, object_id, birth_ids,
+            );
             crate::attr_resize::replace_attribute(record, loc.attr_offset, &new_attr)?;
         } else {
             let attr_id = crate::attr_resize::allocate_attribute_id(record);
-            let new_attr =
-                crate::record_build::build_resident_object_id_attribute(attr_id, object_id);
+            let new_attr = crate::record_build::build_resident_object_id_attribute_full(
+                attr_id, object_id, birth_ids,
+            );
             crate::attr_resize::insert_attribute_before_end(record, &new_attr)?;
         }
         Ok(())

@@ -496,15 +496,42 @@ const ATTR_OBJECT_ID: u32 = 0x40;
 /// (`birth_volume_id`, `birth_object_id`, `birth_domain_id`); this
 /// builder emits only the mandatory 16-byte prefix, which is all
 /// modern Windows volumes need for the file to round-trip via
-/// `FSCTL_GET_OBJECT_ID`. Extended fields can be added later by
-/// growing `value_size` to 32/48/64.
+/// `FSCTL_GET_OBJECT_ID`. Use [`build_resident_object_id_attribute_full`]
+/// to write the 64-byte extended form including the three Birth GUIDs.
 pub fn build_resident_object_id_attribute(
     attr_id: u16,
     object_id: &[u8; 16],
 ) -> Vec<u8> {
+    build_resident_object_id_attribute_full(attr_id, object_id, None)
+}
+
+/// Full `$OBJECT_ID` attribute layout per MS-FSCC §2.4.6:
+///
+/// ```text
+///   +0x00  object_id        u8[16]   (mandatory)
+///   +0x10  birth_volume_id  u8[16]   (optional)
+///   +0x20  birth_object_id  u8[16]   (optional)
+///   +0x30  birth_domain_id  u8[16]   (optional)
+/// ```
+///
+/// All three Birth fields are present together or not at all — that's
+/// how Microsoft DLT (Distributed Link Tracking) interprets the
+/// `value_length`: 16 = mandatory-only, 64 = full record. The 32- and
+/// 48-byte forms are technically representable per spec but neither
+/// chkdsk nor ntfs.sys document interpretation for them, so this
+/// builder ships exactly the two well-formed shapes.
+///
+/// `birth_ids = Some((bv, bo, bd))` writes the 64-byte form;
+/// `None` emits the 16-byte form (equivalent to
+/// [`build_resident_object_id_attribute`]).
+pub fn build_resident_object_id_attribute_full(
+    attr_id: u16,
+    object_id: &[u8; 16],
+    birth_ids: Option<(&[u8; 16], &[u8; 16], &[u8; 16])>,
+) -> Vec<u8> {
     let header_size = 24usize;
     let value_offset = header_size;
-    let value_size = 16usize;
+    let value_size = if birth_ids.is_some() { 64usize } else { 16usize };
     let attr_length = align8(value_offset + value_size);
 
     let mut buf = vec![0u8; attr_length];
@@ -520,6 +547,11 @@ pub fn build_resident_object_id_attribute(
     buf[22] = 0; // indexed_flag
     buf[23] = 0;
     buf[value_offset..value_offset + 16].copy_from_slice(object_id);
+    if let Some((bv, bo, bd)) = birth_ids {
+        buf[value_offset + 16..value_offset + 32].copy_from_slice(bv);
+        buf[value_offset + 32..value_offset + 48].copy_from_slice(bo);
+        buf[value_offset + 48..value_offset + 64].copy_from_slice(bd);
+    }
     buf
 }
 
