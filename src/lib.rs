@@ -382,13 +382,53 @@ pub struct FsNtfsDirent {
 
 #[repr(C)]
 pub struct FsNtfsVolumeInfo {
-    volume_name: [u8; 128],
-    cluster_size: u32,
-    total_clusters: u64,
-    ntfs_version_major: u16,
-    ntfs_version_minor: u16,
-    serial_number: u64,
-    total_size: u64,
+    // Fields are public so callers using the Rust binding can read
+    // them directly. The C ABI side reads them via the struct's
+    // C-layout offsets — there's no behavioural difference between
+    // pub vs private at the binary level, only at the Rust source
+    // level.
+    pub volume_name: [u8; 128],
+    pub cluster_size: u32,
+    pub total_clusters: u64,
+    pub ntfs_version_major: u16,
+    pub ntfs_version_minor: u16,
+    pub serial_number: u64,
+    pub total_size: u64,
+}
+
+/// Extended volume info — v2 of `FsNtfsVolumeInfo`. Keeps every v1
+/// field at the same offset so a callee that allocates this struct
+/// and casts to v1 in a legacy code path still gets the v1 data;
+/// then continues with v2-specific fields after the v1 footprint.
+///
+/// **Why a new struct instead of growing v1**: `FsNtfsVolumeInfo`
+/// is public C ABI; widening it would silently break any caller
+/// compiled against the older struct size. Existing callers stay
+/// on v1; new callers opt into v2.
+#[repr(C)]
+pub struct FsNtfsVolumeInfoV2 {
+    // -- v1 fields, identical offsets ------------------------------------
+    pub volume_name: [u8; 128],
+    pub cluster_size: u32,
+    pub total_clusters: u64,
+    pub ntfs_version_major: u16,
+    pub ntfs_version_minor: u16,
+    pub serial_number: u64,
+    pub total_size: u64,
+    // -- v2 additions ----------------------------------------------------
+    /// Raw `$VOLUME_INFORMATION.flags` bits (NtfsVolumeFlags). Public
+    /// flags include `VOLUME_IS_DIRTY = 0x0001`.
+    pub volume_flags: u16,
+    /// 1 iff `volume_flags & 0x0001 != 0` (convenience for callers
+    /// that just want the dirty bit without a bitmask).
+    pub is_dirty: u8,
+    /// 3 bytes of explicit padding (so `mft_record_size` lands
+    /// 4-byte aligned and the layout is stable across compilers).
+    pub _pad: [u8; 3],
+    /// Size of one MFT record in bytes (typically 1024 or 4096).
+    pub mft_record_size: u32,
+    /// Size of one disk sector in bytes (typically 512 or 4096).
+    pub bytes_per_sector: u32,
 }
 
 /// Write callback matching the `fs_ntfs_write_fn` C typedef. The
@@ -1111,6 +1151,51 @@ pub extern "C" fn fs_ntfs_get_volume_info(
     if let Ok(vol_info) = bridge.ntfs.volume_info(&mut bridge.reader) {
         out.ntfs_version_major = vol_info.major_version() as u16;
         out.ntfs_version_minor = vol_info.minor_version() as u16;
+    }
+
+    0
+}
+
+/// Extended volume info — populates `FsNtfsVolumeInfoV2`. Adds the
+/// `volume_flags` (including the dirty bit), `mft_record_size`, and
+/// `bytes_per_sector` fields on top of everything v1 exposes. See
+/// `FsNtfsVolumeInfoV2` for ABI-compat rationale (v1 fields land at
+/// identical offsets).
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_get_volume_info_v2(
+    fs: *mut FsNtfsHandle,
+    info: *mut FsNtfsVolumeInfoV2,
+) -> c_int {
+    if fs.is_null() || info.is_null() {
+        return -1;
+    }
+    let bridge = unsafe { &mut *fs };
+    let out = unsafe { &mut *info };
+    out.volume_name = [0u8; 128];
+    out.cluster_size = bridge.ntfs.cluster_size();
+    out.total_size = bridge.ntfs.size();
+    out.total_clusters = bridge.ntfs.size() / bridge.ntfs.cluster_size() as u64;
+    out.serial_number = bridge.ntfs.serial_number();
+    out.mft_record_size = bridge.ntfs.file_record_size();
+    out.bytes_per_sector = bridge.ntfs.sector_size() as u32;
+    out.volume_flags = 0;
+    out.is_dirty = 0;
+    out._pad = [0u8; 3];
+
+    if let Some(Ok(vol_name)) = bridge.ntfs.volume_name(&mut bridge.reader) {
+        let name_str = vol_name.name().to_string_lossy();
+        let name_bytes = name_str.as_bytes();
+        let copy_len = std::cmp::min(name_bytes.len(), 127);
+        out.volume_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+    }
+
+    if let Ok(vol_info) = bridge.ntfs.volume_info(&mut bridge.reader) {
+        out.ntfs_version_major = vol_info.major_version() as u16;
+        out.ntfs_version_minor = vol_info.minor_version() as u16;
+        let flags = vol_info.flags();
+        out.volume_flags = flags.bits();
+        // VOLUME_IS_DIRTY = 0x0001
+        out.is_dirty = if flags.bits() & 0x0001 != 0 { 1 } else { 0 };
     }
 
     0

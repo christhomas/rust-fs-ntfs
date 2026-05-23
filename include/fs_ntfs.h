@@ -78,6 +78,38 @@ typedef struct {
     uint64_t total_size;
 } fs_ntfs_volume_info_t;
 
+/*
+ * Extended volume info — v2.
+ *
+ * Every v1 field above lands at the same offset (compile-time
+ * verified by `assert_eq!(offsetof, offsetof)` style tests on the
+ * Rust side), so callers that don't yet know about v2 can ask for
+ * fs_ntfs_get_volume_info_v2 into a v1 buffer at their own risk —
+ * but the safe path is to allocate v2 explicitly.
+ *
+ * v2 adds:
+ *   - volume_flags     : raw $VOLUME_INFORMATION.flags (incl. dirty bit)
+ *   - is_dirty         : 1 iff (volume_flags & 0x0001), 0 otherwise
+ *   - mft_record_size  : bytes per MFT record (typically 1024 or 4096)
+ *   - bytes_per_sector : physical sector size (typically 512 or 4096)
+ */
+typedef struct {
+    /* -- v1 fields, identical offsets ----------------------------------- */
+    char     volume_name[128];
+    uint32_t cluster_size;
+    uint64_t total_clusters;
+    uint16_t ntfs_version_major;
+    uint16_t ntfs_version_minor;
+    uint64_t serial_number;
+    uint64_t total_size;
+    /* -- v2 additions --------------------------------------------------- */
+    uint16_t volume_flags;
+    uint8_t  is_dirty;
+    uint8_t  _pad[3];
+    uint32_t mft_record_size;
+    uint32_t bytes_per_sector;
+} fs_ntfs_volume_info_v2_t;
+
 /* ---- Block device callback interface ---- */
 
 /*
@@ -205,6 +237,15 @@ void fs_ntfs_umount(fs_ntfs_fs_t *fs);
 
 int fs_ntfs_get_volume_info(fs_ntfs_fs_t *fs,
                                 fs_ntfs_volume_info_t *info);
+
+/*
+ * Extended volume info — v2. Populates fs_ntfs_volume_info_v2_t with
+ * everything v1 reports plus volume_flags / is_dirty / mft_record_size /
+ * bytes_per_sector. Returns 0 on success, -1 on error. New callers
+ * should prefer this; legacy callers can stay on v1.
+ */
+int fs_ntfs_get_volume_info_v2(fs_ntfs_fs_t *fs,
+                                   fs_ntfs_volume_info_v2_t *info);
 
 /* ---- File attributes ---- */
 
