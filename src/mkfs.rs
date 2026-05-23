@@ -258,6 +258,7 @@ pub mod stream {
     /// `$Quota:$Q` — quota table view index (keyed by owner_id).
     pub const Q: &str = "$Q";
 
+
     /// UTF-16-LE encoding of a stream name. NTFS attribute headers
     /// store names as raw UTF-16 code units (no NUL); this is the
     /// one place that conversion happens, so a typo upstream can't
@@ -1143,21 +1144,24 @@ pub fn format_filesystem(
         ));
     }
 
-    // record 11: $Extend — directory shell with an *empty* `$I30`.
+    // record 11: $Extend — directory whose `$I30` enumerates lazily-
+    // created kernel metafiles. Sub-PR S4 (2026-05-23) adds an entry
+    // for `$Reparse` (slot 16); Sub-PR S5 will add `$RmMetadata`
+    // (with its full `$TxfLog` hierarchy) once that path is exercised.
     //
-    // Iter L finding (2026-05-22, byte-diff + chkdsk trace against
-    // `windows-fresh-256m.bin`, a freshly-`format.com`'d 256 MiB NTFS
-    // volume): chkdsk readonly + /scan exit 0 on a Windows fresh
-    // volume in which `$Extend` is a directory whose $I30 enumerates
-    // children populated lazily by the NT kernel ($Quota, $ObjId,
-    // $Reparse, $RmMetadata, …). Shipping any of those *incompletely*
-    // (e.g. $RmMetadata\$TxfLog\$Tops without $TxfLog.blf + the two
-    // $TxfLogContainer files) drives the kernel TxF resource manager
-    // to fail to start (Event 136), which in turn raises Event 55
-    // ("corruption discovered, exact nature unknown") and chkdsk
-    // /scan exit 13. Shipping NONE of them — leaving $Extend's $I30
-    // empty — lets the kernel build the hierarchy lazily on first
-    // need and keeps both chkdsk readonly *and* /scan clean.
+    // Iter H Procmon trace (2026-05-21, /scan against a fresh volume)
+    // shows chkdsk opens
+    // `\Device\…\$Extend\$Reparse:$R:$INDEX_ALLOCATION` during
+    // /scan; without the `$Reparse` child the open fails and /scan
+    // exits 13 ("must be fixed offline").
+    //
+    // Critical constraint from Iter L (2026-05-22): shipping
+    // `$RmMetadata\$TxfLog\$Tops` without its companion `$TxfLog.blf`
+    // + two `$TxfLogContainer` files drives the kernel TxF resource
+    // manager to fail to start (Event 136 → Event 55 → chkdsk /scan
+    // exit 13). So S4 ships ONLY `$Reparse` — which is a leaf
+    // view-index file with no TxF involvement — and S5 will ship the
+    // full `$TxfLog` group atomically if needed.
     //
     // $Extend: $STD_INFO + $FILE_NAME + $I30 with entries for the
     // three children built immediately below.
@@ -1402,6 +1406,40 @@ pub fn format_filesystem(
     for slot in 12..mft_records_capacity.min(16) as u32 {
         let rec_bytes = build_reserved_placeholder(&mft_record_layout, slot)?;
         place_record(&mut mft_buf, rs, slot, rec_bytes)?;
+    }
+
+    // record 16: $Extend\$Reparse — view-index file. WIP: chkdsk
+    // currently rejects this layout with "Index $R in file 10 is
+    // corrupt" (where "10" is hex = rec 16). The Iter H Procmon
+    // trace already hinted at the fix: chkdsk opens
+    // `$Extend\$Reparse:$R:$INDEX_ALLOCATION`, so the $R index must
+    // be non-resident (with $INDEX_ALLOCATION + $BITMAP) even when
+    // empty. The resident-$INDEX_ROOT-only form below is what's
+    // structurally incorrect. S4-v2 will switch to the non-resident
+    // layout.
+    if (rec::REPARSE as u64) < mft_records_capacity {
+        let r_name = stream::utf16(stream::R);
+        let r_entries = build_view_index_last_entry();
+        let r_index_root = build_populated_named_index_root_attr(
+            4,
+            &r_name,
+            0,
+            COLLATION_NTOFS_ULONGS,
+            4096,
+            cluster_size,
+            &r_entries,
+        );
+        let rec_bytes = build_system_record_with_parent(
+            &mft_record_layout,
+            rec::REPARSE,
+            rec::EXTEND,
+            rec::name(rec::REPARSE, cluster_size).expect("known rec_num"),
+            false,
+            0,
+            0,
+            &[r_index_root],
+        )?;
+        place_record(&mut mft_buf, rs, rec::REPARSE, rec_bytes)?;
     }
 
     // 6. Write $MFT to disk + mirror first 4 records ----------------------
