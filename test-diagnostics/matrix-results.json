@@ -1,0 +1,336 @@
+{
+  "schema_version": 1,
+  "tested_at_sha": "55fb975e28674c862afda9c8efc1c5b8f6bbf90d",
+  "tested_at_branch": "investigate/remaining-7-failures",
+  "tested_at_utc": "2026-05-23T08:59:59Z",
+  "binary_sha256": "f5bf7b4bfe84b4dfd5b3b2d240a11e148f4639054519fb3d65d2a216fabcf065",
+  "test_matrix_json_sha256": "6baffc0cb1dd38f69f4c0c9f6b933f590c6feaf200943e6eb1f2bbdd18710de5",
+  "harness_submodule_sha": "36e1425408d4e17edd07ba3d1d7d4129524d0392",
+  "host": {
+    "os": "Darwin",
+    "version": "25.4.0",
+    "arch": "arm64"
+  },
+  "vm": {
+    "address": "chris@192.168.213.147",
+    "os_caption": "Microsoft Windows 11 Pro",
+    "os_build": "26200",
+    "os_version": "10.0.26200",
+    "os_arch": "ARM 64-bit Processor",
+    "ntfs_sys": "10.0.26100.1 (WinBuild.160101.0800)",
+    "chkdsk_version": "10.0.26100.1 (WinBuild.160101.0800)",
+    "powershell_version": "5.1.26100.8457"
+  },
+  "scenarios": {
+    "mac-format-basic-256mib": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-cluster-1k": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 11
+      }
+    },
+    "mac-format-cluster-512": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 11
+      }
+    },
+    "mac-format-cluster-64k": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-cluster-8k": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-label-32chars": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-label-cjk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-label-empty": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-label-latin1": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-large-1gib": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-mac-enumerate-empty": {
+      "status": "ok"
+    },
+    "mac-format-mac-mkdir-mac-touch-mac-enumerate": {
+      "status": "ok"
+    },
+    "mac-format-mac-touch-mac-write-mac-enumerate": {
+      "status": "ok"
+    },
+    "mac-format-mac-write-mac-rm-mac-enumerate-empty": {
+      "status": "ok"
+    },
+    "mac-format-mac-write-win-repeat-mount-3-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-mkdir-set-dirty-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "repair-required",
+      "exits": {
+        "/scan": 13,
+        "/scan-post": 0,
+        "/F /X": 0,
+        "readonly": 0
+      }
+    },
+    "mac-format-set-dirty-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "repair-required",
+      "exits": {
+        "/scan": 13,
+        "/scan-post": 0,
+        "/F /X": 0,
+        "readonly": 0
+      }
+    },
+    "mac-format-small-64mib": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-tiny-32mib": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 11
+      }
+    },
+    "mac-format-volume-16gib-cluster-4k": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-volume-32mib-cluster-512": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 11
+      }
+    },
+    "mac-format-volume-4gib-cluster-4k": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-volume-4gib-cluster-64k": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-win-repeat-mount-10-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-win-repeat-mount-5-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-win-write-deep-nesting-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-win-write-large": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-win-write-mac-enumerate": {
+      "status": "ok"
+    },
+    "mac-format-win-write-many-small": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-win-write-many-win-delete-half-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-win-write-medium": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-win-write-modify-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-win-write-remount-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-win-write-rename-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-win-write-then-delete": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-win-write-tiny": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13
+      }
+    },
+    "mac-format-win-write-win-delete-mac-verify-empty": {
+      "status": "ok"
+    },
+    "mac-format-write-set-dirty-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "repair-required",
+      "exits": {
+        "/scan": 13,
+        "/scan-post": 0,
+        "/F /X": 0,
+        "readonly": 0
+      }
+    },
+    "win-format-mac-enumerate-empty": {
+      "status": "ok"
+    },
+    "win-format-win-write-mac-delete-win-verify": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "win-format-win-write-mac-verify": {
+      "status": "ok"
+    },
+    "win-format-win-write-mac-write-win-verify": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    }
+  },
+  "summary": {
+    "passed": 42,
+    "failed": 0,
+    "total": 42,
+    "total_duration_s": 14491.82
+  },
+  "build_rustflags": "--remap-path-prefix=$PWD=. --remap-path-prefix=$HOME/.cargo/registry=/registry",
+  "_notes": "binary_sha256 reflects a path-stable rebuild (RUSTFLAGS=--remap-path-prefix) of the same source at SHA 55fb975. The original matrix run was against a non-stable binary (hash 1a8462af813b44798dd17c35b20facdef279b80c1a42a90b5c43a2b557b2bed1); code is identical, so the per-scenario verdicts in this file still apply. Future matrix runs will be path-stable from the outset via scripts/matrix-baseline.sh."
+}
