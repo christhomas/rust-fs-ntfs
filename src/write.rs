@@ -1492,6 +1492,69 @@ pub fn remove_reparse_point_io<T: BlockIo + ?Sized>(
     })
 }
 
+/// Decoded `$REPARSE_POINT` attribute: the 32-bit reparse tag plus the
+/// raw tag-specific data bytes (the on-disk `DataBuffer` field — *not*
+/// including the 8-byte REPARSE_DATA_BUFFER header).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReparsePoint {
+    pub reparse_tag: u32,
+    pub data: Vec<u8>,
+}
+
+/// Read a file's `$REPARSE_POINT` attribute and return the tag plus the
+/// tag-specific data bytes. Unlike [`fs_ntfs_readlink`] which only
+/// handles symlinks / mount points, this returns the raw payload for
+/// any reparse type (including third-party tags like dedup, HSM, etc.).
+///
+/// Resident-only: this crate writes reparse points resident; reading
+/// non-resident on-disk reparse data would require run-list decoding
+/// and is not yet supported.
+pub fn read_reparse_point(image: &Path, file_path: &str) -> Result<Option<ReparsePoint>, String> {
+    let mut io = PathIo::open_ro(image)?;
+    read_reparse_point_io(&mut io, file_path)
+}
+
+pub fn read_reparse_point_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+) -> Result<Option<ReparsePoint>, String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let (_, record) = read_mft_record_io(io, rec)?;
+    let Some(loc) = attr_io::find_attribute(&record, AttrType::ReparsePoint, None) else {
+        return Ok(None);
+    };
+    if !loc.is_resident {
+        return Err("$REPARSE_POINT is non-resident (not yet supported)".to_string());
+    }
+    let val_off = loc.attr_offset
+        + loc
+            .resident_value_offset
+            .ok_or("$REPARSE_POINT has no value_offset")? as usize;
+    let val_len = loc.resident_value_length.unwrap_or(0) as usize;
+    // REPARSE_DATA_BUFFER (MS-FSCC §2.1.2): u32 ReparseTag, u16 ReparseDataLength,
+    // u16 Reserved, then `ReparseDataLength` bytes of tag-specific data.
+    if val_len < 8 {
+        return Err(format!("$REPARSE_POINT value too short: {val_len} bytes"));
+    }
+    if val_off.checked_add(val_len).is_none_or(|end| end > record.len()) {
+        return Err(format!(
+            "$REPARSE_POINT value range out of record: val_off={val_off}, val_len={val_len}, record_len={}",
+            record.len()
+        ));
+    }
+    let buf = &record[val_off..val_off + val_len];
+    let reparse_tag = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let data_len = u16::from_le_bytes([buf[4], buf[5]]) as usize;
+    let data_start = 8usize;
+    if data_start + data_len > val_len {
+        return Err(format!(
+            "$REPARSE_POINT data_length ({data_len}) runs past attribute value ({val_len})"
+        ));
+    }
+    let data = buf[data_start..data_start + data_len].to_vec();
+    Ok(Some(ReparsePoint { reparse_tag, data }))
+}
+
 /// Convenience: create a symbolic link at `parent/basename` pointing
 /// to `target`.
 pub fn create_symlink(

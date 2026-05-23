@@ -2077,6 +2077,73 @@ pub extern "C" fn fs_ntfs_remove_reparse_point(image: *const c_char, path: *cons
     }
 }
 
+/// Read a file's `$REPARSE_POINT` attribute as raw `(reparse_tag,
+/// data)`. Unlike `fs_ntfs_readlink` which only handles symlinks /
+/// mount points, this exposes the raw payload for any reparse type.
+///
+/// On success: writes the 32-bit reparse tag to `*out_tag`, writes the
+/// actual data length to `*out_data_len`, and — if `out_data_len <=
+/// out_buf_len` — copies the data bytes into `out_buf[0..out_data_len]`.
+/// Always writes `*out_data_len` so the caller can resize on truncation.
+///
+/// Returns:
+///   *  1 — attribute present, fully copied
+///   *  2 — attribute present but `out_buf_len` was too small (data
+///          truncated; `*out_data_len` holds the required length)
+///   *  0 — no `$REPARSE_POINT` attribute on this file
+///   * -1 — error (use `fs_ntfs_last_error`)
+///
+/// `out_tag` and `out_data_len` must be non-null. `out_buf` may be
+/// null only if `out_buf_len == 0` (size-query mode).
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_read_reparse_point(
+    image: *const c_char,
+    path: *const c_char,
+    out_tag: *mut u32,
+    out_buf: *mut u8,
+    out_buf_len: usize,
+    out_data_len: *mut usize,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_read_reparse_point: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_read_reparse_point: null or non-UTF-8 path");
+        return -1;
+    };
+    if out_tag.is_null() || out_data_len.is_null() {
+        set_error("fs_ntfs_read_reparse_point: null out_tag / out_data_len");
+        return -1;
+    }
+    if out_buf.is_null() && out_buf_len != 0 {
+        set_error("fs_ntfs_read_reparse_point: null out_buf with non-zero out_buf_len");
+        return -1;
+    }
+    match write::read_reparse_point(std::path::Path::new(img), p) {
+        Ok(Some(rp)) => {
+            unsafe {
+                *out_tag = rp.reparse_tag;
+                *out_data_len = rp.data.len();
+            }
+            if rp.data.len() > out_buf_len {
+                return 2;
+            }
+            if !rp.data.is_empty() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(rp.data.as_ptr(), out_buf, rp.data.len());
+                }
+            }
+            1
+        }
+        Ok(None) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Create a symlink at `parent_path/basename` pointing to `target`.
 /// Set `relative` != 0 for relative-style target paths. Returns the
 /// new MFT record number on success, -1 on error.
