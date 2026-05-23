@@ -20,7 +20,10 @@ fn fixture_file_has_at_least_one_filename() {
     // WIN32_AND_DOS (namespace=3) FILE_NAME — but the qemu pipeline
     // is opaque enough that we only assert the name is reachable.
     let has_hello = names.iter().any(|n| n.name == "hello.txt");
-    assert!(has_hello, "expected /hello.txt's name to appear; got {names:?}");
+    assert!(
+        has_hello,
+        "expected /hello.txt's name to appear; got {names:?}"
+    );
 }
 
 #[test]
@@ -43,8 +46,7 @@ fn runtime_long_name_uses_posix_namespace() {
     let img = working_copy("runtime_long");
     let long_name = "persistent_archive_with_long_filename.txt";
     create_file(std::path::Path::new(&img), "/", long_name).unwrap();
-    let names = read_file_names(std::path::Path::new(&img), &format!("/{long_name}"))
-        .unwrap();
+    let names = read_file_names(std::path::Path::new(&img), &format!("/{long_name}")).unwrap();
     assert_eq!(names.len(), 1);
     assert_eq!(names[0].name, long_name);
     assert_eq!(

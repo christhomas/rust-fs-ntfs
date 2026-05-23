@@ -12,7 +12,7 @@
     "arch": "arm64"
   },
   "vm": {
-    "address": "chris@192.168.213.147",
+    "address": "<redacted>",
     "os_caption": "Microsoft Windows 11 Pro",
     "os_build": "26200",
     "os_version": "10.0.26200",

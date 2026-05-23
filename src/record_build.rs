@@ -82,22 +82,64 @@ const ATTR_END_MARKER: u32 = 0xFFFF_FFFF;
 const FILE_NAME_NAMESPACE_POSIX: u8 = 0;
 const FILE_NAME_NAMESPACE_WIN32_AND_DOS: u8 = 3;
 
+/// Permitted DOS 8.3 short-name characters (the canonical FAT/NTFS
+/// short-name alphabet): ASCII alphanumerics plus a small set of
+/// punctuation. Excludes spaces, lower-case letters in the strict
+/// reading, control chars, Unicode, and reserved metachars. We accept
+/// lowercase here because NTFS short names are case-insensitive
+/// internally and the upcase table normalises them on disk.
+fn is_dos83_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '$' | '%'
+                | '\''
+                | '-'
+                | '_'
+                | '@'
+                | '~'
+                | '`'
+                | '!'
+                | '('
+                | ')'
+                | '{'
+                | '}'
+                | '^'
+                | '#'
+                | '&'
+        )
+}
+
 /// Pick a `$FILE_NAME.namespace` for a user-supplied basename.
-/// Returns `WIN32_AND_DOS` when the name fits the DOS 8.3 envelope,
-/// `POSIX` otherwise. chkdsk Stage 2 rejects WIN32_AND_DOS on a name
-/// that doesn't fit ("An invalid filename X (N) was found in
-/// directory M"); see also `mkfs::NAMESPACE_POSIX` doc-comment which
-/// records the same rule for the system metafile path.
+/// Returns `WIN32_AND_DOS` when the name fits the DOS 8.3 envelope
+/// (stem 1..=8 DOS chars, ext 0..=3 DOS chars, exactly one or zero
+/// dots, no leading or trailing dot), `POSIX` otherwise. chkdsk Stage 2
+/// rejects WIN32_AND_DOS on a name that doesn't fit ("An invalid
+/// filename X (N) was found in directory M"); see also
+/// `mkfs::NAMESPACE_POSIX` doc-comment which records the same rule for
+/// the system metafile path.
 pub fn fn_namespace_for(name: &str) -> u8 {
+    // Reject leading dot (".env", ".foo") — empty stem is not a valid
+    // DOS 8.3 form and chkdsk treats it as POSIX-only.
+    if name.starts_with('.') || name.ends_with('.') {
+        return FILE_NAME_NAMESPACE_POSIX;
+    }
     let (stem, ext) = match name.find('.') {
         Some(i) => (&name[..i], &name[i + 1..]),
         None => (name, ""),
     };
-    if stem.chars().count() <= 8 && ext.chars().count() <= 3 && !ext.contains('.') {
-        FILE_NAME_NAMESPACE_WIN32_AND_DOS
-    } else {
-        FILE_NAME_NAMESPACE_POSIX
+    let stem_len = stem.chars().count();
+    let ext_len = ext.chars().count();
+    if stem_len == 0
+        || stem_len > 8
+        || ext_len > 3
+        || ext.contains('.')
+        || !stem.chars().all(is_dos83_char)
+        || !ext.chars().all(is_dos83_char)
+    {
+        return FILE_NAME_NAMESPACE_POSIX;
     }
+    FILE_NAME_NAMESPACE_WIN32_AND_DOS
 }
 
 /// Build an MFT record for a regular file. Returns the clean (unfixed-up)
@@ -525,10 +567,7 @@ const ATTR_OBJECT_ID: u32 = 0x40;
 /// modern Windows volumes need for the file to round-trip via
 /// `FSCTL_GET_OBJECT_ID`. Use [`build_resident_object_id_attribute_full`]
 /// to write the 64-byte extended form including the three Birth GUIDs.
-pub fn build_resident_object_id_attribute(
-    attr_id: u16,
-    object_id: &[u8; 16],
-) -> Vec<u8> {
+pub fn build_resident_object_id_attribute(attr_id: u16, object_id: &[u8; 16]) -> Vec<u8> {
     build_resident_object_id_attribute_full(attr_id, object_id, None)
 }
 
@@ -558,7 +597,11 @@ pub fn build_resident_object_id_attribute_full(
 ) -> Vec<u8> {
     let header_size = 24usize;
     let value_offset = header_size;
-    let value_size = if birth_ids.is_some() { 64usize } else { 16usize };
+    let value_size = if birth_ids.is_some() {
+        64usize
+    } else {
+        16usize
+    };
     let attr_length = align8(value_offset + value_size);
 
     let mut buf = vec![0u8; attr_length];

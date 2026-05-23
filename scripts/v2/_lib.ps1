@@ -293,6 +293,12 @@ function Sync-VhdToImg {
                         $dst.Write($buf, 0, $writeLen)
                         $remaining -= $writeLen
                     }
+                    if ($remaining -gt 0) {
+                        # A 0-byte raw read with bytes still expected is a
+                        # truncation, not a normal EOF. Fail loudly so the
+                        # caller doesn't ship a partially-synced .img.
+                        throw "Sync-VhdToImg: short read from raw device; $remaining bytes not copied"
+                    }
                     $dst.Flush($true)
                 } finally { $dst.Close() }
             } catch {

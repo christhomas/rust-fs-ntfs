@@ -161,7 +161,12 @@ pub fn read_security_id_io<T: BlockIo + ?Sized>(
         return Ok(None);
     }
     let off = data_start + SI_SECURITY_ID;
-    let id = u32::from_le_bytes([record[off], record[off + 1], record[off + 2], record[off + 3]]);
+    let id = u32::from_le_bytes([
+        record[off],
+        record[off + 1],
+        record[off + 2],
+        record[off + 3],
+    ]);
     Ok(Some(id))
 }
 
@@ -1329,8 +1334,8 @@ fn commit_eas(record: &mut [u8], eas: &[crate::ea_io::Ea]) -> Result<(), String>
     let ea_info_value = crate::ea_io::build_ea_information_value(packed.len() as u16, need);
 
     if eas.is_empty() {
-        remove_unnamed_attr(record, AttrType::ExtendedAttribute);
-        remove_unnamed_attr(record, AttrType::ExtendedAttributeInformation);
+        remove_unnamed_attr(record, AttrType::ExtendedAttribute)?;
+        remove_unnamed_attr(record, AttrType::ExtendedAttributeInformation)?;
         return Ok(());
     }
 
@@ -1351,19 +1356,45 @@ fn commit_eas(record: &mut [u8], eas: &[crate::ea_io::Ea]) -> Result<(), String>
     Ok(())
 }
 
-fn remove_unnamed_attr(record: &mut [u8], ty: AttrType) {
-    let Some(loc) = attr_io::find_attribute(record, ty, None) else {
-        return;
-    };
-    let old_len = loc.attr_length;
+/// Remove the attribute at `attr_offset` (length `attr_length`) from
+/// `record` in place: shift subsequent bytes down, zero-fill the
+/// trailing slot, and update the record's `bytes_in_use` field.
+///
+/// Validates that the declared lengths are consistent with the record
+/// before touching memory — guards against malformed on-disk records
+/// that would otherwise panic in `copy_within`.
+pub(crate) fn remove_attribute_at(
+    record: &mut [u8],
+    attr_offset: usize,
+    attr_length: usize,
+) -> Result<(), String> {
     let bytes_used =
         u32::from_le_bytes([record[0x18], record[0x19], record[0x1A], record[0x1B]]) as usize;
-    record.copy_within(loc.attr_offset + old_len..bytes_used, loc.attr_offset);
-    for byte in &mut record[bytes_used - old_len..bytes_used] {
+    if attr_length == 0
+        || bytes_used > record.len()
+        || attr_offset
+            .checked_add(attr_length)
+            .is_none_or(|end| end > bytes_used)
+    {
+        return Err(format!(
+            "remove_attribute: invalid range (off={attr_offset}, len={attr_length}, bytes_used={bytes_used}, record_len={})",
+            record.len()
+        ));
+    }
+    record.copy_within(attr_offset + attr_length..bytes_used, attr_offset);
+    for byte in &mut record[bytes_used - attr_length..bytes_used] {
         *byte = 0;
     }
-    let new_bu = (bytes_used - old_len) as u32;
+    let new_bu = (bytes_used - attr_length) as u32;
     record[0x18..0x1C].copy_from_slice(&new_bu.to_le_bytes());
+    Ok(())
+}
+
+fn remove_unnamed_attr(record: &mut [u8], ty: AttrType) -> Result<(), String> {
+    let Some(loc) = attr_io::find_attribute(record, ty, None) else {
+        return Ok(());
+    };
+    remove_attribute_at(record, loc.attr_offset, loc.attr_length)
 }
 
 fn upsert_unnamed_resident_attr<F>(
@@ -1454,15 +1485,7 @@ pub fn remove_reparse_point_io<T: BlockIo + ?Sized>(
     update_mft_record_io(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::ReparsePoint, None)
             .ok_or_else(|| "no $REPARSE_POINT to remove".to_string())?;
-        let old_len = loc.attr_length;
-        let bytes_used =
-            u32::from_le_bytes([record[0x18], record[0x19], record[0x1A], record[0x1B]]) as usize;
-        record.copy_within(loc.attr_offset + old_len..bytes_used, loc.attr_offset);
-        for byte in &mut record[bytes_used - old_len..bytes_used] {
-            *byte = 0;
-        }
-        let new_bu = (bytes_used - old_len) as u32;
-        record[0x18..0x1C].copy_from_slice(&new_bu.to_le_bytes());
+        remove_attribute_at(record, loc.attr_offset, loc.attr_length)?;
 
         set_si_file_attributes_bit(record, FILE_ATTRIBUTE_REPARSE_POINT, false)?;
         Ok(())
@@ -1592,8 +1615,10 @@ pub fn read_file_names_io<T: BlockIo + ?Sized>(
             // string of the next caller if surprising. For now: skip.
             continue;
         }
-        let val_off =
-            loc.attr_offset + loc.resident_value_offset.ok_or("$FILE_NAME no value_offset")? as usize;
+        let val_off = loc.attr_offset
+            + loc
+                .resident_value_offset
+                .ok_or("$FILE_NAME no value_offset")? as usize;
         let val_len = loc.resident_value_length.unwrap_or(0) as usize;
         // $FILE_NAME value layout per MS-FSCC §2.4.4:
         //   +0x00 parent_directory_reference (u64)
@@ -1609,8 +1634,14 @@ pub fn read_file_names_io<T: BlockIo + ?Sized>(
             continue;
         }
         let parent_reference = u64::from_le_bytes([
-            record[v], record[v + 1], record[v + 2], record[v + 3],
-            record[v + 4], record[v + 5], record[v + 6], record[v + 7],
+            record[v],
+            record[v + 1],
+            record[v + 2],
+            record[v + 3],
+            record[v + 4],
+            record[v + 5],
+            record[v + 6],
+            record[v + 7],
         ]);
         let file_attributes = u32::from_le_bytes([
             record[v + 0x38],
@@ -1673,8 +1704,13 @@ pub fn read_volume_label_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<String, S
             "$VOLUME_NAME range out of record (val_off={val_off}, val_len={val_len})"
         ));
     }
-    if val_len == 0 || val_len.is_multiple_of(2).then_some(()).is_none() {
+    if val_len == 0 {
         return Ok(String::new());
+    }
+    if !val_len.is_multiple_of(2) {
+        return Err(format!(
+            "$VOLUME_NAME has odd byte length: {val_len} (must be multiple of 2 for UTF-16)"
+        ));
     }
     let utf16: Vec<u16> = record[val_off..val_off + val_len]
         .chunks_exact(2)
@@ -1696,10 +1732,7 @@ pub fn set_volume_label(image: &Path, label: &str) -> Result<(), String> {
     set_volume_label_io(&mut io, label)
 }
 
-pub fn set_volume_label_io<T: BlockIo + ?Sized>(
-    io: &mut T,
-    label: &str,
-) -> Result<(), String> {
+pub fn set_volume_label_io<T: BlockIo + ?Sized>(io: &mut T, label: &str) -> Result<(), String> {
     let label_utf16: Vec<u16> = label.encode_utf16().collect();
     if label_utf16.len() > VOLUME_LABEL_MAX_UTF16 {
         return Err(format!(
@@ -1716,16 +1749,7 @@ pub fn set_volume_label_io<T: BlockIo + ?Sized>(
         if label_bytes.is_empty() {
             // Empty label: remove the $VOLUME_NAME attribute entirely.
             if let Some(loc) = attr_io::find_attribute(record, AttrType::VolumeName, None) {
-                let old_len = loc.attr_length;
-                let bytes_used = u32::from_le_bytes([
-                    record[0x18], record[0x19], record[0x1A], record[0x1B],
-                ]) as usize;
-                record.copy_within(loc.attr_offset + old_len..bytes_used, loc.attr_offset);
-                for byte in &mut record[bytes_used - old_len..bytes_used] {
-                    *byte = 0;
-                }
-                let new_bu = (bytes_used - old_len) as u32;
-                record[0x18..0x1C].copy_from_slice(&new_bu.to_le_bytes());
+                remove_attribute_at(record, loc.attr_offset, loc.attr_length)?;
             }
             return Ok(());
         }
@@ -1827,10 +1851,18 @@ pub fn read_object_id_extended_io<T: BlockIo + ?Sized>(
             .resident_value_offset
             .ok_or("$OBJECT_ID has no value_offset")? as usize;
     let val_len = loc.resident_value_length.unwrap_or(0) as usize;
-    if val_len < 16 {
-        return Err(format!("$OBJECT_ID value too short: {val_len} bytes"));
+    // MS-FSCC §2.4.6: $OBJECT_ID is either 16 bytes (object_id only) or
+    // 64 bytes (object_id + 3 Birth GUIDs). Reject anything else as
+    // malformed instead of silently downgrading.
+    if val_len != 16 && val_len != 64 {
+        return Err(format!(
+            "unexpected $OBJECT_ID length: {val_len} (expected 16 or 64)"
+        ));
     }
-    if val_off.checked_add(val_len).is_none_or(|end| end > record.len()) {
+    if val_off
+        .checked_add(val_len)
+        .is_none_or(|end| end > record.len())
+    {
         return Err(format!(
             "$OBJECT_ID value range out of record: val_off={val_off}, val_len={val_len}, record_len={}",
             record.len()
@@ -1838,7 +1870,7 @@ pub fn read_object_id_extended_io<T: BlockIo + ?Sized>(
     }
     let mut object_id = [0u8; 16];
     object_id.copy_from_slice(&record[val_off..val_off + 16]);
-    let birth_ids = if val_len >= 64 {
+    let birth_ids = if val_len == 64 {
         let mut bv = [0u8; 16];
         let mut bo = [0u8; 16];
         let mut bd = [0u8; 16];
@@ -1849,18 +1881,17 @@ pub fn read_object_id_extended_io<T: BlockIo + ?Sized>(
     } else {
         None
     };
-    Ok(Some(ObjectIdExtended { object_id, birth_ids }))
+    Ok(Some(ObjectIdExtended {
+        object_id,
+        birth_ids,
+    }))
 }
 
 /// Write a 16-byte `$OBJECT_ID` to a file. Adds the attribute if absent,
 /// replaces the existing value in place if present. To also write the
 /// 48 bytes of DLT Birth-volume / Birth-object / Birth-domain GUIDs
 /// (MS-FSCC §2.4.6), use [`write_object_id_extended`].
-pub fn write_object_id(
-    image: &Path,
-    file_path: &str,
-    object_id: &[u8; 16],
-) -> Result<(), String> {
+pub fn write_object_id(image: &Path, file_path: &str, object_id: &[u8; 16]) -> Result<(), String> {
     let mut io = PathIo::open_rw(image)?;
     write_object_id_io(&mut io, file_path, object_id)
 }
@@ -1961,15 +1992,7 @@ pub fn remove_object_id_io<T: BlockIo + ?Sized>(
         let Some(loc) = attr_io::find_attribute(record, AttrType::ObjectId, None) else {
             return Ok(());
         };
-        let old_len = loc.attr_length;
-        let bytes_used =
-            u32::from_le_bytes([record[0x18], record[0x19], record[0x1A], record[0x1B]]) as usize;
-        record.copy_within(loc.attr_offset + old_len..bytes_used, loc.attr_offset);
-        for byte in &mut record[bytes_used - old_len..bytes_used] {
-            *byte = 0;
-        }
-        let new_bu = (bytes_used - old_len) as u32;
-        record[0x18..0x1C].copy_from_slice(&new_bu.to_le_bytes());
+        remove_attribute_at(record, loc.attr_offset, loc.attr_length)?;
         removed = true;
         Ok(())
     })?;
@@ -2294,22 +2317,7 @@ pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
     update_mft_record_io(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, Some(stream_name))
             .ok_or_else(|| format!("named stream '{stream_name}' not found"))?;
-        // Remove the attribute: shrink to a resident-empty shell, then
-        // trim it entirely via replace with the last-plus-1 attribute
-        // shifted back. Simpler: call attr_resize with new_length=0 —
-        // but resize_resident_value keeps the header. Simplest: use
-        // replace_attribute with... actually we want full removal.
-        // Shift following bytes back by loc.attr_length and zero the tail.
-        let old_len = loc.attr_length;
-        let bytes_used =
-            u32::from_le_bytes([record[0x18], record[0x19], record[0x1A], record[0x1B]]) as usize;
-        record.copy_within(loc.attr_offset + old_len..bytes_used, loc.attr_offset);
-        for byte in &mut record[bytes_used - old_len..bytes_used] {
-            *byte = 0;
-        }
-        let new_bu = (bytes_used - old_len) as u32;
-        record[0x18..0x1C].copy_from_slice(&new_bu.to_le_bytes());
-        Ok(())
+        remove_attribute_at(record, loc.attr_offset, loc.attr_length)
     })
 }
 

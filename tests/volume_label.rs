@@ -46,7 +46,10 @@ fn write_then_read_roundtrips() {
 fn write_empty_removes_label() {
     let img = working_copy("write_empty");
     set_volume_label(std::path::Path::new(&img), "SOMETHING").unwrap();
-    assert_eq!(read_volume_label(std::path::Path::new(&img)).unwrap(), "SOMETHING");
+    assert_eq!(
+        read_volume_label(std::path::Path::new(&img)).unwrap(),
+        "SOMETHING"
+    );
     set_volume_label(std::path::Path::new(&img), "").unwrap();
     assert_eq!(read_volume_label(std::path::Path::new(&img)).unwrap(), "");
 }
@@ -65,7 +68,10 @@ fn write_too_long_rejected() {
     let img = working_copy("write_too_long");
     let too_long = "X".repeat(VOLUME_LABEL_MAX_UTF16 + 1);
     let err = set_volume_label(std::path::Path::new(&img), &too_long).unwrap_err();
-    assert!(err.contains("too long"), "expected 'too long' in error: {err}");
+    assert!(
+        err.contains("too long"),
+        "expected 'too long' in error: {err}"
+    );
 }
 
 #[test]
@@ -73,7 +79,10 @@ fn write_unicode_label() {
     let img = working_copy("write_unicode");
     let label = "café-CJK-🦀-名前"; // mixed BMP + non-BMP
     set_volume_label(std::path::Path::new(&img), label).unwrap();
-    assert_eq!(read_volume_label(std::path::Path::new(&img)).unwrap(), label);
+    assert_eq!(
+        read_volume_label(std::path::Path::new(&img)).unwrap(),
+        label
+    );
 }
 
 #[test]
@@ -98,9 +107,8 @@ fn capi_set_label_roundtrips() {
     let rc = unsafe { fs_ntfs_set_volume_label(img_c.as_ptr(), label_c.as_ptr()) };
     assert_eq!(rc, 0, "err={}", last_error());
     let mut buf = vec![0u8; 128];
-    let n = unsafe {
-        fs_ntfs_read_volume_label(img_c.as_ptr(), buf.as_mut_ptr() as *mut _, buf.len())
-    };
+    let n =
+        unsafe { fs_ntfs_read_volume_label(img_c.as_ptr(), buf.as_mut_ptr() as *mut _, buf.len()) };
     assert_eq!(n, 7);
     assert_eq!(&buf[..7], b"CAPILBL");
 }
@@ -112,9 +120,8 @@ fn capi_set_label_null_removes() {
     let rc = unsafe { fs_ntfs_set_volume_label(img_c.as_ptr(), std::ptr::null()) };
     assert_eq!(rc, 0, "err={}", last_error());
     let mut buf = [0u8; 128];
-    let n = unsafe {
-        fs_ntfs_read_volume_label(img_c.as_ptr(), buf.as_mut_ptr() as *mut _, buf.len())
-    };
+    let n =
+        unsafe { fs_ntfs_read_volume_label(img_c.as_ptr(), buf.as_mut_ptr() as *mut _, buf.len()) };
     assert_eq!(n, 0);
 }
 
@@ -125,9 +132,8 @@ fn capi_read_truncates_silently() {
     let label_c = CString::new("LONGER_LABEL").unwrap();
     unsafe { fs_ntfs_set_volume_label(img_c.as_ptr(), label_c.as_ptr()) };
     let mut buf = [0u8; 4]; // only 4 bytes
-    let n = unsafe {
-        fs_ntfs_read_volume_label(img_c.as_ptr(), buf.as_mut_ptr() as *mut _, buf.len())
-    };
+    let n =
+        unsafe { fs_ntfs_read_volume_label(img_c.as_ptr(), buf.as_mut_ptr() as *mut _, buf.len()) };
     assert_eq!(n, 4);
     assert_eq!(&buf, b"LONG");
 }

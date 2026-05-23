@@ -522,7 +522,7 @@ unlink /hello.txt → inspect_ntfs lists 13.
 
 iter16 in [chkdsk-findings.md](./chkdsk-findings.md). Commit [9a640c5].
 
-## Bug 9 — runtime `$FILE_NAME` `indexed_flag` zero on freshly created records (iter N, 2026-05-23)
+## Bug 9 — runtime `$FILE_NAME` `indexed_flag` zero on freshly created records (Iter K, 2026-05-23)
 
 ### Symptom
 
@@ -556,9 +556,9 @@ as Bug 1 — just the second code path was missed.
 
 ### Iteration
 
-Iter N. Commit [def4088].
+Iter K. Commit [def4088] (Group A/B matrix scenario fixes).
 
-## Bug 10 — runtime MFT `bytes_used` off by 4 (iter N, 2026-05-23)
+## Bug 10 — runtime MFT `bytes_used` off by 4 (Iter K, 2026-05-23)
 
 ### Symptom
 
@@ -584,9 +584,9 @@ Both builders now `cursor += 8` after writing the END marker.
 
 ### Iteration
 
-Iter N. Commit [def4088].
+Iter K. Commit [def4088] (Group A/B matrix scenario fixes).
 
-## Bug 11 — `INDEX_HEADER.allocated_size_of_entries` not bumped on insert (iter N, 2026-05-23)
+## Bug 11 — `INDEX_HEADER.allocated_size_of_entries` not bumped on insert (Iter K, 2026-05-23)
 
 ### Symptom
 
@@ -628,9 +628,9 @@ it to both `IH_TOTAL_SIZE_OF_ENTRIES` and
 
 ### Iteration
 
-Iter N. Commit [def4088].
+Iter K. Commit [def4088] (Group A/B matrix scenario fixes).
 
-## Bug 12 — `$FILE_NAME.namespace` hardcoded to WIN32_AND_DOS (iter N, 2026-05-23)
+## Bug 12 — `$FILE_NAME.namespace` hardcoded to WIN32_AND_DOS (Iter L, 2026-05-23)
 
 ### Symptom
 
@@ -667,9 +667,9 @@ This mirrors the rule already documented for the mkfs-side
 
 ### Iteration
 
-Iter N. Commit [73a9a1c].
+Iter L. Commit [73a9a1c] (namespace=POSIX for non-DOS-8.3 names).
 
-## Bug 13 — index entry's embedded `$FILE_NAME.namespace` disagrees with MFT side (iter N, 2026-05-23)
+## Bug 13 — index entry's embedded `$FILE_NAME.namespace` disagrees with MFT side (Iter M, 2026-05-23)
 
 ### Symptom
 
@@ -695,7 +695,7 @@ applied at the index-entry build site too.
 
 ### Iteration
 
-Iter N. Commit [4f8bbdb].
+Iter M. Commit [4f8bbdb] (index-entry namespace must match $FILE_NAME).
 
 ## Outstanding — `frs.cxx 0x60f` chkdsk `/scan` ceiling and Windows write refusal
 

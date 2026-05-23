@@ -422,9 +422,12 @@ pub struct FsNtfsVolumeInfoV2 {
     /// 1 iff `volume_flags & 0x0001 != 0` (convenience for callers
     /// that just want the dirty bit without a bitmask).
     pub is_dirty: u8,
-    /// 3 bytes of explicit padding (so `mft_record_size` lands
-    /// 4-byte aligned and the layout is stable across compilers).
-    pub _pad: [u8; 3],
+    /// 5 bytes of explicit padding for the full gap between `is_dirty`
+    /// (offset 170, 1 byte) and `mft_record_size` (offset 176, u32
+    /// requires 4-byte alignment). Making the entire gap explicit
+    /// avoids hidden compiler padding and keeps the layout stable
+    /// across compilers / target triples.
+    pub _pad: [u8; 5],
     /// Size of one MFT record in bytes (typically 1024 or 4096).
     pub mft_record_size: u32,
     /// Size of one disk sector in bytes (typically 512 or 4096).
@@ -1180,7 +1183,9 @@ pub extern "C" fn fs_ntfs_get_volume_info_v2(
     out.bytes_per_sector = bridge.ntfs.sector_size() as u32;
     out.volume_flags = 0;
     out.is_dirty = 0;
-    out._pad = [0u8; 3];
+    out.ntfs_version_major = 0;
+    out.ntfs_version_minor = 0;
+    out._pad = [0u8; 5];
 
     if let Some(Ok(vol_name)) = bridge.ntfs.volume_name(&mut bridge.reader) {
         let name_str = vol_name.name().to_string_lossy();
@@ -1207,10 +1212,7 @@ pub extern "C" fn fs_ntfs_get_volume_info_v2(
 /// opened for writing). NTFS labels are conventionally capped at 32
 /// UTF-16 code units; longer labels are rejected.
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_ntfs_set_volume_label(
-    image: *const c_char,
-    label: *const c_char,
-) -> c_int {
+pub extern "C" fn fs_ntfs_set_volume_label(image: *const c_char, label: *const c_char) -> c_int {
     let Some(img) = cstr_to_path(image) else {
         set_error("fs_ntfs_set_volume_label: null or non-UTF-8 image");
         return -1;
@@ -2442,14 +2444,7 @@ pub extern "C" fn fs_ntfs_write_object_id_extended(
         std::ptr::copy_nonoverlapping(birth_object, bo.as_mut_ptr(), 16);
         std::ptr::copy_nonoverlapping(birth_domain, bd.as_mut_ptr(), 16);
     }
-    match write::write_object_id_extended(
-        std::path::Path::new(img),
-        p,
-        &object_id,
-        &bv,
-        &bo,
-        &bd,
-    ) {
+    match write::write_object_id_extended(std::path::Path::new(img), p, &object_id, &bv, &bo, &bd) {
         Ok(()) => 0,
         Err(e) => {
             set_error(&e);
@@ -2520,10 +2515,7 @@ pub extern "C" fn fs_ntfs_read_object_id_extended(
 /// whether or not the attribute was present beforehand. Returns -1
 /// on error.
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_ntfs_remove_object_id(
-    image: *const c_char,
-    path: *const c_char,
-) -> c_int {
+pub extern "C" fn fs_ntfs_remove_object_id(image: *const c_char, path: *const c_char) -> c_int {
     let Some(img) = cstr_to_path(image) else {
         set_error("fs_ntfs_remove_object_id: null or non-UTF-8 image");
         return -1;

@@ -45,7 +45,11 @@ fi
 head_sha=$(git rev-parse HEAD)
 tested_at_sha=$(python3 -c "import json,sys; print(json.load(open('$baseline'))['tested_at_sha'])")
 
-if [ "$head_sha" = "$tested_at_sha" ]; then
+# SHA fast-path requires a clean working tree: tracked-file modifications
+# would change the binary content even when HEAD matches tested_at_sha,
+# making the SHA match a false positive. If dirty, fall through to the
+# binary-hash check which always tells the truth.
+if git diff-index --quiet HEAD -- && [ "$head_sha" = "$tested_at_sha" ]; then
     [ "$quiet" -eq 0 ] && echo "sealed by SHA ($head_sha)"
     exit 0
 fi

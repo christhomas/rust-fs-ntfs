@@ -68,8 +68,8 @@ fn capi_read_object_id_null_outbuf_rejected() {
 fn write_object_id_roundtrips() {
     let img = working_copy("write_roundtrip");
     let guid: [u8; 16] = [
-        0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe,
-        0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+        0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde,
+        0xf0,
     ];
     write_object_id(std::path::Path::new(&img), "/hello.txt", &guid).unwrap();
     let got = read_object_id(std::path::Path::new(&img), "/hello.txt")
@@ -173,7 +173,10 @@ fn short_form_reads_back_with_no_birth_ids() {
         .unwrap()
         .expect("present");
     assert_eq!(ext.object_id, object_id);
-    assert!(ext.birth_ids.is_none(), "16-byte form must have no Birth IDs");
+    assert!(
+        ext.birth_ids.is_none(),
+        "16-byte form must have no Birth IDs"
+    );
 }
 
 #[test]
@@ -197,7 +200,10 @@ fn write_extended_then_overwrite_with_short_shrinks_to_16() {
         .unwrap()
         .unwrap();
     assert_eq!(ext.object_id, g16);
-    assert!(ext.birth_ids.is_none(), "Birth IDs must clear on short overwrite");
+    assert!(
+        ext.birth_ids.is_none(),
+        "Birth IDs must clear on short overwrite"
+    );
 }
 
 #[test]
@@ -286,8 +292,9 @@ fn capi_extended_short_buf_truncates() {
         );
     }
     let mut out = [0xFFu8; 16];
-    let rc =
-        unsafe { fs_ntfs_read_object_id_extended(img_c.as_ptr(), p_c.as_ptr(), out.as_mut_ptr(), 16) };
+    let rc = unsafe {
+        fs_ntfs_read_object_id_extended(img_c.as_ptr(), p_c.as_ptr(), out.as_mut_ptr(), 16)
+    };
     assert_eq!(rc, 16);
     assert_eq!(out, [0x9A; 16]);
 }

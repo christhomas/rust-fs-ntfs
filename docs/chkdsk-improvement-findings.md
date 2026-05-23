@@ -238,7 +238,7 @@ matrix run.
 | Lane                  | State          | Notes |
 |-----------------------|----------------|-------|
 | `chkdsk DRIVE:` (readonly) | **exit 0 (clean)** across the matrix | Lifted from "Stage 1/2 errors" by Iter N (Bugs 9–13 in `mkfs-bug-catalog.md`). |
-| `chkdsk DRIVE: /scan` | exit 13 (errors queued for offline repair) | Ceiling unchanged by Iter N. Differentiator vs `format.com`'s output still unknown; Procmon-tracing path identified (`implementation-plan-secure-and-extend.md` Iter H). |
+| `chkdsk DRIVE: /scan` | exits 0, 11, or 13 depending on which mac-side scenario produced the volume (e.g. fresh `mkfs` → 13; `/F`-touched then `/scan` → 0; some write-churn shapes → 11). The 42/42 sealed matrix records the per-scenario exit code in `test-diagnostics/matrix-results.json`. | Ceiling differentiator vs `format.com`'s output still under investigation; Procmon-tracing path identified (`implementation-plan-secure-and-extend.md` Iter H). |
 | `chkdsk DRIVE: /F`    | exit 0 after modifying the volume | /F adds `$Secure:$SDH/$SII` content, transforms `$Extend` into a real dir, drops `$SD` on system records. Post-/F `/scan` then exits 0. |
 | Mount + read          | works | Volume mounts as NTFS, label + size correct, files listable + readable. |
 | Mount + write         | refused with Win32 1450 `ERROR_NO_SYSTEM_RESOURCES` | Same root cause family as the `/scan` ceiling; expected to fall out of the S1–S5 plan. |

@@ -90,7 +90,11 @@ def main():
             "arch": run("uname -m"),
         },
         "vm": {
-            "address": run("source .test-env && echo $VM_HOST"),
+            # VM_HOST contains the developer's username + LAN address;
+            # redact before serialisation so the committed JSON never
+            # leaks operator identity or internal network topology.
+            # The local .test-env keeps the real value for tooling.
+            "address": "<redacted>",
             "os_caption": vm.get("os_caption"),
             "os_build": vm.get("os_build"),
             "os_version": vm.get("os_version"),

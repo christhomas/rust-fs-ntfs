@@ -4,8 +4,7 @@
 #![allow(unused_unsafe)]
 
 use fs_ntfs::{
-    fs_ntfs_get_volume_info_v2, fs_ntfs_mount, fs_ntfs_umount, FsNtfsVolumeInfo,
-    FsNtfsVolumeInfoV2,
+    fs_ntfs_get_volume_info_v2, fs_ntfs_mount, fs_ntfs_umount, FsNtfsVolumeInfo, FsNtfsVolumeInfoV2,
 };
 use std::ffi::CString;
 

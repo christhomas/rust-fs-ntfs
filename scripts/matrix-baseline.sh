@@ -31,6 +31,8 @@ mode="full"
 case "${1:-}" in
     --smoke) mode="smoke"; shift ;;
     --full)  mode="full"; shift ;;
+    "") ;;
+    *) echo "[matrix-baseline] unknown arg: $1 (expected --full or --smoke)" >&2; exit 2 ;;
 esac
 
 if [ ! -f .test-env ]; then
@@ -68,8 +70,12 @@ if [ "$mode" = "smoke" ]; then
         mac-format-win-write-many-win-delete-half-win-chkdsk
     )
     echo "[matrix-baseline] smoke: ${smoke_scenarios[*]}"
+    smoke_failed=0
     for s in "${smoke_scenarios[@]}"; do
-        bash scripts/run-matrix.sh "$s" 2>&1 | tee -a "$matrix_log" || true
+        if ! bash scripts/run-matrix.sh "$s" 2>&1 | tee -a "$matrix_log"; then
+            smoke_failed=1
+            echo "[matrix-baseline] scenario failed: $s (continuing)" >&2
+        fi
     done
 else
     echo "[matrix-baseline] full matrix (~3-4 hours)"
@@ -83,3 +89,11 @@ bash scripts/_matrix-collect-vm.sh "$matrix_log"
 echo "[matrix-baseline] wrote test-diagnostics/matrix-results.json"
 echo "[matrix-baseline] tested_at_sha=$(git rev-parse HEAD)"
 echo "[matrix-baseline] binary_sha256=$(sha256sum target/release/rust-ntfs | awk '{print $1}')"
+
+# Smoke gate contract: if any smoke scenario failed, the baseline run
+# itself fails. The JSON has still been written so callers can inspect
+# which scenarios failed.
+if [ "${smoke_failed:-0}" -ne 0 ]; then
+    echo "[matrix-baseline] smoke gate FAILED — at least one scenario errored" >&2
+    exit 1
+fi

@@ -82,10 +82,10 @@ typedef struct {
  * Extended volume info — v2.
  *
  * Every v1 field above lands at the same offset (compile-time
- * verified by `assert_eq!(offsetof, offsetof)` style tests on the
- * Rust side), so callers that don't yet know about v2 can ask for
- * fs_ntfs_get_volume_info_v2 into a v1 buffer at their own risk —
- * but the safe path is to allocate v2 explicitly.
+ * verified by `offset_of!` style tests on the Rust side). Callers
+ * MUST allocate a fs_ntfs_volume_info_v2_t (or larger) buffer when
+ * calling fs_ntfs_get_volume_info_v2 — passing a v1-sized buffer is
+ * unsupported and will overrun memory.
  *
  * v2 adds:
  *   - volume_flags     : raw $VOLUME_INFORMATION.flags (incl. dirty bit)
@@ -105,7 +105,10 @@ typedef struct {
     /* -- v2 additions --------------------------------------------------- */
     uint16_t volume_flags;
     uint8_t  is_dirty;
-    uint8_t  _pad[3];
+    /* Full 5-byte gap between is_dirty (offset 170) and mft_record_size
+     * (offset 176, u32 alignment). Make the whole gap explicit so the
+     * layout is stable with no hidden compiler padding. */
+    uint8_t  _pad[5];
     uint32_t mft_record_size;
     uint32_t bytes_per_sector;
 } fs_ntfs_volume_info_v2_t;

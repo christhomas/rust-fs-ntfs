@@ -326,8 +326,8 @@ to `scan == 0` once the differentiator is found.
 
 **What's known**:
 
-- All currently-passing matrix scenarios (35/42 confirmed at the
-  time of writing, full run in progress) reach `readonly = 0`.
+- All 42/42 matrix scenarios reach `readonly = 0` on the sealed run
+  recorded in `test-diagnostics/matrix-results.json`.
 - `chkdsk /scan` consistently returns 13 ("errors queued for offline
   repair") on our volumes but exits 0 on Microsoft `format.com`'s
   output of the same scenario, despite both volumes being byte-similar

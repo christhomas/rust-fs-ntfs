@@ -4,9 +4,7 @@
 
 use fs_ntfs::facade::Filesystem;
 use fs_ntfs::write::{create_file, read_security_id, set_security_id};
-use fs_ntfs::{
-    fs_ntfs_last_error, fs_ntfs_read_security_id, fs_ntfs_set_security_id,
-};
+use fs_ntfs::{fs_ntfs_last_error, fs_ntfs_read_security_id, fs_ntfs_set_security_id};
 use std::ffi::{CStr, CString};
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
@@ -30,8 +28,7 @@ fn last_error() -> String {
 fn working_copy(tag: &str) -> (String, &'static str) {
     let dst = format!("test-disks/_secid_{tag}.img");
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
-    create_file(std::path::Path::new(&dst), "/", "runtime.bin")
-        .expect("runtime create_file");
+    create_file(std::path::Path::new(&dst), "/", "runtime.bin").expect("runtime create_file");
     (dst, "/runtime.bin")
 }
 
