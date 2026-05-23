@@ -697,6 +697,36 @@ pub fn compare_names(
     a.len().cmp(&b.len())
 }
 
+/// Compare two UTF-16 names byte-for-byte (no upcase folding) — the
+/// comparator a case-sensitive directory should use. Win10 1803+
+/// supports `FILE_ATTRIBUTE_CASE_SENSITIVE_DIR` on $FILE_NAME's
+/// file_attributes (used by WSL and Docker-Desktop volumes for
+/// container-image storage); inside such a directory, `foo.txt` and
+/// `FOO.TXT` are distinct files.
+///
+/// Today this comparator is **not yet wired into `find_index_entry`
+/// or the insert paths** — those still use `compare_names` (case-
+/// insensitive) unconditionally. Plumbing the per-directory flag
+/// through is the next step (FUTURE_FEATURES.md §3.9). This function
+/// is the building block.
+///
+/// The bit position of `FILE_ATTRIBUTE_CASE_SENSITIVE_DIR` within
+/// $FILE_NAME.file_attributes / $STANDARD_INFORMATION.file_attributes
+/// is **not yet pinned** in our spec notes — multiple values circulate
+/// across third-party documentation. Determining the right bit by
+/// byte-diff against a reference WSL/Docker volume is part of the
+/// follow-up.
+pub fn compare_names_ordinal(a: &[u16], b: &[u16]) -> std::cmp::Ordering {
+    let n = a.len().min(b.len());
+    for i in 0..n {
+        match a[i].cmp(&b[i]) {
+            std::cmp::Ordering::Equal => continue,
+            ord => return ord,
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
 /// Overwrite the UTF-16 name bytes inside the file's own
 /// `$FILE_NAME` attribute (there may be multiple `$FILE_NAME`s — one
 /// per namespace). Uses the first one whose current name matches
