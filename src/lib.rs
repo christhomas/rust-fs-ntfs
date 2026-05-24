@@ -382,13 +382,56 @@ pub struct FsNtfsDirent {
 
 #[repr(C)]
 pub struct FsNtfsVolumeInfo {
-    volume_name: [u8; 128],
-    cluster_size: u32,
-    total_clusters: u64,
-    ntfs_version_major: u16,
-    ntfs_version_minor: u16,
-    serial_number: u64,
-    total_size: u64,
+    // Fields are public so callers using the Rust binding can read
+    // them directly. The C ABI side reads them via the struct's
+    // C-layout offsets — there's no behavioural difference between
+    // pub vs private at the binary level, only at the Rust source
+    // level.
+    pub volume_name: [u8; 128],
+    pub cluster_size: u32,
+    pub total_clusters: u64,
+    pub ntfs_version_major: u16,
+    pub ntfs_version_minor: u16,
+    pub serial_number: u64,
+    pub total_size: u64,
+}
+
+/// Extended volume info — v2 of `FsNtfsVolumeInfo`. Keeps every v1
+/// field at the same offset so a callee that allocates this struct
+/// and casts to v1 in a legacy code path still gets the v1 data;
+/// then continues with v2-specific fields after the v1 footprint.
+///
+/// **Why a new struct instead of growing v1**: `FsNtfsVolumeInfo`
+/// is public C ABI; widening it would silently break any caller
+/// compiled against the older struct size. Existing callers stay
+/// on v1; new callers opt into v2.
+#[repr(C)]
+pub struct FsNtfsVolumeInfoV2 {
+    // -- v1 fields, identical offsets ------------------------------------
+    pub volume_name: [u8; 128],
+    pub cluster_size: u32,
+    pub total_clusters: u64,
+    pub ntfs_version_major: u16,
+    pub ntfs_version_minor: u16,
+    pub serial_number: u64,
+    pub total_size: u64,
+    // -- v2 additions ----------------------------------------------------
+    /// Raw `$VOLUME_INFORMATION.flags` bits (NtfsVolumeFlags). Public
+    /// flags include `VOLUME_IS_DIRTY = 0x0001`.
+    pub volume_flags: u16,
+    /// 1 iff `volume_flags & 0x0001 != 0` (convenience for callers
+    /// that just want the dirty bit without a bitmask).
+    pub is_dirty: u8,
+    /// 5 bytes of explicit padding for the full gap between `is_dirty`
+    /// (offset 170, 1 byte) and `mft_record_size` (offset 176, u32
+    /// requires 4-byte alignment). Making the entire gap explicit
+    /// avoids hidden compiler padding and keeps the layout stable
+    /// across compilers / target triples.
+    pub _pad: [u8; 5],
+    /// Size of one MFT record in bytes (typically 1024 or 4096).
+    pub mft_record_size: u32,
+    /// Size of one disk sector in bytes (typically 512 or 4096).
+    pub bytes_per_sector: u32,
 }
 
 /// Write callback matching the `fs_ntfs_write_fn` C typedef. The
@@ -1116,6 +1159,123 @@ pub extern "C" fn fs_ntfs_get_volume_info(
     0
 }
 
+/// Extended volume info — populates `FsNtfsVolumeInfoV2`. Adds the
+/// `volume_flags` (including the dirty bit), `mft_record_size`, and
+/// `bytes_per_sector` fields on top of everything v1 exposes. See
+/// `FsNtfsVolumeInfoV2` for ABI-compat rationale (v1 fields land at
+/// identical offsets).
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_get_volume_info_v2(
+    fs: *mut FsNtfsHandle,
+    info: *mut FsNtfsVolumeInfoV2,
+) -> c_int {
+    if fs.is_null() || info.is_null() {
+        return -1;
+    }
+    let bridge = unsafe { &mut *fs };
+    let out = unsafe { &mut *info };
+    out.volume_name = [0u8; 128];
+    out.cluster_size = bridge.ntfs.cluster_size();
+    out.total_size = bridge.ntfs.size();
+    out.total_clusters = bridge.ntfs.size() / bridge.ntfs.cluster_size() as u64;
+    out.serial_number = bridge.ntfs.serial_number();
+    out.mft_record_size = bridge.ntfs.file_record_size();
+    out.bytes_per_sector = bridge.ntfs.sector_size() as u32;
+    out.volume_flags = 0;
+    out.is_dirty = 0;
+    out.ntfs_version_major = 0;
+    out.ntfs_version_minor = 0;
+    out._pad = [0u8; 5];
+
+    if let Some(Ok(vol_name)) = bridge.ntfs.volume_name(&mut bridge.reader) {
+        let name_str = vol_name.name().to_string_lossy();
+        let name_bytes = name_str.as_bytes();
+        let copy_len = std::cmp::min(name_bytes.len(), 127);
+        out.volume_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+    }
+
+    if let Ok(vol_info) = bridge.ntfs.volume_info(&mut bridge.reader) {
+        out.ntfs_version_major = vol_info.major_version() as u16;
+        out.ntfs_version_minor = vol_info.minor_version() as u16;
+        let flags = vol_info.flags();
+        out.volume_flags = flags.bits();
+        // VOLUME_IS_DIRTY = 0x0001
+        out.is_dirty = if flags.bits() & 0x0001 != 0 { 1 } else { 0 };
+    }
+
+    0
+}
+
+/// Set the volume label on an unmounted NTFS image. Empty `label`
+/// removes the `$VOLUME_NAME` attribute entirely. Returns 0 on
+/// success, -1 on error (e.g. label too long, or image cannot be
+/// opened for writing). NTFS labels are conventionally capped at 32
+/// UTF-16 code units; longer labels are rejected.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_set_volume_label(image: *const c_char, label: *const c_char) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_set_volume_label: null or non-UTF-8 image");
+        return -1;
+    };
+    let label_str = if label.is_null() {
+        ""
+    } else {
+        match unsafe { CStr::from_ptr(label) }.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                set_error("fs_ntfs_set_volume_label: non-UTF-8 label");
+                return -1;
+            }
+        }
+    };
+    match write::set_volume_label(std::path::Path::new(img), label_str) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Read the volume label from an unmounted NTFS image into `out_buf`
+/// (UTF-8, no terminating NUL written by this function — caller is
+/// responsible for null-termination if needed). Returns the number of
+/// UTF-8 bytes written on success (0 if the volume has no label),
+/// or -1 on error.
+///
+/// If the on-disk label is longer than `out_buf_len`, the result is
+/// truncated and the truncated byte count is returned; no error is
+/// signalled. Callers wanting the full label should pre-size
+/// `out_buf` to at least 128 bytes (32 UTF-16 code units * up to 4
+/// UTF-8 bytes each).
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_read_volume_label(
+    image: *const c_char,
+    out_buf: *mut c_char,
+    out_buf_len: usize,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_read_volume_label: null or non-UTF-8 image");
+        return -1;
+    };
+    if out_buf.is_null() {
+        set_error("fs_ntfs_read_volume_label: null out_buf");
+        return -1;
+    }
+    match write::read_volume_label(std::path::Path::new(img)) {
+        Ok(label) => {
+            let bytes = label.as_bytes();
+            let n = std::cmp::min(bytes.len(), out_buf_len);
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf as *mut u8, n) };
+            n as c_int
+        }
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stat
 // ---------------------------------------------------------------------------
@@ -1357,6 +1517,51 @@ pub extern "C" fn fs_ntfs_read_file(
             return -1;
         }
     };
+
+    // §3.2 NTFS LZNT1 compression: upstream `ntfs` 0.4 does not
+    // decompress LZNT1, so reading the bytes of a compressed `$DATA`
+    // would silently return the raw compressed stream — garbage to
+    // the caller. Fail loudly until we ship a real decompressor (see
+    // docs/FUTURE_FEATURES.md §3.2).
+    let attr_flags = data_attr.flags();
+    if attr_flags.contains(ntfs::NtfsAttributeFlags::COMPRESSED) {
+        set_error("file is compressed (LZNT1); decompression not yet supported");
+        return -1;
+    }
+    if attr_flags.contains(ntfs::NtfsAttributeFlags::ENCRYPTED) {
+        set_error("file is encrypted ($EFS); decryption not supported");
+        return -1;
+    }
+
+    // §3.8 WOF (Windows Overlay Filter): a WOF-compressed file's
+    // unnamed `$DATA` is empty + sparse and the real bytes live in a
+    // `WofCompressedData` ADS, with the file carrying an
+    // `IO_REPARSE_TAG_WOF` (0x80000017) `$REPARSE_POINT`. Reading the
+    // empty unnamed `$DATA` today would return 0 bytes — also silent
+    // data loss. Detect via the reparse tag and fail loudly until we
+    // ship XPRESS/LZX decompression (see docs/FUTURE_FEATURES.md §3.8).
+    for attr_res in file.attributes_raw() {
+        let a = match attr_res {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        if a.ty().ok() != Some(NtfsAttributeType::ReparsePoint) {
+            continue;
+        }
+        if let Ok(mut v) = a.value(&mut bridge.reader) {
+            let mut tag_buf = [0u8; 4];
+            if v.read(&mut bridge.reader, &mut tag_buf).is_ok() {
+                let tag = u32::from_le_bytes(tag_buf);
+                if tag == 0x8000_0017 {
+                    set_error(
+                        "file is WOF-compressed (IO_REPARSE_TAG_WOF); decompression not yet supported",
+                    );
+                    return -1;
+                }
+            }
+        }
+        break;
+    }
 
     let mut data_value = match data_attr.value(&mut bridge.reader) {
         Ok(v) => v,
@@ -2166,6 +2371,168 @@ pub extern "C" fn fs_ntfs_read_object_id(
     }
 }
 
+/// Write a file's 16-byte `$OBJECT_ID` from `in_buf[0..16]`. Adds the
+/// attribute if absent, replaces in place if present. Returns 0 on
+/// success, -1 on error. `in_buf` must be at least 16 bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_write_object_id(
+    image: *const c_char,
+    path: *const c_char,
+    in_buf: *const u8,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_write_object_id: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_write_object_id: null or non-UTF-8 path");
+        return -1;
+    };
+    if in_buf.is_null() {
+        set_error("fs_ntfs_write_object_id: null in_buf");
+        return -1;
+    }
+    let mut object_id = [0u8; 16];
+    unsafe { std::ptr::copy_nonoverlapping(in_buf, object_id.as_mut_ptr(), 16) };
+    match write::write_object_id(std::path::Path::new(img), p, &object_id) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Write the 64-byte extended `$OBJECT_ID` carrying the mandatory
+/// `object_id` (16 bytes from `in_buf`) plus the three optional DLT
+/// Birth GUIDs (16 bytes each from `birth_volume`, `birth_object`,
+/// `birth_domain`). All four pointers must be non-null and reference
+/// at least 16 readable bytes. Adds the attribute if absent,
+/// replaces in place if present. Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_write_object_id_extended(
+    image: *const c_char,
+    path: *const c_char,
+    in_buf: *const u8,
+    birth_volume: *const u8,
+    birth_object: *const u8,
+    birth_domain: *const u8,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_write_object_id_extended: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_write_object_id_extended: null or non-UTF-8 path");
+        return -1;
+    };
+    if in_buf.is_null()
+        || birth_volume.is_null()
+        || birth_object.is_null()
+        || birth_domain.is_null()
+    {
+        set_error("fs_ntfs_write_object_id_extended: null GUID pointer");
+        return -1;
+    }
+    let mut object_id = [0u8; 16];
+    let mut bv = [0u8; 16];
+    let mut bo = [0u8; 16];
+    let mut bd = [0u8; 16];
+    unsafe {
+        std::ptr::copy_nonoverlapping(in_buf, object_id.as_mut_ptr(), 16);
+        std::ptr::copy_nonoverlapping(birth_volume, bv.as_mut_ptr(), 16);
+        std::ptr::copy_nonoverlapping(birth_object, bo.as_mut_ptr(), 16);
+        std::ptr::copy_nonoverlapping(birth_domain, bd.as_mut_ptr(), 16);
+    }
+    match write::write_object_id_extended(std::path::Path::new(img), p, &object_id, &bv, &bo, &bd) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Read the full `$OBJECT_ID` attribute into `out_buf`. Caller passes
+/// the buffer length in `out_buf_len` (must be ≥ 16; pass 64 to also
+/// receive the Birth GUIDs when present). On success, returns the
+/// number of bytes written (16 or 64); on absent attribute, 0; on
+/// error, -1.
+///
+/// If `out_buf_len < 64` but the on-disk attribute is the 64-byte
+/// extended form, only the first 16 bytes (`object_id`) are written
+/// and 16 is returned — the Birth GUIDs are silently truncated.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_read_object_id_extended(
+    image: *const c_char,
+    path: *const c_char,
+    out_buf: *mut u8,
+    out_buf_len: usize,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_read_object_id_extended: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_read_object_id_extended: null or non-UTF-8 path");
+        return -1;
+    };
+    if out_buf.is_null() {
+        set_error("fs_ntfs_read_object_id_extended: null out_buf");
+        return -1;
+    }
+    if out_buf_len < 16 {
+        set_error("fs_ntfs_read_object_id_extended: out_buf_len < 16");
+        return -1;
+    }
+    match write::read_object_id_extended(std::path::Path::new(img), p) {
+        Ok(Some(ext)) => {
+            unsafe { std::ptr::copy_nonoverlapping(ext.object_id.as_ptr(), out_buf, 16) };
+            if let Some((bv, bo, bd)) = ext.birth_ids {
+                if out_buf_len >= 64 {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bv.as_ptr(), out_buf.add(16), 16);
+                        std::ptr::copy_nonoverlapping(bo.as_ptr(), out_buf.add(32), 16);
+                        std::ptr::copy_nonoverlapping(bd.as_ptr(), out_buf.add(48), 16);
+                    }
+                    64
+                } else {
+                    16
+                }
+            } else {
+                16
+            }
+        }
+        Ok(None) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Remove a file's `$OBJECT_ID` attribute. Idempotent: returns 0
+/// whether or not the attribute was present beforehand. Returns -1
+/// on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_remove_object_id(image: *const c_char, path: *const c_char) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_remove_object_id: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_remove_object_id: null or non-UTF-8 path");
+        return -1;
+    };
+    match write::remove_object_id(std::path::Path::new(img), p) {
+        Ok(_removed) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Add a hard link `new_parent_path/new_basename` pointing at the
 /// same file as `existing_path`. Returns 0 on success, -1 on error.
 /// Refuses directories. The target file's hard-link count is
@@ -2346,6 +2713,78 @@ pub extern "C" fn fs_ntfs_write_file(
     let data = unsafe { slice::from_raw_parts(buf as *const u8, len as usize) };
     match write::write_at(std::path::Path::new(img), fp, offset, data) {
         Ok(n) => n as i64,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Read the file's `$STANDARD_INFORMATION.security_id` (the index into
+/// `$Secure:$SDS` / `$Secure:$SII`). Writes the 32-bit value to `*out`.
+/// Returns:
+///    1  — security_id read into `*out`
+///    0  — file's $STANDARD_INFORMATION is the 48-byte v1.x form (no
+///         security_id field). `*out` is set to 0.
+///   -1  — error
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_read_security_id(
+    image: *const c_char,
+    path: *const c_char,
+    out: *mut u32,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_read_security_id: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(fp) = cstr_to_path(path) else {
+        set_error("fs_ntfs_read_security_id: null or non-UTF-8 path");
+        return -1;
+    };
+    if out.is_null() {
+        set_error("fs_ntfs_read_security_id: null out");
+        return -1;
+    }
+    match write::read_security_id(std::path::Path::new(img), fp) {
+        Ok(Some(id)) => {
+            unsafe { *out = id };
+            1
+        }
+        Ok(None) => {
+            unsafe { *out = 0 };
+            0
+        }
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
+/// Point a file at an existing `$Secure:$SDS` entry by writing the
+/// `security_id` field in its `$STANDARD_INFORMATION`. mkfs ships
+/// the canonical system-files DACL at id `0x100`; pointing a runtime-
+/// created file there grants the same ACL. Adding new SD entries is
+/// a separate (larger) piece of work — this writer only retargets.
+///
+/// Requires the file's $STANDARD_INFORMATION to be in the 72-byte
+/// NTFS 3.x form. Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_set_security_id(
+    image: *const c_char,
+    path: *const c_char,
+    security_id: u32,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_set_security_id: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(fp) = cstr_to_path(path) else {
+        set_error("fs_ntfs_set_security_id: null or non-UTF-8 path");
+        return -1;
+    };
+    match write::set_security_id(std::path::Path::new(img), fp, security_id) {
+        Ok(()) => 0,
         Err(e) => {
             set_error(&e);
             -1

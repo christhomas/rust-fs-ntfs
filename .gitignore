@@ -12,8 +12,12 @@ Cargo.lock.bak
 *.swp
 
 # Coding-agent local working dir (worktrees, scratch, prompts).
-# Per-checkout state, never worth committing.
-.claude/
+# Per-checkout state, never worth committing — EXCEPT skills, which
+# encode project-wide workflow discipline that should ship with the
+# repo (e.g. .claude/skills/wtx/ for the Windows test matrix).
+.claude/*
+!.claude/skills/
+!.claude/skills/**
 
 # Build output
 /dist/
@@ -42,8 +46,12 @@ nfs-*.img
 # Matrix test diagnostics — pulled from the Windows VM by
 # scripts/test-windows-matrix.sh into test-diagnostics/run-<ts>/.
 # Contains binary MFT dumps, chkdsk transcripts, NTFS event log;
-# all reproducible from a re-run, none worth committing.
-test-diagnostics/
+# all reproducible from a re-run, none worth committing. EXCEPT
+# matrix-results.json, which is the per-commit seal (carries
+# tested_at_sha + binary_sha256 + per-scenario verdicts; see
+# .claude/skills/wtx/SKILL.md).
+test-diagnostics/*
+!test-diagnostics/matrix-results.json
 diag/
 
 # SSH key file for the test VM, used when ssh-agent is broken

@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# scripts/matrix-baseline.sh — run the full 42-scenario matrix and write
+# the resulting test-diagnostics/matrix-results.json baseline file.
+#
+# The baseline file binds together:
+#   * tested_at_sha          — git HEAD at run time
+#   * binary_sha256          — sha256 of target/release/rust-ntfs
+#   * VM metadata            — Windows + ntfs.sys + chkdsk versions
+#   * harness_submodule_sha  — exact vendored harness commit
+#   * test_matrix_json_sha256— hash of the scenarios definition
+#   * per-scenario status, verdict_shape, chkdsk exit codes
+#
+# The result file is the *primary* evidence for a sealed commit:
+# `binary_sha256 == sha256(target/release/rust-ntfs)` is the load-bearing
+# check (content-addressable; survives rebase / squash-merge).
+#
+# Usage:
+#   bash scripts/matrix-baseline.sh           # full matrix, ~3-4 hours
+#   bash scripts/matrix-baseline.sh --smoke   # 5 representative scenarios, ~15 min
+#
+# Reads .test-env for VM_HOST / SSH_KEY. Writes:
+#   * test-diagnostics/matrix-results.json
+# Exit 0 iff every scenario passed AND the JSON was written.
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+mode="full"
+case "${1:-}" in
+    --smoke) mode="smoke"; shift ;;
+    --full)  mode="full"; shift ;;
+    "") ;;
+    *) echo "[matrix-baseline] unknown arg: $1 (expected --full or --smoke)" >&2; exit 2 ;;
+esac
+
+if [ ! -f .test-env ]; then
+    echo "[matrix-baseline] fatal: .test-env not found (need VM_HOST / SSH_KEY)" >&2
+    exit 1
+fi
+# shellcheck disable=SC1091
+source .test-env
+
+# 1. Build the binary with path-stable rustc flags so binary_sha256 is
+#    invariant across worktrees / machines. Without these remaps, rustc
+#    embeds the absolute source path in panic strings + debug info, so
+#    `cargo build --release` of the same source produces different
+#    binaries from different paths (e.g. /Volumes/.../rust-fs-ntfs vs
+#    /Volumes/.../rust-fs-ntfs-s4). That breaks the seal-by-binary-hash
+#    property documented in .claude/skills/wtx/SKILL.md.
+echo "[matrix-baseline] cargo build --release (path-stable)"
+export RUSTFLAGS="${RUSTFLAGS:-} \
+    --remap-path-prefix=$PWD=. \
+    --remap-path-prefix=$HOME/.cargo/registry=/registry"
+cargo build --release --quiet
+
+# 2. Run the matrix.
+matrix_log="$(mktemp -t matrix-baseline.XXXXXX.log)"
+trap 'rm -f "$matrix_log"' EXIT
+
+if [ "$mode" = "smoke" ]; then
+    # Smoke set: 5 scenarios covering small + large volume, write op,
+    # mkdir+chkdsk, repeat mounts, delete path.
+    smoke_scenarios=(
+        mac-format-basic-256mib
+        mac-format-tiny-32mib
+        mac-format-mkdir-set-dirty-win-chkdsk
+        mac-format-mac-write-win-repeat-mount-3-win-chkdsk
+        mac-format-win-write-many-win-delete-half-win-chkdsk
+    )
+    echo "[matrix-baseline] smoke: ${smoke_scenarios[*]}"
+    smoke_failed=0
+    for s in "${smoke_scenarios[@]}"; do
+        if ! bash scripts/run-matrix.sh "$s" 2>&1 | tee -a "$matrix_log"; then
+            smoke_failed=1
+            echo "[matrix-baseline] scenario failed: $s (continuing)" >&2
+        fi
+    done
+else
+    echo "[matrix-baseline] full matrix (~3-4 hours)"
+    bash scripts/run-matrix.sh 2>&1 | tee "$matrix_log"
+fi
+
+# 3. Collect VM metadata + per-scenario verdicts.
+echo "[matrix-baseline] collecting VM metadata + verdicts"
+bash scripts/_matrix-collect-vm.sh "$matrix_log"
+
+echo "[matrix-baseline] wrote test-diagnostics/matrix-results.json"
+echo "[matrix-baseline] tested_at_sha=$(git rev-parse HEAD)"
+echo "[matrix-baseline] binary_sha256=$(sha256sum target/release/rust-ntfs | awk '{print $1}')"
+
+# Smoke gate contract: if any smoke scenario failed, the baseline run
+# itself fails. The JSON has still been written so callers can inspect
+# which scenarios failed.
+if [ "${smoke_failed:-0}" -ne 0 ]; then
+    echo "[matrix-baseline] smoke gate FAILED — at least one scenario errored" >&2
+    exit 1
+fi

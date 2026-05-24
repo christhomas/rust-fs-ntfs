@@ -60,9 +60,87 @@ const ATTR_FILE_NAME: u32 = 0x30;
 const ATTR_DATA: u32 = 0x80;
 const ATTR_END_MARKER: u32 = 0xFFFF_FFFF;
 
-/// Namespace for a synthesized $FILE_NAME. Value 3 = "Win32 + DOS" (most
-/// compatible — Windows treats one entry as both the Win32 and DOS name).
+/// `$FILE_NAME.namespace` values per MS-FSCC §2.4.4. Picking the
+/// wrong value for a given name is what chkdsk reports as
+/// "An invalid filename X (N) was found in directory M / All
+/// filenames for File N are invalid / Minor file name errors"
+/// (matrix scenario `mac-format-mac-write-win-repeat-mount-3-win-chkdsk`
+/// 2026-05-23). Conventions we have to match:
+///
+/// * `POSIX` (0) — case-sensitive, no DOS alias required. We use it
+///   for long user names because it sidesteps the WIN32+DOS pairing
+///   requirement.
+/// * `WIN32` (1) — case-preserving, requires a paired DOS namespace
+///   entry with the 8.3 short name. Avoided here because we'd have
+///   to also synthesise the short name + emit a second $FILE_NAME.
+/// * `DOS` (2) — the 8.3 short name half of a WIN32+DOS pair.
+/// * `WIN32_AND_DOS` (3) — the name fits 8.3 *and* is the unique
+///   user-visible representation. Strict DOS-8.3 rule:
+///   ≤ 8 stem chars + ≤ 3 extension chars, no other dots, all
+///   chars valid in DOS short names. chkdsk rejects this namespace
+///   on names that don't fit (e.g. "persistent.txt" — 10-char stem).
+const FILE_NAME_NAMESPACE_POSIX: u8 = 0;
 const FILE_NAME_NAMESPACE_WIN32_AND_DOS: u8 = 3;
+
+/// Permitted DOS 8.3 short-name characters (the canonical FAT/NTFS
+/// short-name alphabet): ASCII alphanumerics plus a small set of
+/// punctuation. Excludes spaces, lower-case letters in the strict
+/// reading, control chars, Unicode, and reserved metachars. We accept
+/// lowercase here because NTFS short names are case-insensitive
+/// internally and the upcase table normalises them on disk.
+fn is_dos83_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '$' | '%'
+                | '\''
+                | '-'
+                | '_'
+                | '@'
+                | '~'
+                | '`'
+                | '!'
+                | '('
+                | ')'
+                | '{'
+                | '}'
+                | '^'
+                | '#'
+                | '&'
+        )
+}
+
+/// Pick a `$FILE_NAME.namespace` for a user-supplied basename.
+/// Returns `WIN32_AND_DOS` when the name fits the DOS 8.3 envelope
+/// (stem 1..=8 DOS chars, ext 0..=3 DOS chars, exactly one or zero
+/// dots, no leading or trailing dot), `POSIX` otherwise. chkdsk Stage 2
+/// rejects WIN32_AND_DOS on a name that doesn't fit ("An invalid
+/// filename X (N) was found in directory M"); see also
+/// `mkfs::NAMESPACE_POSIX` doc-comment which records the same rule for
+/// the system metafile path.
+pub fn fn_namespace_for(name: &str) -> u8 {
+    // Reject leading dot (".env", ".foo") — empty stem is not a valid
+    // DOS 8.3 form and chkdsk treats it as POSIX-only.
+    if name.starts_with('.') || name.ends_with('.') {
+        return FILE_NAME_NAMESPACE_POSIX;
+    }
+    let (stem, ext) = match name.find('.') {
+        Some(i) => (&name[..i], &name[i + 1..]),
+        None => (name, ""),
+    };
+    let stem_len = stem.chars().count();
+    let ext_len = ext.chars().count();
+    if stem_len == 0
+        || stem_len > 8
+        || ext_len > 3
+        || ext.contains('.')
+        || !stem.chars().all(is_dos83_char)
+        || !ext.chars().all(is_dos83_char)
+    {
+        return FILE_NAME_NAMESPACE_POSIX;
+    }
+    FILE_NAME_NAMESPACE_WIN32_AND_DOS
+}
 
 /// Build an MFT record for a regular file. Returns the clean (unfixed-up)
 /// buffer. Caller must apply fixup before writing to disk.
@@ -142,11 +220,24 @@ pub fn build_directory_record(
         &utf16,
         nt_time,
         /* is_dir */ true,
+        fn_namespace_for(name),
     );
     cursor = write_empty_index_root(&mut rec, cursor, 2, index_block_size, bytes_per_sector)?;
 
+    // W2.5 — bounds guard, same rationale as `build_record_inner`.
+    if cursor + 8 > record_size {
+        return Err(format!(
+            "record overflow: attributes consumed {} bytes, no room for 8-byte END marker in {}-byte record",
+            cursor, record_size
+        ));
+    }
+
+    // END marker is 4 bytes magic + 4 bytes attribute_length=0 — see
+    // the matching comment in `build_regular_file_record` above.
+    // chkdsk's "First free byte offset corrected" complaint also fires
+    // against new directories without the +8 inclusion.
     rec[cursor..cursor + 4].copy_from_slice(&ATTR_END_MARKER.to_le_bytes());
-    cursor += 4;
+    cursor += 8;
     rec[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4].copy_from_slice(&(cursor as u32).to_le_bytes());
 
     Ok(rec)
@@ -308,12 +399,33 @@ fn build_record_inner(
         &utf16,
         nt_time,
         is_dir,
+        fn_namespace_for(name),
     );
     cursor = write_empty_data(&mut rec, cursor, 2);
 
-    // End marker.
+    // W2.5 — bounds guard. The resident-only attributes above
+    // (`$STANDARD_INFORMATION` + `$FILE_NAME` + `$DATA`) plus the
+    // 8-byte END marker must all fit in `record_size`. The
+    // realistic exposure is small (4096-byte records have ~3700
+    // bytes free), but a 1024-byte record + a 255-UTF-16-char name
+    // + hard links could exhaust. Fail loudly before writing the
+    // END marker would overflow.
+    if cursor + 8 > record_size {
+        return Err(format!(
+            "record overflow: attributes consumed {} bytes, no room for 8-byte END marker in {}-byte record",
+            cursor, record_size
+        ));
+    }
+
+    // End marker. NTFS spec records the END marker as 4 bytes of
+    // 0xFFFFFFFF *followed by* 4 bytes of `attribute_length = 0` —
+    // the END "attribute" is technically 8 bytes total, even though
+    // only the first 4 are the magic. chkdsk reports
+    // `First free byte offset corrected in file record segment N`
+    // when `used_size` includes only the 4-byte magic. Match
+    // `mkfs::build_system_record` (cursor += 8 there).
     rec[cursor..cursor + 4].copy_from_slice(&ATTR_END_MARKER.to_le_bytes());
-    cursor += 4;
+    cursor += 8;
     let bytes_used = cursor as u32;
     rec[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4].copy_from_slice(&bytes_used.to_le_bytes());
 
@@ -343,6 +455,33 @@ pub fn build_resident_ea_attribute(attr_id: u16, packed: &[u8]) -> Result<Vec<u8
 
 /// Shared builder for resident unnamed attributes: 24-byte header +
 /// value + padding to 8.
+/// Build a resident `$VOLUME_NAME` (type 0x60) attribute carrying
+/// the volume label as raw UTF-16 little-endian bytes. NTFS labels
+/// are capped at 32 UTF-16 code units (64 bytes) by convention —
+/// modern Windows tools refuse to display longer labels — but the
+/// on-disk format places no length cap, so callers responsible for
+/// validation. Pass `label_utf16` already encoded; the empty slice
+/// produces an empty-but-present attribute (NOT a removed one — use
+/// the `remove_volume_label` writer for that semantic).
+pub fn build_resident_volume_name_attribute(attr_id: u16, label_utf16: &[u8]) -> Vec<u8> {
+    let header_size = 24usize;
+    let attr_length = align8(header_size + label_utf16.len());
+    let mut buf = vec![0u8; attr_length];
+    buf[0..4].copy_from_slice(&0x60u32.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 0; // resident
+    buf[9] = 0; // name_length (unnamed)
+    buf[10..12].copy_from_slice(&(header_size as u16).to_le_bytes());
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+    buf[16..20].copy_from_slice(&(label_utf16.len() as u32).to_le_bytes());
+    buf[20..22].copy_from_slice(&(header_size as u16).to_le_bytes());
+    buf[22] = 0;
+    buf[23] = 0;
+    buf[header_size..header_size + label_utf16.len()].copy_from_slice(label_utf16);
+    buf
+}
+
 fn build_resident_unnamed_attribute(
     attr_type: u32,
     attr_id: u16,
@@ -418,6 +557,73 @@ pub fn build_resident_reparse_point_attribute(
 }
 
 const ATTR_REPARSE_POINT: u32 = 0xC0;
+const ATTR_OBJECT_ID: u32 = 0x40;
+
+/// Build a resident `$OBJECT_ID` (type 0x40) attribute carrying a
+/// 16-byte GUID. Per MS-FSCC §2.4.6 the on-disk layout starts with the
+/// `object_id` GUID and may optionally carry three more 16-byte GUIDs
+/// (`birth_volume_id`, `birth_object_id`, `birth_domain_id`); this
+/// builder emits only the mandatory 16-byte prefix, which is all
+/// modern Windows volumes need for the file to round-trip via
+/// `FSCTL_GET_OBJECT_ID`. Use [`build_resident_object_id_attribute_full`]
+/// to write the 64-byte extended form including the three Birth GUIDs.
+pub fn build_resident_object_id_attribute(attr_id: u16, object_id: &[u8; 16]) -> Vec<u8> {
+    build_resident_object_id_attribute_full(attr_id, object_id, None)
+}
+
+/// Full `$OBJECT_ID` attribute layout per MS-FSCC §2.4.6:
+///
+/// ```text
+///   +0x00  object_id        u8[16]   (mandatory)
+///   +0x10  birth_volume_id  u8[16]   (optional)
+///   +0x20  birth_object_id  u8[16]   (optional)
+///   +0x30  birth_domain_id  u8[16]   (optional)
+/// ```
+///
+/// All three Birth fields are present together or not at all — that's
+/// how Microsoft DLT (Distributed Link Tracking) interprets the
+/// `value_length`: 16 = mandatory-only, 64 = full record. The 32- and
+/// 48-byte forms are technically representable per spec but neither
+/// chkdsk nor ntfs.sys document interpretation for them, so this
+/// builder ships exactly the two well-formed shapes.
+///
+/// `birth_ids = Some((bv, bo, bd))` writes the 64-byte form;
+/// `None` emits the 16-byte form (equivalent to
+/// [`build_resident_object_id_attribute`]).
+pub fn build_resident_object_id_attribute_full(
+    attr_id: u16,
+    object_id: &[u8; 16],
+    birth_ids: Option<(&[u8; 16], &[u8; 16], &[u8; 16])>,
+) -> Vec<u8> {
+    let header_size = 24usize;
+    let value_offset = header_size;
+    let value_size = if birth_ids.is_some() {
+        64usize
+    } else {
+        16usize
+    };
+    let attr_length = align8(value_offset + value_size);
+
+    let mut buf = vec![0u8; attr_length];
+    buf[0..4].copy_from_slice(&ATTR_OBJECT_ID.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 0; // resident
+    buf[9] = 0; // name_length
+    buf[10..12].copy_from_slice(&(value_offset as u16).to_le_bytes());
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes()); // flags
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+    buf[16..20].copy_from_slice(&(value_size as u32).to_le_bytes());
+    buf[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes());
+    buf[22] = 0; // indexed_flag
+    buf[23] = 0;
+    buf[value_offset..value_offset + 16].copy_from_slice(object_id);
+    if let Some((bv, bo, bd)) = birth_ids {
+        buf[value_offset + 16..value_offset + 32].copy_from_slice(bv);
+        buf[value_offset + 32..value_offset + 48].copy_from_slice(bo);
+        buf[value_offset + 48..value_offset + 64].copy_from_slice(bd);
+    }
+    buf
+}
 
 /// Common reparse tags (MS-FSCC 2.1.2).
 pub mod reparse_tag {
@@ -688,7 +894,16 @@ pub fn build_file_name_attribute(
     buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
     buf[16..20].copy_from_slice(&(value_size as u32).to_le_bytes());
     buf[20..22].copy_from_slice(&(header_size as u16).to_le_bytes());
-    buf[22] = 0;
+    // indexed_flag = 1 on every $FILE_NAME attribute. Without this byte
+    // chkdsk reports `Attribute record (30, "") from file record
+    // segment N is corrupt` against every newly-created file/dir
+    // (matrix scenarios `mac-format-mkdir-set-dirty-win-chkdsk`,
+    // `mac-format-write-set-dirty-win-chkdsk`,
+    // `mac-format-mac-write-win-repeat-mount-3-win-chkdsk`). Same
+    // finding as `mkfs::write_file_name`'s comment, originally
+    // corroborated against `format.com`'s reference output in CI
+    // iter8 — this builder predates that fix and was missing it.
+    buf[22] = 1;
     buf[23] = 0;
 
     let v = header_size;
@@ -703,7 +918,7 @@ pub fn build_file_name_attribute(
     buf[v + 56..v + 60].copy_from_slice(&fa.to_le_bytes());
     buf[v + 60..v + 64].copy_from_slice(&0u32.to_le_bytes());
     buf[v + 64] = utf16.len() as u8;
-    buf[v + 65] = FILE_NAME_NAMESPACE_WIN32_AND_DOS;
+    buf[v + 65] = fn_namespace_for(name);
     for (i, c) in utf16.iter().enumerate() {
         let off = v + 66 + i * 2;
         buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
@@ -719,6 +934,7 @@ fn write_file_name(
     name_utf16: &[u16],
     nt_time: u64,
     is_dir: bool,
+    namespace: u8,
 ) -> usize {
     let header_size = 24usize;
     let key_fixed = 0x42usize; // parent_ref(8) + 4 times(32) + alloc_size(8) + real_size(8) + attr(4) + reparse/ea(4) + name_len(1) + namespace(1)
@@ -734,7 +950,10 @@ fn write_file_name(
     rec[at + 14..at + 16].copy_from_slice(&attr_id.to_le_bytes());
     rec[at + 16..at + 20].copy_from_slice(&(value_size as u32).to_le_bytes());
     rec[at + 20..at + 22].copy_from_slice(&(header_size as u16).to_le_bytes());
-    rec[at + 22] = 0;
+    // indexed_flag = 1: see comment on `build_file_name_attribute`
+    // above for the same fix — chkdsk reports `Attribute record (30,
+    // "") is corrupt` when it differs.
+    rec[at + 22] = 1;
     rec[at + 23] = 0;
     // Value
     let v = at + header_size;
@@ -749,8 +968,8 @@ fn write_file_name(
     rec[v + 56..v + 60].copy_from_slice(&fa.to_le_bytes()); // file_attributes
     rec[v + 60..v + 64].copy_from_slice(&0u32.to_le_bytes()); // ea/reparse
     rec[v + 64] = name_utf16.len() as u8; // name_length
-    rec[v + 65] = FILE_NAME_NAMESPACE_WIN32_AND_DOS; // namespace
-                                                     // name
+    rec[v + 65] = namespace;
+    // name
     for (i, c) in name_utf16.iter().enumerate() {
         let off = v + 66 + i * 2;
         rec[off..off + 2].copy_from_slice(&c.to_le_bytes());

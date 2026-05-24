@@ -686,9 +686,11 @@ C ABI directly. -->
 9. **Lazy directory iteration.** Stop materializing entire indexes in
    `dir_open`; retain the iterator. `[manyfiles]` regression + a new
    ≥100k-entry fixture (32 MiB image easily holds it).
-   <!-- Status: still outstanding. src/lib.rs:825-862 still pushes
-   every entry into a `Vec<FsNtfsDirent>` inside `fs_ntfs_dir_open`
-   before returning the iterator. -->
+   <!-- Status: still outstanding. src/lib.rs:1175-1265 still materialises
+   every entry into a `Vec<FsNtfsDirent>` (struct at lib.rs:415) inside
+   `fs_ntfs_dir_open` before returning the iterator. C-ABI shape change
+   needed: store the upstream `NtfsIndexEntries` iterator inside
+   `FsNtfsDirIter` and advance in `fs_ntfs_dir_next` (lib.rs:1286). -->
 10. **ADS read API.** `fs_ntfs_read_stream(fs, path, stream_name, …)` +
     `fs_ntfs_list_streams(…)`. The `ntfs-ads.img` fixture + Rust-layer
     tests already exist; add the C surface + a `capi_ads.rs`.
@@ -768,7 +770,7 @@ Findings below are in addition to the items already listed under
 ### Correctness bugs
 
 #### Timestamps truncated to 32-bit UNIX epoch
-**Location:** `src/lib.rs:137-141`, `src/lib.rs:187-193`; `include/fs_ntfs.h:37-40`
+**Location:** `src/lib.rs:431-437` (`filetime_to_unix`), `include/fs_ntfs.h:37-40`
 **Spec:** NTFS timestamps are 64-bit, 100 ns intervals since 1601-01-01 UTC
 ([MS-DTYP FILETIME](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/2c57429b-fdd4-488f-b5fc-9e4cf020fcdf)).
 Representable to year 30828 at 100 ns resolution.
@@ -910,7 +912,7 @@ files; size field lies.
 so callers can target the named stream they want.
 
 #### WOF (Windows Overlay Filter) compression not supported
-**Location:** `src/lib.rs:614-702` (entire read path)
+**Location:** `src/lib.rs:524` (`fill_attr` reparse-tag dispatch) + `src/lib.rs:1315` (`fs_ntfs_read_file`)
 **Spec:** Compact OS / per-file WOF encodes data in an ADS
 `WofCompressedData`, compressed with XPRESS4K/8K/16K or LZX
 ([MS-XCA](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xca/a8b7cb0a-92a6-4187-a23b-5e14273b96f8)).
@@ -927,7 +929,7 @@ ADS using a crate like `ms-compress`. Non-trivial but required for
 correctness on modern volumes.
 
 #### Eager directory materialization — unbounded memory
-**Location:** `src/lib.rs:545-582`
+**Location:** `src/lib.rs:1175-1265` (`fs_ntfs_dir_open`); iterator struct at `src/lib.rs:415`
 **Spec:** `$INDEX_ALLOCATION` B+ trees support millions of entries;
 `C:\Windows\WinSxS` routinely has 100k+.
 **Code:** `dir_open` walks the whole index into `Vec<FsNtfsDirent>`.

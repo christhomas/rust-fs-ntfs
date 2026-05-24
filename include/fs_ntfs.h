@@ -78,6 +78,41 @@ typedef struct {
     uint64_t total_size;
 } fs_ntfs_volume_info_t;
 
+/*
+ * Extended volume info — v2.
+ *
+ * Every v1 field above lands at the same offset (compile-time
+ * verified by `offset_of!` style tests on the Rust side). Callers
+ * MUST allocate a fs_ntfs_volume_info_v2_t (or larger) buffer when
+ * calling fs_ntfs_get_volume_info_v2 — passing a v1-sized buffer is
+ * unsupported and will overrun memory.
+ *
+ * v2 adds:
+ *   - volume_flags     : raw $VOLUME_INFORMATION.flags (incl. dirty bit)
+ *   - is_dirty         : 1 iff (volume_flags & 0x0001), 0 otherwise
+ *   - mft_record_size  : bytes per MFT record (typically 1024 or 4096)
+ *   - bytes_per_sector : physical sector size (typically 512 or 4096)
+ */
+typedef struct {
+    /* -- v1 fields, identical offsets ----------------------------------- */
+    char     volume_name[128];
+    uint32_t cluster_size;
+    uint64_t total_clusters;
+    uint16_t ntfs_version_major;
+    uint16_t ntfs_version_minor;
+    uint64_t serial_number;
+    uint64_t total_size;
+    /* -- v2 additions --------------------------------------------------- */
+    uint16_t volume_flags;
+    uint8_t  is_dirty;
+    /* Full 5-byte gap between is_dirty (offset 170) and mft_record_size
+     * (offset 176, u32 alignment). Make the whole gap explicit so the
+     * layout is stable with no hidden compiler padding. */
+    uint8_t  _pad[5];
+    uint32_t mft_record_size;
+    uint32_t bytes_per_sector;
+} fs_ntfs_volume_info_v2_t;
+
 /* ---- Block device callback interface ---- */
 
 /*
@@ -206,6 +241,44 @@ void fs_ntfs_umount(fs_ntfs_fs_t *fs);
 int fs_ntfs_get_volume_info(fs_ntfs_fs_t *fs,
                                 fs_ntfs_volume_info_t *info);
 
+/*
+ * Extended volume info — v2. Populates fs_ntfs_volume_info_v2_t with
+ * everything v1 reports plus volume_flags / is_dirty / mft_record_size /
+ * bytes_per_sector. Returns 0 on success, -1 on error. New callers
+ * should prefer this; legacy callers can stay on v1.
+ */
+int fs_ntfs_get_volume_info_v2(fs_ntfs_fs_t *fs,
+                                   fs_ntfs_volume_info_v2_t *info);
+
+/*
+ * Set the volume label on an unmounted NTFS image. Pass NULL or an
+ * empty string to remove the $VOLUME_NAME attribute entirely. The
+ * label is UTF-8; this function encodes to UTF-16 LE on disk. NTFS
+ * conventionally caps labels at 32 UTF-16 code units; longer labels
+ * are rejected with -1.
+ *
+ * IMPORTANT: the image must NOT be mounted by Windows / ntfs.sys
+ * concurrently — same constraint as fs_ntfs_clear_dirty / fsck. Use
+ * the mounted-handle API for live volumes (TODO; not yet provided).
+ *
+ * Returns 0 on success, -1 on error (call fs_ntfs_last_error for
+ * details).
+ */
+int fs_ntfs_set_volume_label(const char *image, const char *label);
+
+/*
+ * Read the volume label from an unmounted NTFS image into out_buf
+ * (UTF-8 bytes, NO trailing NUL written — caller may add their own).
+ * Returns the number of bytes written, or -1 on error.
+ *
+ * Returns 0 when the volume has no label (the $VOLUME_NAME attribute
+ * is absent or zero-length). If the on-disk label is longer than
+ * out_buf_len, the result is silently truncated and the truncated
+ * length is returned; no error. Allocate at least 128 bytes for the
+ * full label (32 UTF-16 code units × up to 4 UTF-8 bytes each).
+ */
+int fs_ntfs_read_volume_label(const char *image, char *out_buf, size_t out_buf_len);
+
 /* ---- File attributes ---- */
 
 /*
@@ -307,6 +380,63 @@ int fs_ntfs_link(const char *image,
 int fs_ntfs_read_object_id(const char *image,
                            const char *path,
                            uint8_t *out_buf);
+
+/*
+ * Set a file's 16-byte $OBJECT_ID (GUID) from in_buf. Adds the
+ * attribute if absent, replaces in place if present. The GUID is
+ * stored verbatim — no byte-order reinterpretation. Returns 0 on
+ * success, -1 on error. in_buf must point to at least 16 bytes.
+ *
+ * Extended fields (birth volume / object / domain IDs, MS-FSCC §2.4.6)
+ * are NOT written by this entry point; only the mandatory 16-byte
+ * prefix. Modern Windows volumes accept the short form for
+ * FSCTL_GET_OBJECT_ID round-trips.
+ */
+int fs_ntfs_write_object_id(const char *image,
+                            const char *path,
+                            const uint8_t *in_buf);
+
+/*
+ * Write a full 64-byte $OBJECT_ID carrying the mandatory object_id
+ * plus the three DLT (Distributed Link Tracking) Birth GUIDs per
+ * MS-FSCC §2.4.6: birth_volume_id, birth_object_id, birth_domain_id.
+ * All four pointers must point to at least 16 readable bytes. Adds
+ * the attribute if absent, replaces in place if present. Returns 0
+ * on success, -1 on error.
+ */
+int fs_ntfs_write_object_id_extended(const char *image,
+                                     const char *path,
+                                     const uint8_t *in_buf,
+                                     const uint8_t *birth_volume,
+                                     const uint8_t *birth_object,
+                                     const uint8_t *birth_domain);
+
+/*
+ * Read the full $OBJECT_ID into out_buf, decoding Birth GUIDs when
+ * present. Caller passes out_buf_len (must be >= 16; pass 64 to also
+ * receive Birth GUIDs).
+ *
+ * Returns:
+ *   16  — short form only (object_id); no Birth GUIDs on disk
+ *   64  — extended form (object_id + 3x birth_*); out_buf_len was >= 64
+ *    0  — file has no $OBJECT_ID attribute
+ *   -1  — error
+ *
+ * If on-disk is extended (64 bytes) but out_buf_len < 64, only the
+ * first 16 bytes are written and 16 is returned (Birth GUIDs are
+ * silently dropped).
+ */
+int fs_ntfs_read_object_id_extended(const char *image,
+                                    const char *path,
+                                    uint8_t *out_buf,
+                                    size_t out_buf_len);
+
+/*
+ * Remove a file's $OBJECT_ID attribute. Idempotent — returns 0
+ * whether or not the attribute existed. Returns -1 on error.
+ */
+int fs_ntfs_remove_object_id(const char *image,
+                             const char *path);
 
 /*
  * Clear the VOLUME_IS_DIRTY flag on an NTFS image so Windows / FSKit /
@@ -638,6 +768,33 @@ int64_t fs_ntfs_write_file(const char *image, const char *path,
  */
 int fs_ntfs_set_file_attributes(const char *image, const char *path,
                    uint32_t add_flags, uint32_t remove_flags);
+
+/*
+ * Read the file's $STANDARD_INFORMATION.security_id (the index into
+ * $Secure:$SDS / $Secure:$SII). Writes the 32-bit value to *out.
+ * Returns:
+ *    1  — security_id read into *out
+ *    0  — file's $STANDARD_INFORMATION is the 48-byte v1.x form (no
+ *         security_id field). *out is set to 0.
+ *   -1  — error
+ */
+int fs_ntfs_read_security_id(const char *image, const char *path,
+                             uint32_t *out);
+
+/*
+ * Point a file at an existing $Secure:$SDS entry by writing the
+ * security_id field in its $STANDARD_INFORMATION. mkfs ships the
+ * canonical system-files DACL at id 0x100; pointing a runtime-created
+ * file there grants the same ACL. Adding new SD entries is a separate
+ * (larger) piece of work — this writer only retargets.
+ *
+ * Requires the file's $STANDARD_INFORMATION to be in the 72-byte
+ * NTFS 3.x form. System files written by mkfs use the 48-byte v1.x
+ * form and cannot be retargeted via this API. Returns 0 on success,
+ * -1 on error.
+ */
+int fs_ntfs_set_security_id(const char *image, const char *path,
+                            uint32_t security_id);
 
 /* ---- Handle-based mutation API (`_h` siblings) ---- */
 

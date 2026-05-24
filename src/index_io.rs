@@ -20,6 +20,15 @@ pub const IH_FLAG_HAS_SUBNODES: u8 = 0x01;
 /// Offsets inside `INDEX_HEADER`:
 const IH_FIRST_ENTRY_OFFSET: usize = 0;
 const IH_TOTAL_SIZE_OF_ENTRIES: usize = 4;
+/// Offset of `allocated_size_of_entries` within `INDEX_HEADER`.
+/// Spec invariant: `allocated_size >= total_size`. When we grow the
+/// $INDEX_ROOT's resident value (insert path), both fields move
+/// together — only updating `total_size` makes ntfs.sys raise
+/// Event 55 "A corruption was found in a file system index
+/// structure ... :$I30:$INDEX_ROOT" against rec 5 (Iter "Group A"
+/// trace 2026-05-23, scenario
+/// `mac-format-mkdir-set-dirty-win-chkdsk`).
+const IH_ALLOCATED_SIZE_OF_ENTRIES: usize = 8;
 
 /// Offsets inside an index entry.
 const IE_FILE_REFERENCE: usize = 0x00;
@@ -424,7 +433,13 @@ pub fn build_file_name_index_entry(
     e[k + 56..k + 60].copy_from_slice(&fa.to_le_bytes());
     e[k + 60..k + 64].copy_from_slice(&0u32.to_le_bytes()); // ea/reparse
     e[k + FN_NAME_LENGTH_OFFSET] = utf16.len() as u8;
-    e[k + FN_NAMESPACE_OFFSET] = 3; // Win32+DOS
+    // The index entry's embedded $FILE_NAME copy must agree with the
+    // MFT record's $FILE_NAME on namespace. Hardcoding WIN32_AND_DOS
+    // here made chkdsk Stage 2 emit "Index entry X in index $I30 of
+    // file M is incorrect" for any non-8.3 user name (matrix scenario
+    // mac-format-mac-write-win-repeat-mount-3-win-chkdsk 2026-05-23,
+    // after the MFT-side namespace fix landed).
+    e[k + FN_NAMESPACE_OFFSET] = crate::record_build::fn_namespace_for(name);
     for (i, c) in utf16.iter().enumerate() {
         let off = k + FN_NAME_OFFSET + i * 2;
         e[off..off + 2].copy_from_slice(&c.to_le_bytes());
@@ -542,11 +557,18 @@ pub fn insert_entry_into_index_root_with_collation(
     // Copy the new entry in.
     record[insertion_point..insertion_point + entry_bytes.len()].copy_from_slice(entry_bytes);
 
-    // Bump total_size in INDEX_HEADER.
+    // Bump both `total_size` and `allocated_size` in INDEX_HEADER.
+    // For a resident $INDEX_ROOT every entry byte is part of the
+    // allocated region (no slack — the attribute's resident value
+    // size IS the alloc size). They must stay equal; updating only
+    // `total_size` violates the spec invariant
+    // `allocated_size >= total_size` and trips Event 55 on mount.
     let ih_start2 = attr_val_start + IR_INDEX_HEADER_OFFSET;
-    let new_total_size = (total_size + entry_bytes.len()) as u32;
+    let new_size = (total_size + entry_bytes.len()) as u32;
     record[ih_start2 + IH_TOTAL_SIZE_OF_ENTRIES..ih_start2 + IH_TOTAL_SIZE_OF_ENTRIES + 4]
-        .copy_from_slice(&new_total_size.to_le_bytes());
+        .copy_from_slice(&new_size.to_le_bytes());
+    record[ih_start2 + IH_ALLOCATED_SIZE_OF_ENTRIES..ih_start2 + IH_ALLOCATED_SIZE_OF_ENTRIES + 4]
+        .copy_from_slice(&new_size.to_le_bytes());
 
     Ok(())
 }
@@ -668,6 +690,36 @@ pub fn compare_names(
     let iter = a.iter().copied().map(map).zip(b.iter().copied().map(map));
     for (ac, bc) in iter {
         match ac.cmp(&bc) {
+            std::cmp::Ordering::Equal => continue,
+            ord => return ord,
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+/// Compare two UTF-16 names byte-for-byte (no upcase folding) — the
+/// comparator a case-sensitive directory should use. Win10 1803+
+/// supports `FILE_ATTRIBUTE_CASE_SENSITIVE_DIR` on $FILE_NAME's
+/// file_attributes (used by WSL and Docker-Desktop volumes for
+/// container-image storage); inside such a directory, `foo.txt` and
+/// `FOO.TXT` are distinct files.
+///
+/// Today this comparator is **not yet wired into `find_index_entry`
+/// or the insert paths** — those still use `compare_names` (case-
+/// insensitive) unconditionally. Plumbing the per-directory flag
+/// through is the next step (FUTURE_FEATURES.md §3.9). This function
+/// is the building block.
+///
+/// The bit position of `FILE_ATTRIBUTE_CASE_SENSITIVE_DIR` within
+/// $FILE_NAME.file_attributes / $STANDARD_INFORMATION.file_attributes
+/// is **not yet pinned** in our spec notes — multiple values circulate
+/// across third-party documentation. Determining the right bit by
+/// byte-diff against a reference WSL/Docker volume is part of the
+/// follow-up.
+pub fn compare_names_ordinal(a: &[u16], b: &[u16]) -> std::cmp::Ordering {
+    let n = a.len().min(b.len());
+    for i in 0..n {
+        match a[i].cmp(&b[i]) {
             std::cmp::Ordering::Equal => continue,
             ord => return ord,
         }
