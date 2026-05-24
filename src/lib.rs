@@ -2019,6 +2019,80 @@ pub extern "C" fn fs_ntfs_remove_ea(
     }
 }
 
+/// Enumerate the names of every Extended Attribute on the file at
+/// `path`. Returns names as a sequence of NUL-terminated byte
+/// strings packed into `out_buf` (in on-disk order — EAs are stored
+/// in the order they were written). EA names cannot contain NUL by
+/// the EA wire format, so the NUL terminator is unambiguous.
+///
+/// Always writes the required byte count to `*out_total_len` so
+/// callers can size-query (pass `out_buf = NULL`, `out_buf_len = 0`).
+///
+/// Returns:
+///   * `N >= 0` — number of EAs (also = count of NUL terminators);
+///                0 means the file has no EAs
+///   * `2`      — EAs exist but `out_buf_len` was too small;
+///                `*out_total_len` holds the required size and names
+///                are NOT written
+///   * `-1`     — error (use `fs_ntfs_last_error`)
+///
+/// `out_total_len` must be non-null. `out_buf` may be NULL only when
+/// `out_buf_len == 0`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_list_ea_keys(
+    image: *const c_char,
+    path: *const c_char,
+    out_buf: *mut c_char,
+    out_buf_len: usize,
+    out_total_len: *mut usize,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_list_ea_keys: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_list_ea_keys: null or non-UTF-8 path");
+        return -1;
+    };
+    if out_total_len.is_null() {
+        set_error("fs_ntfs_list_ea_keys: null out_total_len");
+        return -1;
+    }
+    if out_buf.is_null() && out_buf_len != 0 {
+        set_error("fs_ntfs_list_ea_keys: null out_buf with non-zero out_buf_len");
+        return -1;
+    }
+    match write::list_ea_keys(std::path::Path::new(img), p) {
+        Ok(keys) => {
+            let total: usize = keys.iter().map(|k| k.len() + 1).sum();
+            unsafe { *out_total_len = total };
+            if total > out_buf_len {
+                if keys.is_empty() {
+                    return 0;
+                }
+                return 2;
+            }
+            let mut cursor = 0usize;
+            for key in &keys {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        key.as_ptr(),
+                        (out_buf as *mut u8).add(cursor),
+                        key.len(),
+                    );
+                    *(out_buf as *mut u8).add(cursor + key.len()) = 0;
+                }
+                cursor += key.len() + 1;
+            }
+            keys.len() as c_int
+        }
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Write a resident `$REPARSE_POINT` attribute with `reparse_tag` and
 /// `len` bytes of tag-specific data from `buf`. Sets
 /// FILE_ATTRIBUTE_REPARSE_POINT on the file. If the file already has a
