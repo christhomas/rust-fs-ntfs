@@ -230,6 +230,69 @@ are documented there.
 Reverse chronological highlights from `git log`. Full per-commit
 history available via `git log` in the repo.
 
+### 2026-05-24
+
+- `feat(read)`: `read_reparse_point` exposes raw `(tag, data)` for
+  any reparse type (`fs_ntfs_readlink` only handles symlinks/mount
+  points). Useful for inspecting third-party tags (dedup, HSM, etc.).
+- `feat(read)`: `list_named_streams` enumerates the names of every
+  named `$DATA` attribute (ADS) on a file, excluding the unnamed
+  primary stream.
+- `feat(read)`: `list_ea_keys` returns just the EA names, skipping
+  values up to 64KB each — for callers that only need to discover
+  which EAs exist.
+- `feat(read)`: `read_si_full` surfaces every MS-FSCC §2.4.2
+  `$STANDARD_INFORMATION` field, including the NTFS 3.x trailer
+  (owner_id, security_id, quota, usn) when present.
+- `feat(capi)`: `fs_ntfs_set_object_id_extended_h` — handle-based
+  sibling of `fs_ntfs_write_object_id_extended` for callers holding
+  an open filesystem handle.
+- `fix(pr#49)`: bundle of 23 review-feedback fixes covering
+  `fn_namespace_for` DOS 8.3 validity, `read_volume_label` odd-byte
+  corruption surfacing, `read_object_id_extended` strict `{16, 64}`
+  length validation, `remove_attribute_at` bounds-checked helper
+  replacing five `copy_within` panic sites, `_pad[3]` → `_pad[5]`
+  explicit padding, smoke-mode gate failure-detection, dirty-tree
+  seal false-positive guard, VM-host redaction, PowerShell short-
+  read detection, portable verdict-collect path, cargo-fmt
+  hygiene. See `CHANGELOG.md` for the full per-item list.
+- `chore(hooks)`: `core.hooksPath` set to `.githooks` so
+  `cargo fmt --check` + `cargo clippy -- -D warnings` run locally
+  before commit (one-shot install:
+  `bash scripts/install-hooks.sh`).
+
+### 2026-05-23
+
+- `feat(read)`: `read_attributes` / `describe_attributes` — list every
+  attribute on a file's MFT record (type code + name + dimensions).
+  Diagnostics helper for chkdsk byte-diff work.
+- `feat(read)`: `read_file_names` returns every `$FILE_NAME` on a
+  file (multi-namespace files surface as multiple records).
+- `feat(read)`: `read_volume_label` decodes `$VOLUME_NAME` to UTF-8.
+- `feat(write)`: `set_volume_label` renames or clears the volume
+  `$VOLUME_NAME`. Empty label removes the attribute.
+- `feat(write)`: `set_security_id` points a file at an existing
+  `$Secure:$SDS` entry. Read counterpart `read_security_id` also
+  shipped.
+- `feat(write)`: `write_object_id` runtime 16-byte `$OBJECT_ID`
+  writer; `write_object_id_extended` covers the 64-byte
+  object_id + Birth GUIDs form (MS-FSCC §2.4.6).
+- `feat(volume)`: v2 of the volume-info struct adding
+  `volume_flags` / `is_dirty` / `mft_record_size` / `bytes_per_sector`
+  (`fs_ntfs_get_volume_info_v2`). v1 fields stay at the same offsets
+  so legacy callers still work — verified by compile-time
+  `offset_of!` assertion tests.
+- `feat(index_io)`: `compare_names_ordinal` primitive for
+  case-sensitive collation (foundation for `CASE_SENSITIVE_DIR`
+  work; not wired into the default code path yet).
+- `feat(test)`: seal-by-binary-hash matrix discipline
+  (`scripts/matrix-baseline.sh` writes
+  `test-diagnostics/matrix-results.json` with
+  `binary_sha256 = sha256(target/release/rust-ntfs)`; survives
+  rebase/squash-merge via `--remap-path-prefix`).
+  42/42 sealed runs recorded for staging tip `30fcdd6` (11369s) and
+  staging-2 tip `d9595c7` (13794s).
+
 ### 2026-05-21
 
 - `chore(vendor)`: `am-fs-core` is now a git submodule at
