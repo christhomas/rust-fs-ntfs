@@ -170,6 +170,115 @@ pub fn read_security_id_io<T: BlockIo + ?Sized>(
     Ok(Some(id))
 }
 
+/// Full decoded `$STANDARD_INFORMATION` value (MS-FSCC §2.4.2).
+///
+/// The optional `v3` block carries the 24 trailing bytes (`owner_id`,
+/// `security_id`, `quota`, `usn`) that only exist in the 72-byte
+/// NTFS 3.x form; it is `None` for the 48-byte 1.x form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StandardInformationFull {
+    pub creation_time: u64,
+    pub modification_time: u64,
+    pub mft_modification_time: u64,
+    pub access_time: u64,
+    pub file_attributes: u32,
+    pub maximum_versions: u32,
+    pub version_number: u32,
+    pub class_id: u32,
+    pub v3: Option<StandardInformationV3>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StandardInformationV3 {
+    pub owner_id: u32,
+    pub security_id: u32,
+    pub quota: u64,
+    pub usn: u64,
+}
+
+// $STANDARD_INFORMATION v3.x field offsets (continuing from
+// SI_CREATION..SI_SECURITY_ID above).
+const SI_MAX_VERSIONS: usize = 0x24;
+const SI_VERSION: usize = 0x28;
+const SI_CLASS_ID: usize = 0x2C;
+const SI_OWNER_ID: usize = 0x30;
+const SI_QUOTA: usize = 0x38;
+const SI_USN: usize = 0x40;
+
+/// Read every field of a file's `$STANDARD_INFORMATION`. Unlike the
+/// targeted `read_security_id`, this exposes the full 48-byte common
+/// header plus the optional 24-byte NTFS 3.x trailer (Owner/Security
+/// IDs, Quota, USN) when present.
+pub fn read_si_full(image: &Path, file_path: &str) -> Result<StandardInformationFull, String> {
+    let mut io = PathIo::open_ro(image)?;
+    read_si_full_io(&mut io, file_path)
+}
+
+pub fn read_si_full_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+) -> Result<StandardInformationFull, String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let (_, record) = read_mft_record_io(io, rec)?;
+    let loc = attr_io::find_attribute(&record, AttrType::StandardInformation, None)
+        .ok_or_else(|| "$STANDARD_INFORMATION not found".to_string())?;
+    let data_start = attr_io::resident_value_start(&loc)
+        .ok_or_else(|| "$STANDARD_INFORMATION not resident".to_string())?;
+    let value_length = loc.resident_value_length.ok_or("no value length")? as usize;
+    // v1.x = 48 bytes (stops after class_id at 0x30). v3.x = 72 bytes
+    // (adds owner_id/security_id/quota/usn). Anything below 48 is
+    // structurally broken.
+    if value_length < 0x30 {
+        return Err(format!(
+            "$STANDARD_INFORMATION value too short: {value_length} bytes (need ≥ 48)"
+        ));
+    }
+    let read_u32 = |off: usize| {
+        u32::from_le_bytes([
+            record[data_start + off],
+            record[data_start + off + 1],
+            record[data_start + off + 2],
+            record[data_start + off + 3],
+        ])
+    };
+    let read_u64 = |off: usize| {
+        u64::from_le_bytes([
+            record[data_start + off],
+            record[data_start + off + 1],
+            record[data_start + off + 2],
+            record[data_start + off + 3],
+            record[data_start + off + 4],
+            record[data_start + off + 5],
+            record[data_start + off + 6],
+            record[data_start + off + 7],
+        ])
+    };
+    let common = StandardInformationFull {
+        creation_time: read_u64(SI_CREATION),
+        modification_time: read_u64(SI_MODIFICATION),
+        mft_modification_time: read_u64(SI_MFT_MODIFICATION),
+        access_time: read_u64(SI_ACCESS),
+        file_attributes: read_u32(SI_FILE_ATTRIBUTES),
+        maximum_versions: read_u32(SI_MAX_VERSIONS),
+        version_number: read_u32(SI_VERSION),
+        class_id: read_u32(SI_CLASS_ID),
+        v3: None,
+    };
+    if value_length >= 0x48 {
+        Ok(StandardInformationFull {
+            v3: Some(StandardInformationV3 {
+                owner_id: read_u32(SI_OWNER_ID),
+                security_id: read_u32(SI_SECURITY_ID),
+                quota: read_u64(SI_QUOTA),
+                usn: read_u64(SI_USN),
+            }),
+            ..common
+        })
+    } else {
+        Ok(common)
+    }
+}
+
 /// Write the `security_id` field in `$STANDARD_INFORMATION`. The
 /// `security_id` is an index into `$Secure:$SDS` / `$Secure:$SII`;
 /// mkfs ships a single canonical entry at `0x100` (the system-files
