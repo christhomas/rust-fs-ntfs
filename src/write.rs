@@ -1666,7 +1666,10 @@ pub fn read_reparse_point_io<T: BlockIo + ?Sized>(
     if val_len < 8 {
         return Err(format!("$REPARSE_POINT value too short: {val_len} bytes"));
     }
-    if val_off.checked_add(val_len).is_none_or(|end| end > record.len()) {
+    if val_off
+        .checked_add(val_len)
+        .is_none_or(|end| end > record.len())
+    {
         return Err(format!(
             "$REPARSE_POINT value range out of record: val_off={val_off}, val_len={val_len}, record_len={}",
             record.len()
