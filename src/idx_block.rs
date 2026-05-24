@@ -205,3 +205,117 @@ pub const INDX_INDEX_HEADER_OFFSET: usize = 0x18;
 /// Offset of the `first_entry` field inside the INDEX_HEADER.
 pub const IH_FIRST_ENTRY_OFFSET: usize = 0x00;
 pub const IH_TOTAL_SIZE_OF_ENTRIES: usize = 0x04;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ia(
+        block_size: u64,
+        cluster_size: u64,
+        runs: Vec<DataRun>,
+        bitmap: Vec<u8>,
+        data_length: u64,
+    ) -> IndexAllocation {
+        IndexAllocation {
+            params: BootParams {
+                bytes_per_sector: 512,
+                sectors_per_cluster: cluster_size / 512,
+                cluster_size,
+                mft_lcn: 4,
+                file_record_size: 1024,
+            },
+            block_size,
+            runs,
+            bitmap,
+            data_length,
+        }
+    }
+
+    // --- allocated_block_vcns ---------------------------------------------
+
+    #[test]
+    fn allocated_block_vcns_empty_bitmap_yields_empty() {
+        let ia = make_ia(4096, 4096, vec![], vec![0u8; 4], 0);
+        assert!(ia.allocated_block_vcns().is_empty());
+    }
+
+    #[test]
+    fn allocated_block_vcns_decodes_set_bits_in_order() {
+        // 4 KiB block size, 4 KiB cluster size → block_size/cluster_size = 1,
+        // so block index = VCN.  bitmap byte 0 = 0b0000_0101 ⇒ blocks 0, 2.
+        let ia = make_ia(4096, 4096, vec![], vec![0b0000_0101u8], 0);
+        let vcns = ia.allocated_block_vcns();
+        assert_eq!(vcns, vec![0, 2]);
+    }
+
+    #[test]
+    fn allocated_block_vcns_spans_multiple_bytes() {
+        // Bitmap byte 0 = 0b1000_0000 (bit 7), byte 1 = 0b0000_0010 (bit 1
+        // of byte 1 ⇒ block index 9). VCN = block_index for 1:1 block:cluster.
+        let ia = make_ia(4096, 4096, vec![], vec![0b1000_0000u8, 0b0000_0010u8], 0);
+        let vcns = ia.allocated_block_vcns();
+        assert_eq!(vcns, vec![7, 9]);
+    }
+
+    // --- vcn_to_disk_offset ------------------------------------------------
+
+    #[test]
+    fn vcn_to_disk_offset_inside_first_run_uses_cluster_size_arithmetic() {
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 4,
+            lcn: Some(10),
+        }];
+        let ia = make_ia(4096, 4096, runs, vec![], 0);
+        // VCN 0 → LCN 10 → byte offset 10 * 4096.
+        assert_eq!(vcn_to_disk_offset(&ia, 0).unwrap(), 10 * 4096);
+        // VCN 3 → LCN 13 → byte offset 13 * 4096.
+        assert_eq!(vcn_to_disk_offset(&ia, 3).unwrap(), 13 * 4096);
+    }
+
+    #[test]
+    fn vcn_to_disk_offset_in_second_run() {
+        let runs = vec![
+            DataRun {
+                starting_vcn: 0,
+                length: 2,
+                lcn: Some(10),
+            },
+            DataRun {
+                starting_vcn: 2,
+                length: 3,
+                lcn: Some(20),
+            },
+        ];
+        let ia = make_ia(4096, 4096, runs, vec![], 0);
+        // VCN 2 maps to LCN 20 + (2-2) = 20.
+        assert_eq!(vcn_to_disk_offset(&ia, 2).unwrap(), 20 * 4096);
+        // VCN 4 → LCN 22.
+        assert_eq!(vcn_to_disk_offset(&ia, 4).unwrap(), 22 * 4096);
+    }
+
+    #[test]
+    fn vcn_to_disk_offset_in_sparse_run_errors() {
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 4,
+            lcn: None,
+        }];
+        let ia = make_ia(4096, 4096, runs, vec![], 0);
+        let err = vcn_to_disk_offset(&ia, 1).unwrap_err();
+        assert!(err.contains("sparse"), "{err}");
+    }
+
+    #[test]
+    fn vcn_to_disk_offset_past_end_errors() {
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 4,
+            lcn: Some(10),
+        }];
+        let ia = make_ia(4096, 4096, runs, vec![], 0);
+        let err = vcn_to_disk_offset(&ia, 99).unwrap_err();
+        assert!(err.contains("not mapped"), "{err}");
+    }
+}

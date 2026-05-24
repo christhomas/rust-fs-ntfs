@@ -993,3 +993,251 @@ fn write_empty_data(rec: &mut [u8], at: usize, attr_id: u16) -> usize {
     rec[at + 23] = 0;
     at + attr_length
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- pure utility functions --------------------------------------------
+
+    #[test]
+    fn align8_rounds_up_to_multiple_of_eight() {
+        assert_eq!(align8(0), 0);
+        assert_eq!(align8(1), 8);
+        assert_eq!(align8(7), 8);
+        assert_eq!(align8(8), 8);
+        assert_eq!(align8(9), 16);
+        assert_eq!(align8(15), 16);
+        assert_eq!(align8(16), 16);
+        assert_eq!(align8(17), 24);
+    }
+
+    #[test]
+    fn encode_file_reference_packs_record_number_in_low_48_and_sequence_in_high_16() {
+        // record_number=0x1234_5678, sequence=0xAABB
+        let r = encode_file_reference(0x0000_1234_5678, 0xAABB);
+        assert_eq!(r >> 48, 0xAABB);
+        assert_eq!(r & 0x0000_FFFF_FFFF_FFFF, 0x0000_1234_5678);
+        // record_number that exceeds 48 bits is silently masked.
+        let r = encode_file_reference(u64::MAX, 0);
+        assert_eq!(r, 0x0000_FFFF_FFFF_FFFF);
+    }
+
+    #[test]
+    fn nt_time_now_is_above_year_2020_floor() {
+        // Year 2020 in NT FILETIME (100ns since 1601-01-01).
+        // 2020-01-01 ≈ 132_223_104_000_000_000.
+        let now = nt_time_now();
+        assert!(
+            now > 132_223_104_000_000_000,
+            "nt_time_now={now} is before 2020"
+        );
+    }
+
+    // --- fn_namespace_for: 8.3 detection -----------------------------------
+
+    #[test]
+    fn fn_namespace_for_short_simple_name_picks_win32_and_dos() {
+        assert_eq!(
+            fn_namespace_for("README"),
+            FILE_NAME_NAMESPACE_WIN32_AND_DOS
+        );
+        assert_eq!(
+            fn_namespace_for("README.TXT"),
+            FILE_NAME_NAMESPACE_WIN32_AND_DOS
+        );
+        assert_eq!(fn_namespace_for("a.b"), FILE_NAME_NAMESPACE_WIN32_AND_DOS);
+    }
+
+    #[test]
+    fn fn_namespace_for_stem_over_eight_chars_picks_posix() {
+        assert_eq!(fn_namespace_for("ninechars"), FILE_NAME_NAMESPACE_POSIX);
+        assert_eq!(
+            fn_namespace_for("verylongname.txt"),
+            FILE_NAME_NAMESPACE_POSIX
+        );
+    }
+
+    #[test]
+    fn fn_namespace_for_extension_over_three_chars_picks_posix() {
+        assert_eq!(fn_namespace_for("README.MARK"), FILE_NAME_NAMESPACE_POSIX);
+    }
+
+    #[test]
+    fn fn_namespace_for_multi_dot_picks_posix() {
+        // "a.tar.gz" — extension contains a dot, picked POSIX.
+        assert_eq!(fn_namespace_for("a.tar.gz"), FILE_NAME_NAMESPACE_POSIX);
+    }
+
+    // --- EA attribute builders ---------------------------------------------
+
+    #[test]
+    fn build_resident_ea_information_attribute_rejects_non_eight_byte_value() {
+        let err = build_resident_ea_information_attribute(0, &[0u8; 7]).unwrap_err();
+        assert!(err.contains("8 bytes"), "{err}");
+    }
+
+    #[test]
+    fn build_resident_ea_information_attribute_layout() {
+        let val = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let buf = build_resident_ea_information_attribute(7, &val).unwrap();
+        // Type = 0xD0, length is align8(24+8)=32, attr_id at +14, value at +24.
+        let typ = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+        let len = u32::from_le_bytes(buf[4..8].try_into().unwrap()) as usize;
+        let aid = u16::from_le_bytes(buf[14..16].try_into().unwrap());
+        assert_eq!(typ, 0xD0);
+        assert_eq!(len, 32);
+        assert_eq!(aid, 7);
+        assert_eq!(&buf[24..32], &val);
+    }
+
+    #[test]
+    fn build_resident_ea_attribute_uses_type_0xe0() {
+        let packed = b"NAME\x00VALUE";
+        let buf = build_resident_ea_attribute(2, packed).unwrap();
+        let typ = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+        assert_eq!(typ, 0xE0);
+    }
+
+    // --- reparse-point builder ---------------------------------------------
+
+    #[test]
+    fn build_resident_reparse_point_attribute_writes_tag_and_data() {
+        let data = b"hello-target";
+        let buf = build_resident_reparse_point_attribute(3, reparse_tag::SYMLINK, data).unwrap();
+        // Header type
+        assert_eq!(u32::from_le_bytes(buf[0..4].try_into().unwrap()), 0xC0);
+        // Resident value lives at offset 24. First 4 bytes = reparse_tag.
+        let tag = u32::from_le_bytes(buf[24..28].try_into().unwrap());
+        assert_eq!(tag, reparse_tag::SYMLINK);
+        let data_len = u16::from_le_bytes(buf[28..30].try_into().unwrap()) as usize;
+        assert_eq!(data_len, data.len());
+        assert_eq!(&buf[32..32 + data.len()], data);
+    }
+
+    // --- symlink reparse data builder --------------------------------------
+
+    #[test]
+    fn build_symlink_reparse_data_relative_sets_flag_bit() {
+        let buf = build_symlink_reparse_data("foo", None, true);
+        let flags = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+        assert_eq!(flags & 0x1, 0x1);
+    }
+
+    #[test]
+    fn build_symlink_reparse_data_absolute_clears_flag_bit() {
+        let buf = build_symlink_reparse_data("foo", None, false);
+        let flags = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+        assert_eq!(flags & 0x1, 0);
+    }
+
+    #[test]
+    fn build_symlink_reparse_data_layout_substitute_then_print_name() {
+        let buf = build_symlink_reparse_data("sub", Some("show"), false);
+        let sub_off = u16::from_le_bytes(buf[0..2].try_into().unwrap());
+        let sub_len = u16::from_le_bytes(buf[2..4].try_into().unwrap());
+        let print_off = u16::from_le_bytes(buf[4..6].try_into().unwrap());
+        let print_len = u16::from_le_bytes(buf[6..8].try_into().unwrap());
+        // 12-byte header then PathBuffer.
+        assert_eq!(sub_off, 0);
+        assert_eq!(sub_len, 6); // "sub" UTF-16 = 6 bytes
+        assert_eq!(print_off, 6);
+        assert_eq!(print_len, 8); // "show" UTF-16 = 8 bytes
+                                  // Substitute first in PathBuffer.
+        let sub = [
+            u16::from_le_bytes([buf[12], buf[13]]),
+            u16::from_le_bytes([buf[14], buf[15]]),
+            u16::from_le_bytes([buf[16], buf[17]]),
+        ];
+        assert_eq!(String::from_utf16(&sub).unwrap(), "sub");
+    }
+
+    // --- named-stream resident $DATA ---------------------------------------
+
+    #[test]
+    fn build_named_resident_data_attribute_rejects_empty_name() {
+        let err = build_named_resident_data_attribute(0, "", b"x").unwrap_err();
+        assert!(err.contains("invalid stream name length"), "{err}");
+    }
+
+    #[test]
+    fn build_named_resident_data_attribute_round_trip_via_attr_iter() {
+        // Build inside an MFT record and ask attr_io to parse it back.
+        use crate::attr_io::{find_attribute, iter_attributes, AttrType};
+        let attr = build_named_resident_data_attribute(4, "stream", b"hi").unwrap();
+        let mut rec = vec![0u8; 1024];
+        let attrs_offset: u16 = 0x38;
+        rec[0x14..0x16].copy_from_slice(&attrs_offset.to_le_bytes());
+        let start = attrs_offset as usize;
+        rec[start..start + attr.len()].copy_from_slice(&attr);
+        rec[start + attr.len()..start + attr.len() + 4]
+            .copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+        rec[0x18..0x1C].copy_from_slice(&((start + attr.len() + 4) as u32).to_le_bytes());
+
+        let attrs: Vec<_> = iter_attributes(&rec).collect();
+        assert_eq!(attrs.len(), 1);
+        let found = find_attribute(&rec, AttrType::Data, Some("stream")).expect("found");
+        assert_eq!(found.name_length, 6);
+        assert!(found.is_resident);
+    }
+
+    // --- $FILE_NAME builder ------------------------------------------------
+
+    /// Regression: indexed_flag (offset +0x16 inside attribute header,
+    /// = byte 22 from attr start) must be 1 — see
+    /// `build_file_name_attribute`'s comment. Without it, chkdsk reports
+    /// "Attribute record (30, "") from file record segment N is corrupt".
+    #[test]
+    fn build_file_name_attribute_sets_indexed_flag_to_one() {
+        let buf =
+            build_file_name_attribute(5, 0x12_3456_7890, "name.txt", 1_000_000, false).unwrap();
+        assert_eq!(
+            buf[22], 1,
+            "indexed_flag must be 1; see chkdsk regression comment"
+        );
+    }
+
+    #[test]
+    fn build_file_name_attribute_writes_parent_reference_and_namespace() {
+        let parent = 0x55_AABB_CCDDu64;
+        let buf = build_file_name_attribute(5, parent, "longname.text", 0, false).unwrap();
+        // Value starts at header_size=24. parent_ref is first 8 bytes.
+        let got_parent = u64::from_le_bytes(buf[24..32].try_into().unwrap());
+        assert_eq!(got_parent, parent);
+        // Namespace at offset 24+65 = 89.
+        assert_eq!(buf[89], FILE_NAME_NAMESPACE_POSIX);
+    }
+
+    #[test]
+    fn build_file_name_attribute_rejects_empty_and_oversize_names() {
+        assert!(build_file_name_attribute(0, 0, "", 0, false).is_err());
+        let huge: String = "a".repeat(256);
+        assert!(build_file_name_attribute(0, 0, &huge, 0, false).is_err());
+    }
+
+    // --- regular file record builder smoke test ----------------------------
+
+    #[test]
+    fn build_regular_file_record_produces_well_formed_record() {
+        let rec = build_regular_file_record(
+            1024,
+            /* record_number */ 100,
+            /* sequence */ 1,
+            encode_file_reference(5, 1),
+            "test.txt",
+            nt_time_now(),
+            512,
+        )
+        .unwrap();
+        assert_eq!(rec.len(), 1024);
+        assert_eq!(&rec[0..4], b"FILE");
+        // flags: IN_USE = 0x0001.
+        let flags = u16::from_le_bytes([rec[0x16], rec[0x17]]);
+        assert!(flags & 1 != 0);
+        // bytes_used > attrs_offset and < record_size.
+        let bu = u32::from_le_bytes(rec[0x18..0x1C].try_into().unwrap()) as usize;
+        let ao = u16::from_le_bytes(rec[0x14..0x16].try_into().unwrap()) as usize;
+        assert!(bu > ao);
+        assert!(bu < rec.len());
+    }
+}
