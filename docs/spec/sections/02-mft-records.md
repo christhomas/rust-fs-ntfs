@@ -1035,7 +1035,6 @@ not documented in our permitted sources.
   [src/attr_resize.rs](../../../src/attr_resize.rs).
 - `rust-fs-ntfs` operational notes:
   [docs/STATUS.md](../../STATUS.md),
-  [docs/chkdsk-debugging.md](../../chkdsk-debugging.md),
   [docs/chkdsk-improvement-findings.md](../../chkdsk-improvement-findings.md),
   [docs/mkfs-bug-catalog.md](../../mkfs-bug-catalog.md).
 

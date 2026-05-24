@@ -163,7 +163,7 @@ expect_exit = 0
 #
 # The VHD-wrap path inside `win-chkdsk.ps1` (and every other op
 # routed through `_lib.ps1`) uses `vhd_tool create-fixed` from
-# antimatter-studios/rust-img-vhd — see docs/phase-1e-design.md.
+# antimatter-studios/rust-img-vhd (installed by setup-windows-vm.ps1).
 
 [ops.win-chkdsk]
 # Wrap the .img into a VHD, mount it on Windows, run chkdsk with
