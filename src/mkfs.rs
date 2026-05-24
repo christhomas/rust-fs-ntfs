@@ -41,7 +41,6 @@ const USA_OFFSET: usize = 0x30;
 
 const ATTR_STANDARD_INFORMATION: u32 = 0x10;
 const ATTR_FILE_NAME: u32 = 0x30;
-const ATTR_SECURITY_DESCRIPTOR: u32 = 0x50;
 const ATTR_VOLUME_NAME: u32 = 0x60;
 const ATTR_VOLUME_INFORMATION: u32 = 0x70;
 const ATTR_DATA: u32 = 0x80;
@@ -57,46 +56,21 @@ const COLLATION_NTOFS_SECURITY_HASH: u32 = 0x12;
 // `COLLATION_NTOFS_ULONG = 0x10` per the same source. Used by
 // $SII and by `$Quota:$Q` and `$Quota:$O` (not relevant at S1).
 const COLLATION_NTOFS_ULONG: u32 = 0x10;
+// $ObjId:$O and $Reparse:$R view-index — keyed by OBJECT_ID (16-byte
+// GUID-like structure) and reparse-tag+MFT-ref respectively.
+// `COLLATION_NTOFS_ULONGS = 0x13` per MS-FSCC §2.4.
+const COLLATION_NTOFS_ULONGS: u32 = 0x13;
 
 // ---------------------------------------------------------------------------
-// $SECURITY_DESCRIPTOR (0x50) blobs for system MFT records.
+// `SD_SYSFILE_RW`: canonical security descriptor stored in $Secure:$SDS
+// (security_id = 0x100).  All system records reference this entry via
+// their $STD_INFO.SecurityId field; no per-file $SECURITY_DESCRIPTOR
+// attribute is emitted in NTFS v3.x mode (S3.1 upgrade, 2026-05-24).
 //
-// Bytes captured verbatim from a Microsoft `format.com /FS:NTFS` reference
-// volume (CI iter13 byte-diff:
-// `$TMPDIR/rust-fs-ntfs-diag/agent-8a29-2026-05-02/iter-20260502-024137/
-// reference-mft-16recs.bin`). Three distinct blobs cover all 12 system
-// records:
-//
-//   * `SD_SYSFILE_RO`  — read-only system files. DACL access mask
-//     `0x00120089` = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE.
-//     Used for: $MFT(0), $MFTMirr(1), $LogFile(2), $AttrDef(4),
-//     $Bitmap(6), $Boot(7), $BadClus(8), $UpCase(10).
-//
-//   * `SD_SYSFILE_RW` — writable system files. DACL access mask
-//     `0x0012009F` = FILE_GENERIC_READ | FILE_GENERIC_WRITE
-//     | FILE_GENERIC_EXECUTE. Used for: $Volume(3), $Secure(9),
-//     $Extend(11).
-//
-//   * `SD_ROOT_DIR`   — root directory. Wider DACL with multiple ACEs
-//     including INHERIT_ONLY entries that propagate to children.
-//     Used only for record 5 (root ".").
-//
-// The structure is the standard SECURITY_DESCRIPTOR_RELATIVE per
-// MS-DTYP §2.4.6 (Revision=1, Sbz1=0, Control=0x8004
-// = SE_DACL_PRESENT | SE_SELF_RELATIVE, then offsets to Owner SID
-// (BUILTIN\Administrators, S-1-5-32-544), Group SID (also
-// Administrators), no SACL, and a self-relative DACL).
-
-const SD_SYSFILE_RO: &[u8] = &[
-    0x01, 0x00, 0x04, 0x80, 0x48, 0x00, 0x00, 0x00, 0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x14, 0x00, 0x00, 0x00, 0x02, 0x00, 0x34, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00,
-    0x89, 0x00, 0x12, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x12, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x18, 0x00, 0x89, 0x00, 0x12, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
-    0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
-    0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
-    0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00,
-];
-
+// DACL access mask 0x0012009F = FILE_GENERIC_READ | FILE_GENERIC_WRITE
+// | FILE_GENERIC_EXECUTE.  SECURITY_DESCRIPTOR_RELATIVE per MS-DTYP
+// §2.4.6: Revision=1, Control=0x8004 (SE_DACL_PRESENT|SE_SELF_RELATIVE),
+// Owner/Group = BUILTIN\Administrators (S-1-5-32-544), no SACL.
 const SD_SYSFILE_RW: &[u8] = &[
     0x01, 0x00, 0x04, 0x80, 0x48, 0x00, 0x00, 0x00, 0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x14, 0x00, 0x00, 0x00, 0x02, 0x00, 0x34, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00,
@@ -107,73 +81,40 @@ const SD_SYSFILE_RW: &[u8] = &[
     0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00,
 ];
 
-const SD_ROOT_DIR: &[u8] = &[
-    0x01, 0x00, 0x04, 0x80, 0xcc, 0x00, 0x00, 0x00, 0xdc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x14, 0x00, 0x00, 0x00, 0x02, 0x00, 0xb8, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00,
-    0xff, 0x01, 0x1f, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00,
-    0x20, 0x02, 0x00, 0x00, 0x00, 0x0b, 0x18, 0x00, 0x00, 0x00, 0x00, 0x10, 0x01, 0x02, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00,
-    0xff, 0x01, 0x1f, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x12, 0x00, 0x00, 0x00,
-    0x00, 0x0b, 0x14, 0x00, 0x00, 0x00, 0x00, 0x10, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
-    0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00, 0xbf, 0x01, 0x13, 0x00, 0x01, 0x01, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x14, 0x00, 0x00, 0x00, 0x01, 0xe0,
-    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00,
-    0xa9, 0x00, 0x12, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00,
-    0x21, 0x02, 0x00, 0x00, 0x00, 0x0b, 0x18, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x01, 0x02, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x21, 0x02, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05, 0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x01, 0x05, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05, 0x15, 0x00, 0x00, 0x00, 0xf0, 0x6f, 0xdf, 0x48, 0xa0, 0xe4, 0x9f, 0x24,
-    0xea, 0x7d, 0xcc, 0x65, 0x01, 0x02, 0x00,
-    0x00, // last 4 bytes are
-          // SubAuthority for the user/group owner SID; matrix byte-diff
-          // showed reference uses 0x00010200 (RID 513 = "Domain Users")
-          // while our hardcoded 0x00010203 was a transcription error.
-          // Fix doesn't affect chkdsk readonly (which already passes) but
-          // brings the byte-diff to zero on this 1 byte.
-];
-
 // ---------------------------------------------------------------------------
 // $LogFile canonical content — first 12 KiB.
 //
-// Bytes captured from a Microsoft `format.com /FS:NTFS` reference run on a
-// 256 MiB / 4 KiB-cluster volume (diag
+// Base bytes captured from a Microsoft `format.com /FS:NTFS` reference run on
+// a 256 MiB / 4 KiB-cluster volume (diag
 // `test-diagnostics/run-20260502-154836/mac-format-label-empty/
-// reference-logfile.bin`, SHA-256 0a1d770715ee987934fcdfd6691507c96912b708d79b1bb8e1ce9408ce2ae368).
+// reference-logfile.bin`).
 //
-// Layout of the captured 12 KiB:
-//   * page 0 (offset 0x0000)  — log-restart page (RSTR magic, USA-protected,
-//                               restart area at offset 0x30, current_lsn
-//                               0x104408, single client "NTFS" at offset 0x90)
-//   * page 1 (offset 0x1000)  — paired log-restart page (RSTR magic, slightly
-//                               newer current_lsn 0x10634B; ntfs.sys picks
-//                               the higher one as authoritative)
-//   * page 2 (offset 0x2000)  — single RCRD record page (RCRD magic, USA at
-//                               0x28, lsn matches restart's current_lsn)
+// The restart page pair was then patched so that page 0 (cur_lsn=0x104408) is
+// the authoritative copy and page 1 is a stale backup (cur_lsn=0x100000).
+// Without this patch, NTFS would select page 1 as authoritative (it had a
+// higher cur_lsn=0x10634B) and look for log records in the range
+// [0x10443C, 0x10634B] — a range not covered by the embedded pages — which
+// triggered a full recovery pass on every first mount, causing chkdsk /scan
+// to exit 13 during the initialization window.  With the patch, NTFS selects
+// page 0 and its active range [0x100000, 0x104408] is fully covered by page 2
+// (RCRD, lsn=0x104408), so no recovery is needed and the first online scan
+// exits 0.
 //
-// `format.com`'s output past offset 0x3000 is all-0xFF; the canonical bytes
-// stop at 12 KiB so the rest of the log can be filled by the existing
-// 0xFF sweep in `format_filesystem`.
+// Layout of the 12 KiB:
+//   * page 0 (offset 0x0000)  — authoritative RSTR (cur_lsn=0x104408,
+//                               oldest_lsn=0x100000, flags=0x0000 clean)
+//   * page 1 (offset 0x1000)  — stale backup RSTR (cur_lsn=0x100000;
+//                               ntfs.sys ignores it as older)
+//   * page 2 (offset 0x2000)  — single RCRD record page (lsn=0x104408;
+//                               covers page 0's active range)
+//
+// Bytes 0x3000..end are all-0xFF; written by the 0xFF sweep below.
 //
 // References: MS-FSCC (system files / log structure), Windows Internals
 // 7th ed. ch. "NTFS Logging" (RSTR / RCRD page taxonomy). No GPL'd
 // NTFS reimplementations consulted.
-const LOGFILE_CANONICAL_12K: &[u8] = include_bytes!("logfile-canonical-12k.bin");
-
-/// Pick the canonical SD blob for a given system MFT record.
-/// $Volume (3), $Secure (9), $Extend (11) — writable system files (the
-/// SYSFILE_RW descriptor); all others get the read-only variant. Sub-PR
-/// S3 restored rec 11 as a directory shell with an empty `$I30`; Iter L
-/// (2026-05-22) chkdsk-trace truth showed shipping any $Extend children
-/// at format time drives the kernel TxF resource manager to fail to
-/// start (Event 136), surfacing Event 55 "corruption discovered"
-/// + chkdsk /scan exit 13. So `$Extend` stays empty here.
-fn sd_for_system_record(rec_num: u32) -> &'static [u8] {
-    match rec_num {
-        rec::ROOT => SD_ROOT_DIR,
-        rec::VOLUME | rec::SECURE | rec::EXTEND => SD_SYSFILE_RW,
-        _ => SD_SYSFILE_RO,
-    }
-}
+//
+const LOGFILE_CANONICAL: &[u8] = include_bytes!("logfile-canonical-12k.bin");
 
 /// `$FILE_NAME` namespace values (MS-FSCC §2.4.4).
 ///
@@ -215,14 +156,20 @@ pub mod rec {
     // records — see build_reserved_placeholder + the loop in
     // format_filesystem.
     //
-    // Slots 16+ are LEFT FREE (zeroed MFT slots, MFT bitmap bit 0).
-    // Iter L (2026-05-22) verified against a freshly-formatted Windows
-    // volume that $Extend's children ($Quota, $ObjId, $Reparse,
-    // $RmMetadata, …) are created lazily by the NT kernel on first
-    // need; provisioning them at format time drives the kernel TxF
-    // resource manager to fail to start (Event 136) and chkdsk /scan
-    // exits 13 ("must be fixed offline"). Empty $Extend = clean
-    // chkdsk readonly + /scan.
+    // Slots 16..18 are $Extend's children. scan-f-scan experiments
+    // (2026-05-24) proved that chkdsk /scan exits 13 unless $ObjId,
+    // $Reparse, and $RmMetadata are present under $Extend at format
+    // time; chkdsk /f creates them if absent, and scan2 then exits 0.
+    // The earlier Iter L warning about TxF Event 136 was based on a
+    // broken S4-v1 that omitted VIEW_INDEX (0x0008) from $Reparse.
+    // With correct flags all three ship safely.
+    pub const OBJID: u32 = 16; // $Extend\$ObjId   VIEW_INDEX
+    pub const REPARSE: u32 = 17; // $Extend\$Reparse VIEW_INDEX
+                                 // $RmMetadata intentionally omitted: chkdsk /scan accepts $ObjId+$Reparse
+                                 // without $RmMetadata (scan-f-scan 2026-05-24). Including an empty
+                                 // $RmMetadata causes "corrupt basic file structure" because chkdsk
+                                 // expects its $I30 to contain $Repair/$TxfLog/$Txf children; shipping
+                                 // those chains is out of scope.
 
     /// Canonical NTFS name for each system MFT record (root → "."
     /// per filesystem convention; everything else is `$Name`). This
@@ -348,6 +295,8 @@ pub mod rec {
             }
             UPCASE => "$UpCase",
             EXTEND => "$Extend",
+            OBJID => "$ObjId",
+            REPARSE => "$Reparse",
             _ => return None,
         })
     }
@@ -384,6 +333,12 @@ pub mod stream {
     /// INDEX_ROOT attribute name and the INDEX_ALLOCATION /
     /// BITMAP / etc. stream name when the directory grows.
     pub const I30: &str = "$I30";
+
+    /// `$ObjId:$O` / `$Quota:$O` — object-id and quota view indexes.
+    pub const O: &str = "$O";
+
+    /// `$Reparse:$R` — reparse-point view index.
+    pub const R: &str = "$R";
 
     /// UTF-16-LE encoding of a stream name. NTFS attribute headers
     /// store names as raw UTF-16 code units (no NUL); this is the
@@ -446,7 +401,7 @@ pub fn format_filesystem(
     let logfile_lcn = mft_lcn + mft_clusters;
     // $LogFile sized at 0x3B0000 (3866624 bytes / ~3.78 MiB). The
     // value MUST match the `file_size` field encoded inside the
-    // baked LOGFILE_CANONICAL_12K restart pages — ntfs.sys reads
+    // baked LOGFILE_CANONICAL restart pages — ntfs.sys reads
     // restart-area.file_size at mount and chkdsk compares it to
     // the on-disk allocated length. With our previous 1 MiB sizing,
     // chkdsk reported "CHKDSK is adjusting the size of the log file"
@@ -560,9 +515,9 @@ pub fn format_filesystem(
     // on every subsequent write.
     let log_size_bytes = logfile_clusters * cluster_size as u64;
     let logfile_off = logfile_lcn * cluster_size as u64;
-    dev.write_all_at(logfile_off, LOGFILE_CANONICAL_12K)?;
-    let pad_off = logfile_off + LOGFILE_CANONICAL_12K.len() as u64;
-    let pad_len = log_size_bytes - LOGFILE_CANONICAL_12K.len() as u64;
+    dev.write_all_at(logfile_off, LOGFILE_CANONICAL)?;
+    let pad_off = logfile_off + LOGFILE_CANONICAL.len() as u64;
+    let pad_len = log_size_bytes - LOGFILE_CANONICAL.len() as u64;
     write_filled(dev, pad_off, pad_len, 0xFF)?;
 
     // 3. $UpCase data -----------------------------------------------------
@@ -691,18 +646,17 @@ pub fn format_filesystem(
             &mp,
         )?;
         let bitmap_value_size = mft_records_capacity.div_ceil(8) as usize;
-        // Slots 0..10 are the canonical system files; slot 11 is $Extend
-        // (Sub-PR S3, empty $I30 after Iter L); slots 12..15 are
-        // reserved-slot placeholders (see build_reserved_placeholder).
-        // Slots 16+ are LEFT FREE — Iter L 2026-05-22 byte truth (clean
-        // Windows-format reference + chkdsk /scan exit 0) shows
-        // shipping any $Extend children at format time drives the
-        // kernel TxF resource manager to fail. Marking a free slot
-        // as in-use while it carries zero bytes also raises chkdsk's
-        // "master file table's (MFT) BITMAP attribute is incorrect".
+        // Slots 0..10: canonical system files; 11: $Extend; 12..15:
+        // reserved placeholders; 16..18: $Extend children ($ObjId,
+        // $Reparse, $RmMetadata). Slots 19+ left free.
         let mut allocated: Vec<u32> = (0u32..=10u32).collect();
         for slot in 11..mft_records_capacity.min(16) as u32 {
             allocated.push(slot);
+        }
+        for slot in [rec::OBJID, rec::REPARSE] {
+            if (slot as u64) < mft_records_capacity {
+                allocated.push(slot);
+            }
         }
         let mft_bitmap_value = make_mft_internal_bitmap(bitmap_value_size, &allocated);
         // Reference's $MFT $BITMAP is non-resident: 1 cluster allocated,
@@ -833,50 +787,26 @@ pub fn format_filesystem(
         }
         let volume_name_attr = build_resident_unnamed(ATTR_VOLUME_NAME, 3, &volume_name_value);
 
-        // $VOLUME_INFORMATION value: reserved(8) + major(1) + minor(1) + flags(2)
+        // $VOLUME_INFORMATION: reserved(8) + major(1) + minor(1) + flags(2)
         //
-        // **What we actually write: `version 1.2 + flags 0x0080`**
-        // (MODIFIED_BY_CHKDSK per Tuxera public docs). This diverges
-        // from a clean Windows-fresh format (which stamps 3.1 / 0x0080)
-        // on the **version** only, for the reason below. The **flags**
-        // value matches Windows-fresh.
+        // version 3.1, flags 0x0080 (MODIFIED_BY_CHKDSK).
         //
-        // ## Why 1.2 and not 3.1
+        // 3.1 matches Windows fresh-format output (S3.1 upgrade
+        // 2026-05-24: all system records now carry the v3.x 72-byte
+        // $STD_INFO with SecurityId, so 3.1 is self-consistent).
+        // Earlier iterations used 1.2 to avoid a "v3.1 + v1.x STD_INFO"
+        // mismatch that ntfs.sys flagged as Critical Event 55; that
+        // mismatch is now resolved.
         //
-        // Our system records ship v1.x `$STD_INFO` (48 bytes, no
-        // SecurityId field) throughout. Declaring v3.1 in
-        // $VOLUME_INFORMATION while still emitting v1.x STD_INFO
-        // creates an internal inconsistency that ntfs.sys flags as a
-        // **Critical** Event 55 ("Force Full Chkdsk" on rec 3
-        // $Volume) on every /scan snapshot mount (Iter M-1 trace,
-        // 2026-05-22). 1.2 + v1.x STD_INFO is self-consistent; 3.1
-        // would require us to also rewrite every system record's
-        // STD_INFO to the 72-byte v3.x form (with security_id =
-        // 0x100 / 0x101) — a strictly larger change deferred to a
-        // future iteration.
-        //
-        // ## Why 0x0080 (MODIFIED_BY_CHKDSK) and not 0x0000
-        //
-        // Windows runs chkdsk implicitly at format-finalize time,
-        // marking the volume as "blessed". Without this flag,
-        // ntfs.sys's mount path queues a proactive scan (Normal-
-        // severity Event 55 / "Force Proactive Scan" /
-        // Property[3]=34) on every mount, surfacing as chkdsk /scan
-        // exit 13 even with Stage 1/2/3 all clean (Iter M-3 trace).
-        //
-        // ## Why NOT 0x0084 (UPGRADE_ON_MOUNT | MODIFIED_BY_CHKDSK)
-        //
-        // An earlier version of this code emitted 0x0084, cribbed
-        // from `test-disks/_fpr_project.img`, a post-test-rollback
-        // fixture with Stage 1 corruption — NOT a clean fresh-format
-        // reference (Iter L revelation). UPGRADE_ON_MOUNT on a /scan
-        // snapshot mount drives ntfs.sys to a Critical Event 55
-        // because the read-only snapshot can't complete the upgrade.
-        // Dropping that bit eliminated the Critical Event 55 in the
-        // Iter M-2 trace.
+        // 0x0080 (MODIFIED_BY_CHKDSK) prevents ntfs.sys from queuing
+        // a proactive scan on every mount (Iter M-3 trace confirmed
+        // 0x0000 causes chkdsk /scan exit 13 even with clean metadata).
+        // 0x0004 (UPGRADE_ON_MOUNT) is intentionally absent: on a
+        // /scan snapshot mount the upgrade can't complete (read-only
+        // snapshot), causing a Critical Event 55 (Iter M-2 trace).
         let mut vi = vec![0u8; 12];
-        vi[8] = 1;
-        vi[9] = 2;
+        vi[8] = 3;
+        vi[9] = 1;
         vi[10..12].copy_from_slice(&0x0080u16.to_le_bytes());
         let volume_info_attr = build_resident_unnamed(ATTR_VOLUME_INFORMATION, 4, &vi);
 
@@ -1311,14 +1241,30 @@ pub fn format_filesystem(
     // empty — lets the kernel build the hierarchy lazily on first
     // need and keeps both chkdsk readonly *and* /scan clean.
     //
-    // Layout: $STD_INFO + $FILE_NAME ("$Extend" → root) + $SD (RW) +
-    // $INDEX_ROOT '$I30' carrying only the LAST sentinel. is_dir=true
-    // sets the MFT-header IS_DIRECTORY flag (0x0002) and the
-    // $FILE_NAME.file_attributes FILE_ATTRIBUTE_DIRECTORY bit
-    // (0x10000000).
+    // $Extend: $STD_INFO + $FILE_NAME + $I30 with entries for the
+    // three children built immediately below.
     {
         let index_block_size: u32 = 4096;
+        let extend_ref = encode_file_reference(rec::EXTEND as u64, rec::EXTEND as u16);
+        let mut extend_children: Vec<(u32, &str)> = vec![
+            (
+                rec::OBJID,
+                rec::name(rec::OBJID, cluster_size).expect("known"),
+            ),
+            (
+                rec::REPARSE,
+                rec::name(rec::REPARSE, cluster_size).expect("known"),
+            ),
+        ];
+        extend_children.sort_by(|a, b| collate_file_name(a.1, b.1));
+
         let mut entries_blob: Vec<u8> = Vec::new();
+        for &(child_rec, child_name) in &extend_children {
+            let child_seq: u16 = child_rec as u16;
+            let child_ref = encode_file_reference(child_rec as u64, child_seq);
+            let stream = build_skeleton_fn_stream(extend_ref, child_name)?;
+            entries_blob.extend_from_slice(&build_index_entry(child_ref, &stream, false));
+        }
         entries_blob.extend_from_slice(&build_index_entry(0, &[], true));
         let index_root =
             build_populated_index_root_attr(3, index_block_size, cluster_size, &entries_blob);
@@ -1341,11 +1287,61 @@ pub fn format_filesystem(
         ));
     }
 
-    // Iter L: records 16..19 are intentionally LEFT as zeroed MFT
-    // slots. Windows fresh format puts no children directly at these
-    // slots — see the comment in `mod rec` above for the full Iter L
-    // rationale (TxF Event 136 + Event 55 if $RmMetadata machinery is
-    // shipped partial). The MFT bitmap below excludes them.
+    // $Extend children — $ObjId (VIEW_INDEX), $Reparse (VIEW_INDEX),
+    // $RmMetadata (DIRECTORY). Slot ordering matches chkdsk /f output
+    // (2026-05-24 scan-f-scan experiments). These three are required for
+    // chkdsk /scan to exit 0; without them /scan exits 13 and queues
+    // offline repairs.
+    {
+        let index_block_size: u32 = 4096;
+        let last_entry = build_view_index_last_entry();
+
+        // $ObjId: empty $O view index (COLLATION_NTOFS_ULONGS = 0x13)
+        let o_name = stream::utf16(stream::O);
+        let o_index_root = build_populated_named_index_root_attr(
+            3,
+            &o_name,
+            0,
+            COLLATION_NTOFS_ULONGS,
+            index_block_size,
+            cluster_size,
+            &last_entry,
+        );
+        let objid_rec = build_system_record_with_parent(
+            &mft_record_layout,
+            rec::OBJID,
+            rec::EXTEND,
+            rec::name(rec::OBJID, cluster_size).expect("known rec_num"),
+            false,
+            0,
+            0,
+            &[o_index_root],
+        )?;
+        place_record(&mut mft_buf, rs, rec::OBJID, objid_rec)?;
+
+        // $Reparse: empty $R view index (COLLATION_NTOFS_ULONGS = 0x13)
+        let r_name = stream::utf16(stream::R);
+        let r_index_root = build_populated_named_index_root_attr(
+            3,
+            &r_name,
+            0,
+            COLLATION_NTOFS_ULONGS,
+            index_block_size,
+            cluster_size,
+            &last_entry,
+        );
+        let reparse_rec = build_system_record_with_parent(
+            &mft_record_layout,
+            rec::REPARSE,
+            rec::EXTEND,
+            rec::name(rec::REPARSE, cluster_size).expect("known rec_num"),
+            false,
+            0,
+            0,
+            &[r_index_root],
+        )?;
+        place_record(&mut mft_buf, rs, rec::REPARSE, reparse_rec)?;
+    }
 
     // record 5: root directory "." — built AFTER rec 0..4 and rec 6..11
     // so we have every system file's name + $DATA size to emit as
@@ -1643,9 +1639,12 @@ fn build_system_record_with_parent(
     // byte-diff — its rec 9 is `$Quota`, not `$Secure`, so the
     // comparable flag field is uninformative. Fix is keyed on the
     // public spec rather than a flag-byte diff.
-    let is_view_index = record_number == rec::SECURE;
+    let is_view_index = matches!(record_number, rec::SECURE | rec::REPARSE | rec::OBJID);
+    // VIEW_INDEX records need both 0x0004 (MFT_RECORD_HAS_VIEW_INDEX, indicating
+    // a named non-$I30 index root is present) and 0x0008 (MFT_RECORD_IS_VIEW_INDEX).
+    // Post-/f byte-diff (2026-05-24): slots 16/17 show 0x000D after /f fixes them.
     let flags: u16 =
-        0x0001 | if is_dir { 0x0002 } else { 0x0000 } | if is_view_index { 0x0008 } else { 0x0000 };
+        0x0001 | if is_dir { 0x0002 } else { 0x0000 } | if is_view_index { 0x000C } else { 0x0000 };
     rec[REC_OFF_FLAGS..REC_OFF_FLAGS + 2].copy_from_slice(&flags.to_le_bytes());
     rec[REC_OFF_BYTES_ALLOCATED..REC_OFF_BYTES_ALLOCATED + 4]
         .copy_from_slice(&(rs as u32).to_le_bytes());
@@ -1675,7 +1674,16 @@ fn build_system_record_with_parent(
 
     // Every system record references the single canonical SD entry
     // shipped in `$Secure:$SDS` (security_id = 0x100).
-    cursor = write_standard_information(&mut rec, cursor, 0, layout.nt_time, is_dir, true, 0x100);
+    cursor = write_standard_information(
+        &mut rec,
+        cursor,
+        0,
+        layout.nt_time,
+        is_dir,
+        true,
+        is_view_index,
+        0x100,
+    );
     cursor = write_file_name(
         &mut rec,
         cursor,
@@ -1685,27 +1693,11 @@ fn build_system_record_with_parent(
         layout.nt_time,
         is_dir,
         true,
+        is_view_index,
         fn_data_alloc,
         fn_data_real,
         NAMESPACE_WIN32_DOS,
     )?;
-
-    // $SECURITY_DESCRIPTOR (0x50) — required on every system MFT record.
-    // Without it chkdsk hits an internal frs.cxx assert during Stage 2's
-    // unindexed-file scan ("An unspecified error occurred (frs.cxx 60f)";
-    // hex 6672732e637878 = "frs.cxx"). Reference (format.com) ships a
-    // 104-byte SD on each non-root system file and a 248-byte SD on
-    // root; bytes captured verbatim — see SD_* consts above.
-    let sd_blob = sd_for_system_record(record_number);
-    let sd_attr = build_resident_unnamed(ATTR_SECURITY_DESCRIPTOR, 2, sd_blob);
-    if cursor + sd_attr.len() + 8 > rs {
-        return Err(format!(
-            "system record {record_number} too small: need {} more bytes for $SD",
-            sd_attr.len()
-        ));
-    }
-    rec[cursor..cursor + sd_attr.len()].copy_from_slice(&sd_attr);
-    cursor += sd_attr.len();
 
     for attr in extra_attrs {
         if cursor + attr.len() + 8 > rs {
@@ -1734,12 +1726,9 @@ fn build_system_record_with_parent(
     Ok(rec)
 }
 
-/// Build a 304-byte FILE-magic placeholder for one of the reserved
-/// MFT slots (11..15). Microsoft `format.com` writes one of these per
-/// reserved slot, in IN_USE state, with `$STD_INFO + $SD + empty $DATA`
-/// — no `$FILE_NAME`, not in any directory index. ntfs.sys validates
-/// this layout at mount; raw-zero slots cause Event ID 55 even though
-/// chkdsk Stage 1+2 walks them as "free".
+/// Build a FILE-magic placeholder for one of the reserved MFT slots
+/// (11..15). `$STD_INFO + empty $DATA`, no `$FILE_NAME`. ntfs.sys
+/// validates this layout at mount; raw-zero slots cause Event ID 55.
 fn build_reserved_placeholder(layout: &MftLayout, record_number: u32) -> Result<Vec<u8>, String> {
     let rs = layout.record_size;
     let bps = layout.bytes_per_sector;
@@ -1772,26 +1761,23 @@ fn build_reserved_placeholder(layout: &MftLayout, record_number: u32) -> Result<
     rec[REC_OFF_BYTES_ALLOCATED..REC_OFF_BYTES_ALLOCATED + 4]
         .copy_from_slice(&(rs as u32).to_le_bytes());
     rec[REC_OFF_BASE_FILE_REF..REC_OFF_BASE_FILE_REF + 8].copy_from_slice(&0u64.to_le_bytes());
-    // Reference uses next_attr_id=3 on these placeholders (matches the
-    // attr_ids 0/1/2 below).
-    rec[REC_OFF_NEXT_ATTR_ID..REC_OFF_NEXT_ATTR_ID + 2].copy_from_slice(&3u16.to_le_bytes());
+    rec[REC_OFF_NEXT_ATTR_ID..REC_OFF_NEXT_ATTR_ID + 2].copy_from_slice(&2u16.to_le_bytes());
     rec[REC_OFF_MFT_REC_NUM..REC_OFF_MFT_REC_NUM + 4].copy_from_slice(&record_number.to_le_bytes());
     rec[USA_OFFSET..USA_OFFSET + 2].copy_from_slice(&1u16.to_le_bytes());
 
     let mut cursor = attrs_offset;
-    // Reserved-slot placeholder: also references the canonical SD
-    // entry (security_id = 0x100) shipped in `$Secure:$SDS`.
-    cursor = write_standard_information(&mut rec, cursor, 0, layout.nt_time, false, true, 0x100);
+    cursor = write_standard_information(
+        &mut rec,
+        cursor,
+        0,
+        layout.nt_time,
+        false,
+        true,
+        false,
+        0x100,
+    );
 
-    // $SECURITY_DESCRIPTOR — SD_SYSFILE_RW per byte-diff with reference's
-    // rec 11..15 (run-20260502-170839/reference-mft-16recs.bin).
-    let sd_attr = build_resident_unnamed(ATTR_SECURITY_DESCRIPTOR, 1, SD_SYSFILE_RW);
-    rec[cursor..cursor + sd_attr.len()].copy_from_slice(&sd_attr);
-    cursor += sd_attr.len();
-
-    // Empty resident $DATA — header (16) + value_length(0) + value_offset(0x18)
-    // + indexed_flag(0) + padding(1) = 24 bytes total.
-    let data_attr = build_resident_unnamed(ATTR_DATA, 2, &[]);
+    let data_attr = build_resident_unnamed(ATTR_DATA, 1, &[]);
     rec[cursor..cursor + data_attr.len()].copy_from_slice(&data_attr);
     cursor += data_attr.len();
 
@@ -1828,33 +1814,21 @@ fn write_standard_information(
     nt_time: u64,
     is_dir: bool,
     is_system: bool,
+    is_view_index: bool,
     security_id: u32,
 ) -> usize {
-    // $STANDARD_INFORMATION has two on-disk forms:
-    //   * NTFS 1.x — 48-byte value: 4 timestamps (32) + DOSAttributes (4)
-    //     + MaxVersions (4) + VersionNumber (4) + ClassId (4).
-    //   * NTFS 3.x — 72-byte value: same fields plus OwnerId (4)
-    //     + SecurityId (4) + QuotaCharged (8) + USN (8).
-    //
-    // Microsoft `format.com` ships the **48-byte** form on every system
-    // MFT record (CI iter13 byte-diff: reference-mft-16recs.bin rec
-    // 0/1/2/3/4/6/7/8/9/10/11 all carry attr len=72 / content_size=48).
-    // Emitting the 72-byte form on a system record diverges from the
-    // reference by 24 bytes per record. chkdsk's "Read-only chkdsk
-    // found bad on-disk uppercase table - using system table" warning
-    // persists from iter12 through iter16 even after the $UpCase
-    // bytes themselves were brought to byte-identical-with-reference
-    // — strong indication chkdsk's check keys on the *attribute layout*
-    // surrounding $UpCase, not the table content.
-    //
-    // For non-system files we preserve the 72-byte form (modern user
-    // files ship NTFS 3.x extended fields).
-    // System records: 48-byte NTFS 1.x $STANDARD_INFORMATION value
-    // (matches Microsoft `format.com` reference output on v1.2-stamped
-    // fresh volumes). Regular files: 72-byte NTFS 3.x form. The 48-byte
-    // form gets rewritten to 72 by ntfs.sys / chkdsk when the
-    // UPGRADE_ON_MOUNT flag in $VOLUME_INFORMATION fires.
-    let value_size = if is_system { 48usize } else { 72usize };
+    // 72-byte NTFS 3.x $STANDARD_INFORMATION (MS-FSCC §2.4.2):
+    //   4 timestamps (32) + DOSAttributes (4) + MaxVersions (4)
+    //   + VersionNumber (4) + ClassId (4) + OwnerId (4) + SecurityId (4)
+    //   + QuotaCharged (8) + USN (8).
+    // All records use this form (S3.1 upgrade, 2026-05-24). Prior
+    // iterations used the 48-byte v1.x form on system records to match
+    // format.com's raw byte layout; ETW trace analysis revealed chkdsk
+    // /scan validates SecurityId→$SDS linkage and exits 13 when
+    // SecurityId=0 (the implicit value of the absent field in v1.x).
+    // chkdsk /f confirms the correct fix: it upgrades every record to
+    // the 72-byte form with SecurityId=0x100 and removes per-file $SD.
+    let value_size = 72usize;
     let header_size = 24usize;
     let attr_length = align8(header_size + value_size);
     rec[at..at + 4].copy_from_slice(&ATTR_STANDARD_INFORMATION.to_le_bytes());
@@ -1879,7 +1853,7 @@ fn write_standard_information(
     // (agent-8934-2026-05-02 iter19, diag iter-20260502-072713) shows
     // file_attributes = 0x06 on every system record; ours emitted 0x26
     // (HIDDEN|SYSTEM|ARCHIVE) before this fix. Regular files keep ARCHIVE.
-    let fa: u32 = if is_system {
+    let mut fa: u32 = if is_system {
         0x06 // HIDDEN | SYSTEM (matches Microsoft reference)
     } else {
         let mut f: u32 = 0x20; // ARCHIVE
@@ -1888,33 +1862,16 @@ fn write_standard_information(
         }
         f
     };
-    rec[v + 32..v + 36].copy_from_slice(&fa.to_le_bytes());
-    // Sub-PR S2: write `security_id` only on the 72-byte v3.x form
-    // (field at +0x34 per MS-FSCC §2.4.2). The 48-byte v1.x form
-    // does **not** have a SecurityId field at all — its tail is
-    // MaxVersions(+0x24) + VersionNumber(+0x28) + ClassId(+0x2C).
-    // Writing security_id into a v1.x record would clobber
-    // VersionNumber and produce a malformed record.
-    //
-    // System records use the 48-byte form (§2.3 in
-    // chkdsk-improvement-findings.md), so this write is effectively a
-    // no-op for every record S2 currently builds; the SDS entry at
-    // id=0x100 exists in $SDS/$SDH/$SII but no STD_INFO references
-    // it yet. If chkdsk requires inbound STD_INFO references, the
-    // next iteration switches system records to the 72-byte form
-    // — a separate decision because it diverges from `format.com`'s
-    // v1.2 reference layout.
-    if value_size == 72 {
-        rec[v + 0x34..v + 0x38].copy_from_slice(&security_id.to_le_bytes());
-    } else {
-        // 48-byte form: security_id arg is ignored by design (see above).
-        let _ = security_id;
+    // VIEW_INDEX records carry an internal 0x20000000 bit in file_attributes
+    // (both $STD_INFO and $FILE_NAME). Post-/f byte-diff (2026-05-24) shows
+    // this bit present on $ObjId and $Reparse after chkdsk repairs them.
+    if is_view_index {
+        fa |= 0x20000000;
     }
-    // For NTFS-3.x form (non-system), the remaining bytes at v+0x30
-    // (OwnerId), v+0x38..v+0x40 (QuotaCharged) and v+0x40..v+0x48
-    // (USN) stay zero — that's the canonical default for fresh-format
-    // files. For the 48-byte form the bytes at v+0x24 / v+0x2C
-    // (MaxVersions / ClassId) stay zero.
+    rec[v + 32..v + 36].copy_from_slice(&fa.to_le_bytes());
+    // SecurityId at value+0x34 (MS-FSCC §2.4.2). OwnerId (+0x30),
+    // QuotaCharged (+0x38), USN (+0x40) stay zero (fresh-format defaults).
+    rec[v + 0x34..v + 0x38].copy_from_slice(&security_id.to_le_bytes());
     at + attr_length
 }
 
@@ -1927,6 +1884,7 @@ fn write_file_name(
     nt_time: u64,
     is_dir: bool,
     is_system: bool,
+    is_view_index: bool,
     data_alloc: u64,
     data_real: u64,
     namespace: u8,
@@ -1984,6 +1942,9 @@ fn write_file_name(
     let mut fa: u32 = if is_system { 0x06 } else { 0x20 };
     if is_dir {
         fa |= 0x10000000;
+    }
+    if is_view_index {
+        fa |= 0x20000000;
     }
     rec[v + 56..v + 60].copy_from_slice(&fa.to_le_bytes());
     rec[v + 60..v + 64].copy_from_slice(&0u32.to_le_bytes());
