@@ -584,15 +584,12 @@ mod tests {
 
     #[test]
     fn upgrade_flips_fresh_mkfs_volume_to_3_1_and_clears_flag() {
-        // Iter M-final 2026-05-22: a fresh mkfs volume stamps
-        // `version 1.2 + flags 0x0080` (no UPGRADE_ON_MOUNT) — see
-        // `fresh_mkfs_volume_is_1_2_with_modified_by_chkdsk_flag`
-        // for the rationale. The `upgrade_volume_version_io` helper
-        // exists to cover externally-supplied 1.2 + UPGRADE_ON_MOUNT
-        // volumes (e.g. imaged from a Windows volume mid-mount, or
-        // produced by an older mkfs that pre-dated the Iter M fix),
-        // so this test manually downgrades a freshly-mkfs'd volume
-        // before exercising the upgrade path.
+        // S3.1 2026-05-24: fresh mkfs volumes stamp 3.1 + 0x0080 (no
+        // UPGRADE_ON_MOUNT). `upgrade_volume_version_io` exists to
+        // handle externally-supplied 1.2 + UPGRADE_ON_MOUNT volumes
+        // (e.g. imaged mid-mount from an older Windows format), so
+        // this test manually downgrades a fresh volume before
+        // exercising the upgrade path.
         const SIZE: u64 = 64 * 1024 * 1024;
         let mut dev = MemDev {
             buf: vec![0u8; SIZE as usize],
@@ -656,25 +653,19 @@ mod tests {
         assert!(!again, "second upgrade call must be a no-op");
     }
 
-    /// Iter M-final 2026-05-22: a fresh mkfs volume stamps
-    /// `$VOLUME_INFORMATION` = `version 1.2 + flags 0x0080`. Each
-    /// half of that has its own rationale and its own failure mode
-    /// if changed — both deserve a positive assertion here:
+    /// S3.1 2026-05-24: a fresh mkfs volume stamps
+    /// `$VOLUME_INFORMATION` = `version 3.1 + flags 0x0080`. Each
+    /// half has its own failure mode if changed:
     ///
-    /// * **`version = 1.2`** — we keep v1.x to match our v1.x
-    ///   `$STD_INFO` across every system record. Declaring v3.1 in
-    ///   `$VOLUME_INFORMATION` while still emitting v1.x STD_INFO
-    ///   created an internal inconsistency that ntfs.sys flagged as
-    ///   a Critical Event 55 ("Force Full Chkdsk" on rec 3 $Volume)
-    ///   on every /scan snapshot mount (Iter M-1 trace).
+    /// * **`version = 3.1`** — consistent with v3.x 72-byte $STD_INFO
+    ///   on every system record (S3.1 upgrade). Earlier iterations used
+    ///   1.2 to avoid a v3.1+v1.x mismatch that ntfs.sys flagged as a
+    ///   Critical Event 55 (Iter M-1); that mismatch is now resolved.
     ///
-    /// * **`flags = 0x0080`** — this is `MODIFIED_BY_CHKDSK` per the
-    ///   public NTFS docs (and what a clean Windows-fresh format
-    ///   stamps). The bit signals "this volume has been blessed by
-    ///   chkdsk at least once"; without it, ntfs.sys's mount path
-    ///   queues a proactive scan (Normal-severity Event 55 / "Force
-    ///   Proactive Scan") on every mount, surfacing as chkdsk /scan
-    ///   exit 13 even with all stages clean.
+    /// * **`flags = 0x0080`** — `MODIFIED_BY_CHKDSK` per Tuxera docs
+    ///   (what a clean Windows-fresh format stamps). Without it,
+    ///   ntfs.sys queues a proactive scan on every mount, surfacing as
+    ///   chkdsk /scan exit 13 even with all stages clean (Iter M-3).
     ///
     /// NB: the upstream `ntfs` crate's `NtfsVolumeFlags` enum
     /// defines `MODIFIED_BY_CHKDSK = 0x8000`, which disagrees with
@@ -697,7 +688,7 @@ mod tests {
             SIZE,
             4096,
             4096,
-            Some("FRSH12"),
+            Some("FRSH31"),
             Some(0xCAFEBABE),
         )
         .expect("format_filesystem");
@@ -706,8 +697,8 @@ mod tests {
             let mut reader = IoReader::new(&mut dev);
             let ntfs = Ntfs::new(&mut reader).expect("re-parse");
             let vi = ntfs.volume_info(&mut reader).expect("read volume info");
-            assert_eq!(vi.major_version(), 1);
-            assert_eq!(vi.minor_version(), 2);
+            assert_eq!(vi.major_version(), 3);
+            assert_eq!(vi.minor_version(), 1);
             assert!(
                 !vi.flags().contains(NtfsVolumeFlags::UPGRADE_ON_MOUNT),
                 "fresh mkfs must NOT set UPGRADE_ON_MOUNT (Iter M-2)"
@@ -729,7 +720,7 @@ mod tests {
         let upgraded = upgrade_volume_version_io(&mut dev).expect("upgrade");
         assert!(
             !upgraded,
-            "upgrade helper must be a no-op on a 1.2 volume without UPGRADE_ON_MOUNT"
+            "upgrade helper must be a no-op on a fresh 3.1 volume without UPGRADE_ON_MOUNT"
         );
     }
 }
