@@ -3368,6 +3368,61 @@ pub extern "C" fn fs_ntfs_set_times_h(
     }
 }
 
+/// Handle-based sibling of [`fs_ntfs_write_object_id_extended`]. Writes
+/// the 64-byte extended `$OBJECT_ID` carrying the mandatory `object_id`
+/// (16 bytes from `in_buf`) plus the three optional DLT Birth GUIDs
+/// (16 bytes each from `birth_volume`, `birth_object`, `birth_domain`).
+///
+/// All four GUID pointers must be non-null and reference at least 16
+/// readable bytes. Adds the attribute if absent, replaces in place if
+/// present. Returns 0 on success, -1 on error.
+///
+/// Use this when you already hold an open filesystem handle (mounted
+/// via the callback interface) and would rather not pay the cost of
+/// re-opening the underlying image on every call.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_set_object_id_extended_h(
+    fs: *mut FsNtfsHandle,
+    path: *const c_char,
+    in_buf: *const u8,
+    birth_volume: *const u8,
+    birth_object: *const u8,
+    birth_domain: *const u8,
+) -> c_int {
+    let Some(fp) = cstr_to_path(path) else {
+        set_error("fs_ntfs_set_object_id_extended_h: null or non-UTF-8 path");
+        return -1;
+    };
+    if in_buf.is_null()
+        || birth_volume.is_null()
+        || birth_object.is_null()
+        || birth_domain.is_null()
+    {
+        set_error("fs_ntfs_set_object_id_extended_h: null GUID pointer");
+        return -1;
+    }
+    let mut object_id = [0u8; 16];
+    let mut bv = [0u8; 16];
+    let mut bo = [0u8; 16];
+    let mut bd = [0u8; 16];
+    unsafe {
+        std::ptr::copy_nonoverlapping(in_buf, object_id.as_mut_ptr(), 16);
+        std::ptr::copy_nonoverlapping(birth_volume, bv.as_mut_ptr(), 16);
+        std::ptr::copy_nonoverlapping(birth_object, bo.as_mut_ptr(), 16);
+        std::ptr::copy_nonoverlapping(birth_domain, bd.as_mut_ptr(), 16);
+    }
+    let Ok(mut io) = handle_io_from_ptr(fs) else {
+        return -1;
+    };
+    match write::write_object_id_extended_io(&mut io, fp, &object_id, &bv, &bo, &bd) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Combined recovery: reset `$LogFile` and clear the dirty flag.
 ///
 /// Optional out-params report what the call did:
