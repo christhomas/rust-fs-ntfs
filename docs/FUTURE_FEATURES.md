@@ -313,94 +313,43 @@ the baseline.
 
 ## 🟡 Completeness — spec features still missing
 
-### §3.1 `chkdsk /scan` exit 13 ceiling — pin down the differentiator
+### §3.1 `chkdsk /scan` exit 0 — shipped (2026-05-24)
 
-**Status (2026-05-23)**: still open. `chkdsk DRIVE:` (readonly) now
-exits 0 on every passing matrix scenario after the
-indexed_flag / bytes_used / INDEX_HEADER.alloc / namespace fixes
-(see [`docs/mkfs-bug-catalog.md`](mkfs-bug-catalog.md) — Iter N).
-`chkdsk DRIVE: /scan` still exits 13. The matrix's `clean`
-verdict shape accepts `readonly == 0 AND scan ∈ {0, 11, 13}`,
-so the matrix being green does not mean /scan is clean. Tighten
-to `scan == 0` once the differentiator is found.
+`chkdsk DRIVE: /scan` now exits 0 on the first online scan of every
+freshly-formatted volume, matching Windows `format.com` behaviour.
 
-**What's known**:
+**Root cause**: the original `src/logfile-canonical-12k.bin` had LFS
+restart page 1 as the authoritative copy (`current_lsn = 0x10634B`
+> page 0's `0x104408`). Page 1's active log range `[0x10443C,
+0x10634B]` had **zero covering RCRD pages** in the embedded 12 KB
+content. On every first mount ntfs.sys entered full log-recovery mode
+because it could not find the referenced records; chkdsk's VSS
+snapshot captured the volume mid-recovery, returning exit 13.
 
-- All 42/42 matrix scenarios reach `readonly = 0` on the sealed run
-  recorded in `test-diagnostics/matrix-results.json`.
-- `chkdsk /scan` consistently returns 13 ("errors queued for offline
-  repair") on our volumes but exits 0 on Microsoft `format.com`'s
-  output of the same scenario, despite both volumes being byte-similar
-  in every checked structural field (BPB, $VOLUME_INFORMATION
-  major/minor/flags, $STD_INFO size, $FILE_NAME content, $SECURITY_DESCRIPTOR,
-  $LogFile RSTR pages, $AttrDef bytes, root $I30 entries, placeholder
-  records 11-15 with link_count=0).
-- Running `chkdsk /F` on our volume modifies it (drops $SD on most
-  records, transforms $Extend into a real directory, adds $TXF_DATA
-  to root, adds $O/$Q view indexes on slot 9) — *but reference's
-  volume already passes /scan without those modifications*.
-- Hypotheses tested and ruled out: $VOLUME_INFORMATION version
-  (1.2 vs 3.1), flags (0x0084 vs 0x0080 vs 0x0085), 72-byte $STD_INFO,
-  bootstrap bytes, 256-record initial MFT, SD_ROOT_DIR last-byte
-  typo, link_count=0 on placeholders, $Extend as real directory,
-  $BadClus off-by-one, dirty-bit set.
-- The Iter N fixes (FILE_NAME indexed_flag = 1; MFT bytes_used to
-  include the 8-byte END trailer; INDEX_HEADER alloc_size kept in
-  sync with total_size; FILE_NAME.namespace derived from DOS-8.3
-  fit instead of hardcoded WIN32_AND_DOS, both MFT-side and index-
-  entry-side) lifted `readonly` from "errors found" to 0 across the
-  matrix, but did **not** shift /scan. So the differentiator is in
-  whatever /scan validates that readonly skips.
+**Fix**: patched 3 fields in page 1 to make it a stale backup
+(`current_lsn`, `oldest_lsn`, `restart_lsn` all set to `0x100000`).
+Page 0 becomes authoritative (`cur = 0x104408`); its active range
+`[0x100000, 0x104408]` is fully covered by the existing page 2 RCRD
+(`lsn = 0x104408`, containing a generic `LfsClientRestart` record
+with all-zero payload). ntfs.sys skips recovery entirely; scan1 = 0.
 
-**Productive next moves** (not yet attempted):
+The patch is 24 bytes across three 8-byte fields at offsets
+`0x1030`, `0x1070`, `0x1078` in `src/logfile-canonical-12k.bin`. No
+USA fixup needed (none of those offsets land on sector-end slots).
+`src/mkfs.rs` comment block updated with the full rationale. All 42
+test-matrix scenarios pass; no regressions.
 
-1. Capture every disk read `chkdsk /scan` performs against our volume
-   via Windows Procmon on the test VM, correlate with what /scan does
-   against the reference. The reads /scan does that readonly doesn't
-   pinpoint exactly which bytes the validator keys on. Harness already
-   exists at `scripts/procmon-chkdsk-trace.ps1`.
-2. Implement S1–S5 (see `docs/implementation-plan-secure-and-extend.md`):
-   ship populated `$Secure:$SDH`/`$SII` view indexes + `$Extend`
-   directory with `$Reparse` and `$RmMetadata` sub-files. Iter H's
-   Procmon trace identified these three structures as files /scan
-   opens that we don't ship.
-3. Time-bisect: Mount-DiskImage with `-NoDriveLetter`, manually run
-   `Set-Disk -IsOffline $false`, then assign letter — different
-   sequencing might shift ntfs.sys's first-mount-state behaviour.
-
-**Effort estimate**: medium-to-large (S1–S5 is the most-promising
-path; multi-day. The bisection / Procmon work is hours).
-
-**S4 investigation update (2026-05-23)**: two S4 attempts on branch
+**S4 investigation note** (2026-05-23): two S4 attempts on branch
 `feature/s4-extend-reparse` (commits 278c676 and 712566a) shipped
 `$Reparse` at MFT slot 16 — first as resident `$INDEX_ROOT $R`
 only, then as non-resident `$INDEX_ALLOCATION $R` + `$BITMAP $R` +
 HAS_SUBNODES root. Both rejected by chkdsk readonly with `Index $R
 in file 10 is corrupt` / `Error detected in index $R for file 10`
-(where `10` is hex = slot 16).
-
-Background-agent byte-level investigation of the reference image
-(`nfs-win-format-mac-enumerate-empty.img`, parsed by walking the
-$MFT data runs to find rec 26 carrying `$FILE_NAME` = "$Reparse")
-showed the reference's `$Reparse`:
-
-* Lives at **MFT slot 26**, not slot 16. Microsoft places $Extend
-  children at slots determined by allocation order, not by
-  canonical convention.
-* Carries **flags = 0x0D** (IN_USE | bit 0x04 | bit 0x08), not 0x05
-  or 0x09 that S4-v1/v2 used.
-* Ships the `$R` index as a **resident-only `$INDEX_ROOT`**, NO
-  `$INDEX_ALLOCATION` and NO `$BITMAP`. Procmon's observation that
-  chkdsk opens `\Device\…\$Extend\$Reparse:$R:$INDEX_ALLOCATION`
-  is most likely a speculative open of a potential non-resident
-  stream that chkdsk tolerates failing.
-
-S4-v3 should drop the non-resident machinery, place `$Reparse` at
-slot 26 (or wherever follows the canonical 0..15 reserved range
-naturally), and use flags 0x0D. The `read_attributes` /
-`describe_attributes` helper on `feature/read-attribute-list`
-(commit c54d817) was built specifically to make this byte-diff
-investigation easier next iteration.
+(where `10` is hex = slot 16). Background byte-diff investigation
+showed `$Reparse` lives at slot 26 in the reference, carries
+flags = 0x0D, and ships only a resident `$INDEX_ROOT $R` with no
+`$INDEX_ALLOCATION` / `$BITMAP`. S4-v3 guidance preserved in
+`docs/implementation-plan-secure-and-extend.md`.
 
 ### §3.2 NTFS compression (LZNT1)
 

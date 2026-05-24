@@ -83,19 +83,14 @@ fn format_and_parse_back() {
     assert_eq!(ntfs.cluster_size(), 4096);
     assert_eq!(ntfs.serial_number(), 0xDEADBEEF);
 
-    // Volume info: NTFS 1.2 with NO flags (no UPGRADE_ON_MOUNT).
-    // Iter M-2: keep version 1.2 to match our v1.x $STD_INFO across
-    // system records (mixing v3 in $VOLUME_INFORMATION with v1.x
-    // STD_INFO triggers ntfs.sys Event 55 "corruption discovered,
-    // exact nature unknown"). The UPGRADE_ON_MOUNT dance was a
-    // misread from a dirty fixture (`test-disks/_fpr_project.img`);
-    // a clean 1.2 volume without that flag is also acceptable to
-    // ntfs.sys.
+    // Volume info: NTFS 3.1 with NO UPGRADE_ON_MOUNT flag.
+    // S3.1 2026-05-24: system records now carry 72-byte $STD_INFO
+    // with SecurityId, so 3.1 is self-consistent with the metadata.
     let vi = ntfs
         .volume_info(&mut cursor)
         .expect("read $VOLUME_INFORMATION");
-    assert_eq!(vi.major_version(), 1);
-    assert_eq!(vi.minor_version(), 2);
+    assert_eq!(vi.major_version(), 3);
+    assert_eq!(vi.minor_version(), 1);
 
     // Volume name.
     let vol_name_opt = ntfs.volume_name(&mut cursor);
@@ -217,9 +212,8 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
     format_filesystem(&mut dev, VOL_SIZE, 4096, 4096, Some("TESTVOL"), None)
         .expect("format_filesystem");
 
-    // The canonical SD shipped at security_id=0x100 — same blob the
-    // mkfs path applies inline to every system record's
-    // $SECURITY_DESCRIPTOR attribute.
+    // The canonical SD stored in $Secure:$SDS at security_id=0x100.
+    // All system records reference this entry via $STD_INFO.SecurityId.
     const SD_SYSFILE_RW: &[u8] = &[
         0x01, 0x00, 0x04, 0x80, 0x48, 0x00, 0x00, 0x00, 0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x14, 0x00, 0x00, 0x00, 0x02, 0x00, 0x34, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -419,16 +413,9 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
     let s_sds_size = u32::from_le_bytes(s0[sii_val_off + 16..sii_val_off + 20].try_into().unwrap());
     assert_eq!(s_sds_size, expected_sds_size, "$SII value sds_size");
 
-    // Spot-check system records' `$STANDARD_INFORMATION` payload size.
-    // Per MS-FSCC §2.4.2 SecurityId lives at value-relative offset
-    // 0x34 in the 72-byte v3.x form; the 48-byte v1.x form does not
-    // have a SecurityId field (its tail is MaxVersions / VersionNumber
-    // / ClassId). System records currently use the 48-byte form (§2.3
-    // in chkdsk-improvement-findings.md), so S2 cannot make them
-    // reference the SDS entry — the $SDS/$SDH/$SII machinery exists
-    // but no STD_INFO points to it. If a future iteration switches
-    // system records to the 72-byte form, this test will need to
-    // assert SecurityId == 0x100 at offset 0x34.
+    // S3.1: system records use the 72-byte v3.x $STD_INFO form.
+    // SecurityId at value-relative offset 0x34 must be 0x100 (the
+    // single canonical SDS entry).
     for rec_num in [0u64, 5u64, 9u64] {
         let f = ntfs.file(&mut cursor, rec_num).expect("open system rec");
         let mut std_attrs = f.attributes();
@@ -441,9 +428,18 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
             }
             assert_eq!(
                 a.value_length(),
-                48,
-                "rec {rec_num} $STD_INFO must be 48-byte v1.x form (no SecurityId field)"
+                72,
+                "rec {rec_num} $STD_INFO must be 72-byte v3.x form"
             );
+            use std::io::Read;
+            let mut val = vec![0u8; 72];
+            a.value(&mut cursor)
+                .expect("std_info value")
+                .attach(&mut cursor)
+                .read_exact(&mut val)
+                .expect("read std_info");
+            let sid = u32::from_le_bytes([val[0x34], val[0x35], val[0x36], val[0x37]]);
+            assert_eq!(sid, 0x100, "rec {rec_num} $STD_INFO SecurityId");
             found = true;
             break;
         }
@@ -510,9 +506,9 @@ fn extend_record_is_empty_directory() {
         "rec 11 $FILE_NAME.file_attributes must carry FILE_ATTRIBUTE_DIRECTORY"
     );
 
-    // $I30 INDEX_ROOT exists (directory_index() succeeds) but is
-    // empty — only the LAST sentinel, which the upstream iterator
-    // consumes and never surfaces.
+    // $I30 INDEX_ROOT must contain exactly $ObjId (16), $Reparse (17),
+    // $RmMetadata (18) — sorted by NTFS collation order. These are
+    // required for chkdsk /scan to exit 0 (scan-f-scan proof 2026-05-24).
     let index = extend
         .directory_index(&mut cursor)
         .expect("$Extend must have $I30 $INDEX_ROOT");
@@ -527,9 +523,13 @@ fn extend_record_is_empty_directory() {
         let mft_ref = entry.file_reference().file_record_number();
         entries.push((key.name().to_string_lossy(), mft_ref));
     }
-    assert!(
-        entries.is_empty(),
-        "$Extend $I30 must be empty at format time (Iter L final); got {entries:?}"
+    assert_eq!(
+        entries,
+        vec![
+            ("$ObjId".to_string(), rec::OBJID as u64),
+            ("$Reparse".to_string(), rec::REPARSE as u64),
+        ],
+        "$Extend $I30 must list $ObjId and $Reparse; got {entries:?}"
     );
 }
 
@@ -559,13 +559,12 @@ fn mft_layout_from_bpb(buf: &[u8]) -> (usize, usize) {
     (mft_lcn * cluster_size, record_size)
 }
 
-/// Iter L revision (was Sub-PR S4): rec 16 must be a zeroed MFT slot
-/// — populating it (with `$Reparse` as a file under `$Extend`) drove
-/// chkdsk Stage 2 to report rec 11's $I30 inconsistent. Microsoft
-/// `format.com`'s freshly-formatted volume also leaves rec 16
-/// unallocated. See Iter L trace 2026-05-22.
+/// Rec 16 ($ObjId) must be a populated MFT slot with FILE magic,
+/// VIEW_INDEX flag (0x0009), and a named $O INDEX_ROOT attribute.
+/// scan-f-scan proof (2026-05-24) showed chkdsk /scan exits 13
+/// without $ObjId under $Extend; with it, /scan exits 0.
 #[test]
-fn reparse_slot_is_zeroed() {
+fn objid_slot_is_populated() {
     let mut dev = MemDev::new(VOL_SIZE);
     format_filesystem(
         &mut dev,
@@ -579,23 +578,21 @@ fn reparse_slot_is_zeroed() {
 
     let (mft_offset, record_size) = mft_layout_from_bpb(&dev.buf);
     let rec16 = mft_offset + 16 * record_size;
-    assert!(
-        dev.buf[rec16..rec16 + record_size].iter().all(|&b| b == 0),
-        "rec 16 must be a zeroed MFT slot (BPB-derived offset {rec16:#x})"
+    let slot = &dev.buf[rec16..rec16 + record_size];
+    assert_eq!(&slot[0..4], b"FILE", "rec 16 must have FILE magic");
+    let flags = u16::from_le_bytes([slot[22], slot[23]]);
+    assert_eq!(
+        flags, 0x000D,
+        "rec 16 must have flags=0x000D (IN_USE|0x04|VIEW_INDEX)"
     );
 }
 
-/// Iter L final: slots 17/18/19 must be zeroed MFT slots — the
-/// $RmMetadata / $TxfLog / $Tops chain from Sub-PR S5 was removed
-/// after Iter L (2026-05-22) trace showed shipping a partial TxF
-/// hierarchy at format time drove the kernel TxF resource manager to
-/// fail to start (NTFS Event 136), surfacing Event 55 "corruption
-/// discovered" and chkdsk /scan exit 13. Empty $Extend restores
-/// **readonly chkdsk** to exit 0; `/scan` still reports Event 55
-/// only (no Event 136) — Event 55 is the original "exact nature
-/// unknown" baseline that pre-dated the S1..S5 work.
+/// Slot 17 ($Reparse) must be populated; slot 18+ must be zeroed.
+/// $RmMetadata is intentionally absent — chkdsk /scan accepts
+/// $ObjId+$Reparse alone, and including an empty $RmMetadata caused
+/// "corrupt basic file structure" (its $I30 needs children we don't ship).
 #[test]
-fn extend_child_slots_17_19_are_zeroed() {
+fn extend_child_slot_17_is_populated_18_is_zeroed() {
     let mut dev = MemDev::new(VOL_SIZE);
     format_filesystem(
         &mut dev,
@@ -608,13 +605,25 @@ fn extend_child_slots_17_19_are_zeroed() {
     .expect("format_filesystem");
 
     let (mft_offset, record_size) = mft_layout_from_bpb(&dev.buf);
-    for rec in 17u32..=19u32 {
-        let off = mft_offset + (rec as usize) * record_size;
-        assert!(
-            dev.buf[off..off + record_size].iter().all(|&b| b == 0),
-            "rec {rec} must be a zeroed MFT slot (BPB-derived offset {off:#x})"
-        );
-    }
+
+    // rec 17 = $Reparse: FILE magic + IN_USE|0x0004|VIEW_INDEX = 0x000D
+    let rec17_off = mft_offset + 17 * record_size;
+    let s17 = &dev.buf[rec17_off..rec17_off + record_size];
+    assert_eq!(&s17[0..4], b"FILE", "rec 17 must have FILE magic");
+    let flags17 = u16::from_le_bytes([s17[22], s17[23]]);
+    assert_eq!(
+        flags17, 0x000D,
+        "rec 17 must have flags=0x000D (IN_USE|0x04|VIEW_INDEX)"
+    );
+
+    // rec 18 must be zeroed (no $RmMetadata)
+    let rec18_off = mft_offset + 18 * record_size;
+    assert!(
+        dev.buf[rec18_off..rec18_off + record_size]
+            .iter()
+            .all(|&b| b == 0),
+        "rec 18 must be a zeroed MFT slot"
+    );
 }
 
 // --------------------------------------------------------------------------
