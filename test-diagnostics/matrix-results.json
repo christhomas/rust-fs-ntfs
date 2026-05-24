@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "tested_at_sha": "30fcdd600366083e5d8483f783d511e633467b2d",
-  "tested_at_branch": "staging",
-  "tested_at_utc": "2026-05-23T19:11:52Z",
-  "binary_sha256": "a1a281c4f8e9cfc73c587983f1e0989f2a02945cc13e43c036b1d1e4170242ba",
+  "tested_at_sha": "d9595c7b71e6102d4b928476fb7432e6374d6a0d",
+  "tested_at_branch": "staging-2",
+  "tested_at_utc": "2026-05-24T07:33:20Z",
+  "binary_sha256": "6e2e96b7df61cd6753c0bbfb2ce9c5ec9ae93405fba9776c88326d18200032a9",
   "test_matrix_json_sha256": "6baffc0cb1dd38f69f4c0c9f6b933f590c6feaf200943e6eb1f2bbdd18710de5",
   "harness_submodule_sha": "36e1425408d4e17edd07ba3d1d7d4129524d0392",
   "host": {
@@ -330,6 +330,6 @@
     "failed": 0,
     "unknown": 0,
     "total": 42,
-    "total_duration_s": 11369.88
+    "total_duration_s": 13794.5
   }
 }
