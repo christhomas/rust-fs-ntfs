@@ -68,5 +68,8 @@ fn empty_after_removing_last_ea() {
     write::write_ea(Path::new(&img), "/Documents/readme.txt", b"SOLE", b"s", 0).unwrap();
     write::remove_ea(Path::new(&img), "/Documents/readme.txt", b"SOLE").unwrap();
     let keys = write::list_ea_keys(Path::new(&img), "/Documents/readme.txt").unwrap();
-    assert!(keys.is_empty(), "expected no EAs after final remove, got {keys:?}");
+    assert!(
+        keys.is_empty(),
+        "expected no EAs after final remove, got {keys:?}"
+    );
 }

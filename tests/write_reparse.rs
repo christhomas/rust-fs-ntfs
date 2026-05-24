@@ -180,8 +180,13 @@ fn read_reparse_point_returns_none_when_absent() {
 #[test]
 fn read_reparse_point_after_replace_reflects_new_payload() {
     let img = working_copy("read_replace");
-    write::write_reparse_point(Path::new(&img), "/Documents/readme.txt", 0xA000_000C, b"first")
-        .unwrap();
+    write::write_reparse_point(
+        Path::new(&img),
+        "/Documents/readme.txt",
+        0xA000_000C,
+        b"first",
+    )
+    .unwrap();
     write::write_reparse_point(
         Path::new(&img),
         "/Documents/readme.txt",
