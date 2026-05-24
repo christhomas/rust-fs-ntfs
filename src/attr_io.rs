@@ -185,7 +185,7 @@ fn attr_type_name(type_code: u32) -> String {
 /// Decode an attribute's UTF-16 LE name field to a Rust `String`,
 /// returning lossy decoding rather than failing so the caller still
 /// sees what's there.
-fn decode_attr_name(record: &[u8], loc: &AttrLocation) -> String {
+pub fn decode_attr_name(record: &[u8], loc: &AttrLocation) -> String {
     if loc.name_length == 0 {
         return String::new();
     }

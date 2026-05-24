@@ -681,6 +681,28 @@ int fs_ntfs_delete_named_stream(const char *image, const char *path,
                                 const char *stream_name);
 
 /*
+ * Enumerate the names of every named $DATA stream (Alternate Data
+ * Stream) on `path`, excluding the unnamed primary $DATA. Writes
+ * names as a sequence of NUL-terminated UTF-8 strings packed into
+ * out_buf (in on-disk MFT record order — sort on the caller side if
+ * a canonical ordering is required). Always writes the required
+ * total byte count to *out_total_len so callers can size-query (pass
+ * out_buf=NULL, out_buf_len=0).
+ *
+ * Returns:
+ *   N >= 0 — number of named streams (also = count of NUL terminators)
+ *   2      — at least one stream exists but out_buf_len was too small;
+ *            *out_total_len holds the required size, names not copied
+ *  -1      — error (see fs_ntfs_last_error)
+ *
+ * out_total_len must be non-NULL. out_buf may be NULL only when
+ * out_buf_len == 0.
+ */
+int fs_ntfs_list_named_streams(const char *image, const char *path,
+                               char *out_buf, size_t out_buf_len,
+                               size_t *out_total_len);
+
+/*
  * Write `len` bytes from `buf` as the entire contents of the file at
  * `path`. Transparently dispatches: stays resident if it fits in the
  * MFT record, otherwise allocates clusters and promotes $DATA to
