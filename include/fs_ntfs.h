@@ -951,6 +951,22 @@ int fs_ntfs_set_times_h(fs_ntfs_fs_t *fs, const char *path,
                         const int64_t *mft_record_modification,
                         const int64_t *access);
 
+/*
+ * Handle-based sibling of fs_ntfs_write_object_id_extended. Writes
+ * the 64-byte extended $OBJECT_ID carrying the mandatory object_id
+ * (16 bytes from in_buf) plus the three optional DLT Birth GUIDs
+ * (16 bytes each from birth_volume, birth_object, birth_domain).
+ *
+ * All four GUID pointers must be non-NULL and reference at least
+ * 16 readable bytes. Adds the attribute if absent, replaces in
+ * place if present. Returns 0 on success, -1 on error.
+ */
+int fs_ntfs_set_object_id_extended_h(fs_ntfs_fs_t *fs, const char *path,
+                                     const uint8_t *in_buf,
+                                     const uint8_t *birth_volume,
+                                     const uint8_t *birth_object,
+                                     const uint8_t *birth_domain);
+
 #ifdef __cplusplus
 }
 #endif
