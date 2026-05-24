@@ -850,6 +850,42 @@ int fs_ntfs_read_security_id(const char *image, const char *path,
                              uint32_t *out);
 
 /*
+ * Full $STANDARD_INFORMATION value (MS-FSCC §2.4.2). The four
+ * timestamps are NT 100-nanosecond intervals since 1601-01-01 UTC.
+ * file_attributes is the FILE_ATTRIBUTE_* bitmask. The trailing
+ * owner_id / security_id / quota / usn fields only have meaning
+ * when has_v3 != 0 (72-byte 3.x form); the 48-byte 1.x form
+ * leaves them zeroed.
+ */
+typedef struct {
+    uint64_t creation_time;
+    uint64_t modification_time;
+    uint64_t mft_modification_time;
+    uint64_t access_time;
+    uint32_t file_attributes;
+    uint32_t maximum_versions;
+    uint32_t version_number;
+    uint32_t class_id;
+    uint32_t owner_id;
+    uint32_t security_id;
+    uint64_t quota;
+    uint64_t usn;
+    uint8_t  has_v3;
+    uint8_t  _pad[7];
+} fs_ntfs_standard_info_t;
+
+/*
+ * Read every field of a file's $STANDARD_INFORMATION. Unlike the
+ * targeted fs_ntfs_read_security_id, this exposes the full common
+ * header plus the optional NTFS 3.x trailer (when present).
+ *
+ * Returns 0 on success, -1 on error. out must be non-NULL and
+ * point at a writable fs_ntfs_standard_info_t.
+ */
+int fs_ntfs_read_si_full(const char *image, const char *path,
+                         fs_ntfs_standard_info_t *out);
+
+/*
  * Point a file at an existing $Secure:$SDS entry by writing the
  * security_id field in its $STANDARD_INFORMATION. mkfs ships the
  * canonical system-files DACL at id 0x100; pointing a runtime-created

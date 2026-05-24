@@ -2980,6 +2980,91 @@ pub extern "C" fn fs_ntfs_read_security_id(
     }
 }
 
+/// Full `$STANDARD_INFORMATION` value (MS-FSCC §2.4.2). The four
+/// timestamps are NT 100-nanosecond intervals since 1601-01-01 UTC.
+/// `file_attributes` is the FILE_ATTRIBUTE_* bitmask. The trailing
+/// `owner_id` / `security_id` / `quota` / `usn` fields only have
+/// meaning when `has_v3 != 0` (the 72-byte 3.x form); the 48-byte
+/// 1.x form leaves them zeroed.
+#[repr(C)]
+pub struct FsNtfsStandardInfo {
+    pub creation_time: u64,
+    pub modification_time: u64,
+    pub mft_modification_time: u64,
+    pub access_time: u64,
+    pub file_attributes: u32,
+    pub maximum_versions: u32,
+    pub version_number: u32,
+    pub class_id: u32,
+    pub owner_id: u32,
+    pub security_id: u32,
+    pub quota: u64,
+    pub usn: u64,
+    /// 1 iff this image's $STANDARD_INFORMATION was the 72-byte 3.x
+    /// form (owner_id/security_id/quota/usn carry decoded values);
+    /// 0 for the 48-byte 1.x form (those four fields are zero).
+    pub has_v3: u8,
+    pub _pad: [u8; 7],
+}
+
+/// Read every field of a file's `$STANDARD_INFORMATION`. Unlike the
+/// targeted `fs_ntfs_read_security_id`, this exposes the full common
+/// header plus the optional NTFS 3.x trailer (when present).
+///
+/// Returns 0 on success, -1 on error. `out` must be non-null and
+/// large enough for `FsNtfsStandardInfo`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_read_si_full(
+    image: *const c_char,
+    path: *const c_char,
+    out: *mut FsNtfsStandardInfo,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_read_si_full: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_read_si_full: null or non-UTF-8 path");
+        return -1;
+    };
+    if out.is_null() {
+        set_error("fs_ntfs_read_si_full: null out");
+        return -1;
+    }
+    match write::read_si_full(std::path::Path::new(img), p) {
+        Ok(si) => {
+            let out_ref = unsafe { &mut *out };
+            out_ref.creation_time = si.creation_time;
+            out_ref.modification_time = si.modification_time;
+            out_ref.mft_modification_time = si.mft_modification_time;
+            out_ref.access_time = si.access_time;
+            out_ref.file_attributes = si.file_attributes;
+            out_ref.maximum_versions = si.maximum_versions;
+            out_ref.version_number = si.version_number;
+            out_ref.class_id = si.class_id;
+            if let Some(v3) = si.v3 {
+                out_ref.owner_id = v3.owner_id;
+                out_ref.security_id = v3.security_id;
+                out_ref.quota = v3.quota;
+                out_ref.usn = v3.usn;
+                out_ref.has_v3 = 1;
+            } else {
+                out_ref.owner_id = 0;
+                out_ref.security_id = 0;
+                out_ref.quota = 0;
+                out_ref.usn = 0;
+                out_ref.has_v3 = 0;
+            }
+            out_ref._pad = [0u8; 7];
+            0
+        }
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Point a file at an existing `$Secure:$SDS` entry by writing the
 /// `security_id` field in its `$STANDARD_INFORMATION`. mkfs ships
 /// the canonical system-files DACL at id `0x100`; pointing a runtime-
