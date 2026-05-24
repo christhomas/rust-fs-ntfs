@@ -2361,6 +2361,43 @@ pub fn write_named_stream_io<T: BlockIo + ?Sized>(
     }
 }
 
+/// Enumerate the names of every *named* `$DATA` stream on a file
+/// (i.e. alternate data streams — excludes the unnamed primary
+/// `$DATA`). Returns names in on-disk MFT record order.
+///
+/// Note: the NTFS spec keeps `$DATA` attributes sorted by attribute
+/// name (with the unnamed primary first), but enforcement is a
+/// writer concern — this crate's `write_named_stream` currently
+/// appends in insertion order. Callers that need a canonical
+/// ordering should sort the returned `Vec`.
+///
+/// Resident and non-resident streams are both reported (this is a
+/// header-only walk; we don't read the bodies).
+pub fn list_named_streams(image: &Path, file_path: &str) -> Result<Vec<String>, String> {
+    let mut io = PathIo::open_ro(image)?;
+    list_named_streams_io(&mut io, file_path)
+}
+
+pub fn list_named_streams_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+) -> Result<Vec<String>, String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let (_, record) = read_mft_record_io(io, rec)?;
+    let mut names = Vec::new();
+    for loc in attr_io::iter_attributes(&record) {
+        if loc.type_code != AttrType::Data as u32 {
+            continue;
+        }
+        if loc.name_length == 0 {
+            // Unnamed primary $DATA — not an ADS.
+            continue;
+        }
+        names.push(attr_io::decode_attr_name(&record, &loc));
+    }
+    Ok(names)
+}
+
 /// Delete a named `$DATA` stream from a file. Fails if the stream
 /// doesn't exist.
 pub fn delete_named_stream(image: &Path, file_path: &str, stream_name: &str) -> Result<(), String> {

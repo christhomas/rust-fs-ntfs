@@ -2219,6 +2219,84 @@ pub extern "C" fn fs_ntfs_write_named_stream(
     }
 }
 
+/// Enumerate the names of every *named* `$DATA` stream (alternate
+/// data streams) on the file at `path`. Excludes the unnamed primary
+/// `$DATA`.
+///
+/// Writes names as a sequence of NUL-terminated UTF-8 strings packed
+/// into `out_buf` (in MFT record order, which matches NTFS sort order
+/// — names appear sorted by binary $DATA-attribute name). Always
+/// writes the actual required byte count to `*out_total_len` so the
+/// caller can size-query (pass `out_buf = NULL`, `out_buf_len = 0`).
+///
+/// Returns:
+///   * `N >= 0` — number of named streams (matches the count of
+///                NUL terminators in the written buffer); 0 means the
+///                file has no ADS
+///   * `2`      — at least one named stream exists but `out_buf_len`
+///                was too small; `*out_total_len` holds the required
+///                size and names are NOT written
+///   * `-1`     — error (use `fs_ntfs_last_error`)
+///
+/// `out_total_len` must be non-null. `out_buf` may be NULL only if
+/// `out_buf_len == 0`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_list_named_streams(
+    image: *const c_char,
+    path: *const c_char,
+    out_buf: *mut c_char,
+    out_buf_len: usize,
+    out_total_len: *mut usize,
+) -> c_int {
+    let Some(img) = cstr_to_path(image) else {
+        set_error("fs_ntfs_list_named_streams: null or non-UTF-8 image");
+        return -1;
+    };
+    let Some(p) = cstr_to_path(path) else {
+        set_error("fs_ntfs_list_named_streams: null or non-UTF-8 path");
+        return -1;
+    };
+    if out_total_len.is_null() {
+        set_error("fs_ntfs_list_named_streams: null out_total_len");
+        return -1;
+    }
+    if out_buf.is_null() && out_buf_len != 0 {
+        set_error("fs_ntfs_list_named_streams: null out_buf with non-zero out_buf_len");
+        return -1;
+    }
+    match write::list_named_streams(std::path::Path::new(img), p) {
+        Ok(names) => {
+            let total: usize = names.iter().map(|n| n.as_bytes().len() + 1).sum();
+            unsafe { *out_total_len = total };
+            if total > out_buf_len {
+                if names.is_empty() {
+                    // total==0 case, no data to copy
+                    return 0;
+                }
+                return 2;
+            }
+            let mut cursor = 0usize;
+            for name in &names {
+                let bytes = name.as_bytes();
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        (out_buf as *mut u8).add(cursor),
+                        bytes.len(),
+                    );
+                    *(out_buf as *mut u8).add(cursor + bytes.len()) = 0;
+                }
+                cursor += bytes.len() + 1;
+            }
+            names.len() as c_int
+        }
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
+}
+
 /// Delete a named `$DATA` stream. Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_delete_named_stream(
