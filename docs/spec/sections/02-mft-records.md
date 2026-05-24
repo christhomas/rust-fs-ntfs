@@ -115,7 +115,12 @@ record. See [§2.11 Sequence numbers and reuse](#sequence-numbers).
 **Hard link count at `0x12`.** Equal to the number of `$FILE_NAME` attributes
 in the record (one per directory entry that points at this file). A regular
 file with one parent has hard link count 1; a hard-linked file has 2 or
-more. [OBSERVED: src/record_build.rs:119]
+more. A record with **no** `$FILE_NAME` at all (e.g. a placeholder MFT
+slot reserved by the formatter but never wired into the directory tree —
+see §2 records 11..15) carries `link_count = 0`; a non-zero value here on
+a record with no FN attribute would be flagged by `chkdsk /F`, which
+post-process clears it. [OBSERVED: src/record_build.rs:119]
+[OBSERVED: docs/overnight-findings.md iter I post-/F dump]
 
 **First attribute offset at `0x14`.** The first attribute record begins at
 `align8(USA_offset + 2 + sectors * 2)`. `rust-fs-ntfs` computes this
@@ -443,17 +448,36 @@ directory; tools that walk the MFT see them as ordinary files (with the
 [OBSERVED: docs/mkfs-bug-catalog.md Bug 5 (root `$I30` enumerates 11 system records + `.`)]
 [OBSERVED: docs/chkdsk-improvement-findings.md §2.5.1 (per-record attribute set table for records 0..10)]
 
-**Slot 9 — `$Secure` vs `$Quota`.** Modern Microsoft `format.com` places
-`$Quota` at slot 9 and `$Secure` elsewhere (off the first 16); older
-NTFS-3.0-era convention placed `$Secure` at slot 9. `rust-fs-ntfs` follows
-the older convention. chkdsk identifies records by their `$FILE_NAME`, not by
-slot, and demands the `MFT_RECORD_IS_VIEW_INDEX` bit on the *named* `$Secure`
-record regardless of which slot it occupies.
-[OBSERVED: docs/mkfs-bug-catalog.md Bug 4]
-[OBSERVED: docs/chkdsk-improvement-findings.md §2.2.3]
-[UNVERIFIED] — the precise slot ownership ($Quota vs $Secure at #9) is one of
-several conventions; we have no canonical source statement that fixes the
-slot beyond per-volume observation.
+**Slot 9 — `$Secure` vs `$Quota`** (corroborated 2026-05-23). The
+`$FILE_NAME` `chkdsk` expects at slot 9 is **cluster-size-dependent**:
+
+| `cluster_size` | Slot 9 name | Notes                                                                                          |
+| -------------- | ----------- | ---------------------------------------------------------------------------------------------- |
+| `< 4096`       | `$Quota`    | Modern NTFS-3.x convention. `chkdsk`'s non-4K cluster path runs a slot-9-name check.           |
+| `≥ 4096`       | `$Secure`   | `chkdsk`'s 4K-cluster path does **not** run the slot-9-name check; either spelling is accepted. |
+
+At cluster sizes 512 and 1024, shipping `$Secure` at slot 9 produces
+the diagnostic sequence:
+
+```
+The file name in system file record segment 9 contains errors.
+Stage 2: Examining file name linkage ...
+Deleting invalid system file name $Secure (9) in directory 5.
+Repairing invalid system file name $Quota (9) in directory 5.
+Correcting system file name errors in file 9.
+Error detected in index $I30 for file 5.
+Index entry $Secure in index $I30 of file 5 is incorrect.
+```
+
+`rust-fs-ntfs::mkfs` switches the slot 9 file name accordingly via
+`rec::name(rec::SECURE, cluster_size)`
+[`[OBSERVED: src/mkfs.rs:342-348]`](#references). The internal record-
+slot constant is still spelled `SECURE`; only the on-disk
+`$FILE_NAME` text varies. Regardless of which spelling occupies slot
+9, the `MFT_RECORD_IS_VIEW_INDEX` bit (`0x0008`) is required — both
+`$Quota` and `$Secure` host view indexes
+[`[OBSERVED: docs/mkfs-bug-catalog.md Bug 4]`](#references),
+[`[OBSERVED: docs/chkdsk-improvement-findings.md §2.2.3]`](#references).
 
 **Version dependencies.** NTFS 3.0 (Windows 2000) introduced `$Extend` and
 its descendants. The `$Volume`'s `$VOLUME_INFORMATION` attribute carries

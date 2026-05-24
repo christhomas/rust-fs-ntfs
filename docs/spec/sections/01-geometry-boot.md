@@ -182,6 +182,47 @@ The boot sector is also exposed as a regular NTFS file under MFT record 7
 the first 8 KiB of the volume (cluster 0 onwards) `[OBSERVED: src/mkfs.rs
 lines 691–725, 384–391]`.
 
+#### `mft_lcn` placement must not overlap `$Boot.$DATA` {#mft-lcn-placement}
+
+Because `$Boot.$DATA` claims the first 8 KiB of the volume starting at
+LCN 0, the MFT's first LCN must lie *outside* that range. The constraint
+is:
+
+```
+mft_lcn ≥ ceil(8192 / cluster_size)
+```
+
+At 4 KiB clusters the canonical `mft_lcn = 4` satisfies this (`$Boot.$DATA`
+occupies LCN 0..1, the MFT starts at LCN 4). At smaller cluster sizes
+(1 KiB or 512 B) a hardcoded `mft_lcn = 4` puts the MFT *inside*
+`$Boot.$DATA`'s mapping and `chkdsk` aborts with "Corrupt master file
+table. CHKDSK aborted." `rust-fs-ntfs::mkfs` computes
+`mft_lcn = max(4, ceil(8192 / cluster_size))`
+[`[OBSERVED: src/mkfs.rs / mft_lcn placement]`](#references), which gives:
+
+| cluster_size | mft_lcn |
+| ------------ |  ------ |
+| 512 B        | 16      |
+| 1 KiB        | 8       |
+| 4 KiB        | 4       |
+| ≥ 8 KiB      | 4       |
+
+#### Bootstrap code area {#bootstrap-code}
+
+The first 426 bytes of the boot sector (offsets `0x54..0x1FE`) hold
+the BIOS bootstrap code that runs on a BIOS-boot path to load `ntldr` /
+`bootmgr`. On non-BIOS volumes (data partitions, snapshots, mounted
+images), `ntfs.sys` never executes this region; `chkdsk` does not
+validate its contents.
+
+`rust-fs-ntfs::mkfs` ships a 3-byte clean-room halt loop (`FA EB FD` —
+`CLI; JMP $-1`) in this region rather than baking Microsoft's compiled
+bootstrap bytes verbatim, keeping the repo free of Microsoft binary
+code while still producing a valid (mountable, write-accepting, chkdsk-
+clean) NTFS volume. Matrix scenarios confirm this is sufficient: 42/42
+sealed runs pass with the 3-byte halt loop and no BIOS-boot scenarios
+in scope.
+
 ### Two physical copies
 
 | Copy             | Location                                                       |

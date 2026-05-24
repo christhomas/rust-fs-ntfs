@@ -892,13 +892,59 @@ Offset  Size  Field            Description
                                VOLUME_MOUNTED_ON_NT4 (0x0008),
                                VOLUME_DELETE_USN_UNDERWAY (0x0010),
                                VOLUME_REPAIR_OBJECT_ID (0x0020),
-                               VOLUME_MODIFIED_BY_CHKDSK (0x8000),
+                               VOLUME_MODIFIED_BY_CHKDSK (0x0080),
                                others reserved.
 ```
 
-The flag-bit values above are `[UNVERIFIED]` against `[MS-NTFS]` —
-they're the conventional public-documentation values; bit-for-bit
-confirmation against a Microsoft spec doc is pending.
+The flag-bit values above follow Tuxera's public documentation and
+have been cross-checked against `format.com`'s output via byte-diff
+[`[OBSERVED: src/mkfs.rs:836-880]`](#references). Note specifically
+that `VOLUME_MODIFIED_BY_CHKDSK = 0x0080` — older public references
+sometimes quote `0x8000`, which is wrong (it doesn't match what
+Microsoft's `format.com` actually writes).
+
+#### Fresh-format shape {#volume-information-fresh-format}
+
+`format.com` and `rust-fs-ntfs`'s `mkfs` both stamp the same shape
+on a freshly-formatted volume
+[`[OBSERVED: src/mkfs.rs:836-881]`](#references):
+
+| Field         | Value                                          |
+| ------------- | ---------------------------------------------- |
+| MajorVersion  | `1`                                            |
+| MinorVersion  | `2`                                            |
+| Flags         | `0x0080` (`VOLUME_MODIFIED_BY_CHKDSK` alone)   |
+
+The `1.2 + UPGRADE_ON_MOUNT` configuration is a Windows convention
+that the format step has not yet been "blessed" by chkdsk's full
+catalog of structural transitions; `ntfs.sys` upgrades the volume
+to `3.1` with the `UPGRADE_ON_MOUNT` flag cleared on the first RW
+mount.
+
+`MODIFIED_BY_CHKDSK = 0x0080` is set at format time because Windows
+runs an implicit chkdsk pass during `format.com`'s finalize step.
+Without this flag set, `ntfs.sys`'s mount path queues a proactive
+scan on every mount and `chkdsk /scan` exits 13 even on a structurally
+sound volume.
+
+`rust-fs-ntfs` rewrites the version-pair to `3.1` with all upgrade
+flags cleared at the next opportunity, on the RW-mount path
+(`fsck::upgrade_volume_version`, see [§5 fsck](../README.md) and
+[`docs/STATUS.md`](../STATUS.md)). The transition is idempotent and
+mimics what `ntfs.sys` would do.
+
+#### Why earlier code emitted `0x0084` — and why that was wrong
+
+An earlier `rust-fs-ntfs` `mkfs` revision shipped `Flags = 0x0084`
+(adding `VOLUME_UPGRADE_ON_MOUNT = 0x0004`). That value was cribbed
+from a post-chkdsk-rollback test fixture that already had Stage 1
+corruption, not from a clean `format.com` output. The
+`UPGRADE_ON_MOUNT` bit on a `chkdsk /scan` snapshot mount drives
+`ntfs.sys` to a Critical Event 55 because the read-only snapshot
+can't complete the upgrade. Dropping that bit (so the volume ships
+as `1.2 + 0x0080` instead of `1.2 + 0x0084`) eliminated the Critical
+Event 55 and is the byte sequence currently stamped on the matrix's
+sealed runs `[OBSERVED: test-diagnostics/matrix-results.json]`.
 
 ### NTFS version cutoffs {#volume-ntfs-versions}
 
