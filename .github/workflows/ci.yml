@@ -64,9 +64,15 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo deny --all-features check
 
-      # clippy deferred: lib.rs FFI funcs need `unsafe` refactor before
-      # `clippy -D warnings` can pass. Re-enable once resolved.
-      #
+      # clippy gate. Pre-commit hook runs the same invocation locally
+      # so this should never fail on a clean push; it's the second line
+      # of defence against drift via merges or rebases that bypass the
+      # hook. Lint output is deterministic across OSes, so we only run
+      # on ubuntu — same rationale as cargo-deny above.
+      - name: cargo clippy
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --all-targets -- -D warnings
+
       # Test scope is intentionally narrow: only tests that DON'T need
       # the out-of-tree `test-disks/*.img` fixtures. The fixture-driven
       # integration tests (tests/ads.rs, tests/file_data.rs, etc.)
