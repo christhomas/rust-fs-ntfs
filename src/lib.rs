@@ -146,6 +146,69 @@ pub extern "C" fn fs_ntfs_clear_last_error() {
 }
 
 // ---------------------------------------------------------------------------
+// FFI return-translation helpers
+// ---------------------------------------------------------------------------
+// FFI bodies share two pervasive patterns:
+//
+//   match thing(...) {
+//       Ok(()) => 0,
+//       Err(e) => { set_error(&e); -1 }
+//   }
+//
+// and the C-string argument validation:
+//
+//   let Some(img) = cstr_to_path(image) else {
+//       set_error("fs_ntfs_<name>: null or non-UTF-8 image");
+//       return -1;
+//   };
+//
+// The helpers below collapse those into one call/macro each. They do
+// not change error-string content or return values — purely textual
+// compression. See callers throughout this file.
+
+/// Record `e` as the thread-local last-error and return the int sentinel.
+/// Use in `Err` arms returning an `int` from an FFI function.
+#[inline]
+fn err_int<E: AsRef<str>>(e: E) -> c_int {
+    set_error(e.as_ref());
+    -1
+}
+
+/// Record `e` as the thread-local last-error and return the `i64` sentinel.
+/// Use in `Err` arms returning an `i64` from an FFI function.
+#[inline]
+fn err_i64<E: AsRef<str>>(e: E) -> i64 {
+    set_error(e.as_ref());
+    -1
+}
+
+/// Record `e` as the thread-local last-error and return a null pointer.
+/// Use in `Err` arms returning a `*mut T` from an FFI function.
+#[inline]
+fn err_ptr<T, E: AsRef<str>>(e: E) -> *mut T {
+    set_error(e.as_ref());
+    std::ptr::null_mut()
+}
+
+/// `cstr_to_path` + last-error + early-return in one line.
+/// Expands to a `let` binding shadowing the pointer with its &str form.
+///
+/// Usage:
+///   cstr_or_return!(image, "fs_ntfs_create_file", "image", -1);
+///   // `image` is now a `&str`, having been the `*const c_char` arg.
+macro_rules! cstr_or_return {
+    ($ptr:ident, $ctx:literal, $param:literal, $ret:expr) => {
+        let $ptr = match cstr_to_path($ptr) {
+            Some(s) => s,
+            None => {
+                set_error(concat!($ctx, ": null or non-UTF-8 ", $param));
+                return $ret;
+            }
+        };
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Callback-based reader for FSKit integration
 // ---------------------------------------------------------------------------
 
@@ -1313,15 +1376,11 @@ pub extern "C" fn fs_ntfs_stat(
 
     let file = match navigate_to_path(&bridge.ntfs, &mut bridge.reader, path_str) {
         Ok(f) => f,
-        Err(e) => {
-            set_error(&e);
-            return -1;
-        }
+        Err(e) => return err_int(e),
     };
 
     if let Err(e) = fill_attr(&file, &mut bridge.reader, out) {
-        set_error(&e);
-        return -1;
+        return err_int(e);
     }
 
     0
@@ -1348,10 +1407,7 @@ pub extern "C" fn fs_ntfs_dir_open(
 
     let dir_file = match navigate_to_path(&bridge.ntfs, &mut bridge.reader, path_str) {
         Ok(f) => f,
-        Err(e) => {
-            set_error(&e);
-            return std::ptr::null_mut();
-        }
+        Err(e) => return err_ptr(e),
     };
 
     let current_record_number = dir_file.file_record_number();
@@ -1491,10 +1547,7 @@ pub extern "C" fn fs_ntfs_read_file(
 
     let file = match navigate_to_path(&bridge.ntfs, &mut bridge.reader, path_str) {
         Ok(f) => f,
-        Err(e) => {
-            set_error(&e);
-            return -1;
-        }
+        Err(e) => return err_i64(e),
     };
 
     // Find the unnamed $DATA attribute
@@ -1624,10 +1677,7 @@ pub extern "C" fn fs_ntfs_readlink(
     };
     let file = match navigate_to_path(&bridge.ntfs, &mut bridge.reader, path_str) {
         Ok(f) => f,
-        Err(e) => {
-            set_error(&e);
-            return -1;
-        }
+        Err(e) => return err_int(e),
     };
     // Find the $REPARSE_POINT attribute.
     let mut reparse_bytes: Option<Vec<u8>> = None;
@@ -1786,18 +1836,12 @@ fn cstr_to_path<'a>(path: *const c_char) -> Option<&'a str> {
 /// success, `-1` on error. Scans the entire `$Bitmap`.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_free_clusters(path: *const c_char) -> i64 {
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_free_clusters: null or non-UTF-8 path");
-        return -1;
-    };
-    match crate::bitmap::locate_bitmap(std::path::Path::new(p))
-        .and_then(|bm| crate::bitmap::count_free(std::path::Path::new(p), &bm))
+    cstr_or_return!(path, "fs_ntfs_free_clusters", "path", -1);
+    match crate::bitmap::locate_bitmap(std::path::Path::new(path))
+        .and_then(|bm| crate::bitmap::count_free(std::path::Path::new(path), &bm))
     {
         Ok(n) => n as i64,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_i64(e),
     }
 }
 
@@ -1805,18 +1849,12 @@ pub extern "C" fn fs_ntfs_free_clusters(path: *const c_char) -> i64 {
 /// success, `-1` on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mft_free_records(path: *const c_char) -> i64 {
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_mft_free_records: null or non-UTF-8 path");
-        return -1;
-    };
-    match crate::mft_bitmap::locate(std::path::Path::new(p))
-        .and_then(|bm| crate::mft_bitmap::count_free(std::path::Path::new(p), &bm))
+    cstr_or_return!(path, "fs_ntfs_mft_free_records", "path", -1);
+    match crate::mft_bitmap::locate(std::path::Path::new(path))
+        .and_then(|bm| crate::mft_bitmap::count_free(std::path::Path::new(path), &bm))
     {
         Ok(n) => n as i64,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_i64(e),
     }
 }
 
@@ -1824,17 +1862,11 @@ pub extern "C" fn fs_ntfs_mft_free_records(path: *const c_char) -> i64 {
 /// Returns `1` if dirty, `0` if clean, `-1` on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_is_dirty(path: *const c_char) -> c_int {
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_is_dirty: null or non-UTF-8 path");
-        return -1;
-    };
-    match fsck::is_dirty(p) {
+    cstr_or_return!(path, "fs_ntfs_is_dirty", "path", -1);
+    match fsck::is_dirty(path) {
         Ok(true) => 1,
         Ok(false) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -1845,17 +1877,11 @@ pub extern "C" fn fs_ntfs_is_dirty(path: *const c_char) -> c_int {
 /// `fs_ntfs_last_error()` for the error message.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_clear_dirty(path: *const c_char) -> c_int {
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_clear_dirty: null or non-UTF-8 path");
-        return -1;
-    };
-    match fsck::clear_dirty(p) {
+    cstr_or_return!(path, "fs_ntfs_clear_dirty", "path", -1);
+    match fsck::clear_dirty(path) {
         Ok(true) => 1,
         Ok(false) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -1864,16 +1890,10 @@ pub extern "C" fn fs_ntfs_clear_dirty(path: *const c_char) -> c_int {
 /// Returns the number of bytes overwritten on success, `-1` on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_reset_logfile(path: *const c_char) -> i64 {
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_reset_logfile: null or non-UTF-8 path");
-        return -1;
-    };
-    match fsck::reset_logfile(p) {
+    cstr_or_return!(path, "fs_ntfs_reset_logfile", "path", -1);
+    match fsck::reset_logfile(path) {
         Ok(n) => n as i64,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_i64(e),
     }
 }
 
@@ -1893,26 +1913,17 @@ pub extern "C" fn fs_ntfs_set_times(
     mft_record_modification: *const i64,
     access: *const i64,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_set_times: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(fp) = cstr_to_path(path) else {
-        set_error("fs_ntfs_set_times: null or non-UTF-8 path");
-        return -1;
-    };
+    cstr_or_return!(image, "fs_ntfs_set_times", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_set_times", "path", -1);
     let times = write::FileTimes {
         creation: unsafe { creation.as_ref() }.map(|v| *v as u64),
         modification: unsafe { modification.as_ref() }.map(|v| *v as u64),
         mft_record_modification: unsafe { mft_record_modification.as_ref() }.map(|v| *v as u64),
         access: unsafe { access.as_ref() }.map(|v| *v as u64),
     };
-    match write::set_times(std::path::Path::new(img), fp, times) {
+    match write::set_times(std::path::Path::new(image), path, times) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -1925,24 +1936,12 @@ pub extern "C" fn fs_ntfs_create_file(
     parent_path: *const c_char,
     basename: *const c_char,
 ) -> i64 {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_create_file: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(pp) = cstr_to_path(parent_path) else {
-        set_error("fs_ntfs_create_file: null or non-UTF-8 parent_path");
-        return -1;
-    };
-    let Some(bn) = cstr_to_path(basename) else {
-        set_error("fs_ntfs_create_file: null or non-UTF-8 basename");
-        return -1;
-    };
-    match write::create_file(std::path::Path::new(img), pp, bn) {
+    cstr_or_return!(image, "fs_ntfs_create_file", "image", -1);
+    cstr_or_return!(parent_path, "fs_ntfs_create_file", "parent_path", -1);
+    cstr_or_return!(basename, "fs_ntfs_create_file", "basename", -1);
+    match write::create_file(std::path::Path::new(image), parent_path, basename) {
         Ok(rn) => rn as i64,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_i64(e),
     }
 }
 
@@ -1959,14 +1958,8 @@ pub extern "C" fn fs_ntfs_write_ea(
     value_len: u64,
     flags: u8,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_write_ea: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_write_ea: null or non-UTF-8 path");
-        return -1;
-    };
+    cstr_or_return!(image, "fs_ntfs_write_ea", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_write_ea", "path", -1);
     if ea_name.is_null() {
         set_error("fs_ntfs_write_ea: null ea_name");
         return -1;
@@ -1980,12 +1973,9 @@ pub extern "C" fn fs_ntfs_write_ea(
     } else {
         unsafe { slice::from_raw_parts(value as *const u8, value_len as usize) }
     };
-    match write::write_ea(std::path::Path::new(img), p, name_bytes, data, flags) {
+    match write::write_ea(std::path::Path::new(image), path, name_bytes, data, flags) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -1997,25 +1987,16 @@ pub extern "C" fn fs_ntfs_remove_ea(
     path: *const c_char,
     ea_name: *const c_char,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_remove_ea: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_remove_ea: null or non-UTF-8 path");
-        return -1;
-    };
+    cstr_or_return!(image, "fs_ntfs_remove_ea", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_remove_ea", "path", -1);
     if ea_name.is_null() {
         set_error("fs_ntfs_remove_ea: null ea_name");
         return -1;
     }
     let name_bytes = unsafe { CStr::from_ptr(ea_name) }.to_bytes();
-    match write::remove_ea(std::path::Path::new(img), p, name_bytes) {
+    match write::remove_ea(std::path::Path::new(image), path, name_bytes) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -2097,14 +2078,8 @@ pub extern "C" fn fs_ntfs_write_reparse_point(
     buf: *const c_void,
     len: u64,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_write_reparse_point: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_write_reparse_point: null or non-UTF-8 path");
-        return -1;
-    };
+    cstr_or_return!(image, "fs_ntfs_write_reparse_point", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_write_reparse_point", "path", -1);
     let data: &[u8] = if len == 0 {
         &[]
     } else if buf.is_null() {
@@ -2113,12 +2088,9 @@ pub extern "C" fn fs_ntfs_write_reparse_point(
     } else {
         unsafe { slice::from_raw_parts(buf as *const u8, len as usize) }
     };
-    match write::write_reparse_point(std::path::Path::new(img), p, reparse_tag, data) {
+    match write::write_reparse_point(std::path::Path::new(image), path, reparse_tag, data) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -2126,20 +2098,11 @@ pub extern "C" fn fs_ntfs_write_reparse_point(
 /// flag. Returns 0 on success, -1 on error (e.g. no reparse point).
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_remove_reparse_point(image: *const c_char, path: *const c_char) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_remove_reparse_point: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_remove_reparse_point: null or non-UTF-8 path");
-        return -1;
-    };
-    match write::remove_reparse_point(std::path::Path::new(img), p) {
+    cstr_or_return!(image, "fs_ntfs_remove_reparse_point", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_remove_reparse_point", "path", -1);
+    match write::remove_reparse_point(std::path::Path::new(image), path) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -2220,28 +2183,19 @@ pub extern "C" fn fs_ntfs_create_symlink(
     target: *const c_char,
     relative: c_int,
 ) -> i64 {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_create_symlink: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(pp) = cstr_to_path(parent_path) else {
-        set_error("fs_ntfs_create_symlink: null or non-UTF-8 parent_path");
-        return -1;
-    };
-    let Some(bn) = cstr_to_path(basename) else {
-        set_error("fs_ntfs_create_symlink: null or non-UTF-8 basename");
-        return -1;
-    };
-    let Some(tg) = cstr_to_path(target) else {
-        set_error("fs_ntfs_create_symlink: null or non-UTF-8 target");
-        return -1;
-    };
-    match write::create_symlink(std::path::Path::new(img), pp, bn, tg, relative != 0) {
+    cstr_or_return!(image, "fs_ntfs_create_symlink", "image", -1);
+    cstr_or_return!(parent_path, "fs_ntfs_create_symlink", "parent_path", -1);
+    cstr_or_return!(basename, "fs_ntfs_create_symlink", "basename", -1);
+    cstr_or_return!(target, "fs_ntfs_create_symlink", "target", -1);
+    match write::create_symlink(
+        std::path::Path::new(image),
+        parent_path,
+        basename,
+        target,
+        relative != 0,
+    ) {
         Ok(rn) => rn as i64,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_i64(e),
     }
 }
 
@@ -2255,18 +2209,9 @@ pub extern "C" fn fs_ntfs_write_named_stream(
     buf: *const c_void,
     len: u64,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_write_named_stream: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_write_named_stream: null or non-UTF-8 path");
-        return -1;
-    };
-    let Some(sn) = cstr_to_path(stream_name) else {
-        set_error("fs_ntfs_write_named_stream: null or non-UTF-8 stream_name");
-        return -1;
-    };
+    cstr_or_return!(image, "fs_ntfs_write_named_stream", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_write_named_stream", "path", -1);
+    cstr_or_return!(stream_name, "fs_ntfs_write_named_stream", "stream_name", -1);
     let data: &[u8] = if len == 0 {
         &[]
     } else if buf.is_null() {
@@ -2275,12 +2220,9 @@ pub extern "C" fn fs_ntfs_write_named_stream(
     } else {
         unsafe { slice::from_raw_parts(buf as *const u8, len as usize) }
     };
-    match write::write_named_stream(std::path::Path::new(img), p, sn, data) {
+    match write::write_named_stream(std::path::Path::new(image), path, stream_name, data) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -2364,24 +2306,17 @@ pub extern "C" fn fs_ntfs_delete_named_stream(
     path: *const c_char,
     stream_name: *const c_char,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_delete_named_stream: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_delete_named_stream: null or non-UTF-8 path");
-        return -1;
-    };
-    let Some(sn) = cstr_to_path(stream_name) else {
-        set_error("fs_ntfs_delete_named_stream: null or non-UTF-8 stream_name");
-        return -1;
-    };
-    match write::delete_named_stream(std::path::Path::new(img), p, sn) {
+    cstr_or_return!(image, "fs_ntfs_delete_named_stream", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_delete_named_stream", "path", -1);
+    cstr_or_return!(
+        stream_name,
+        "fs_ntfs_delete_named_stream",
+        "stream_name",
+        -1
+    );
+    match write::delete_named_stream(std::path::Path::new(image), path, stream_name) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -2396,21 +2331,12 @@ pub extern "C" fn fs_ntfs_write_file_contents(
     buf: *const c_void,
     len: u64,
 ) -> i64 {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_write_file_contents: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_write_file_contents: null or non-UTF-8 path");
-        return -1;
-    };
+    cstr_or_return!(image, "fs_ntfs_write_file_contents", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_write_file_contents", "path", -1);
     if len == 0 {
-        return match write::write_file_contents(std::path::Path::new(img), p, &[]) {
+        return match write::write_file_contents(std::path::Path::new(image), path, &[]) {
             Ok(n) => n as i64,
-            Err(e) => {
-                set_error(&e);
-                -1
-            }
+            Err(e) => err_i64(e),
         };
     }
     if buf.is_null() {
@@ -2418,12 +2344,9 @@ pub extern "C" fn fs_ntfs_write_file_contents(
         return -1;
     }
     let data = unsafe { slice::from_raw_parts(buf as *const u8, len as usize) };
-    match write::write_file_contents(std::path::Path::new(img), p, data) {
+    match write::write_file_contents(std::path::Path::new(image), path, data) {
         Ok(n) => n as i64,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_i64(e),
     }
 }
 
@@ -2432,20 +2355,11 @@ pub extern "C" fn fs_ntfs_write_file_contents(
 /// overflow (for MVP).
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_rmdir(image: *const c_char, path: *const c_char) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_rmdir: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_rmdir: null or non-UTF-8 path");
-        return -1;
-    };
-    match write::rmdir(std::path::Path::new(img), p) {
+    cstr_or_return!(image, "fs_ntfs_rmdir", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_rmdir", "path", -1);
+    match write::rmdir(std::path::Path::new(image), path) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -2457,24 +2371,12 @@ pub extern "C" fn fs_ntfs_mkdir(
     parent_path: *const c_char,
     basename: *const c_char,
 ) -> i64 {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_mkdir: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(pp) = cstr_to_path(parent_path) else {
-        set_error("fs_ntfs_mkdir: null or non-UTF-8 parent_path");
-        return -1;
-    };
-    let Some(bn) = cstr_to_path(basename) else {
-        set_error("fs_ntfs_mkdir: null or non-UTF-8 basename");
-        return -1;
-    };
-    match write::mkdir(std::path::Path::new(img), pp, bn) {
+    cstr_or_return!(image, "fs_ntfs_mkdir", "image", -1);
+    cstr_or_return!(parent_path, "fs_ntfs_mkdir", "parent_path", -1);
+    cstr_or_return!(basename, "fs_ntfs_mkdir", "basename", -1);
+    match write::mkdir(std::path::Path::new(image), parent_path, basename) {
         Ok(rn) => rn as i64,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_i64(e),
     }
 }
 
@@ -2489,21 +2391,12 @@ pub extern "C" fn fs_ntfs_write_resident_contents(
     buf: *const c_void,
     len: u64,
 ) -> i64 {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_write_resident_contents: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_write_resident_contents: null or non-UTF-8 path");
-        return -1;
-    };
+    cstr_or_return!(image, "fs_ntfs_write_resident_contents", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_write_resident_contents", "path", -1);
     if len == 0 {
-        return match write::write_resident_contents(std::path::Path::new(img), p, &[]) {
+        return match write::write_resident_contents(std::path::Path::new(image), path, &[]) {
             Ok(n) => n as i64,
-            Err(e) => {
-                set_error(&e);
-                -1
-            }
+            Err(e) => err_i64(e),
         };
     }
     if buf.is_null() {
@@ -2511,12 +2404,9 @@ pub extern "C" fn fs_ntfs_write_resident_contents(
         return -1;
     }
     let data = unsafe { slice::from_raw_parts(buf as *const u8, len as usize) };
-    match write::write_resident_contents(std::path::Path::new(img), p, data) {
+    match write::write_resident_contents(std::path::Path::new(image), path, data) {
         Ok(n) => n as i64,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_i64(e),
     }
 }
 
@@ -2525,20 +2415,11 @@ pub extern "C" fn fs_ntfs_write_resident_contents(
 /// record are freed.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_unlink(image: *const c_char, path: *const c_char) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_unlink: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(fp) = cstr_to_path(path) else {
-        set_error("fs_ntfs_unlink: null or non-UTF-8 path");
-        return -1;
-    };
-    match write::unlink(std::path::Path::new(img), fp) {
+    cstr_or_return!(image, "fs_ntfs_unlink", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_unlink", "path", -1);
+    match write::unlink(std::path::Path::new(image), path) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -2551,28 +2432,19 @@ pub extern "C" fn fs_ntfs_read_object_id(
     path: *const c_char,
     out_buf: *mut u8,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_read_object_id: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_read_object_id: null or non-UTF-8 path");
-        return -1;
-    };
+    cstr_or_return!(image, "fs_ntfs_read_object_id", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_read_object_id", "path", -1);
     if out_buf.is_null() {
         set_error("fs_ntfs_read_object_id: null out_buf");
         return -1;
     }
-    match write::read_object_id(std::path::Path::new(img), p) {
+    match write::read_object_id(std::path::Path::new(image), path) {
         Ok(Some(guid)) => {
             unsafe { std::ptr::copy_nonoverlapping(guid.as_ptr(), out_buf, 16) };
             1
         }
         Ok(None) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -2750,28 +2622,18 @@ pub extern "C" fn fs_ntfs_link(
     new_parent_path: *const c_char,
     new_basename: *const c_char,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_link: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(ep) = cstr_to_path(existing_path) else {
-        set_error("fs_ntfs_link: null or non-UTF-8 existing_path");
-        return -1;
-    };
-    let Some(npp) = cstr_to_path(new_parent_path) else {
-        set_error("fs_ntfs_link: null or non-UTF-8 new_parent_path");
-        return -1;
-    };
-    let Some(nb) = cstr_to_path(new_basename) else {
-        set_error("fs_ntfs_link: null or non-UTF-8 new_basename");
-        return -1;
-    };
-    match write::link(std::path::Path::new(img), ep, npp, nb) {
+    cstr_or_return!(image, "fs_ntfs_link", "image", -1);
+    cstr_or_return!(existing_path, "fs_ntfs_link", "existing_path", -1);
+    cstr_or_return!(new_parent_path, "fs_ntfs_link", "new_parent_path", -1);
+    cstr_or_return!(new_basename, "fs_ntfs_link", "new_basename", -1);
+    match write::link(
+        std::path::Path::new(image),
+        existing_path,
+        new_parent_path,
+        new_basename,
+    ) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -2785,24 +2647,12 @@ pub extern "C" fn fs_ntfs_rename(
     old_path: *const c_char,
     new_basename: *const c_char,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_rename: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(op) = cstr_to_path(old_path) else {
-        set_error("fs_ntfs_rename: null or non-UTF-8 old_path");
-        return -1;
-    };
-    let Some(nb) = cstr_to_path(new_basename) else {
-        set_error("fs_ntfs_rename: null or non-UTF-8 new_basename");
-        return -1;
-    };
-    match write::rename(std::path::Path::new(img), op, nb) {
+    cstr_or_return!(image, "fs_ntfs_rename", "image", -1);
+    cstr_or_return!(old_path, "fs_ntfs_rename", "old_path", -1);
+    cstr_or_return!(new_basename, "fs_ntfs_rename", "new_basename", -1);
+    match write::rename(std::path::Path::new(image), old_path, new_basename) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -2815,24 +2665,12 @@ pub extern "C" fn fs_ntfs_rename_same_length(
     old_path: *const c_char,
     new_name: *const c_char,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_rename_same_length: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(op) = cstr_to_path(old_path) else {
-        set_error("fs_ntfs_rename_same_length: null or non-UTF-8 old_path");
-        return -1;
-    };
-    let Some(nn) = cstr_to_path(new_name) else {
-        set_error("fs_ntfs_rename_same_length: null or non-UTF-8 new_name");
-        return -1;
-    };
-    match write::rename_same_length(std::path::Path::new(img), op, nn) {
+    cstr_or_return!(image, "fs_ntfs_rename_same_length", "image", -1);
+    cstr_or_return!(old_path, "fs_ntfs_rename_same_length", "old_path", -1);
+    cstr_or_return!(new_name, "fs_ntfs_rename_same_length", "new_name", -1);
+    match write::rename_same_length(std::path::Path::new(image), old_path, new_name) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -2845,20 +2683,11 @@ pub extern "C" fn fs_ntfs_rename_same_length(
 /// Returns the new size on success, -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_grow(image: *const c_char, path: *const c_char, new_size: u64) -> i64 {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_grow: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(fp) = cstr_to_path(path) else {
-        set_error("fs_ntfs_grow: null or non-UTF-8 path");
-        return -1;
-    };
-    match write::grow_nonresident(std::path::Path::new(img), fp, new_size) {
+    cstr_or_return!(image, "fs_ntfs_grow", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_grow", "path", -1);
+    match write::grow_nonresident(std::path::Path::new(image), path, new_size) {
         Ok(n) => n as i64,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_i64(e),
     }
 }
 
@@ -2872,20 +2701,11 @@ pub extern "C" fn fs_ntfs_truncate(
     path: *const c_char,
     new_size: u64,
 ) -> i64 {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_truncate: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(fp) = cstr_to_path(path) else {
-        set_error("fs_ntfs_truncate: null or non-UTF-8 path");
-        return -1;
-    };
-    match write::truncate(std::path::Path::new(img), fp, new_size) {
+    cstr_or_return!(image, "fs_ntfs_truncate", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_truncate", "path", -1);
+    match write::truncate(std::path::Path::new(image), path, new_size) {
         Ok(n) => n as i64,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_i64(e),
     }
 }
 
@@ -2900,14 +2720,8 @@ pub extern "C" fn fs_ntfs_write_file(
     buf: *const c_void,
     len: u64,
 ) -> i64 {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_write_file: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(fp) = cstr_to_path(path) else {
-        set_error("fs_ntfs_write_file: null or non-UTF-8 path");
-        return -1;
-    };
+    cstr_or_return!(image, "fs_ntfs_write_file", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_write_file", "path", -1);
     if len == 0 {
         return 0;
     }
@@ -2916,12 +2730,9 @@ pub extern "C" fn fs_ntfs_write_file(
         return -1;
     }
     let data = unsafe { slice::from_raw_parts(buf as *const u8, len as usize) };
-    match write::write_at(std::path::Path::new(img), fp, offset, data) {
+    match write::write_at(std::path::Path::new(image), path, offset, data) {
         Ok(n) => n as i64,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_i64(e),
     }
 }
 
@@ -3092,27 +2903,18 @@ pub extern "C" fn fs_ntfs_set_file_attributes(
     add_flags: u32,
     remove_flags: u32,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_set_file_attributes: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(fp) = cstr_to_path(path) else {
-        set_error("fs_ntfs_set_file_attributes: null or non-UTF-8 path");
-        return -1;
-    };
+    cstr_or_return!(image, "fs_ntfs_set_file_attributes", "image", -1);
+    cstr_or_return!(path, "fs_ntfs_set_file_attributes", "path", -1);
     match write::set_file_attributes(
-        std::path::Path::new(img),
-        fp,
+        std::path::Path::new(image),
+        path,
         write::FileAttributesChange {
             add: add_flags,
             remove: remove_flags,
         },
     ) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -3155,23 +2957,14 @@ pub extern "C" fn fs_ntfs_create_file_h(
     parent_path: *const c_char,
     basename: *const c_char,
 ) -> i64 {
-    let Some(pp) = cstr_to_path(parent_path) else {
-        set_error("fs_ntfs_create_file_h: null or non-UTF-8 parent_path");
-        return -1;
-    };
-    let Some(bn) = cstr_to_path(basename) else {
-        set_error("fs_ntfs_create_file_h: null or non-UTF-8 basename");
-        return -1;
-    };
+    cstr_or_return!(parent_path, "fs_ntfs_create_file_h", "parent_path", -1);
+    cstr_or_return!(basename, "fs_ntfs_create_file_h", "basename", -1);
     let Ok(mut io) = handle_io_from_ptr(fs) else {
         return -1;
     };
-    match write::create_file_io(&mut io, pp, bn) {
+    match write::create_file_io(&mut io, parent_path, basename) {
         Ok(rn) => rn as i64,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_i64(e),
     }
 }
 
@@ -3183,10 +2976,7 @@ pub extern "C" fn fs_ntfs_write_file_contents_h(
     buf: *const c_void,
     len: u64,
 ) -> i64 {
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_write_file_contents_h: null or non-UTF-8 path");
-        return -1;
-    };
+    cstr_or_return!(path, "fs_ntfs_write_file_contents_h", "path", -1);
     let data: &[u8] = if len == 0 {
         &[]
     } else if buf.is_null() {
@@ -3198,31 +2988,22 @@ pub extern "C" fn fs_ntfs_write_file_contents_h(
     let Ok(mut io) = handle_io_from_ptr(fs) else {
         return -1;
     };
-    match write::write_file_contents_io(&mut io, p, data) {
+    match write::write_file_contents_io(&mut io, path, data) {
         Ok(n) => n as i64,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_i64(e),
     }
 }
 
 /// Handle-based [`fs_ntfs_unlink`].
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_unlink_h(fs: *mut FsNtfsHandle, path: *const c_char) -> c_int {
-    let Some(fp) = cstr_to_path(path) else {
-        set_error("fs_ntfs_unlink_h: null or non-UTF-8 path");
-        return -1;
-    };
+    cstr_or_return!(path, "fs_ntfs_unlink_h", "path", -1);
     let Ok(mut io) = handle_io_from_ptr(fs) else {
         return -1;
     };
-    match write::unlink_io(&mut io, fp) {
+    match write::unlink_io(&mut io, path) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -3233,23 +3014,14 @@ pub extern "C" fn fs_ntfs_rename_h(
     old_path: *const c_char,
     new_basename: *const c_char,
 ) -> c_int {
-    let Some(op) = cstr_to_path(old_path) else {
-        set_error("fs_ntfs_rename_h: null or non-UTF-8 old_path");
-        return -1;
-    };
-    let Some(nb) = cstr_to_path(new_basename) else {
-        set_error("fs_ntfs_rename_h: null or non-UTF-8 new_basename");
-        return -1;
-    };
+    cstr_or_return!(old_path, "fs_ntfs_rename_h", "old_path", -1);
+    cstr_or_return!(new_basename, "fs_ntfs_rename_h", "new_basename", -1);
     let Ok(mut io) = handle_io_from_ptr(fs) else {
         return -1;
     };
-    match write::rename_io(&mut io, op, nb) {
+    match write::rename_io(&mut io, old_path, new_basename) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -3260,42 +3032,27 @@ pub extern "C" fn fs_ntfs_mkdir_h(
     parent_path: *const c_char,
     basename: *const c_char,
 ) -> i64 {
-    let Some(pp) = cstr_to_path(parent_path) else {
-        set_error("fs_ntfs_mkdir_h: null or non-UTF-8 parent_path");
-        return -1;
-    };
-    let Some(bn) = cstr_to_path(basename) else {
-        set_error("fs_ntfs_mkdir_h: null or non-UTF-8 basename");
-        return -1;
-    };
+    cstr_or_return!(parent_path, "fs_ntfs_mkdir_h", "parent_path", -1);
+    cstr_or_return!(basename, "fs_ntfs_mkdir_h", "basename", -1);
     let Ok(mut io) = handle_io_from_ptr(fs) else {
         return -1;
     };
-    match write::mkdir_io(&mut io, pp, bn) {
+    match write::mkdir_io(&mut io, parent_path, basename) {
         Ok(rn) => rn as i64,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_i64(e),
     }
 }
 
 /// Handle-based [`fs_ntfs_rmdir`].
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_rmdir_h(fs: *mut FsNtfsHandle, path: *const c_char) -> c_int {
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_rmdir_h: null or non-UTF-8 path");
-        return -1;
-    };
+    cstr_or_return!(path, "fs_ntfs_rmdir_h", "path", -1);
     let Ok(mut io) = handle_io_from_ptr(fs) else {
         return -1;
     };
-    match write::rmdir_io(&mut io, p) {
+    match write::rmdir_io(&mut io, path) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -3306,19 +3063,13 @@ pub extern "C" fn fs_ntfs_truncate_h(
     path: *const c_char,
     new_size: u64,
 ) -> i64 {
-    let Some(fp) = cstr_to_path(path) else {
-        set_error("fs_ntfs_truncate_h: null or non-UTF-8 path");
-        return -1;
-    };
+    cstr_or_return!(path, "fs_ntfs_truncate_h", "path", -1);
     let Ok(mut io) = handle_io_from_ptr(fs) else {
         return -1;
     };
-    match write::truncate_io(&mut io, fp, new_size) {
+    match write::truncate_io(&mut io, path, new_size) {
         Ok(n) => n as i64,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_i64(e),
     }
 }
 
@@ -3332,10 +3083,7 @@ pub extern "C" fn fs_ntfs_set_times_h(
     mft_record_modification: *const i64,
     access: *const i64,
 ) -> c_int {
-    let Some(fp) = cstr_to_path(path) else {
-        set_error("fs_ntfs_set_times_h: null or non-UTF-8 path");
-        return -1;
-    };
+    cstr_or_return!(path, "fs_ntfs_set_times_h", "path", -1);
     let times = write::FileTimes {
         creation: unsafe { creation.as_ref() }.map(|v| *v as u64),
         modification: unsafe { modification.as_ref() }.map(|v| *v as u64),
@@ -3345,12 +3093,9 @@ pub extern "C" fn fs_ntfs_set_times_h(
     let Ok(mut io) = handle_io_from_ptr(fs) else {
         return -1;
     };
-    match write::set_times_io(&mut io, fp, times) {
+    match write::set_times_io(&mut io, path, times) {
         Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
@@ -3423,11 +3168,8 @@ pub extern "C" fn fs_ntfs_fsck(
     out_logfile_bytes: *mut u64,
     out_dirty_cleared: *mut u8,
 ) -> c_int {
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_fsck: null or non-UTF-8 path");
-        return -1;
-    };
-    match fsck::fsck(p) {
+    cstr_or_return!(path, "fs_ntfs_fsck", "path", -1);
+    match fsck::fsck(path) {
         Ok(report) => {
             if !out_logfile_bytes.is_null() {
                 unsafe { *out_logfile_bytes = report.logfile_bytes };
@@ -3437,10 +3179,7 @@ pub extern "C" fn fs_ntfs_fsck(
             }
             0
         }
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
+        Err(e) => err_int(e),
     }
 }
 
