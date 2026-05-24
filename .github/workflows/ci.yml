@@ -136,8 +136,8 @@ jobs:
   # ~3x slower than ubuntu-latest.
   #
   # Windows Mount-DiskImage doesn't accept raw .img files, so we wrap
-  # the binary's output in a VHDX container via qemu-img (called as a
-  # build-time tool only, never bundled or distributed).
+  # the binary's output in a VHD container via vhd_tool (from
+  # antimatter-studios/rust-img-vhd, an MIT-licensed in-house writer).
   #
   # Diagnostics are aggressive: we capture chkdsk's full output,
   # Get-Volume metadata, and fsutil dumps as artifacts on every run
@@ -159,12 +159,18 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
-      - name: Install qemu-img via choco
+      - name: Install vhd_tool from rust-img-vhd
+        # Builds the in-house VHD writer (~30 s with no cache). Pinning
+        # a SHA would be nicer but the repo is small and stable; HEAD
+        # of main is fine for CI. The binary lands in ~/.cargo/bin
+        # which is on PATH after dtolnay/rust-toolchain.
         shell: pwsh
-        run: choco install qemu-img -y --no-progress
+        run: |
+          git clone --depth 1 https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
+          cargo install --path $env:RUNNER_TEMP/rust-img-vhd --bin vhd_tool --locked
       - name: Build rust-ntfs (Windows)
         run: cargo build --release --bin rust-ntfs
-      - name: Generate raw image and wrap in GPT-partitioned VHDX
+      - name: Generate raw image and wrap in GPT-partitioned VHD
         shell: pwsh
         run: |
           # Generate the raw NTFS volume bytes via our binary.
@@ -178,9 +184,9 @@ jobs:
           ./target/release/rust-ntfs.exe format -L CITEST --serial deadbeefcafe1234 nfs.img
 
           # Dump the first 64 bytes of nfs.img BEFORE we wrap/write to the
-          # VHDX. This is the ground-truth view of what rust-ntfs format produced.
+          # VHD. This is the ground-truth view of what rust-ntfs format produced.
           # If this is correct but the post-remount read is wrong, the bug
-          # is in the VHDX/PhysicalDrive layer, not mkfs_ntfs. If it's
+          # is in the VHD/PhysicalDrive layer, not mkfs_ntfs. If it's
           # already wrong here, mkfs_ntfs itself produced a bad boot sector.
           New-Item -ItemType Directory -Path diag -Force | Out-Null
           $imgBytes = [System.IO.File]::ReadAllBytes("$pwd\nfs.img")
@@ -196,17 +202,19 @@ jobs:
           $bpbReport = "nfs.img BPB decode:`n  bytes_per_sector (0x0B): $bps`n  sectors_per_cluster (0x0D): $spc`n  total_sectors (0x28): $totalSectors`n  mft_lcn (0x30): $mftLcn"
           $bpbReport | Tee-Object diag/nfs-img-bpb.txt
 
-          # Why we DON'T just `qemu-img convert -O vhdx nfs.img out.vhdx`:
-          # Windows' VHDX mounting path REQUIRES a partition table. A
-          # raw NTFS volume at offset 0 (superfloppy layout) gets
-          # picked up correctly on physical media but VHDX-mounted
-          # disks don't go through the superfloppy auto-detection.
+          # Why we DON'T just convert nfs.img directly to a VHD wrapper
+          # without a partition table: Windows' Mount-DiskImage path
+          # REQUIRES a partition table on the wrapper. A raw NTFS volume
+          # at offset 0 (superfloppy layout) gets picked up correctly on
+          # physical media but disk-image mounts don't go through the
+          # superfloppy auto-detection.
           # Confirmed by run #25230496866's Get-Disk output:
           #   NumberOfPartitions: 0   PartitionStyle: MBR
-          # Windows saw our VHDX as "MBR disk with zero partitions",
-          # not "NTFS volume". No drive letter, no chkdsk possible.
+          # Windows saw the wrapped image as "MBR disk with zero
+          # partitions", not "NTFS volume". No drive letter, no chkdsk
+          # possible.
           #
-          # So we build a GPT-partitioned wrapper VHDX, mount it,
+          # So we build a GPT-partitioned wrapper VHD, mount it,
           # initialise + add one partition aligned to 1 MiB, then
           # dd our NTFS bytes into the partition's offset within
           # the disk. Windows on remount sees a real partitioned
@@ -214,24 +222,25 @@ jobs:
           # Same layout `diskutil eraseDisk` produces — closer to the
           # real shipping scenario too.
 
-          # Create an empty fixed VHDX with comfortable headroom over
+          # Create an empty fixed VHD with comfortable headroom over
           # the data partition. iter4 hit "specified offset is not valid"
           # when the wrapper was sized too tight against the partition's
-          # request — VHDX adds metadata overhead (log + BAT) on top of
-          # the virtual disk size, and Windows GPT itself reserves 33 LBA
-          # at each end. 384 MiB gives 256 MiB partition + slack with
-          # headroom to spare.
-          qemu-img create -f vhdx -o subformat=fixed wrapper.vhdx 384M
-          # Same sparse-attribute cleanup as before (qemu-img sets
-          # the NTFS host-FS sparse flag regardless of subformat).
-          fsutil sparse setflag wrapper.vhdx 0
+          # request — Windows GPT reserves 33 LBA at each end. 384 MiB
+          # gives 256 MiB partition + slack with headroom to spare.
+          # vhd_tool create-fixed takes raw bytes (no MB suffix).
+          $wrapperBytes = [int64](384MB)
+          vhd_tool create-fixed wrapper.vhd $wrapperBytes
+          # Strip the NTFS host-FS sparse flag in case the host carrier
+          # set it (harmless on the fixed VHD, kept for parity with
+          # the per-scenario matrix scripts).
+          fsutil sparse setflag wrapper.vhd 0
 
           # Echo file metrics for the log.
-          Get-Item nfs.img,wrapper.vhdx | Format-List Name,Length
+          Get-Item nfs.img,wrapper.vhd | Format-List Name,Length
 
           # Mount the empty wrapper, partition it, write our NTFS
           # bytes into the partition area, dismount.
-          $vhd = Mount-DiskImage -ImagePath "$pwd\wrapper.vhdx" -PassThru
+          $vhd = Mount-DiskImage -ImagePath "$pwd\wrapper.vhd" -PassThru
           Start-Sleep -Seconds 2
           Initialize-Disk -Number $vhd.Number -PartitionStyle GPT
           # Initialize-Disk completes async-ish: the LargestFreeExtent
@@ -295,8 +304,8 @@ jobs:
           # probe — Windows caches the "no partition recognized"
           # state from the empty mount, and only a remount makes it
           # re-scan the partition contents.
-          Dismount-DiskImage -ImagePath "$pwd\wrapper.vhdx" | Out-Null
-      - name: Mount VHDX and capture pre-chkdsk diagnostics
+          Dismount-DiskImage -ImagePath "$pwd\wrapper.vhd" | Out-Null
+      - name: Mount VHD and capture pre-chkdsk diagnostics
         id: mount
         shell: pwsh
         # Don't fail the step on individual cmdlet errors — fsutil reports
@@ -305,14 +314,14 @@ jobs:
         continue-on-error: true
         run: |
           # Same drive-letter discovery pattern as before (snapshot,
-          # mount, diff). The wrapper VHDX is GPT-partitioned with
+          # mount, diff). The wrapper VHD is GPT-partitioned with
           # one NTFS partition now, so Windows SHOULD assign a letter
           # promptly — but the snapshot-diff approach is robust to
           # both the partitioned and superfloppy layouts, so keep it.
           $lettersBefore = @((Get-Volume |
               Where-Object { $_.DriveLetter }).DriveLetter)
 
-          $vhd = Mount-DiskImage -ImagePath "$pwd\wrapper.vhdx" -PassThru
+          $vhd = Mount-DiskImage -ImagePath "$pwd\wrapper.vhd" -PassThru
 
           $letter = $null
           for ($i = 0; $i -lt 10; $i++) {
@@ -333,7 +342,7 @@ jobs:
 
           # Re-read the first 512 bytes at the partition offset post-remount
           # to verify the bytes actually persisted across dismount/remount.
-          # If this magic differs from pre-dismount, VHDX or Windows ate them.
+          # If this magic differs from pre-dismount, VHD or Windows ate them.
           $disk = Get-Disk -Number $vhd.Number
           $partition = Get-Partition -DiskNumber $disk.Number |
               Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
@@ -362,7 +371,7 @@ jobs:
           if (-not $letter) {
             # No auto-assignment — try forcing one before giving up.
             # Windows will sometimes leave a recognised volume unmapped
-            # when the disk is non-removable VHDX-backed.
+            # when the disk is non-removable VHD-backed.
             $partition = Get-Partition -DiskNumber $disk.Number |
                 Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
             if ($partition) {
@@ -393,7 +402,7 @@ jobs:
             Get-Volume | Format-List | Out-File diag/get-volume-on-failure.txt
             Get-Partition -ErrorAction SilentlyContinue | Format-List |
                 Out-File diag/get-partition-on-failure.txt
-            throw "wrapper VHDX mounted but no drive letter was assigned and Set-Partition fallback failed — Windows did not recognise the NTFS partition we wrote. See diag/ for storage state dumps."
+            throw "wrapper VHD mounted but no drive letter was assigned and Set-Partition fallback failed — Windows did not recognise the NTFS partition we wrote. See diag/ for storage state dumps."
           }
 
           Write-Host "Mounted at ${letter}:"
@@ -476,12 +485,13 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path diag -Force | Out-Null
           $rawSize = 256MB
-          # Create a second VHDX, partition it identically (GPT + 1 MiB
+          # Create a second VHD, partition it identically (GPT + 1 MiB
           # offset), but format with Microsoft's format.exe. Dismount it
           # while still mounted to capture pristine post-format bytes.
-          qemu-img create -f vhdx -o subformat=fixed reference.vhdx 384M
-          fsutil sparse setflag reference.vhdx 0
-          $refVhd = Mount-DiskImage -ImagePath "$pwd\reference.vhdx" -PassThru
+          $refWrapperBytes = [int64](384MB)
+          vhd_tool create-fixed reference.vhd $refWrapperBytes
+          fsutil sparse setflag reference.vhd 0
+          $refVhd = Mount-DiskImage -ImagePath "$pwd\reference.vhd" -PassThru
           Start-Sleep -Seconds 2
           Initialize-Disk -Number $refVhd.Number -PartitionStyle GPT
           Start-Sleep -Seconds 2
@@ -535,7 +545,7 @@ jobs:
           } catch {
               "Failed to read reference bytes: $_" | Out-File diag/reference-state.txt
           }
-          Dismount-DiskImage -ImagePath "$pwd\reference.vhdx" -ErrorAction SilentlyContinue | Out-Null
+          Dismount-DiskImage -ImagePath "$pwd\reference.vhd" -ErrorAction SilentlyContinue | Out-Null
 
           # Dump same ranges from our nfs.img (already on disk).
           $ourBytes = [System.IO.File]::ReadAllBytes("$pwd\nfs.img")
@@ -674,7 +684,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          Dismount-DiskImage -ImagePath "$pwd\wrapper.vhdx" -ErrorAction SilentlyContinue | Out-Null
+          Dismount-DiskImage -ImagePath "$pwd\wrapper.vhd" -ErrorAction SilentlyContinue | Out-Null
       - name: Upload diagnostics
         # Always upload — successful runs also benefit from having the
         # baseline metadata captured for cross-commit comparison.

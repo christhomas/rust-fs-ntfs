@@ -18,8 +18,9 @@ This doc describes the harness for that capture.
 
 - Windows 10/11.
 - PowerShell ≥ 5.
-- `qemu-img.exe` on PATH (`winget install cloudbase.qemu-img`).
-- Administrator (the script's VHDX mount + raw `\\.\PhysicalDrive`
+- `vhd_tool.exe` on PATH (installed by `scripts/setup-windows-vm.ps1`
+  via `cargo install` from `antimatter-studios/rust-img-vhd`).
+- Administrator (the script's VHD mount + raw `\\.\PhysicalDrive`
   write + ETW kernel-session start all need elevation).
 
 The capture itself is driven by `wpr.exe` (Windows Performance
@@ -120,7 +121,7 @@ To compare against Microsoft `format.com`:
 
 ```powershell
 # On the VM, format a reference volume identical to ours but with
-# Microsoft's own formatter. Re-use the wrapper VHDX dance from the
+# Microsoft's own formatter. Re-use the wrapper VHD dance from the
 # script — easiest is to copy procmon-chkdsk-trace.ps1 and swap
 # step 2's "write nfs.img" for "format with format.com after mount".
 ```

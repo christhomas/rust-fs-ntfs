@@ -13,16 +13,16 @@
 # and runs fine in any session.
 #
 # What it does:
-#   1. Wraps the caller-supplied `nfs.img` into a GPT-partitioned VHDX
-#      (same dance as .github/workflows/ci.yml -- Windows VHDX mount
-#      requires a partition table, not a superfloppy image).
-#   2. Mounts the VHDX, captures the assigned drive letter.
+#   1. Wraps the caller-supplied `nfs.img` into a GPT-partitioned VHD
+#      (Windows Mount-DiskImage requires a VHD/VHDX/ISO container with
+#      a partition table, not a superfloppy raw image).
+#   2. Mounts the VHD, captures the assigned drive letter.
 #   3. Starts wpr capture (DiskIO + FileIO profiles).
 #   4. Runs `chkdsk DRIVE:` (read-only) followed by `chkdsk DRIVE: /scan`.
 #   5. Stops wpr, writes the .etl trace.
 #   6. Converts the .etl to CSV via tracerpt.
 #   7. Post-filters the CSV down to chkdsk.exe events on the volume.
-#   8. Dismounts the VHDX.
+#   8. Dismounts the VHD.
 #
 # Output (in -OutDir):
 #   chkdsk-readonly.txt         -- stdout of `chkdsk DRIVE:`
@@ -34,9 +34,9 @@
 #   chkdsk-trace-summary.xml    -- tracerpt summary
 #   chkdsk-trace-filtered.csv   -- chkdsk.exe events only
 #
-# Requires: qemu-img on PATH (winget install cloudbase.qemu-img),
-# administrator privileges (for VHDX mount + raw PhysicalDrive write +
-# wpr's ETW session).
+# Requires: vhd_tool on PATH (installed by scripts/setup-windows-vm.ps1
+# via `cargo install` from antimatter-studios/rust-img-vhd), administrator
+# privileges (for VHD mount + raw PhysicalDrive write + wpr's ETW session).
 
 param(
     [Parameter(Mandatory=$true)][string]$Image,
@@ -54,20 +54,21 @@ $OutDir = (Resolve-Path $OutDir).Path
 $Image  = (Resolve-Path $Image).Path
 
 # ---------------------------------------------------------------------------
-# 1. Build the GPT-wrapped VHDX
+# 1. Build the GPT-wrapped VHD
 # ---------------------------------------------------------------------------
-Write-Host "[1/8] Building wrapper VHDX (${WrapperSizeMb} MiB GPT-partitioned)..."
-$Vhdx = Join-Path $OutDir "wrapper.vhdx"
+Write-Host "[1/8] Building wrapper VHD (${WrapperSizeMb} MiB GPT-partitioned)..."
+$VhdPath = Join-Path $OutDir "wrapper.vhd"
 # Clean up a leftover mount from an aborted previous run.
-if (Test-Path $Vhdx) {
-    Dismount-DiskImage -ImagePath $Vhdx -ErrorAction SilentlyContinue | Out-Null
-    Remove-Item $Vhdx -Force
+if (Test-Path $VhdPath) {
+    Dismount-DiskImage -ImagePath $VhdPath -ErrorAction SilentlyContinue | Out-Null
+    Remove-Item $VhdPath -Force
 }
 
-& qemu-img create -f vhdx -o subformat=fixed $Vhdx "${WrapperSizeMb}M" | Out-Null
-& fsutil sparse setflag $Vhdx 0 | Out-Null
+$wrapperSizeBytes = [int64]$WrapperSizeMb * 1MB
+& vhd_tool create-fixed $VhdPath $wrapperSizeBytes | Out-Null
+& fsutil sparse setflag $VhdPath 0 | Out-Null
 
-$Vhd = Mount-DiskImage -ImagePath $Vhdx -PassThru
+$Vhd = Mount-DiskImage -ImagePath $VhdPath -PassThru
 Start-Sleep -Seconds 2
 Initialize-Disk -Number $Vhd.Number -PartitionStyle GPT
 Start-Sleep -Seconds 2
@@ -88,14 +89,14 @@ try {
 } finally {
     $Fs.Close()
 }
-Dismount-DiskImage -ImagePath $Vhdx | Out-Null
+Dismount-DiskImage -ImagePath $VhdPath | Out-Null
 
 # ---------------------------------------------------------------------------
 # 2. Remount to get an assigned drive letter
 # ---------------------------------------------------------------------------
-Write-Host "[2/8] Remounting VHDX, waiting for drive-letter assignment..."
+Write-Host "[2/8] Remounting VHD, waiting for drive-letter assignment..."
 $LettersBefore = @((Get-Volume | Where-Object { $_.DriveLetter }).DriveLetter)
-$Vhd = Mount-DiskImage -ImagePath $Vhdx -PassThru
+$Vhd = Mount-DiskImage -ImagePath $VhdPath -PassThru
 $Letter = $null
 for ($i = 0; $i -lt 10; $i++) {
     Start-Sleep -Seconds 1
@@ -226,8 +227,8 @@ if (Test-Path $Csv) {
 # ---------------------------------------------------------------------------
 # 8. Dismount
 # ---------------------------------------------------------------------------
-Write-Host "[8/8] Dismounting wrapper VHDX..."
-Dismount-DiskImage -ImagePath $Vhdx -ErrorAction SilentlyContinue | Out-Null
+Write-Host "[8/8] Dismounting wrapper VHD..."
+Dismount-DiskImage -ImagePath $VhdPath -ErrorAction SilentlyContinue | Out-Null
 
 Write-Host ""
 Write-Host "Done. Output in $OutDir"
