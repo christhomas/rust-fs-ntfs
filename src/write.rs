@@ -1327,6 +1327,27 @@ pub fn list_eas_io<T: BlockIo + ?Sized>(
     crate::ea_io::read_from_record(&record)
 }
 
+/// Return just the key (name) bytes of every EA on `file_path`,
+/// preserving on-disk order. Useful for cheap enumeration when the
+/// caller only needs the names and would rather not pay for the
+/// values (which can be up to 64KB each).
+///
+/// EA names are byte-strings on disk (not strictly UTF-8) — they
+/// cannot contain NUL but otherwise carry arbitrary bytes. Callers
+/// that need UTF-8 should validate at the API boundary.
+pub fn list_ea_keys(image: &Path, file_path: &str) -> Result<Vec<Vec<u8>>, String> {
+    let mut io = PathIo::open_ro(image)?;
+    list_ea_keys_io(&mut io, file_path)
+}
+
+pub fn list_ea_keys_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+) -> Result<Vec<Vec<u8>>, String> {
+    let eas = list_eas_io(io, file_path)?;
+    Ok(eas.into_iter().map(|ea| ea.name).collect())
+}
+
 /// Rewrite `$EA` + `$EA_INFORMATION`. Empty list ⇒ both removed.
 fn commit_eas(record: &mut [u8], eas: &[crate::ea_io::Ea]) -> Result<(), String> {
     let packed = crate::ea_io::encode(eas)?;

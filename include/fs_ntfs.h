@@ -615,6 +615,27 @@ int fs_ntfs_remove_ea(const char *image, const char *path,
                       const char *ea_name);
 
 /*
+ * Enumerate the names (keys) of every Extended Attribute on `path`.
+ * Writes names as a sequence of NUL-terminated byte strings packed
+ * into out_buf (in on-disk order). EA names cannot contain NUL by
+ * the EA wire format, so the NUL terminator is unambiguous. Always
+ * writes the required total byte count to *out_total_len so callers
+ * can size-query (pass out_buf=NULL, out_buf_len=0).
+ *
+ * Returns:
+ *   N >= 0 — number of EAs (also = count of NUL terminators)
+ *   2      — at least one EA exists but out_buf_len was too small;
+ *            *out_total_len holds the required size, names not copied
+ *  -1      — error (see fs_ntfs_last_error)
+ *
+ * out_total_len must be non-NULL. out_buf may be NULL only when
+ * out_buf_len == 0.
+ */
+int fs_ntfs_list_ea_keys(const char *image, const char *path,
+                         char *out_buf, size_t out_buf_len,
+                         size_t *out_total_len);
+
+/*
  * Write a resident $REPARSE_POINT attribute with the given tag and
  * tag-specific data. Sets FILE_ATTRIBUTE_REPARSE_POINT on the file.
  * Returns 0 on success, -1 on error.
