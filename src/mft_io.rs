@@ -327,3 +327,244 @@ where
     io.sync()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_io::BlockIo;
+
+    /// In-memory `BlockIo` for tests. Tracks size so size()/read past-end
+    /// behave like a real file.
+    struct MemDev {
+        buf: Vec<u8>,
+    }
+    impl MemDev {
+        fn new(size: usize) -> Self {
+            Self {
+                buf: vec![0u8; size],
+            }
+        }
+    }
+    impl BlockIo for MemDev {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            let off = offset as usize;
+            if off + buf.len() > self.buf.len() {
+                return Err(format!("read past end: off={off} len={}", buf.len()));
+            }
+            buf.copy_from_slice(&self.buf[off..off + buf.len()]);
+            Ok(())
+        }
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            let off = offset as usize;
+            if off + buf.len() > self.buf.len() {
+                return Err(format!("write past end: off={off} len={}", buf.len()));
+            }
+            self.buf[off..off + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn size(&self) -> u64 {
+            self.buf.len() as u64
+        }
+    }
+
+    /// Synthesize a 512-byte NTFS boot sector with the four fields we
+    /// parse, plus the "NTFS    " magic so we don't trip the magic check
+    /// upstream (we don't check it here, but real boot sectors have it).
+    fn synth_boot(
+        bytes_per_sector: u16,
+        sectors_per_cluster: u8,
+        mft_lcn: u64,
+        clusters_per_mft_record: i8,
+    ) -> [u8; 512] {
+        let mut b = [0u8; 512];
+        b[3..11].copy_from_slice(b"NTFS    ");
+        b[0x0B..0x0D].copy_from_slice(&bytes_per_sector.to_le_bytes());
+        b[0x0D] = sectors_per_cluster;
+        b[0x30..0x38].copy_from_slice(&mft_lcn.to_le_bytes());
+        b[0x40] = clusters_per_mft_record as u8;
+        b
+    }
+
+    // --- boot params parsing -----------------------------------------------
+
+    #[test]
+    fn parse_boot_typical_512_8_4_neg10() {
+        // 512 bps, 8 spc → 4 KiB cluster, MFT at LCN 4, cpmr=-10 → 1024 records.
+        let boot = synth_boot(512, 8, 4, -10);
+        let bp = parse_boot_params_from_bytes(&boot).unwrap();
+        assert_eq!(bp.bytes_per_sector, 512);
+        assert_eq!(bp.sectors_per_cluster, 8);
+        assert_eq!(bp.cluster_size, 4096);
+        assert_eq!(bp.mft_lcn, 4);
+        assert_eq!(bp.file_record_size, 1024);
+    }
+
+    #[test]
+    fn parse_boot_positive_cpmr_means_cluster_count() {
+        // 4096 bps, 1 spc → 4 KiB cluster, cpmr=+1 → record = 1*cluster = 4096.
+        let boot = synth_boot(4096, 1, 0, 1);
+        let bp = parse_boot_params_from_bytes(&boot).unwrap();
+        assert_eq!(bp.file_record_size, 4096);
+    }
+
+    #[test]
+    fn parse_boot_negative_cpmr_means_power_of_two_bytes() {
+        // cpmr=-12 → record = 2^12 = 4096 bytes.
+        let boot = synth_boot(512, 8, 4, -12);
+        let bp = parse_boot_params_from_bytes(&boot).unwrap();
+        assert_eq!(bp.file_record_size, 4096);
+    }
+
+    #[test]
+    fn parse_boot_rejects_non_power_of_two_bytes_per_sector() {
+        let boot = synth_boot(513, 1, 0, -10);
+        let err = parse_boot_params_from_bytes(&boot).unwrap_err();
+        assert!(err.contains("not a power of two"), "{err}");
+    }
+
+    #[test]
+    fn parse_boot_rejects_record_size_out_of_plausible_range() {
+        // cpmr=-20 → 2^20 = 1 MiB record, refused as implausible.
+        let boot = synth_boot(512, 1, 0, -20);
+        let err = parse_boot_params_from_bytes(&boot).unwrap_err();
+        assert!(err.contains("out of plausible range"), "{err}");
+    }
+
+    #[test]
+    fn read_boot_params_via_block_io() {
+        let mut dev = MemDev::new(4096);
+        let boot = synth_boot(512, 8, 4, -10);
+        dev.write_all_at(0, &boot).unwrap();
+        let bp = read_boot_params_io(&mut dev).unwrap();
+        assert_eq!(bp.cluster_size, 4096);
+        assert_eq!(bp.file_record_size, 1024);
+    }
+
+    // --- mft_record_offset (pure arithmetic) -------------------------------
+
+    #[test]
+    fn mft_record_offset_record_0_is_mft_lcn_times_cluster_size() {
+        let p = BootParams {
+            bytes_per_sector: 512,
+            sectors_per_cluster: 8,
+            cluster_size: 4096,
+            mft_lcn: 4,
+            file_record_size: 1024,
+        };
+        assert_eq!(mft_record_offset(&p, 0), 4 * 4096);
+        assert_eq!(mft_record_offset(&p, 7), 4 * 4096 + 7 * 1024);
+    }
+
+    // --- record_flags ------------------------------------------------------
+
+    #[test]
+    fn record_flags_reads_u16_le_at_offset_0x16() {
+        let mut rec = vec![0u8; 64];
+        rec[0x16] = 0x03; // IN_USE + DIRECTORY
+        rec[0x17] = 0x00;
+        let flags = record_flags(&rec);
+        assert!(flags & MFT_FLAG_IN_USE != 0);
+        assert!(flags & MFT_FLAG_DIRECTORY != 0);
+    }
+
+    // --- USA fixup ---------------------------------------------------------
+
+    /// Synthesize a minimal FILE-magic'd 1024-byte record with 2 sectors
+    /// of 512 bytes each. Sets up USA header at 0x2A with count=3 (one
+    /// USN slot + 2 sector slots). Saved USA bytes are 0x00, sector-end
+    /// bytes are set to the USN (0x0001).
+    fn synth_fixup_record(usn: u16) -> Vec<u8> {
+        let mut rec = vec![0u8; 1024];
+        rec[0..4].copy_from_slice(b"FILE");
+        // USA offset = 0x2A, count = 3 (USN + 2 sectors).
+        rec[OFF_USA_OFFSET..OFF_USA_OFFSET + 2].copy_from_slice(&0x002Au16.to_le_bytes());
+        rec[OFF_USA_COUNT..OFF_USA_COUNT + 2].copy_from_slice(&0x0003u16.to_le_bytes());
+        // USN at 0x2A.
+        rec[0x2A..0x2C].copy_from_slice(&usn.to_le_bytes());
+        // saved sector-end bytes at 0x2C, 0x2E. Use 0xAA 0xAA / 0xBB 0xBB
+        // so the round-trip is non-trivially detectable.
+        rec[0x2C] = 0xAA;
+        rec[0x2D] = 0xAA;
+        rec[0x2E] = 0xBB;
+        rec[0x2F] = 0xBB;
+        // Sector-end pairs replaced with USN to match a freshly-written
+        // record (on-disk form).
+        rec[0x1FE..0x200].copy_from_slice(&usn.to_le_bytes());
+        rec[0x3FE..0x400].copy_from_slice(&usn.to_le_bytes());
+        rec
+    }
+
+    #[test]
+    fn fixup_on_read_restores_saved_sector_end_bytes() {
+        let mut rec = synth_fixup_record(0x0001);
+        apply_fixup_on_read(&mut rec, 512).unwrap();
+        // Sector ends restored from USA.
+        assert_eq!(&rec[0x1FE..0x200], &[0xAA, 0xAA]);
+        assert_eq!(&rec[0x3FE..0x400], &[0xBB, 0xBB]);
+    }
+
+    #[test]
+    fn fixup_write_then_read_round_trips_record_bytes() {
+        // Start from a clean (post-read) record: sector-ends hold the
+        // "real" data bytes.
+        let mut rec = vec![0u8; 1024];
+        rec[0..4].copy_from_slice(b"FILE");
+        rec[OFF_USA_OFFSET..OFF_USA_OFFSET + 2].copy_from_slice(&0x002Au16.to_le_bytes());
+        rec[OFF_USA_COUNT..OFF_USA_COUNT + 2].copy_from_slice(&0x0003u16.to_le_bytes());
+        rec[0x2A..0x2C].copy_from_slice(&0x0000u16.to_le_bytes());
+        // Put recognisable bytes at the sector ends.
+        rec[0x1FE] = 0x12;
+        rec[0x1FF] = 0x34;
+        rec[0x3FE] = 0x56;
+        rec[0x3FF] = 0x78;
+        let snapshot = rec.clone();
+
+        apply_fixup_on_write(&mut rec, 512).unwrap();
+        // USN bumped from 0 → 1, sector ends overwritten with USN.
+        assert_eq!(rec[0x1FE], 0x01);
+        assert_eq!(rec[0x1FF], 0x00);
+
+        apply_fixup_on_read(&mut rec, 512).unwrap();
+        // Original sector-end bytes restored.
+        assert_eq!(rec[0x1FE..0x200], snapshot[0x1FE..0x200]);
+        assert_eq!(rec[0x3FE..0x400], snapshot[0x3FE..0x400]);
+    }
+
+    #[test]
+    fn fixup_write_skips_usn_value_zero() {
+        // Pre-set USN to 0xFFFF so bump wraps to 0; must skip to 1.
+        let mut rec = vec![0u8; 1024];
+        rec[0..4].copy_from_slice(b"FILE");
+        rec[OFF_USA_OFFSET..OFF_USA_OFFSET + 2].copy_from_slice(&0x002Au16.to_le_bytes());
+        rec[OFF_USA_COUNT..OFF_USA_COUNT + 2].copy_from_slice(&0x0003u16.to_le_bytes());
+        rec[0x2A..0x2C].copy_from_slice(&0xFFFFu16.to_le_bytes());
+
+        apply_fixup_on_write(&mut rec, 512).unwrap();
+        let new_usn = u16::from_le_bytes([rec[0x2A], rec[0x2B]]);
+        assert_eq!(new_usn, 1, "USN must skip 0 on wraparound");
+    }
+
+    #[test]
+    fn fixup_on_read_rejects_usn_mismatch() {
+        let mut rec = synth_fixup_record(0x0001);
+        // Corrupt one sector end so it doesn't match USN.
+        rec[0x1FF] = 0x99;
+        let err = apply_fixup_on_read(&mut rec, 512).unwrap_err();
+        assert!(err.contains("USN mismatch"), "{err}");
+    }
+
+    #[test]
+    fn fixup_rejects_wrong_magic() {
+        let mut rec = synth_fixup_record(0x0001);
+        rec[0..4].copy_from_slice(b"XXXX");
+        let err = apply_fixup_on_read(&mut rec, 512).unwrap_err();
+        assert!(err.contains("magic mismatch"), "{err}");
+    }
+
+    #[test]
+    fn fixup_works_on_indx_magic() {
+        let mut rec = synth_fixup_record(0x0001);
+        rec[0..4].copy_from_slice(b"INDX");
+        apply_fixup_on_read_magic(&mut rec, 512, b"INDX").unwrap();
+    }
+}

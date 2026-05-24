@@ -361,3 +361,181 @@ pub fn is_allocated_io<T: BlockIo + ?Sized>(
     let bytes = read_bitmap_bytes_io(io, bm, byte_idx, 1)?;
     Ok((bytes[0] >> bit) & 1 != 0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_io::BlockIo;
+
+    struct MemDev {
+        buf: Vec<u8>,
+    }
+    impl MemDev {
+        fn new(size: usize) -> Self {
+            Self {
+                buf: vec![0u8; size],
+            }
+        }
+    }
+    impl BlockIo for MemDev {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            let off = offset as usize;
+            if off + buf.len() > self.buf.len() {
+                return Err("read past end".into());
+            }
+            buf.copy_from_slice(&self.buf[off..off + buf.len()]);
+            Ok(())
+        }
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            let off = offset as usize;
+            if off + buf.len() > self.buf.len() {
+                return Err("write past end".into());
+            }
+            self.buf[off..off + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn size(&self) -> u64 {
+            self.buf.len() as u64
+        }
+    }
+
+    /// Build a `BitmapLocation` pointing to a single contiguous run
+    /// starting at LCN 1 (= file offset = cluster_size). Bitmap covers
+    /// `n_bytes` of $Bitmap data ⇒ `n_bytes*8` clusters total.
+    fn make_bm(cluster_size: u64, n_bytes: u64) -> BitmapLocation {
+        BitmapLocation {
+            params: BootParams {
+                bytes_per_sector: 512,
+                sectors_per_cluster: cluster_size / 512,
+                cluster_size,
+                mft_lcn: 0,
+                file_record_size: 1024,
+            },
+            // One run: bitmap lives at LCN 1, one cluster's worth.
+            runs: vec![DataRun {
+                starting_vcn: 0,
+                length: 1,
+                lcn: Some(1),
+            }],
+            total_bits: n_bytes * 8,
+            value_length: n_bytes,
+        }
+    }
+
+    // --- is_allocated_io ---------------------------------------------------
+
+    #[test]
+    fn is_allocated_io_reads_set_bit_as_true() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4); // 4 bytes ⇒ 32 clusters total.
+                                   // Set bit 5 of byte 0 (cluster 5) in the bitmap (stored at offset 4096).
+        dev.buf[4096] = 0b0010_0000;
+        assert!(is_allocated_io(&mut dev, &bm, 5).unwrap());
+        assert!(!is_allocated_io(&mut dev, &bm, 4).unwrap());
+        assert!(!is_allocated_io(&mut dev, &bm, 6).unwrap());
+    }
+
+    #[test]
+    fn is_allocated_io_out_of_range_errors() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4);
+        let err = is_allocated_io(&mut dev, &bm, 32).unwrap_err();
+        assert!(err.contains("out of range"), "{err}");
+    }
+
+    // --- allocate_io / free_io --------------------------------------------
+
+    #[test]
+    fn allocate_io_sets_bits_in_range() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4);
+        allocate_io(&mut dev, &bm, 3, 5).unwrap();
+        for lcn in 3..8 {
+            assert!(is_allocated_io(&mut dev, &bm, lcn).unwrap(), "lcn {lcn}");
+        }
+        // Neighbours untouched.
+        assert!(!is_allocated_io(&mut dev, &bm, 2).unwrap());
+        assert!(!is_allocated_io(&mut dev, &bm, 8).unwrap());
+    }
+
+    #[test]
+    fn allocate_io_rejects_already_allocated_cluster() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4);
+        allocate_io(&mut dev, &bm, 5, 1).unwrap();
+        let err = allocate_io(&mut dev, &bm, 5, 1).unwrap_err();
+        assert!(err.contains("already allocated"), "{err}");
+    }
+
+    #[test]
+    fn free_io_clears_bits_in_range() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4);
+        allocate_io(&mut dev, &bm, 0, 16).unwrap();
+        free_io(&mut dev, &bm, 4, 8).unwrap();
+        for lcn in 0..4 {
+            assert!(is_allocated_io(&mut dev, &bm, lcn).unwrap());
+        }
+        for lcn in 4..12 {
+            assert!(!is_allocated_io(&mut dev, &bm, lcn).unwrap());
+        }
+        for lcn in 12..16 {
+            assert!(is_allocated_io(&mut dev, &bm, lcn).unwrap());
+        }
+    }
+
+    #[test]
+    fn free_io_rejects_already_free_cluster() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4);
+        let err = free_io(&mut dev, &bm, 5, 1).unwrap_err();
+        assert!(err.contains("already free"), "{err}");
+    }
+
+    // --- count_free_io -----------------------------------------------------
+
+    #[test]
+    fn count_free_io_reports_zeros_minus_ones() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4);
+        // 32 total bits. Allocate 11.
+        allocate_io(&mut dev, &bm, 0, 11).unwrap();
+        assert_eq!(count_free_io(&mut dev, &bm).unwrap(), 32 - 11);
+    }
+
+    // --- find_free_run_io --------------------------------------------------
+
+    #[test]
+    fn find_free_run_io_picks_first_fit_starting_at_hint() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4);
+        // Allocate clusters 0..10, leaving 10..32 free.
+        allocate_io(&mut dev, &bm, 0, 10).unwrap();
+        // Looking for 4 contiguous starting from hint=0 → must land at 10.
+        let lcn = find_free_run_io(&mut dev, &bm, 4, 0).unwrap();
+        assert_eq!(lcn, Some(10));
+    }
+
+    #[test]
+    fn find_free_run_io_returns_none_if_not_enough_contiguous_free() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4);
+        // Allocate every other cluster — no 2-contiguous run available.
+        for lcn in (0..32).step_by(2) {
+            allocate_io(&mut dev, &bm, lcn, 1).unwrap();
+        }
+        let res = find_free_run_io(&mut dev, &bm, 2, 0).unwrap();
+        assert_eq!(res, None);
+    }
+
+    #[test]
+    fn find_free_run_io_wraps_around_to_below_hint() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4);
+        // Free clusters only in [0..3); past 3 everything allocated.
+        allocate_io(&mut dev, &bm, 3, 29).unwrap();
+        // Hint at end of bitmap; should wrap and find free run at 0.
+        let lcn = find_free_run_io(&mut dev, &bm, 2, 25).unwrap();
+        assert_eq!(lcn, Some(0));
+    }
+}

@@ -220,3 +220,255 @@ pub fn range_has_hole_or_past_end(runs: &[DataRun], vcn_start: u64, n_clusters: 
     }
     covered_to < end
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- decode_runs: happy paths ------------------------------------------
+
+    #[test]
+    fn decode_empty_terminator_returns_no_runs() {
+        assert_eq!(decode_runs(&[0x00]).unwrap(), Vec::<DataRun>::new());
+    }
+
+    #[test]
+    fn decode_single_run_one_cluster_at_lcn_0() {
+        // header 0x11 = 1 lcn byte, 1 length byte. length=1, lcn=0.
+        let bytes = [0x11, 0x01, 0x00, 0x00];
+        let runs = decode_runs(&bytes).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0],
+            DataRun {
+                starting_vcn: 0,
+                length: 1,
+                lcn: Some(0),
+            }
+        );
+    }
+
+    #[test]
+    fn decode_two_runs_with_positive_lcn_delta() {
+        // run0: length=2, lcn=5; run1: length=3, lcn=5+10=15.
+        let bytes = [0x11, 0x02, 0x05, 0x11, 0x03, 0x0A, 0x00];
+        let runs = decode_runs(&bytes).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].starting_vcn, 0);
+        assert_eq!(runs[0].length, 2);
+        assert_eq!(runs[0].lcn, Some(5));
+        assert_eq!(runs[1].starting_vcn, 2);
+        assert_eq!(runs[1].length, 3);
+        assert_eq!(runs[1].lcn, Some(15));
+    }
+
+    #[test]
+    fn decode_sparse_run_lcn_is_none() {
+        // header 0x01 = 0 lcn bytes, 1 length byte ⇒ sparse hole.
+        let bytes = [0x01, 0x05, 0x00];
+        let runs = decode_runs(&bytes).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].length, 5);
+        assert_eq!(runs[0].lcn, None);
+    }
+
+    #[test]
+    fn decode_negative_lcn_delta_sign_extends() {
+        // run0: length=2, lcn=100 (1 byte 0x64).
+        // run1: length=2, lcn=100 + (-10) = 90 (1 signed byte 0xF6).
+        let bytes = [0x11, 0x02, 0x64, 0x11, 0x02, 0xF6, 0x00];
+        let runs = decode_runs(&bytes).unwrap();
+        assert_eq!(runs[1].lcn, Some(90));
+    }
+
+    // --- decode_runs: errors -----------------------------------------------
+
+    #[test]
+    fn decode_rejects_zero_length_bytes_header() {
+        // header 0x10 = 1 lcn byte, 0 length bytes.
+        let err = decode_runs(&[0x10, 0x00]).unwrap_err();
+        assert!(err.contains("length-byte-count is zero"), "{err}");
+    }
+
+    #[test]
+    fn decode_rejects_zero_cluster_length() {
+        // header 0x11, length-byte = 0 ⇒ run of zero clusters.
+        let err = decode_runs(&[0x11, 0x00, 0x05]).unwrap_err();
+        assert!(err.contains("zero-cluster length"), "{err}");
+    }
+
+    #[test]
+    fn decode_rejects_header_extending_past_data() {
+        // header says we need 2+2 bytes but only 1 follows.
+        let err = decode_runs(&[0x22, 0xFF]).unwrap_err();
+        assert!(err.contains("extends past data"), "{err}");
+    }
+
+    #[test]
+    fn decode_rejects_run_landing_at_negative_absolute_lcn() {
+        // First run sets prev_lcn=10. Second run delta = -100 ⇒ -90.
+        let bytes = [0x11, 0x01, 0x0A, 0x11, 0x01, 0x9C, 0x00];
+        let err = decode_runs(&bytes).unwrap_err();
+        assert!(err.contains("negative absolute LCN"), "{err}");
+    }
+
+    // --- encode_runs: happy paths + round-trip -----------------------------
+
+    #[test]
+    fn encode_decode_round_trip_single_run() {
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 7,
+            lcn: Some(42),
+        }];
+        let encoded = encode_runs(&runs).unwrap();
+        let decoded = decode_runs(&encoded).unwrap();
+        assert_eq!(decoded, runs);
+    }
+
+    #[test]
+    fn encode_decode_round_trip_multi_run_with_sparse() {
+        let runs = vec![
+            DataRun {
+                starting_vcn: 0,
+                length: 4,
+                lcn: Some(100),
+            },
+            DataRun {
+                starting_vcn: 4,
+                length: 8,
+                lcn: None,
+            },
+            DataRun {
+                starting_vcn: 12,
+                length: 2,
+                lcn: Some(120),
+            },
+        ];
+        let encoded = encode_runs(&runs).unwrap();
+        let decoded = decode_runs(&encoded).unwrap();
+        assert_eq!(decoded, runs);
+    }
+
+    #[test]
+    fn encode_rejects_vcn_gap_between_runs() {
+        let runs = vec![
+            DataRun {
+                starting_vcn: 0,
+                length: 2,
+                lcn: Some(10),
+            },
+            DataRun {
+                starting_vcn: 5,
+                length: 1,
+                lcn: Some(20),
+            },
+        ];
+        let err = encode_runs(&runs).unwrap_err();
+        assert!(err.contains("starts at VCN"), "{err}");
+    }
+
+    #[test]
+    fn encode_rejects_zero_length_run() {
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 0,
+            lcn: Some(0),
+        }];
+        let err = encode_runs(&runs).unwrap_err();
+        assert!(err.contains("zero length"), "{err}");
+    }
+
+    // Regression: length 0x8000 (= 32768) must encode with 3 bytes, not
+    // 2 — sign-extension would otherwise read it back as -32768. See
+    // the "Event ID 55 against $BadClus" history in encode_runs's
+    // doc-comment. This pins the fix.
+    #[test]
+    fn encode_length_32768_uses_three_bytes_not_two() {
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 0x8000,
+            lcn: Some(0),
+        }];
+        let encoded = encode_runs(&runs).unwrap();
+        // header byte + 3 length bytes (sign-extended) + 1 lcn byte + 0x00.
+        // header low nibble = 3 (length bytes), high nibble = 1 (lcn byte).
+        assert_eq!(encoded[0], 0x13, "header was {:#04x}", encoded[0]);
+        // Round-trip must give back exactly 0x8000.
+        let decoded = decode_runs(&encoded).unwrap();
+        assert_eq!(decoded[0].length, 0x8000);
+    }
+
+    // --- vcn_to_lcn --------------------------------------------------------
+
+    #[test]
+    fn vcn_to_lcn_inside_first_run() {
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 10,
+            lcn: Some(100),
+        }];
+        assert_eq!(vcn_to_lcn(&runs, 0), Some(100));
+        assert_eq!(vcn_to_lcn(&runs, 5), Some(105));
+        assert_eq!(vcn_to_lcn(&runs, 9), Some(109));
+    }
+
+    #[test]
+    fn vcn_to_lcn_in_sparse_hole_is_none() {
+        let runs = vec![
+            DataRun {
+                starting_vcn: 0,
+                length: 2,
+                lcn: Some(100),
+            },
+            DataRun {
+                starting_vcn: 2,
+                length: 5,
+                lcn: None,
+            },
+        ];
+        assert_eq!(vcn_to_lcn(&runs, 1), Some(101));
+        assert_eq!(vcn_to_lcn(&runs, 3), None);
+        // Past end of all runs.
+        assert_eq!(vcn_to_lcn(&runs, 100), None);
+    }
+
+    // --- range_has_hole_or_past_end ----------------------------------------
+
+    #[test]
+    fn range_fully_inside_allocated_run_has_no_hole() {
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 10,
+            lcn: Some(100),
+        }];
+        assert!(!range_has_hole_or_past_end(&runs, 2, 5));
+    }
+
+    #[test]
+    fn range_straddling_sparse_run_has_hole() {
+        let runs = vec![
+            DataRun {
+                starting_vcn: 0,
+                length: 4,
+                lcn: Some(100),
+            },
+            DataRun {
+                starting_vcn: 4,
+                length: 2,
+                lcn: None,
+            },
+        ];
+        assert!(range_has_hole_or_past_end(&runs, 3, 2));
+    }
+
+    #[test]
+    fn range_past_end_of_runs_is_hole() {
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 4,
+            lcn: Some(100),
+        }];
+        assert!(range_has_hole_or_past_end(&runs, 2, 5));
+    }
+}

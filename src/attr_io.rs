@@ -379,3 +379,255 @@ pub fn resident_value_start(loc: &AttrLocation) -> Option<usize> {
     loc.resident_value_offset
         .map(|off| loc.attr_offset + off as usize)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builder for a synthetic MFT record with manually-placed attributes.
+    /// Sets attrs_offset, bytes_used, and the 0xFFFFFFFF terminator. Does
+    /// NOT include FILE magic or USA fixup — those live in `mft_io`; this
+    /// is purely a fixture for the attribute walker.
+    struct RecordBuilder {
+        rec: Vec<u8>,
+        cursor: usize,
+    }
+    impl RecordBuilder {
+        fn new(size: usize, attrs_offset: u16) -> Self {
+            let mut rec = vec![0u8; size];
+            rec[REC_OFF_ATTRS_OFFSET..REC_OFF_ATTRS_OFFSET + 2]
+                .copy_from_slice(&attrs_offset.to_le_bytes());
+            Self {
+                rec,
+                cursor: attrs_offset as usize,
+            }
+        }
+        /// Append a minimal resident attribute. Returns self for chaining.
+        fn push_resident(
+            mut self,
+            type_code: u32,
+            attr_id: u16,
+            value: &[u8],
+            name_utf16: &[u16],
+        ) -> Self {
+            let header_size = 24usize; // up through value_offset
+            let name_size = name_utf16.len() * 2;
+            let value_offset = header_size + name_size;
+            let total_unaligned = value_offset + value.len();
+            let total = (total_unaligned + 7) & !7; // 8-byte align
+            let start = self.cursor;
+            // Header
+            self.rec[start..start + 4].copy_from_slice(&type_code.to_le_bytes());
+            self.rec[start + attr_off::LENGTH..start + attr_off::LENGTH + 4]
+                .copy_from_slice(&(total as u32).to_le_bytes());
+            self.rec[start + attr_off::NON_RESIDENT] = 0;
+            self.rec[start + attr_off::NAME_LENGTH] = name_utf16.len() as u8;
+            self.rec[start + attr_off::NAME_OFFSET..start + attr_off::NAME_OFFSET + 2]
+                .copy_from_slice(&(header_size as u16).to_le_bytes());
+            self.rec[start + attr_off::ATTRIBUTE_ID..start + attr_off::ATTRIBUTE_ID + 2]
+                .copy_from_slice(&attr_id.to_le_bytes());
+            self.rec[start + attr_off::RESIDENT_VALUE_LENGTH
+                ..start + attr_off::RESIDENT_VALUE_LENGTH + 4]
+                .copy_from_slice(&(value.len() as u32).to_le_bytes());
+            self.rec[start + attr_off::RESIDENT_VALUE_OFFSET
+                ..start + attr_off::RESIDENT_VALUE_OFFSET + 2]
+                .copy_from_slice(&(value_offset as u16).to_le_bytes());
+            // Name bytes
+            for (i, &codeunit) in name_utf16.iter().enumerate() {
+                self.rec[start + header_size + i * 2..start + header_size + i * 2 + 2]
+                    .copy_from_slice(&codeunit.to_le_bytes());
+            }
+            // Value bytes
+            self.rec[start + value_offset..start + value_offset + value.len()]
+                .copy_from_slice(value);
+            self.cursor = start + total;
+            self
+        }
+        /// Append a minimal non-resident attribute with the given data
+        /// length and mapping_pairs blob.
+        fn push_nonresident(
+            mut self,
+            type_code: u32,
+            data_length: u64,
+            mapping_pairs: &[u8],
+        ) -> Self {
+            let header_size = 64usize; // non-resident header is 64 bytes
+            let mp_offset = header_size;
+            let total_unaligned = mp_offset + mapping_pairs.len();
+            let total = (total_unaligned + 7) & !7;
+            let start = self.cursor;
+            self.rec[start..start + 4].copy_from_slice(&type_code.to_le_bytes());
+            self.rec[start + attr_off::LENGTH..start + attr_off::LENGTH + 4]
+                .copy_from_slice(&(total as u32).to_le_bytes());
+            self.rec[start + attr_off::NON_RESIDENT] = 1;
+            self.rec[start + attr_off::NAME_LENGTH] = 0;
+            self.rec[start + attr_off::NAME_OFFSET..start + attr_off::NAME_OFFSET + 2]
+                .copy_from_slice(&0u16.to_le_bytes());
+            self.rec
+                [start + attr_off::NONRES_DATA_LENGTH..start + attr_off::NONRES_DATA_LENGTH + 8]
+                .copy_from_slice(&data_length.to_le_bytes());
+            self.rec[start + attr_off::NONRES_MAPPING_PAIRS_OFFSET
+                ..start + attr_off::NONRES_MAPPING_PAIRS_OFFSET + 2]
+                .copy_from_slice(&(mp_offset as u16).to_le_bytes());
+            self.rec[start + mp_offset..start + mp_offset + mapping_pairs.len()]
+                .copy_from_slice(mapping_pairs);
+            self.cursor = start + total;
+            self
+        }
+        fn finish(mut self) -> Vec<u8> {
+            // 0xFFFFFFFF end marker.
+            self.rec[self.cursor..self.cursor + 4].copy_from_slice(&END_MARKER.to_le_bytes());
+            // bytes_used = cursor + 4 (the end marker).
+            let bu = (self.cursor + 4) as u32;
+            self.rec[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4].copy_from_slice(&bu.to_le_bytes());
+            self.rec
+        }
+    }
+
+    // --- AttrType::from_u32 ------------------------------------------------
+
+    #[test]
+    fn attr_type_from_u32_known_values() {
+        assert_eq!(
+            AttrType::from_u32(0x10),
+            Some(AttrType::StandardInformation)
+        );
+        assert_eq!(AttrType::from_u32(0x30), Some(AttrType::FileName));
+        assert_eq!(AttrType::from_u32(0x80), Some(AttrType::Data));
+        assert_eq!(AttrType::from_u32(0xE0), Some(AttrType::ExtendedAttribute));
+        assert_eq!(AttrType::from_u32(0xFF), None);
+        assert_eq!(AttrType::from_u32(0), None);
+    }
+
+    // --- iter_attributes ---------------------------------------------------
+
+    #[test]
+    fn iter_empty_record_yields_no_attributes() {
+        let rec = RecordBuilder::new(1024, 0x38).finish();
+        let attrs: Vec<_> = iter_attributes(&rec).collect();
+        assert!(attrs.is_empty());
+    }
+
+    #[test]
+    fn iter_record_with_one_resident_attribute() {
+        let rec = RecordBuilder::new(1024, 0x38)
+            .push_resident(AttrType::StandardInformation as u32, 0, b"hello", &[])
+            .finish();
+        let attrs: Vec<_> = iter_attributes(&rec).collect();
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0].type_code, 0x10);
+        assert!(attrs[0].is_resident);
+        assert_eq!(attrs[0].resident_value_length, Some(5));
+        let val_start = attrs[0].attr_offset + attrs[0].resident_value_offset.unwrap() as usize;
+        assert_eq!(&rec[val_start..val_start + 5], b"hello");
+    }
+
+    #[test]
+    fn iter_record_with_multiple_attributes() {
+        let rec = RecordBuilder::new(1024, 0x38)
+            .push_resident(AttrType::StandardInformation as u32, 0, &[0; 48], &[])
+            .push_resident(AttrType::FileName as u32, 1, &[0; 16], &[])
+            .push_resident(AttrType::Data as u32, 2, b"\x01\x02\x03", &[])
+            .finish();
+        let attrs: Vec<_> = iter_attributes(&rec).collect();
+        assert_eq!(attrs.len(), 3);
+        let codes: Vec<u32> = attrs.iter().map(|a| a.type_code).collect();
+        assert_eq!(codes, vec![0x10, 0x30, 0x80]);
+    }
+
+    #[test]
+    fn iter_stops_at_end_marker() {
+        // After a manual 0xFFFFFFFF, no further iteration even if more
+        // bytes follow.
+        let rec = RecordBuilder::new(1024, 0x38)
+            .push_resident(AttrType::StandardInformation as u32, 0, b"x", &[])
+            .finish();
+        // Mess up bytes past the end marker — iter_attributes must not
+        // touch them.
+        let mut rec = rec;
+        let bu = u32::from_le_bytes([
+            rec[REC_OFF_BYTES_USED],
+            rec[REC_OFF_BYTES_USED + 1],
+            rec[REC_OFF_BYTES_USED + 2],
+            rec[REC_OFF_BYTES_USED + 3],
+        ]) as usize;
+        rec[bu..bu + 4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let attrs: Vec<_> = iter_attributes(&rec).collect();
+        assert_eq!(attrs.len(), 1);
+    }
+
+    #[test]
+    fn iter_rejects_attr_length_not_multiple_of_8() {
+        // Build a record then corrupt one attribute's length to 5.
+        let mut rec = RecordBuilder::new(1024, 0x38)
+            .push_resident(AttrType::StandardInformation as u32, 0, b"x", &[])
+            .finish();
+        let start = 0x38;
+        rec[start + attr_off::LENGTH..start + attr_off::LENGTH + 4]
+            .copy_from_slice(&5u32.to_le_bytes());
+        let attrs: Vec<_> = iter_attributes(&rec).collect();
+        assert_eq!(attrs.len(), 0, "iterator must stop on malformed length");
+    }
+
+    // --- find_attribute ----------------------------------------------------
+
+    #[test]
+    fn find_attribute_by_type_returns_first_match() {
+        let rec = RecordBuilder::new(1024, 0x38)
+            .push_resident(AttrType::StandardInformation as u32, 0, &[0; 48], &[])
+            .push_resident(AttrType::FileName as u32, 1, &[0; 16], &[])
+            .finish();
+        let si = find_attribute(&rec, AttrType::StandardInformation, None).unwrap();
+        assert_eq!(si.type_code, 0x10);
+        let fname = find_attribute(&rec, AttrType::FileName, None).unwrap();
+        assert_eq!(fname.type_code, 0x30);
+    }
+
+    #[test]
+    fn find_attribute_returns_none_when_absent() {
+        let rec = RecordBuilder::new(1024, 0x38)
+            .push_resident(AttrType::StandardInformation as u32, 0, b"x", &[])
+            .finish();
+        assert!(find_attribute(&rec, AttrType::Data, None).is_none());
+    }
+
+    #[test]
+    fn find_attribute_by_name_matches_utf16_name() {
+        // Build an attribute with name "$I30" (4 UTF-16 code units).
+        let name = [0x0024, 0x0049, 0x0033, 0x0030u16]; // "$I30"
+        let rec = RecordBuilder::new(1024, 0x38)
+            .push_resident(AttrType::IndexRoot as u32, 0, b"data", &name)
+            .finish();
+        let found = find_attribute(&rec, AttrType::IndexRoot, Some("$I30")).unwrap();
+        assert_eq!(found.name_length, 4);
+        assert!(find_attribute(&rec, AttrType::IndexRoot, Some("$WRONG")).is_none());
+    }
+
+    // --- non-resident iteration -------------------------------------------
+
+    #[test]
+    fn iter_returns_nonresident_data_length_and_mapping_pairs_offset() {
+        // mapping pairs: one run of length=2, lcn=5.
+        let mp = [0x11, 0x02, 0x05, 0x00];
+        let rec = RecordBuilder::new(1024, 0x38)
+            .push_nonresident(AttrType::Data as u32, 8192, &mp)
+            .finish();
+        let attrs: Vec<_> = iter_attributes(&rec).collect();
+        assert_eq!(attrs.len(), 1);
+        assert!(!attrs[0].is_resident);
+        assert_eq!(attrs[0].non_resident_value_length, Some(8192));
+        assert_eq!(attrs[0].non_resident_mapping_pairs_offset, Some(64));
+    }
+
+    // --- attr_name_equals --------------------------------------------------
+
+    #[test]
+    fn attr_name_equals_empty_name_only_matches_empty_string() {
+        let rec = RecordBuilder::new(1024, 0x38)
+            .push_resident(AttrType::Data as u32, 0, b"x", &[])
+            .finish();
+        let loc = iter_attributes(&rec).next().unwrap();
+        assert!(attr_name_equals(&rec, &loc, ""));
+        assert!(!attr_name_equals(&rec, &loc, "anything"));
+    }
+}
