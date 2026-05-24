@@ -582,9 +582,9 @@ mixed-Unicode (BMP + non-BMP), upstream remount after write and
 after remove, plus C-ABI parallels. No on-disk format change
 beyond what mkfs already produces.
 
-### §3.11 Diagnostic-helper read APIs — shipped (2026-05-23)
+### §3.11 Diagnostic-helper read APIs — shipped (2026-05-23, extended 2026-05-24)
 
-A family of read-only helpers added during this session to
+A family of read-only helpers added during these sessions to
 support byte-diff investigations (S4 `$Reparse`, case-sensitive
 flag bit-position research, multi-namespace files, etc.). All
 ship on small focused branches; tests live alongside.
@@ -597,6 +597,10 @@ ship on small focused branches; tests live alongside.
 | `read_object_id_extended` | `feature/objid-extended` b4a1344 | `Option<ObjectIdExtended>` with full 64-byte form (object_id + Birth GUIDs) when present |
 | `read_volume_label` | `feature/set-volume-label` c1eb03a | `String` (UTF-8); empty if `$VOLUME_NAME` absent |
 | `fs_ntfs_get_volume_info_v2` | `feature/volume-info-v2` 7d64f3f | `FsNtfsVolumeInfoV2` adding `volume_flags` / `is_dirty` / `mft_record_size` / `bytes_per_sector` on top of v1 |
+| `read_reparse_point` | `feature/read-reparse-point` bd977e3 | `Option<ReparsePoint { reparse_tag, data }>` — raw payload for any reparse type, complement to readlink-only |
+| `list_named_streams` | `feature/list-named-streams` 5b45fb1 | `Vec<String>` of named `$DATA` attribute names (ADS), excluding the unnamed primary |
+| `list_ea_keys` | `feature/list-ea-keys` 6e2edaa | `Vec<Vec<u8>>` of EA names only (skips values up to 64KB each — cheap enumeration) |
+| `read_si_full` | `feature/read-si-full` 7ed5c60 | `StandardInformationFull { timestamps, file_attributes, ..., v3: Option<{owner_id, security_id, quota, usn}> }` — every MS-FSCC §2.4.2 field |
 
 These don't ship as a unified "diagnostics module" — each lives in
 the natural place (write.rs for the path-based functions, attr_io
@@ -604,6 +608,11 @@ for the attribute walker). They share the same pattern: open
 read-only, resolve path → record number, parse the attribute, return
 a structured Rust value. Most have C-ABI wrappers for use from
 external tools.
+
+Writer-side complement also added in the staging-2 stack:
+`fs_ntfs_set_object_id_extended_h` (976ce03) — handle-based sibling
+of `fs_ntfs_write_object_id_extended`, for callers that already hold
+an open filesystem handle and don't want a per-call image reopen.
 
 ---
 

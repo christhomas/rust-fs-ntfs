@@ -2030,10 +2030,9 @@ pub extern "C" fn fs_ntfs_remove_ea(
 ///
 /// Returns:
 ///   * `N >= 0` — number of EAs (also = count of NUL terminators);
-///                0 means the file has no EAs
+///     0 means the file has no EAs
 ///   * `2`      — EAs exist but `out_buf_len` was too small;
-///                `*out_total_len` holds the required size and names
-///                are NOT written
+///     `*out_total_len` holds the required size and names are NOT written
 ///   * `-1`     — error (use `fs_ntfs_last_error`)
 ///
 /// `out_total_len` must be non-null. `out_buf` may be NULL only when
@@ -2161,11 +2160,10 @@ pub extern "C" fn fs_ntfs_remove_reparse_point(image: *const c_char, path: *cons
 /// Always writes `*out_data_len` so the caller can resize on truncation.
 ///
 /// Returns:
-///   *  1 — attribute present, fully copied
-///   *  2 — attribute present but `out_buf_len` was too small (data
-///          truncated; `*out_data_len` holds the required length)
-///   *  0 — no `$REPARSE_POINT` attribute on this file
-///   * -1 — error (use `fs_ntfs_last_error`)
+///   *  `1` — attribute present, fully copied
+///   *  `2` — attribute present but `out_buf_len` was too small (data truncated; `*out_data_len` holds the required length)
+///   *  `0` — no `$REPARSE_POINT` attribute on this file
+///   * `-1` — error (use `fs_ntfs_last_error`)
 ///
 /// `out_tag` and `out_data_len` must be non-null. `out_buf` may be
 /// null only if `out_buf_len == 0` (size-query mode).
@@ -2305,11 +2303,10 @@ pub extern "C" fn fs_ntfs_write_named_stream(
 ///
 /// Returns:
 ///   * `N >= 0` — number of named streams (matches the count of
-///                NUL terminators in the written buffer); 0 means the
-///                file has no ADS
+///     NUL terminators in the written buffer); 0 means the file has no ADS
 ///   * `2`      — at least one named stream exists but `out_buf_len`
-///                was too small; `*out_total_len` holds the required
-///                size and names are NOT written
+///     was too small; `*out_total_len` holds the required size and names
+///     are NOT written
 ///   * `-1`     — error (use `fs_ntfs_last_error`)
 ///
 /// `out_total_len` must be non-null. `out_buf` may be NULL only if
@@ -2340,7 +2337,7 @@ pub extern "C" fn fs_ntfs_list_named_streams(
     }
     match write::list_named_streams(std::path::Path::new(img), p) {
         Ok(names) => {
-            let total: usize = names.iter().map(|n| n.as_bytes().len() + 1).sum();
+            let total: usize = names.iter().map(|n| n.len() + 1).sum();
             unsafe { *out_total_len = total };
             if total > out_buf_len {
                 if names.is_empty() {

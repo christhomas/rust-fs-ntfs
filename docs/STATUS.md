@@ -54,12 +54,20 @@ All functions and types prefixed `fs_ntfs_` / `FsNtfs…`. Declared in
 
 | Function | Role |
 |---|---|
-| `fs_ntfs_get_volume_info(fs, out)` | Label, cluster size, total/used clusters, version. |
+| `fs_ntfs_get_volume_info(fs, out)` | Label, cluster size, total/used clusters, version (v1 shape). |
+| `fs_ntfs_get_volume_info_v2(fs, out)` | v2 extension: adds `volume_flags`, `is_dirty`, `mft_record_size`, `bytes_per_sector`. v1 fields stay at identical offsets. |
 | `fs_ntfs_stat(fs, path, out)` | Per-file metadata — size, timestamps, file type. |
 | `fs_ntfs_dir_open/next/close(fs, path)` | Streaming directory iterator. One entry at a time; `_next` returns NULL when exhausted. |
 | `fs_ntfs_read_file(fs, path, offset, length, buf)` | Pread-style data read. Returns bytes read or -1 on error. |
 | `fs_ntfs_readlink(fs, path, buf, cap)` | Reparse-point / symlink target. See limitations below. |
+| `fs_ntfs_read_reparse_point(image, path, &tag, buf, len, &total)` | Raw `(reparse_tag, data)` payload for any reparse type. Complements `readlink` (symlink/mount-point only). |
 | `fs_ntfs_read_object_id(image, path, out_buf)` | Read the 16-byte `$OBJECT_ID` GUID when present. |
+| `fs_ntfs_read_object_id_extended(image, path, out_buf, len)` | Read the 64-byte form (object_id + 3 Birth GUIDs, MS-FSCC §2.4.6). |
+| `fs_ntfs_read_security_id(image, path, &out)` | `$STANDARD_INFORMATION.security_id`. Returns 1 (id), 0 (48-byte v1.x form — no field), -1 (error). |
+| `fs_ntfs_read_si_full(image, path, &out)` | Every MS-FSCC §2.4.2 SI field — timestamps, attributes, plus the optional NTFS 3.x trailer (owner_id, security_id, quota, usn) flagged by `has_v3`. |
+| `fs_ntfs_read_volume_label(image, buf, len)` | `$VOLUME_NAME` decoded to UTF-8. Empty result = no label. |
+| `fs_ntfs_list_named_streams(image, path, buf, len, &total)` | Names of every named `$DATA` attribute (ADS), excluding the unnamed primary. NUL-separated, size-queryable. |
+| `fs_ntfs_list_ea_keys(image, path, buf, len, &total)` | EA names only (skips values up to 64KB each — cheap enumeration). NUL-separated, size-queryable. |
 | `fs_ntfs_free_clusters(image)` / `fs_ntfs_mft_free_records(image)` | Volume-stat probes. |
 
 ### Writes
@@ -93,6 +101,11 @@ MFT — are tracked in [`FUTURE_FEATURES.md`](FUTURE_FEATURES.md).
 | `fs_ntfs_create_symlink(image, parent, basename, target, relative)` | `create_file` + reparse-point with `IO_REPARSE_TAG_SYMLINK`. |
 | `fs_ntfs_write_ea(image, path, name, value)` | Upsert an extended attribute. |
 | `fs_ntfs_remove_ea(image, path, name)` | Remove an extended attribute. |
+| `fs_ntfs_write_object_id(image, path, in_buf)` | Write the 16-byte `$OBJECT_ID` GUID. Adds the attribute if absent, replaces in place if present. |
+| `fs_ntfs_write_object_id_extended(image, path, in, bv, bo, bd)` | Write the 64-byte extended form (object_id + 3 Birth GUIDs, MS-FSCC §2.4.6). `_h` sibling for handle-based callers. |
+| `fs_ntfs_remove_object_id(image, path)` | Remove the `$OBJECT_ID` attribute. |
+| `fs_ntfs_set_security_id(image, path, security_id)` | Point a file at an existing `$Secure:$SDS` entry (e.g. the mkfs system-files DACL at `0x100`). Requires the 72-byte NTFS 3.x SI form. Adding new SD entries is separate. |
+| `fs_ntfs_set_volume_label(image, label)` | Rename the volume `$VOLUME_NAME`. Empty label removes the attribute. |
 
 ### Recovery / volume tools
 
