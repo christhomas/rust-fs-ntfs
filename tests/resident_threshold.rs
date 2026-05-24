@@ -102,11 +102,11 @@ fn sweep_around_resident_threshold() {
     // The threshold for 4096-byte MFT records sits in the 600..1100
     // band. Walk a ±100-byte window around the most likely values; if
     // the boundary moves we still cover both sides.
-    // mkfs.ntfs reserves a fixed initial MFT of 64 records (cf.
-    // src/mkfs.rs:191) and the driver doesn't grow it. With ~12
-    // system records that leaves ~50 user records. Stride is set so
-    // total file+dir count stays under that ceiling.
-    let sizes: Vec<usize> = (500..=1200).step_by(17).collect();
+    // mkfs.ntfs reserves a fixed initial MFT of 64 records and the
+    // driver doesn't grow it. 19 slots are now occupied by system
+    // records (0..18), leaving 45 for user files+dirs. Step=20 gives
+    // 36 files + 5 dirs = 41 slots, comfortably within the ceiling.
+    let sizes: Vec<usize> = (500..=1200).step_by(20).collect();
     const PER_DIR: usize = 8;
     for (i, &size) in sizes.iter().enumerate() {
         let bucket = i / PER_DIR;
