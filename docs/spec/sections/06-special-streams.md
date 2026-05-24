@@ -41,7 +41,7 @@ warrant its own treatment.
 | `0x20`    | `$ATTRIBUTE_LIST`          | Used when attributes span multiple MFT records.                      |
 | `0x30`    | `$FILE_NAME`               | One per namespace per name. See [§2](02-mft-records.md#file-name).   |
 | `0x40`    | `$OBJECT_ID`               | 16-byte GUID + optional birth IDs. See [§6.15](#objid).              |
-| `0x50`    | `$SECURITY_DESCRIPTOR`     | Per-record SD; obsolete since NTFS 3.0 (replaced by `$Secure`).      |
+| `0x50`    | `$SECURITY_DESCRIPTOR`     | Per-record SD; deprecated on user files since NTFS 3.0 (replaced by `$Secure`) but **mandatory on every system record (slots 0–11)** — see [§6 SDs on system records](#system-record-sds). |
 | `0x60`    | `$VOLUME_NAME`             | Only on the `$Volume` system file. See [§6.13](#volume-file).        |
 | `0x70`    | `$VOLUME_INFORMATION`      | NTFS major/minor version + flags. See [§6.13](#volume-file).         |
 | `0x80`    | `$DATA`                    | Unnamed = primary content. Named = ADS. See [§6.2](#ads).            |
@@ -702,6 +702,65 @@ field (32-bit, NTFS 3.0+) that names a row in `$SDS` via the `$SII`
 index. Multiple files share a single `security_id` when their SDs are
 identical — the catalogue deduplicates. Cross-link to
 [§2 std-info](02-mft-records.md#std-info) for the field offset.
+
+### Per-record `$SECURITY_DESCRIPTOR` on system records (slots 0–11) {#system-record-sds}
+
+Although NTFS 3.0+ moved per-record SDs into the `$Secure` catalogue
+for user files, **every system MFT record (slots 0..=11) still
+carries a per-record `$SECURITY_DESCRIPTOR` attribute (type `0x50`)
+on a modern `format.com` volume**
+[`[OBSERVED: docs/chkdsk-improvement-findings.md §2.5.1]`](#references).
+Omitting it on system records produces the chkdsk `frs.cxx 60f`
+internal assertion plus Event 55 at mount.
+
+Reference `format.com` ships one of three byte-verbatim SD blobs
+per system record, distinguished by DACL access mask:
+
+| Blob              | Used by                                                                              | Size      | DACL access mask                                                                                       |
+| ----------------- | ------------------------------------------------------------------------------------ | --------- | ------------------------------------------------------------------------------------------------------ |
+| `SD_SYSFILE_RO`   | `$MFT(0)`, `$MFTMirr(1)`, `$LogFile(2)`, `$AttrDef(4)`, `$Bitmap(6)`, `$Boot(7)`, `$BadClus(8)`, `$UpCase(10)` | 104 bytes | `0x00120089` — `SYNCHRONIZE \| READ_CONTROL \| FILE_READ_DATA \| FILE_READ_EA \| FILE_READ_ATTRIBUTES` |
+| `SD_SYSFILE_RW`   | `$Volume(3)`, `$Quota`/`$Secure(9)`, `$Extend(11)`                                    | 104 bytes | `0x0001009F` — RO bits plus `DELETE \| FILE_WRITE_DATA \| FILE_APPEND_DATA \| FILE_WRITE_EA`             |
+| `SD_ROOT_DIR`     | root `.`(5)                                                                          | 248 bytes | Wider DACL with `INHERIT_ONLY` ACEs that propagate to children                                          |
+
+All three are standard `SECURITY_DESCRIPTOR_RELATIVE`
+([MS-DTYP §2.4.6](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/)):
+`Revision=1`, `Control=0x8004` (`SE_DACL_PRESENT | SE_SELF_RELATIVE`),
+Owner = `BUILTIN\Administrators` (`S-1-5-32-544`), Group = same, no
+SACL, self-relative DACL.
+
+Canonical 104-byte `SD_SYSFILE_RO` (the variant 8 of 12 system
+records use):
+
+```
+header (20 bytes):
+  01 00          rev=1, Sbz1=0
+  04 80          Control = SE_SELF_RELATIVE | SE_DACL_PRESENT
+  48 00 00 00    OffsetOwner = 72
+  58 00 00 00    OffsetGroup = 88
+  00 00 00 00    OffsetSacl  = 0   (no SACL)
+  14 00 00 00    OffsetDacl  = 20
+
+DACL @20 (52 bytes):
+  rev=2, Sbz1=0, AclSize=0x34, AceCount=2, Sbz2=0
+  ACE[0] @28 (20B): ACCESS_ALLOWED, mask=0x00120089, SID=S-1-5-18 (NT AUTHORITY\SYSTEM)
+  ACE[1] @48 (24B): ACCESS_ALLOWED, mask=0x00120089, SID=S-1-5-32-544 (BUILTIN\Administrators)
+
+Owner SID @72 (16 bytes): S-1-5-32-544
+Group SID @88 (16 bytes): S-1-5-32-544
+```
+
+The `RW` variant differs at exactly four bytes (offsets 32, 33, 52,
+53) where the access mask becomes `0x0001009F`.
+
+These three blobs are baked into `rust-fs-ntfs::mkfs` as the
+constants `SD_SYSFILE_RO`, `SD_SYSFILE_RW`, `SD_ROOT_DIR` selected by
+`sd_for_system_record(rec_num)`
+[`[OBSERVED: src/mkfs.rs:82-132, 170-176]`](#references).
+
+Note that **rec 9 (`$Quota` / `$Secure`) uses the RW variant** — even
+though it is the security catalogue itself, its own per-record SD is
+still required and is writeable (chkdsk would otherwise reject a
+fresh-format volume).
 
 ### Validation pass {#secure-validation}
 
