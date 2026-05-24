@@ -322,7 +322,7 @@ entries into the relevant section's local Open Questions list once placed.
 - [ ] (2026-05-03) `$VOLUME_INFORMATION` flag-bit values (`VOLUME_DIRTY=0x0001`, `VOLUME_RESIZE_LOG_FILE=0x0002`, etc.) — conventional public values listed in §6 — needs `[MS-NTFS]` confirmation.
 - [ ] (2026-05-03) NTFS 1.2 / 3.0 / 3.1 cutover — exact Windows-version mapping for the `$Secure` introduction.
 - [ ] (2026-05-03) Per-volume "volume GUID" — confirm absence of any `$Volume` GUID attribute distinct from the 8-byte boot-sector volume serial number.
-- [ ] (2026-05-03) `$Extend` directory vs file structural shape — `docs/chkdsk-debugging.md` flags a difference between writer output and Microsoft reference — proposed test: diff `$Extend` MFT record body against a fresh `format.com` reference dump.
+- [ ] (2026-05-03) `$Extend` directory vs file structural shape — `docs/chkdsk-improvement-findings.md §2.8` and `docs/mkfs-bug-catalog.md` flag a difference between writer output and Microsoft reference — proposed test: diff `$Extend` MFT record body against a fresh `format.com` reference dump.
 - [ ] (2026-05-03) `$Extend` child record numbers (24 = `$Quota`, 25 = `$ObjId`, 26 = `$Reparse`) — needs cross-version corroboration; conventional values used.
 - [ ] (2026-05-03) `$OBJECT_ID` attribute optional-fields rule — public layout shows 16/16/16/16; rule for when `BirthVolumeId` / `BirthObjectId` / `DomainId` are present is `[UNVERIFIED]`.
 - [ ] (2026-05-03) `$Extend\$ObjId:$O` index entry layout (key = 16-byte GUID, value = MFT reference) — uncorroborated; conventional layout used.

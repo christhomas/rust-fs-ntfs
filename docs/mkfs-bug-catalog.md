@@ -22,8 +22,8 @@ has surfaced about `mkfs_ntfs`. Per-bug entries cover:
 For full per-iteration history including dead ends, see
 [chkdsk-findings.md](./chkdsk-findings.md). For methodology see
 [multi-agent-test-protocol.md](./multi-agent-test-protocol.md).
-For the corroboration mechanism (Mac → VM → Mac local pipeline) see
-[local-test-pipeline.md](./local-test-pipeline.md).
+For the corroboration mechanism (Mac → VM → Mac byte-diff loop) see
+[chkdsk-improvement-findings.md §1.1 The byte-diff loop](./chkdsk-improvement-findings.md).
 
 ## Glossary of recurring proper nouns
 

@@ -41,7 +41,7 @@ same-length rename). Multi-level B+-tree balancing on `$INDEX_ALLOCATION`
 is partially implemented for traversal but not for insertion; large
 directories are accepted on read, but writes refuse to operate on them
 until B+-tree split/merge lands. ✅ read / 🟡 write
-[OBSERVED: STATUS.md `$INDEX_ALLOCATION` walks; chkdsk-debugging.md iter13]
+[OBSERVED: STATUS.md `$INDEX_ALLOCATION` walks; chkdsk-improvement-findings.md §2.7 root $I30 population]
 
 The rest of this section walks the layout in order, then covers the
 named-index variants, collation rules, and the read-side awareness needed
@@ -349,8 +349,8 @@ formatter **always** allocates `$INDEX_ALLOCATION` for the root directory
 (record 5) of a freshly-formatted volume, regardless of whether it is
 actually populated, because the system files inserted at format time
 overflow a single record's resident space. [OBSERVED: STATUS.md
-`ntfs-manyfiles.img` test rationale; chkdsk-debugging.md iter13 root
-$I30 overflow]
+`ntfs-manyfiles.img` test rationale; chkdsk-improvement-findings.md
+§2.7 root $I30 overflow]
 
 For ordinary subdirectories, the threshold depends on cluster size,
 record size, and the average key length. A typical 1024-byte record with
@@ -778,7 +778,6 @@ strictly authoritative will cause inconsistencies under host activity.
   [`src/record_build.rs`](../../../src/record_build.rs),
   [`src/attr_io.rs`](../../../src/attr_io.rs).
 - `rust-fs-ntfs` docs: [`docs/STATUS.md`](../../STATUS.md),
-  [`docs/chkdsk-debugging.md`](../../chkdsk-debugging.md),
   [`docs/chkdsk-improvement-findings.md`](../../chkdsk-improvement-findings.md),
   [`docs/mkfs-bug-catalog.md`](../../mkfs-bug-catalog.md).
 - Cross-section dependencies:

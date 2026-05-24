@@ -838,7 +838,7 @@ Read-only chkdsk found bad on-disk uppercase table — using system table
 and falls back to its built-in table for the remainder of the run.
 This causes filename collation in chkdsk's view to disagree with
 collation in the on-disk indexes, producing spurious "out-of-order"
-or "duplicate" entries. `[OBSERVED: docs/chkdsk-debugging.md upcase
+or "duplicate" entries. `[OBSERVED: docs/chkdsk-improvement-findings.md §2.6 upcase
 note]`.
 
 ### Canonical bytes embedded in the writer {#upcase-blob}
@@ -871,7 +871,7 @@ metadata via two attributes that exist *only* on this record:
 UTF-16LE volume label, NOT null-terminated. Length is the attribute's
 resident value length. May be empty (zero-length).
 
-`[OBSERVED: docs/chkdsk-debugging.md "CJK label encoding verified
+`[OBSERVED: rec 3 $VOLUME_NAME byte-decode (raw MFT read corroborates UTF-16 LE; chkdsk console as ?????? is codepage rendering, not bytes-on-disk error)
 byte-perfect"]` confirmed via raw MFT read that
 `$VOLUME_NAME` carries pure UTF-16LE — chkdsk's stdout rendering as
 `??????` for CJK labels is a console codepage limitation, not a
@@ -985,14 +985,14 @@ keyed by COLLATION_FILE_NAME like any other directory.
 | `$Extend\$Reparse`  | 26       | `:$R`                                               | [§6.17](#reparse-index)  |
 | `$Extend\$UsnJrnl`  | (varies) | `:$Max` (resident), `:$J` (non-resident sparse)     | [§5](05-logfile-journal.md) |
 
-`[OBSERVED: docs/chkdsk-debugging.md "$Extend rec 11 differs in
+`[OBSERVED: docs/chkdsk-improvement-findings.md §2.8 "$Extend rec 11 differs in
 structure between reference (a regular file with $DATA) and ours
-(a directory with $INDEX_ROOT:$I30)"]` — note the open question:
-the chkdsk-debugging report flags this structural difference between
-our writer and the Microsoft reference. The current reading is that
-`$Extend` *is* a directory in both cases; the difference observed in
-that report needs re-verification against a fresh reference dump.
-`[UNVERIFIED]`.
+(a directory with $INDEX_ROOT:$I30)"]` — open question:
+this structural difference between our writer and the Microsoft
+reference may explain the residual `chkdsk /scan = 13` ceiling on
+fresh-format volumes. The current reading is that `$Extend` *is* a
+directory in both cases; re-verification against a fresh reference
+dump pending. `[UNVERIFIED]`.
 
 ### Record numbers {#extend-record-numbers}
 
@@ -1155,7 +1155,7 @@ referenced below). `[OBSERVED: docs/STATUS.md]`.
   `$DATA` writers.
 - `[OBSERVED: docs/STATUS.md]` — C ABI surface and per-feature
   implementation status.
-- `[OBSERVED: docs/chkdsk-debugging.md]` — upcase mismatch diagnostic,
+- `[OBSERVED: docs/chkdsk-improvement-findings.md §2.6]` — upcase mismatch diagnostic,
   CJK label byte verification, `$Extend` rec 11 structural note.
 - `[OBSERVED: docs/mkfs-bug-catalog.md]` — `$FILE_NAME` mirror sizes,
   `frs.cxx 0x60f` outstanding chkdsk error.

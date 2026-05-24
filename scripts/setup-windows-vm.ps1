@@ -98,8 +98,9 @@ Write-Host "[setup] workdir: $workdirPath"
 # Clones antimatter-studios/rust-img-vhd into the workdir, builds + installs
 # `vhd_tool` to ~/.cargo/bin (which is on PATH after rustup setup). The
 # harness's _lib.ps1::Initialize-VhdFromImg invokes `vhd_tool create-fixed`
-# directly. See docs/phase-1e-design.md for the design rationale (Path B:
-# build on the VM rather than cross-compile from the Mac).
+# directly. We build vhd_tool on the VM rather than cross-compile from
+# the Mac so the binary matches the VM's gnullvm toolchain target and
+# CPU arch without us maintaining a cross-build pipeline.
 $vhdRepoDir = Join-Path $workdirPath "rust-img-vhd"
 if (-not (Test-Path $vhdRepoDir)) {
     Write-Host "[setup] cloning rust-img-vhd into $vhdRepoDir"
