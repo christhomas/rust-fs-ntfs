@@ -250,14 +250,38 @@ For a directory `$I30`, `attribute_type_indexed = 0x30` and `collation_rule
 `$ObjId`) the indexed-attribute field is `0x00` because the value is
 synthetic, not a copy of an MFT attribute. [UNVERIFIED]
 
-The `clusters_per_index_block` byte uses the same dual encoding as
-`clusters_per_mft_record` in the boot sector ([§1 boot sector
-fields](01-geometry-boot.md#bpb-extended)): when `index_block_size <
-cluster_size`, the field is `-log2(bytes_per_block)` and the absolute
-value gives the byte size of one block; when `index_block_size ≥
-cluster_size`, the field is positive and gives the cluster count.
-`rust-fs-ntfs` currently writes `1` and assumes `index_block_size ==
-cluster_size`. [OBSERVED: src/record_build.rs#L210-L212] [UNVERIFIED]
+The `clusters_per_index_block` byte (at INDEX_ROOT body offset `0x0C`)
+shares the *spirit* of the boot-sector `clusters_per_mft_record` /
+`clusters_per_index_buffer` encoding but uses a **different** rule in
+the smaller-than-cluster case:
+
+| Relation                              | Byte value                          |
+| ------------------------------------- | ----------------------------------- |
+| `cluster_size ≤ index_block_size`     | `index_block_size / cluster_size` (clusters per block — positive) |
+| `cluster_size  > index_block_size`    | `index_block_size / 512` (sectors per block — positive)           |
+
+This is **not** symmetric with boot offset `0x44`
+(`ClustersPerIndexBuffer`), which uses signed-negative-log2 in the
+second branch. For a 4 KiB index block on an 8 KiB cluster volume the
+boot byte is `-log2(4096) = -12 = 0xF4`, but the `INDEX_ROOT.cpib`
+byte is `4096 / 512 = 8` (sectors-per-block). `chkdsk` Stage 2
+reports "Error detected in index $I30 for file 5" when these byte
+forms diverge from `format.com`'s reference (corroborated against
+512 / 1024 / 4096 / 8192 cluster-size scenarios)
+[`[OBSERVED: src/mkfs.rs::build_populated_index_root_attr]`](#references).
+
+Two `rust-fs-ntfs` code paths handle this differently:
+
+- `src/mkfs.rs::build_populated_index_root_attr` (the root `$I30`
+  populated at format time) takes `cluster_size` and applies the
+  table above [OBSERVED].
+- `src/record_build.rs::build_index_root_skeleton_attr` (used for
+  fresh `$I30` skeletons during runtime mkdir) hardcodes `1` and
+  assumes `index_block_size == cluster_size`. Adequate for matrix
+  scenarios which all create directories at the volume's default
+  cluster size, but would need the same per-cluster-size encoding
+  if non-default block sizes were ever requested
+  [`[OBSERVED: src/record_build.rs:300-303]`](#references).
 
 ### INDEX_HEADER (16 bytes) {#index-header}
 
@@ -584,6 +608,52 @@ Win32 `FindFirstFile` API, FUSE bridges) synthesise `.`/`..` on the fly.
 
 `rust-fs-ntfs` synthesises these in its directory-listing API; they are
 never stored on disk. [OBSERVED: STATUS.md "directory listing"]
+
+### Root-directory $I30 system entries are skeleton FN streams {#i30-system-skeleton}
+
+Microsoft `format.com` populates the root directory's `$I30` with one
+index entry per first-16 system file (`$MFT`, `$MFTMirr`, `$LogFile`,
+`$Volume`, `$AttrDef`, `.`, `$Bitmap`, `$Boot`, `$BadClus`, `$Quota`,
+`$UpCase`, `$Extend`, …). The reference's `$FILE_NAME` stream embedded
+in each system entry is a **skeleton**: only `parent_reference` and
+`name` are populated; every other field (`creation_time`,
+`modification_time`, `allocated_size`, `data_size`, `file_attributes`,
+`reparse_point`, etc.) is zero. The only fully-populated entry is the
+`$MFT` self-reference.
+
+`rust-fs-ntfs::mkfs` emits the same skeleton shape via
+`build_skeleton_fn_stream(parent_reference, name)` for every system
+entry in the root `$I30` loop except `$MFT`
+[`[OBSERVED: src/mkfs.rs::build_skeleton_fn_stream]`](#references).
+Without this shape, `chkdsk` Stage 1 fires
+`Event 55 → file reference 0x5000000000005 → corrupted index attribute
+:$I30:$INDEX_ROOT` even when every per-record `$FILE_NAME` is correct.
+
+### DIRECTORY bit on `$FILE_NAME.file_attributes` for system directories {#fn-directory-bit}
+
+The `$FILE_NAME` attribute's `file_attributes` field at offset `0x38`
+([§4 layout](#file-name-layout)) mirrors `$STANDARD_INFORMATION`'s flag
+bitmask but also carries the `FILE_ATTRIBUTE_DIRECTORY` bit
+(`0x10000000` in the FN-attribute encoding, not the SI `0x10`) when the
+record is a directory.
+
+The only system record that's a directory in the first 16 is the root
+itself (rec 5). On the root's per-record `$FILE_NAME` the field reads:
+
+```
+file_attributes = 0x06          | 0x10000000
+                  (HIDDEN+SYSTEM) (DIRECTORY for FN-mirror encoding)
+                = 0x10000006
+```
+
+`format.com` ships this exact byte sequence
+[`[OBSERVED: docs/overnight-findings.md → docs/mkfs-bug-catalog.md
+"Bug 9"]`](#references). Earlier `rust-fs-ntfs` revisions emitted
+`0x00000006` (missing the DIRECTORY bit) and Event 55 fired with the
+same `corrupted index attribute :$I30:$INDEX_ROOT` message at all
+cluster sizes. The fix is to OR `0x10000000` into `file_attributes`
+when the record is both `is_dir` and `is_system` (or more generally:
+whenever the MFT record has `$INDEX_ROOT:$I30`).
 
 ## Other named indexes {#other-indexes}
 

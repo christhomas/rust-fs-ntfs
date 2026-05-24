@@ -127,6 +127,48 @@ MFT — are tracked in [`FUTURE_FEATURES.md`](FUTURE_FEATURES.md).
 - `FsNtfsBlockdevCfg` — read callback + context + size for the callback mount path.
 - `FsNtfsDirIter` — opaque directory iterator (heap-allocated, must be closed).
 
+## Current matrix state
+
+A 42-scenario Mac→Windows-VM test matrix exercises mkfs + mount +
+chkdsk on real `ntfs.sys`. The matrix is sealed by binary hash via
+`test-diagnostics/matrix-results.json` (`tested_at_sha` + `binary_sha256`
++ VM metadata + per-scenario verdict).
+
+| Branch     | tested_at_sha | Wall time   | Scenarios passed | Source                                                                                |
+| ---------- | ------------- | ----------- | ---------------- | ------------------------------------------------------------------------------------- |
+| `staging`  | `30fcdd6`     | 11369 s     | 42 / 42          | PR #49 stacked features                                                               |
+| `staging-2`| `d9595c7`     | 13794 s     | 42 / 42          | PR #49 + 5 staging-2 features (`read_reparse_point`, `list_named_streams`, …)         |
+
+Verify a working tree against the committed seal:
+
+```sh
+bash scripts/matrix-verify.sh
+# → "sealed by SHA (…)" or "sealed by binary content (…)"
+```
+
+Run the full matrix against a Windows VM (~3-4 hr; needs `.test-env`):
+
+```sh
+bash scripts/matrix-baseline.sh           # full 42-scenario sweep
+bash scripts/matrix-baseline.sh --smoke   # 5 representative scenarios (~15 min)
+```
+
+All 42 scenarios reach `chkdsk readonly = 0` (no problems) and
+`chkdsk /scan ∈ {0, 11, 13}` (per-scenario distribution recorded in
+the JSON). The `/scan = 13` ceiling on fresh-format volumes is a
+known still-open differentiator tracked in
+[`docs/FUTURE_FEATURES.md` §3.1](FUTURE_FEATURES.md) — every other
+verdict (mount, write, repeat-mount, repair) is clean. Detailed
+findings live in
+[`docs/chkdsk-improvement-findings.md`](chkdsk-improvement-findings.md)
+and the per-bug catalog in
+[`docs/mkfs-bug-catalog.md`](mkfs-bug-catalog.md). Spec-level rules
+extracted from these investigations live in the spec sections
+([§1 geometry](spec/sections/01-geometry-boot.md),
+[§2 MFT records](spec/sections/02-mft-records.md),
+[§4 indexes](spec/sections/04-indexes-directories.md),
+[§6 special streams](spec/sections/06-special-streams.md)).
+
 ## Test infrastructure
 
 Fixture-driven integration tests. Real NTFS images are generated inside
