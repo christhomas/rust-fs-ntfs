@@ -300,11 +300,12 @@ COMMENTED OUT: shipped. `fs_ntfs_last_errno()` is in
 include/fs_ntfs.h:177 and src/lib.rs:132. tests/errno_companion.rs
 covers it. -->
 
-**Outstanding (Phase 2 #7 still open):** the CI clippy step is still
-commented out in `.github/workflows/ci.yml` ("clippy deferred…
-Re-enable once resolved"). The crate-level `#![allow(...)]` lines
-in `src/lib.rs` are in place; what remains is flipping the CI step
-back on with `-D warnings`.
+<!-- Phase 2 #7 (CI clippy gate) resolved — the
+`.github/workflows/ci.yml` step `cargo clippy --all-targets --
+-D warnings` runs on ubuntu, matching the pre-commit hook. Crate-
+level `#![allow(...)]` lines in `src/lib.rs` are kept for the few
+intentional FFI patterns documented inline. -->
+**Outstanding:** none in this row.
 
 ## Test coverage
 
@@ -714,15 +715,12 @@ capi_ea, capi_fsck, capi_fsck_callbacks, capi_link, capi_remove,
 capi_rename, capi_reparse, capi_write_content, capi_write_truncate,
 capi_write_variants, capi_write_w1 — all driving the `fs_ntfs_*`
 C ABI directly. -->
-7. **Re-enable `clippy -D warnings` in CI.** Resolve the
-   `not_unsafe_ptr_arg_deref` lints (mark FFI entries `unsafe extern "C"`
-   or allow the lint at the boundary). Without this gate, regressions
-   go uncaught.
-   <!-- Status: still outstanding. The crate-level
-   `#![allow(clippy::not_unsafe_ptr_arg_deref)]` exists at
-   src/lib.rs:12, but `.github/workflows/ci.yml` still has the
-   `cargo clippy` step commented out ("clippy deferred… Re-enable
-   once resolved"). Flip the CI step on. -->
+7. ~~**Re-enable `clippy -D warnings` in CI.**~~ Shipped. CI now runs
+   `cargo clippy --all-targets -- -D warnings` on ubuntu, matching
+   the pre-commit hook. Crate-level `#![allow(...)]` lines in
+   `src/lib.rs` are kept for the small set of intentional FFI
+   patterns (`not_unsafe_ptr_arg_deref`, `too_many_arguments`,
+   `needless_range_loop`) and documented inline.
 8. **Dirty-volume state surface.** Add `fs_ntfs_volume_info_t::is_dirty`
    + optional `metadata_consistent` from an MFT-mirror cross-check.
    Requires a fresh fixture with `$Volume` dirty bit set (either force
