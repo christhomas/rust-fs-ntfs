@@ -1475,12 +1475,19 @@ correct.
 - Drop the `build_empty_index_root_attr` helper — no callers remain
   (rec 5 uses `build_populated_index_root_attr` since iter13).
 
-**Source verification**: rec 11 is indeed unwritten in current `main`.
-[`src/mkfs.rs:358`](../src/mkfs.rs#L358) carries the comment "//
-rec::EXTEND (11) deliberately omitted — see iter14-v2". The `rec`
-module at lines 141-151 lists only `MFT`, `MFTMIRR`, `LOGFILE`,
-`VOLUME`, `ATTRDEF`, `ROOT`, `BITMAP`, `BOOT`, `BADCLUS`, `SECURE`,
-`UPCASE` — no `EXTEND` constant.
+**Source verification (2026-05-22 update)**: rec 11 is **no longer
+unwritten** on current `main`. Sub-PR S3 restored rec 11 as a
+**directory shell with an empty `$I30`** (filename `$Extend`, parent
+= rec 5, `SD_SYSFILE_RW`); Iter L (2026-05-22) chkdsk-trace truth
+showed that shipping any `$Extend` children at format time drives
+the kernel TxF resource manager to fail to start (Event 136),
+surfacing Event 55 "corruption discovered" + chkdsk /scan exit 13.
+So `$Extend` stays empty (no `$Quota`, `$ObjId`, `$Reparse`,
+`$UsnJrnl` children at format time) but the directory shell at rec
+11 itself ships. See [`src/mkfs.rs:162-180`](../src/mkfs.rs#L162-L180)
+for the current `sd_for_system_record` and the comment chain. The
+"leave entirely unwritten" verdict above is HISTORICAL — preserved
+here for the iteration trail but superseded by Sub-PR S3 / Iter L.
 
 **Independent cross-agent corroboration**:
 - `agent-5442` iter14-v3 (commits `1135519`, `6ecf58c`) — first to

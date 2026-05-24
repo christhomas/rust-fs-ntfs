@@ -144,9 +144,18 @@ Notes:
 - **`Win32&DOS` collapses the pair.** When the LFN is already 8.3-legal
   uppercase, Windows writes a single entry with `namespace=3` instead of
   two redundant entries.
-  `rust-fs-ntfs` mkfs uses `namespace=3` for all synthesized index
-  entries.
-  [OBSERVED: src/record_build.rs `FILE_NAME_NAMESPACE_WIN32_AND_DOS`]
+- **`rust-fs-ntfs::mkfs` selects the namespace per-name** via
+  `fn_namespace_for(name)` (`src/record_build.rs`): names that fit
+  the DOS 8.3 envelope (stem ∈ [1, 8] chars + ext ∈ [0, 3] chars + no
+  leading/trailing dot + every char in the canonical DOS 8.3 alphabet)
+  return `namespace = 3` (Win32&DOS); everything else returns
+  `namespace = 0` (POSIX). The rule is symmetric on both sides of the
+  index — both the MFT-record `$FILE_NAME` and the embedded copy in
+  each `$INDEX_ROOT` / `$INDEX_ALLOCATION` entry MUST carry the same
+  namespace value; chkdsk Stage 2 reports
+  `Index entry 'X' in index $I30 of file 5 is incorrect` when the two
+  copies disagree.
+  [`[OBSERVED: src/record_build.rs::fn_namespace_for, docs/mkfs-bug-catalog.md Bug 12 + Bug 13]`](#references)
 - **chkdsk asymmetry.** chkdsk validates the namespace byte ∈ {0,1,2,3}
   and that every Win32 has either a paired DOS or a `Win32&DOS` collapse.
   Lone `DOS` entries without a `Win32` counterpart are flagged.
@@ -211,11 +220,15 @@ regeneration. The negative signal is detectable from disk state alone:
 the absence of *any* DOS-namespace entries on the volume implies the flag
 is set. [UNVERIFIED]
 
-`rust-fs-ntfs` does not currently generate DOS aliases. All synthesised
-entries use `namespace=3`, which is structurally valid only when the
-provided basename is itself 8.3-legal uppercase; tests use ASCII names
-that satisfy this constraint. ⛔ DOS-alias write
-[OBSERVED: STATUS.md "skips DOS-namespace entries at the index level"]
+`rust-fs-ntfs` does not currently synthesise paired DOS aliases. Each
+basename gets a single index entry whose namespace is chosen by
+`fn_namespace_for(name)` (see the namespace bullets above): names
+satisfying the DOS 8.3 envelope ship as `namespace=3` (Win32&DOS);
+all others ship as `namespace=0` (POSIX). Names that need a strict
+`namespace=1` / `namespace=2` pair (LFN + paired DOS short alias)
+are not generated — the closest existing functional limit. ⛔
+paired-DOS-alias write
+[OBSERVED: `src/record_build.rs::fn_namespace_for`, `STATUS.md`]
 
 ## $INDEX_ROOT (0x90) {#index-root}
 
@@ -294,6 +307,16 @@ Two `rust-fs-ntfs` code paths handle this differently:
 | 0x0D | 3    | padding                | Zero                                                                    |
 
 [OBSERVED: src/index_io.rs IH offsets]
+
+**Invariant `allocated_size ≥ total_size`** (updates on insert/delete).
+Both fields move together when index entries are inserted or
+removed; `allocated_size` may equal `total_size` (no slack) or
+exceed it (slack reserved for future inserts in the same node), but
+must never be smaller. Writing only one of the two — for example,
+bumping `total_size` past `allocated_size` after an `$INDEX_ROOT`
+insert — produces a chkdsk Stage 1 Event 55 against `$I30:$INDEX_ROOT`
+even when the entry payload itself is correctly placed
+[`[OBSERVED: docs/mkfs-bug-catalog.md Bug 11]`](#references).
 
 For an empty directory, the entry area contains just one entry — the
 `LAST` sentinel — with `length = 16`, `key_length = 0`, `flags = 0x02`.
@@ -609,17 +632,35 @@ Win32 `FindFirstFile` API, FUSE bridges) synthesise `.`/`..` on the fly.
 `rust-fs-ntfs` synthesises these in its directory-listing API; they are
 never stored on disk. [OBSERVED: STATUS.md "directory listing"]
 
-### Root-directory $I30 system entries are skeleton FN streams {#i30-system-skeleton}
+### Root-directory $I30: required entries and sort order {#i30-root-required}
 
-Microsoft `format.com` populates the root directory's `$I30` with one
-index entry per first-16 system file (`$MFT`, `$MFTMirr`, `$LogFile`,
-`$Volume`, `$AttrDef`, `.`, `$Bitmap`, `$Boot`, `$BadClus`, `$Quota`,
-`$UpCase`, `$Extend`, …). The reference's `$FILE_NAME` stream embedded
-in each system entry is a **skeleton**: only `parent_reference` and
-`name` are populated; every other field (`creation_time`,
-`modification_time`, `allocated_size`, `data_size`, `file_attributes`,
-`reparse_point`, etc.) is zero. The only fully-populated entry is the
-`$MFT` self-reference.
+A fresh-format volume's root directory `$I30` MUST list **all 12
+system files** (slots 0..=11) plus the root's self-link `.`, sorted
+by `COLLATION_FILE_NAME`. Each entry's embedded `$FILE_NAME` is a
+**skeleton**: only `parent_reference` and `name` are populated;
+every other field (`creation_time`, `modification_time`,
+`allocated_size`, `data_size`, `file_attributes`, `reparse_point`,
+etc.) is zero. The only fully-populated entry is the `$MFT`
+self-reference at index 0.
+
+The 11 system-file names, in `COLLATION_FILE_NAME` order
+(case-insensitive ordinal via the canonical `$UpCase` table, with
+the `$` prefix sorting at its ASCII codepoint `0x24`):
+
+| Order | Record | Name        |
+| ----: | -----: | ----------- |
+| 0     | 5      | `.`         |
+| 1     | 4      | `$AttrDef`  |
+| 2     | 8      | `$BadClus`  |
+| 3     | 6      | `$Bitmap`   |
+| 4     | 7      | `$Boot`     |
+| 5     | 11     | `$Extend`   |
+| 6     | 2      | `$LogFile`  |
+| 7     | 0      | `$MFT`      |
+| 8     | 1      | `$MFTMirr`  |
+| 9     | 9      | `$Quota` / `$Secure` (cluster-size-dependent, see [§2 slot 9](02-mft-records.md)) |
+| 10    | 10     | `$UpCase`   |
+| 11    | 3      | `$Volume`   |
 
 `rust-fs-ntfs::mkfs` emits the same skeleton shape via
 `build_skeleton_fn_stream(parent_reference, name)` for every system
@@ -628,6 +669,9 @@ entry in the root `$I30` loop except `$MFT`
 Without this shape, `chkdsk` Stage 1 fires
 `Event 55 → file reference 0x5000000000005 → corrupted index attribute
 :$I30:$INDEX_ROOT` even when every per-record `$FILE_NAME` is correct.
+A missing entry or a non-skeleton FN body trips the same event.
+
+Cross-link: [`docs/chkdsk-improvement-findings.md §2.7`](../../chkdsk-improvement-findings.md) carries the per-iteration history of how this was corroborated against `format.com`'s output.
 
 ### DIRECTORY bit on `$FILE_NAME.file_attributes` for system directories {#fn-directory-bit}
 
