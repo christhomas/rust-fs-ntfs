@@ -120,7 +120,7 @@ slot reserved by the formatter but never wired into the directory tree —
 see §2 records 11..15) carries `link_count = 0`; a non-zero value here on
 a record with no FN attribute would be flagged by `chkdsk /F`, which
 post-process clears it. [OBSERVED: src/record_build.rs:119]
-[OBSERVED: docs/overnight-findings.md iter I post-/F dump]
+[OBSERVED: docs/mkfs-bug-catalog.md placeholder records (slots 11..15)]
 
 **First attribute offset at `0x14`.** The first attribute record begins at
 `align8(USA_offset + 2 + sectors * 2)`. `rust-fs-ntfs` computes this

@@ -647,8 +647,8 @@ file_attributes = 0x06          | 0x10000000
 ```
 
 `format.com` ships this exact byte sequence
-[`[OBSERVED: docs/overnight-findings.md → docs/mkfs-bug-catalog.md
-"Bug 9"]`](#references). Earlier `rust-fs-ntfs` revisions emitted
+[`[OBSERVED: docs/mkfs-bug-catalog.md "Bug 9"]`](#references). Earlier
+`rust-fs-ntfs` revisions emitted
 `0x00000006` (missing the DIRECTORY bit) and Event 55 fired with the
 same `corrupted index attribute :$I30:$INDEX_ROOT` message at all
 cluster sizes. The fix is to OR `0x10000000` into `file_attributes`
@@ -780,7 +780,7 @@ strictly authoritative will cause inconsistencies under host activity.
 - `rust-fs-ntfs` docs: [`docs/STATUS.md`](../../STATUS.md),
   [`docs/chkdsk-debugging.md`](../../chkdsk-debugging.md),
   [`docs/chkdsk-improvement-findings.md`](../../chkdsk-improvement-findings.md),
-  [`docs/overnight-findings.md`](../../overnight-findings.md).
+  [`docs/mkfs-bug-catalog.md`](../../mkfs-bug-catalog.md).
 - Cross-section dependencies:
   [§2 USA fixup](02-mft-records.md#usa-fixup),
   [§3 cluster bitmap](03-data-runs-bitmap.md),

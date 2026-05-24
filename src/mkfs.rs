@@ -2272,7 +2272,7 @@ fn build_file_name_stream(
 ///
 /// Byte-corroboration: run-20260503-011545/mac-format-label-empty,
 /// reference-mft-16recs.bin rec 5 entries 0..4,6..10. See
-/// `docs/overnight-findings.md` iter A.
+/// `docs/spec/sections/04-indexes-directories.md#i30-system-skeleton`.
 fn build_skeleton_fn_stream(parent_reference: u64, name: &str) -> Result<Vec<u8>, String> {
     let utf16: Vec<u16> = name.encode_utf16().collect();
     if utf16.is_empty() || utf16.len() > 255 {
