@@ -1,7 +1,7 @@
 //! Locate attributes within a clean (post-fixup) MFT record buffer.
 //!
 //! Stays in the Rust domain so every W1+ write path can work on a buffer
-//! handed to it by [`mft_io::update_mft_record`] without going back
+//! handed to it by `mft_io::update_mft_record` without going back
 //! through upstream parsers. Upstream is used for path → record-number
 //! resolution; once inside the RMW callback, we walk attributes here.
 //!
