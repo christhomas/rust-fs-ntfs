@@ -121,6 +121,11 @@ fn infer_errno_from_message(msg: &str) -> c_int {
     }
 }
 
+/// Return the last error message recorded on this thread as a NUL-terminated
+/// C string, or an empty string if no error has been recorded.  The pointer
+/// is valid until the next FFI call on this thread that may set an error (i.e.
+/// any non-trivial call).  Copy the string before making further calls if you
+/// need it to persist.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_last_error() -> *const c_char {
     LAST_ERROR.with(|cell| cell.borrow().as_ptr())
@@ -723,6 +728,10 @@ fn fill_attr(
 // Mount / Unmount
 // ---------------------------------------------------------------------------
 
+/// Mount an NTFS volume from a filesystem path (raw image file, block device,
+/// etc.). Returns an opaque handle on success, NULL on error; call
+/// [`fs_ntfs_last_error`] for the message.  The handle supports both read and
+/// write operations.  Release with [`fs_ntfs_umount`].
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle {
     if device_path.is_null() {
@@ -786,6 +795,12 @@ pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle
     Box::into_raw(bridge)
 }
 
+/// Mount an NTFS volume via caller-supplied read (and optionally write)
+/// callbacks described by `cfg`.  Useful when the backing store is not a
+/// filesystem path (e.g. an in-memory buffer, a network device, or a custom
+/// block-layer abstraction).  Returns NULL on error; call
+/// [`fs_ntfs_last_error`] for the message.  The resulting handle supports
+/// the full read API; mutators work when a `write` callback is provided.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) -> *mut FsNtfsHandle {
     if cfg.is_null() {
@@ -1172,6 +1187,9 @@ fn handle_to_rw_io(handle: &FsNtfsHandle) -> Result<HandleIo, String> {
     }
 }
 
+/// Close a mount handle returned by any `fs_ntfs_mount*` function and free
+/// all associated memory.  Passing NULL is a no-op.  Do not use the handle
+/// after calling this.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_umount(fs: *mut FsNtfsHandle) {
     if !fs.is_null() {
@@ -1186,6 +1204,8 @@ pub extern "C" fn fs_ntfs_umount(fs: *mut FsNtfsHandle) {
 // Volume info
 // ---------------------------------------------------------------------------
 
+/// Fill `*info` with volume-level metadata (label, cluster size, serial
+/// number, NTFS version). Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_get_volume_info(
     fs: *mut FsNtfsHandle,
@@ -1343,6 +1363,10 @@ pub extern "C" fn fs_ntfs_read_volume_label(
 // Stat
 // ---------------------------------------------------------------------------
 
+/// Stat a file by path using an open mount handle. Fills `*attr` on success
+/// and returns 0; returns -1 on error. The handle variant of
+/// `fs_ntfs_stat_h` (path-based) accepts a null-terminated UTF-8 path
+/// rooted at the volume root (leading `\` or `/` optional).
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_stat(
     fs: *mut FsNtfsHandle,
@@ -1390,6 +1414,11 @@ pub extern "C" fn fs_ntfs_stat(
 // Directory listing
 // ---------------------------------------------------------------------------
 
+/// Open a directory for iteration. Returns an opaque [`FsNtfsDirIter`]
+/// pointer on success, NULL on error.  The first two entries are always
+/// synthesized `"."` and `".."`.  Advance with [`fs_ntfs_dir_next`]; free
+/// with [`fs_ntfs_dir_close`].  Check [`fs_ntfs_dir_skipped`] after
+/// exhaustion to detect corrupt index rows that were silently skipped.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_dir_open(
     fs: *mut FsNtfsHandle,
@@ -1498,6 +1527,9 @@ pub extern "C" fn fs_ntfs_dir_skipped(iter: *const FsNtfsDirIter) -> i64 {
     it.skipped_count as i64
 }
 
+/// Advance the iterator and return a pointer to the next [`FsNtfsDirent`], or
+/// NULL when the listing is exhausted.  The returned pointer is valid until
+/// [`fs_ntfs_dir_close`] is called on the same iterator.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_dir_next(iter: *mut FsNtfsDirIter) -> *const FsNtfsDirent {
     if iter.is_null() {
@@ -1514,6 +1546,8 @@ pub extern "C" fn fs_ntfs_dir_next(iter: *mut FsNtfsDirIter) -> *const FsNtfsDir
     ptr
 }
 
+/// Free a directory iterator returned by [`fs_ntfs_dir_open`]. Passing NULL
+/// is a no-op.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_dir_close(iter: *mut FsNtfsDirIter) {
     if !iter.is_null() {
@@ -1527,6 +1561,11 @@ pub extern "C" fn fs_ntfs_dir_close(iter: *mut FsNtfsDirIter) {
 // File reading
 // ---------------------------------------------------------------------------
 
+/// Read up to `length` bytes from the unnamed `$DATA` stream of `path`,
+/// starting at byte `offset`, into `buf`.  Returns bytes read on success,
+/// `-1` on error (check `fs_ntfs_last_error`).  Sparse holes read as zeroes.
+/// Compressed and encrypted files return an error; use the raw-read path for
+/// those after the appropriate decompress/decrypt layer.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_read_file(
     fs: *mut FsNtfsHandle,
@@ -1656,6 +1695,11 @@ pub extern "C" fn fs_ntfs_read_file(
 // Symlink / reparse point reading (stub for now)
 // ---------------------------------------------------------------------------
 
+/// Read the symlink target of a reparse-point file into `buf` (NUL-terminated).
+/// `bufsize` must include room for the NUL terminator.
+/// Returns the number of bytes written (excluding NUL) on success, `-1` on
+/// error. The path must refer to a file with a `$REPARSE_POINT` attribute
+/// whose tag is `IO_REPARSE_TAG_SYMLINK`; non-symlink reparse tags return -1.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_readlink(
     fs: *mut FsNtfsHandle,

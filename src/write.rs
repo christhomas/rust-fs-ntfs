@@ -3,7 +3,7 @@
 //! Phase W1 for the exact scope.
 //!
 //! Path resolution uses upstream `ntfs` (read-only). The actual write
-//! goes through [`mft_io::update_mft_record`] which handles USA fixup
+//! goes through `mft_io::update_mft_record` which handles USA fixup
 //! and `fsync`. The mutator closures here use [`attr_io`] to locate
 //! attributes without touching upstream.
 

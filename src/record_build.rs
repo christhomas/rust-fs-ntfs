@@ -513,7 +513,7 @@ fn build_resident_unnamed_attribute(
 ///   u32 reparse_tag
 ///   u16 reparse_data_length  (= data.len())
 ///   u16 reserved
-///   u8[reparse_data_length] data
+///   u8\[reparse_data_length\] data
 pub fn build_resident_reparse_point_attribute(
     attr_id: u16,
     reparse_tag: u32,
