@@ -527,19 +527,178 @@ pub struct FsNtfsBlockdevCfg {
 }
 
 // ---------------------------------------------------------------------------
-// Directory iterator
+// Directory iterator — lazy
 // ---------------------------------------------------------------------------
 
+/// Heap state for the lazy NTFS index traversal. All four raw pointers form
+/// a borrow chain: `entries` → `index` → `file` → `ntfs`. They are all kept
+/// alive for the lifetime of this struct and are manually dropped (via the
+/// `Drop` impl) in reverse-chain order.
+///
+/// # Safety
+///
+/// The NTFS upstream types carry lifetime parameters (`'n`, `'f`, `'i`) that
+/// we extend to `'static` via `mem::transmute`. This is sound because:
+///
+/// 1. **All referenced objects are heap-pinned** inside this struct.
+///    Moving `LazyDirState` (or `Box<LazyDirState>`) does not move the
+///    heap-allocated `Ntfs`/`NtfsFile`/`NtfsIndex` objects — only the raw
+///    pointers to them move.
+///
+/// 2. **Every reference in these types is non-owning** (`&T`, not `Box<T>`),
+///    so dropping a reference (which Rust does as a no-op) never tries to
+///    free the referent. The only owned allocations are the `Record` buffer
+///    inside `NtfsFile` and the `Vec`s inside `NtfsIndex`/`NtfsIndexEntries`,
+///    which are freed in correct order by the explicit `Drop` impl.
+///
+/// 3. **Drop order** is explicit in `Drop`: `entries` is dropped before
+///    `index`, `index` before `file`, `file` before `ntfs`, which is the
+///    correct order for the borrow chain.
+///
+/// 4. **`NtfsIndexEntries::next` accesses `ntfs` through the chain** for the
+///    upcase table. The `ntfs` Box is alive for the full lifetime of the
+///    struct, so every `next()` call is safe.
+struct LazyDirState {
+    // Raw pointers to heap-pinned NTFS objects; see safety comment above.
+    // Stored as raw pointers (not Boxes) so Rust's drop glue doesn't run
+    // automatically — we drop them manually in the correct order.
+    entries_ptr:
+        *mut ntfs::NtfsIndexEntries<'static, 'static, 'static, ntfs::indexes::NtfsFileNameIndex>,
+    index_ptr: *mut ntfs::NtfsIndex<'static, 'static, ntfs::indexes::NtfsFileNameIndex>,
+    file_ptr: *mut ntfs::NtfsFile<'static>,
+    ntfs_ptr: *mut ntfs::Ntfs,
+    reader: ReaderKind,
+}
+
+// Safety: `context: *mut c_void` inside a `CallbackReader` is treated as
+// a handle managed by the caller.  Same contract as `MountSource::Callbacks`.
+unsafe impl Send for LazyDirState {}
+
+impl Drop for LazyDirState {
+    fn drop(&mut self) {
+        unsafe {
+            // Must drop in borrow-chain order: entries → index → file → ntfs.
+            drop(Box::from_raw(self.entries_ptr));
+            drop(Box::from_raw(self.index_ptr));
+            drop(Box::from_raw(self.file_ptr));
+            drop(Box::from_raw(self.ntfs_ptr));
+        }
+    }
+}
+
+impl LazyDirState {
+    fn new(source: &MountSource, record_number: u64) -> Result<Self, String> {
+        // 1. Open an independent reader for this iterator so the mount handle
+        //    remains usable for concurrent stat/read calls.
+        let mut reader = open_reader_from_source(source)?;
+
+        // 2. Parse a fresh Ntfs header + upcase table from the new reader.
+        let ntfs_box = {
+            let mut ntfs = Ntfs::new(&mut reader).map_err(|e| format!("ntfs init: {e}"))?;
+            ntfs.read_upcase_table(&mut reader)
+                .map_err(|e| format!("upcase: {e}"))?;
+            Box::new(ntfs)
+        };
+        let ntfs_ptr = Box::into_raw(ntfs_box);
+
+        // 3. Navigate to the directory by record number.
+        let file = {
+            // Safety: ntfs_ptr was just allocated and is alive here.
+            let ntfs_ref: &ntfs::Ntfs = unsafe { &*ntfs_ptr };
+            ntfs_ref
+                .file(&mut reader, record_number)
+                .map_err(|e| format!("file record {record_number}: {e}"))?
+        };
+        // Transmute 'n lifetime to 'static; safe because ntfs_ptr outlives the Box.
+        let file_box: Box<ntfs::NtfsFile<'static>> = unsafe { std::mem::transmute(Box::new(file)) };
+        let file_ptr = Box::into_raw(file_box);
+
+        // 4. Build the directory index.
+        let index = {
+            let file_ref: &ntfs::NtfsFile<'static> = unsafe { &*file_ptr };
+            file_ref
+                .directory_index(&mut reader)
+                .map_err(|e| format!("directory_index: {e}"))?
+        };
+        let index_box: Box<ntfs::NtfsIndex<'static, 'static, ntfs::indexes::NtfsFileNameIndex>> =
+            unsafe { std::mem::transmute(Box::new(index)) };
+        let index_ptr = Box::into_raw(index_box);
+
+        // 5. Create the entry iterator.
+        let entries = {
+            let index_ref: &ntfs::NtfsIndex<'static, 'static, ntfs::indexes::NtfsFileNameIndex> =
+                unsafe { &*index_ptr };
+            index_ref.entries()
+        };
+        let entries_box: Box<
+            ntfs::NtfsIndexEntries<'static, 'static, 'static, ntfs::indexes::NtfsFileNameIndex>,
+        > = unsafe { std::mem::transmute(Box::new(entries)) };
+        let entries_ptr = Box::into_raw(entries_box);
+
+        Ok(LazyDirState {
+            entries_ptr,
+            index_ptr,
+            file_ptr,
+            ntfs_ptr,
+            reader,
+        })
+    }
+
+    fn next_entry(
+        &mut self,
+    ) -> Option<Result<ntfs::NtfsIndexEntry<'_, ntfs::indexes::NtfsFileNameIndex>, ntfs::NtfsError>>
+    {
+        let entries = unsafe { &mut *self.entries_ptr };
+        entries.next(&mut self.reader)
+    }
+}
+
+/// Open a fresh `ReaderKind` from a `MountSource` without touching the
+/// existing mount handle's reader.
+fn open_reader_from_source(source: &MountSource) -> Result<ReaderKind, String> {
+    match source {
+        MountSource::Path(path) => {
+            let f = File::open(path).map_err(|e| format!("open '{}': {e}", path.display()))?;
+            Ok(ReaderKind::File(BufReader::new(f)))
+        }
+        MountSource::Callbacks {
+            read_fn,
+            context,
+            size,
+            ..
+        } => Ok(ReaderKind::Callback(BufReader::new(CallbackReader {
+            read_fn: *read_fn,
+            context: *context,
+            size: *size,
+            position: 0,
+        }))),
+        MountSource::FsCore { device } => {
+            let size = fs_core::BlockRead::size_bytes(device.as_ref());
+            Ok(ReaderKind::FsCore(BufReader::new(FsCoreReader {
+                inner: device.clone(),
+                size,
+                position: 0,
+            })))
+        }
+    }
+}
+
+/// Directory iterator. Yields `.` and `..` first (synthesized), then real
+/// entries lazily from the on-disk index via [`LazyDirState`].
 pub struct FsNtfsDirIter {
-    entries: Vec<FsNtfsDirent>,
-    index: usize,
-    /// Number of index entries the iterator skipped during materialisation —
-    /// e.g. malformed entries on a dirty volume, DOS-only namespace names,
-    /// entries whose key failed to decode. Surfaced via
-    /// `fs_ntfs_dir_skipped`. Skip-on-error is the right default (one bad
-    /// entry shouldn't make a directory unreadable), but the caller has
-    /// no way to tell whether they got a complete listing without this.
+    /// Synthesized `.` and `..` entries; yielded before `lazy`.
+    dot: FsNtfsDirent,
+    dotdot: FsNtfsDirent,
+    /// Scratch buffer for the most recently yielded real entry. The C caller
+    /// may hold a pointer into this between calls to `fs_ntfs_dir_next`.
+    current: FsNtfsDirent,
+    /// Phase: 0 = dot pending, 1 = dotdot pending, 2 = lazy entries, 3 = done.
+    phase: u8,
+    /// Number of real index entries silently skipped (e.g. DOS-only names,
+    /// malformed entries). Surfaced via `fs_ntfs_dir_skipped`.
     skipped_count: u64,
+    /// Lazy index state; `None` only while `phase < 2`.
+    lazy: Option<Box<LazyDirState>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1471,64 +1630,28 @@ pub extern "C" fn fs_ntfs_dir_open(
             }
         };
 
-    let index = match dir_file.directory_index(&mut bridge.reader) {
-        Ok(i) => i,
-        Err(e) => {
-            set_error(&format!("directory index: {e}"));
+    drop(dir_file);
+
+    let source = match bridge.source.as_ref() {
+        Some(s) => s,
+        None => {
+            set_error("no mount source for lazy dir iteration");
             return std::ptr::null_mut();
         }
     };
 
-    let mut entries = Vec::new();
-    let mut skipped_count: u64 = 0;
-    // Synthesized entries for "." and ".."
-    entries.push(make_dirent(current_record_number, 2, b"."));
-    entries.push(make_dirent(parent_record_number, 2, b".."));
-
-    let mut iter = index.entries();
-
-    while let Some(entry_result) = iter.next(&mut bridge.reader) {
-        let entry = match entry_result {
-            Ok(e) => e,
-            Err(_) => {
-                skipped_count = skipped_count.saturating_add(1);
-                continue;
-            }
-        };
-
-        let file_name = match entry.key() {
-            Some(Ok(name)) => name,
-            _ => {
-                skipped_count = skipped_count.saturating_add(1);
-                continue;
-            }
-        };
-
-        // Skip DOS-only names to avoid duplicates
-        if file_name.namespace() == NtfsFileNamespace::Dos {
-            continue;
-        }
-
-        let name_str = file_name.name().to_string_lossy();
-        let name_bytes = name_str.as_bytes();
-
-        let mut dirent = FsNtfsDirent {
-            file_record_number: entry.file_reference().file_record_number(),
-            file_type: if file_name.is_directory() { 2 } else { 1 },
-            name_len: std::cmp::min(name_bytes.len(), FS_NTFS_DIRENT_NAME_BYTES - 1) as u16,
-            name: [0u8; FS_NTFS_DIRENT_NAME_BYTES],
-        };
-
-        let copy_len = dirent.name_len as usize;
-        dirent.name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-
-        entries.push(dirent);
-    }
+    let lazy = match LazyDirState::new(source, current_record_number) {
+        Ok(s) => s,
+        Err(e) => return err_ptr(e),
+    };
 
     let iter = Box::new(FsNtfsDirIter {
-        entries,
-        index: 0,
-        skipped_count,
+        dot: make_dirent(current_record_number, 2, b"."),
+        dotdot: make_dirent(parent_record_number, 2, b".."),
+        current: make_dirent(0, 0, b""),
+        phase: 0,
+        skipped_count: 0,
+        lazy: Some(Box::new(lazy)),
     });
     Box::into_raw(iter)
 }
@@ -1556,13 +1679,68 @@ pub extern "C" fn fs_ntfs_dir_next(iter: *mut FsNtfsDirIter) -> *const FsNtfsDir
     }
 
     let it = unsafe { &mut *iter };
-    if it.index >= it.entries.len() {
-        return std::ptr::null();
+    loop {
+        match it.phase {
+            0 => {
+                it.phase = 1;
+                return &it.dot as *const FsNtfsDirent;
+            }
+            1 => {
+                it.phase = 2;
+                return &it.dotdot as *const FsNtfsDirent;
+            }
+            2 => {
+                let lazy = match it.lazy.as_mut() {
+                    Some(l) => l,
+                    None => {
+                        it.phase = 3;
+                        return std::ptr::null();
+                    }
+                };
+                match lazy.next_entry() {
+                    None => {
+                        it.phase = 3;
+                        return std::ptr::null();
+                    }
+                    Some(Err(_)) => {
+                        it.skipped_count = it.skipped_count.saturating_add(1);
+                        continue;
+                    }
+                    Some(Ok(entry)) => {
+                        let file_name = match entry.key() {
+                            Some(Ok(name)) => name,
+                            _ => {
+                                it.skipped_count = it.skipped_count.saturating_add(1);
+                                continue;
+                            }
+                        };
+                        // Skip DOS-only names to avoid duplicates.
+                        if file_name.namespace() == NtfsFileNamespace::Dos {
+                            continue;
+                        }
+                        let name_str = file_name.name().to_string_lossy();
+                        let name_bytes = name_str.as_bytes();
+                        let name_len =
+                            std::cmp::min(name_bytes.len(), FS_NTFS_DIRENT_NAME_BYTES - 1) as u16;
+                        let mut dirent = FsNtfsDirent {
+                            file_record_number: entry.file_reference().file_record_number(),
+                            file_type: if file_name.is_directory() { 2 } else { 1 },
+                            name_len,
+                            name: [0u8; FS_NTFS_DIRENT_NAME_BYTES],
+                        };
+                        dirent.name[..name_len as usize]
+                            .copy_from_slice(&name_bytes[..name_len as usize]);
+                        // Store dirent in the lazy state so the pointer remains
+                        // valid until the next call.  We use a field on the
+                        // iterator itself via a small scratch buffer.
+                        it.current = dirent;
+                        return &it.current as *const FsNtfsDirent;
+                    }
+                }
+            }
+            _ => return std::ptr::null(),
+        }
     }
-
-    let ptr = &it.entries[it.index] as *const FsNtfsDirent;
-    it.index += 1;
-    ptr
 }
 
 /// Free a directory iterator returned by [`fs_ntfs_dir_open`]. Passing NULL
