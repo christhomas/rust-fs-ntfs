@@ -62,10 +62,14 @@ pub enum FileType {
 pub struct Attr {
     pub file_record_number: u64,
     pub size: u64,
-    pub atime: u32,
-    pub mtime: u32,
-    pub ctime: u32,
-    pub crtime: u32,
+    pub atime_sec: i64,
+    pub mtime_sec: i64,
+    pub ctime_sec: i64,
+    pub crtime_sec: i64,
+    pub atime_nsec: u32,
+    pub mtime_nsec: u32,
+    pub ctime_nsec: u32,
+    pub crtime_nsec: u32,
     pub mode: u16,
     pub link_count: u16,
     pub file_type: FileType,
@@ -234,10 +238,14 @@ impl Filesystem {
         let mut attr = Attr {
             file_record_number: file.file_record_number(),
             size: 0,
-            atime: 0,
-            mtime: 0,
-            ctime: 0,
-            crtime: 0,
+            atime_sec: 0,
+            mtime_sec: 0,
+            ctime_sec: 0,
+            crtime_sec: 0,
+            atime_nsec: 0,
+            mtime_nsec: 0,
+            ctime_nsec: 0,
+            crtime_nsec: 0,
             mode: if file.is_directory() {
                 0o40755
             } else {
@@ -259,10 +267,12 @@ impl Filesystem {
             match a.ty() {
                 Ok(NtfsAttributeType::StandardInformation) => {
                     if let Ok(si) = a.resident_structured_value::<NtfsStandardInformation>() {
-                        attr.crtime = ntfs_time_to_unix(si.creation_time());
-                        attr.mtime = ntfs_time_to_unix(si.modification_time());
-                        attr.atime = ntfs_time_to_unix(si.access_time());
-                        attr.ctime = ntfs_time_to_unix(si.mft_record_modification_time());
+                        (attr.crtime_sec, attr.crtime_nsec) = ntfs_time_to_unix(si.creation_time());
+                        (attr.mtime_sec, attr.mtime_nsec) =
+                            ntfs_time_to_unix(si.modification_time());
+                        (attr.atime_sec, attr.atime_nsec) = ntfs_time_to_unix(si.access_time());
+                        (attr.ctime_sec, attr.ctime_nsec) =
+                            ntfs_time_to_unix(si.mft_record_modification_time());
                         attr.attributes = si.file_attributes().bits();
                     }
                 }
@@ -467,10 +477,12 @@ impl Filesystem {
     }
 }
 
-fn ntfs_time_to_unix(t: ntfs::NtfsTime) -> u32 {
-    const EPOCH_DIFF: u64 = 11_644_473_600;
-    let secs = t.nt_timestamp() / 10_000_000;
-    secs.saturating_sub(EPOCH_DIFF) as u32
+fn ntfs_time_to_unix(t: ntfs::NtfsTime) -> (i64, u32) {
+    const EPOCH_DIFF: i64 = 11_644_473_600;
+    let ts = t.nt_timestamp();
+    let secs = (ts / 10_000_000) as i64 - EPOCH_DIFF;
+    let nsec = ((ts % 10_000_000) * 100) as u32;
+    (secs, nsec)
 }
 
 fn parent_record_of(file: &ntfs::NtfsFile, reader: &mut BufReader<File>) -> Result<u64, String> {

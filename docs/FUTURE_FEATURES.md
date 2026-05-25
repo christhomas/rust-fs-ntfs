@@ -247,21 +247,15 @@ change** for either — only the FFI projection widens. (See also
 `STATUS.md` §"Documentation cross-check" for the deeper write-up
 behind each.)
 
-### §1.3 Timestamp widening to 64-bit + nanoseconds
+### §1.3 Timestamp widening to 64-bit + nanoseconds — shipped (2026-05-25)
 
-**Today**: `FsNtfsAttr::atime` / `mtime` / `ctime` / `crtime` are
-`uint32_t` UNIX-epoch seconds. `ntfs_time_to_unix` does
-`.saturating_sub(EPOCH_DIFF) as u32`.
-
-**Problem**: pre-1970 timestamps clamp to 0, post-2038 timestamps
-wrap, sub-second precision is dropped. Silently wrong for backup
-metadata, SMB peers, archive volumes.
-
-**Fix**: widen to `int64_t seconds + uint32_t nsec`. ~50 LOC.
-Convert as `(ts / 10_000_000) as i64 - EPOCH_DIFF` +
-`((ts % 10_000_000) * 100) as u32`. FILETIME on disk is u64
-(100 ns intervals since 1601-01-01 UTC, representable to year 30828);
-only the FFI projection is widening.
+`FsNtfsAttr::atime` / `mtime` / `ctime` / `crtime` are now split into
+an `int64_t *_sec` (UNIX epoch, signed — pre-1970 is negative) and a
+`uint32_t *_nsec` (sub-second nanoseconds, always in `[0, 1e9)`).
+`ntfs_time_to_unix` returns `(i64, u32)`. ABI break: struct size grew
+from 44 to 76 bytes. `facade::Attr` updated in parallel.
+Four unit tests cover epoch boundary, sub-second rounding, pre-epoch,
+and max-nsec cases.
 
 ### §1.4 `fs_ntfs_dirent_t::name[256]` truncation (resolved)
 
