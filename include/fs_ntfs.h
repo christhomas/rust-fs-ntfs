@@ -632,7 +632,7 @@ int fs_ntfs_remove_ea(const char *image, const char *path,
  * out_buf_len == 0.
  */
 int fs_ntfs_list_ea_keys(const char *image, const char *path,
-                         char *out_buf, size_t out_buf_len,
+                         uint8_t *out_buf, size_t out_buf_len,
                          size_t *out_total_len);
 
 /*

@@ -2041,7 +2041,7 @@ pub extern "C" fn fs_ntfs_remove_ea(
 pub extern "C" fn fs_ntfs_list_ea_keys(
     image: *const c_char,
     path: *const c_char,
-    out_buf: *mut c_char,
+    out_buf: *mut u8,
     out_buf_len: usize,
     out_total_len: *mut usize,
 ) -> c_int {
@@ -2066,20 +2066,13 @@ pub extern "C" fn fs_ntfs_list_ea_keys(
             let total: usize = keys.iter().map(|k| k.len() + 1).sum();
             unsafe { *out_total_len = total };
             if total > out_buf_len {
-                if keys.is_empty() {
-                    return 0;
-                }
                 return 2;
             }
             let mut cursor = 0usize;
             for key in &keys {
                 unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        key.as_ptr(),
-                        (out_buf as *mut u8).add(cursor),
-                        key.len(),
-                    );
-                    *(out_buf as *mut u8).add(cursor + key.len()) = 0;
+                    std::ptr::copy_nonoverlapping(key.as_ptr(), out_buf.add(cursor), key.len());
+                    *out_buf.add(cursor + key.len()) = 0;
                 }
                 cursor += key.len() + 1;
             }
@@ -2340,10 +2333,6 @@ pub extern "C" fn fs_ntfs_list_named_streams(
             let total: usize = names.iter().map(|n| n.len() + 1).sum();
             unsafe { *out_total_len = total };
             if total > out_buf_len {
-                if names.is_empty() {
-                    // total==0 case, no data to copy
-                    return 0;
-                }
                 return 2;
             }
             let mut cursor = 0usize;
@@ -3001,7 +2990,7 @@ pub struct FsNtfsStandardInfo {
     /// form (owner_id/security_id/quota/usn carry decoded values);
     /// 0 for the 48-byte 1.x form (those four fields are zero).
     pub has_v3: u8,
-    pub _pad: [u8; 7],
+    _pad: [u8; 7],
 }
 
 /// Read every field of a file's `$STANDARD_INFORMATION`. Unlike the
