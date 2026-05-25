@@ -37,7 +37,24 @@
 
 use std::path::Path;
 
+use crate::attr_io::read_u16_le;
 use crate::block_io::{BlockIo, PathIo};
+
+// BPB (BIOS Parameter Block) field byte offsets within the 512-byte boot sector.
+// Names match the BPB specification in Windows Internals 7th ed. / MS-FSCC.
+const BOOT_OFF_BYTES_PER_SECTOR: usize = 0x0B; // WORD BytsPerSec
+const BOOT_OFF_SECTORS_PER_CLUSTER: usize = 0x0D; // BYTE SecPerClus
+const BOOT_OFF_MFT_LCN: usize = 0x30; // NTFS extension: QWORD MFT cluster number
+const BOOT_OFF_CLUSTERS_PER_MFT_RECORD: usize = 0x40; // NTFS extension: BYTE/i8 clusters per FILE record
+
+/// NTFS stores USA fixup bytes in the last 2 bytes of every sector-sized
+/// stripe within a multi-sector record (MFT records, INDX blocks).
+const SECTOR_TAIL_BYTES: usize = 2;
+
+/// Returns true iff `n` is a non-zero power of two.
+fn is_power_of_two(n: u16) -> bool {
+    n != 0 && n & (n - 1) == 0
+}
 
 /// NTFS boot-sector fields we need for MFT addressing.
 #[derive(Debug, Clone, Copy)]
@@ -66,8 +83,8 @@ pub fn read_boot_params_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BootParams
 }
 
 fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> {
-    let bytes_per_sector = u16::from_le_bytes([boot[0x0B], boot[0x0C]]);
-    if bytes_per_sector == 0 || bytes_per_sector & (bytes_per_sector - 1) != 0 {
+    let bytes_per_sector = read_u16_le(boot, BOOT_OFF_BYTES_PER_SECTOR);
+    if !is_power_of_two(bytes_per_sector) {
         return Err(format!(
             "bytes_per_sector {bytes_per_sector} not a power of two"
         ));
@@ -76,7 +93,7 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
     // sectors_per_cluster: values 1–128 (0x01–0x80) are literal. 0x80 = 128
     // sectors per cluster = 64 KiB with 512-byte sectors. No log2 encoding
     // exists for this field (unlike clusters_per_mft_record which uses i8).
-    let spc_raw = boot[0x0D];
+    let spc_raw = boot[BOOT_OFF_SECTORS_PER_CLUSTER];
     let sectors_per_cluster: u64 = spc_raw as u64;
     if sectors_per_cluster == 0 {
         return Err(format!(
@@ -85,11 +102,15 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
     }
     let cluster_size = bytes_per_sector as u64 * sectors_per_cluster;
 
-    let mft_lcn = u64::from_le_bytes(boot[0x30..0x38].try_into().unwrap());
+    let mft_lcn = u64::from_le_bytes(
+        boot[BOOT_OFF_MFT_LCN..BOOT_OFF_MFT_LCN + 8]
+            .try_into()
+            .unwrap(),
+    );
 
     // clusters_per_mft_record: positive ⇒ that many clusters; negative ⇒
     // 2^|val| bytes (common: -10 ⇒ 1024 byte records).
-    let cpmr = boot[0x40] as i8;
+    let cpmr = boot[BOOT_OFF_CLUSTERS_PER_MFT_RECORD] as i8;
     let file_record_size = if cpmr > 0 {
         (cpmr as u64) * cluster_size
     } else {
@@ -161,8 +182,8 @@ pub fn apply_fixup_on_read_magic(
     let sectors = usa_count - 1;
     for sector in 0..sectors {
         let sector_end = (sector + 1) * bytes_per_sector as usize;
-        let check = sector_end - 2;
-        if record[check..check + 2] != usn_bytes {
+        let check = sector_end - SECTOR_TAIL_BYTES;
+        if record[check..check + SECTOR_TAIL_BYTES] != usn_bytes {
             return Err(format!(
                 "USN mismatch at sector {sector} (offset {check:#x}): \
                  expected {usn_bytes:02x?}, found {:02x?}",
@@ -212,11 +233,11 @@ pub fn apply_fixup_on_write_magic(
     let sectors = usa_count - 1;
     for sector in 0..sectors {
         let sector_end = (sector + 1) * bytes_per_sector as usize;
-        let replace = sector_end - 2;
+        let replace = sector_end - SECTOR_TAIL_BYTES;
         let saved = usa_offset + 2 + sector * 2;
         record[saved] = record[replace];
         record[saved + 1] = record[replace + 1];
-        record[replace..replace + 2].copy_from_slice(&new_usn.to_le_bytes());
+        record[replace..replace + SECTOR_TAIL_BYTES].copy_from_slice(&new_usn.to_le_bytes());
     }
     Ok(())
 }
@@ -225,9 +246,8 @@ fn read_usa_header(record: &[u8]) -> Result<(usize, usize), String> {
     if record.len() < 8 {
         return Err("record too small to contain USA header".to_string());
     }
-    let usa_offset =
-        u16::from_le_bytes([record[OFF_USA_OFFSET], record[OFF_USA_OFFSET + 1]]) as usize;
-    let usa_count = u16::from_le_bytes([record[OFF_USA_COUNT], record[OFF_USA_COUNT + 1]]) as usize;
+    let usa_offset = read_u16_le(record, OFF_USA_OFFSET) as usize;
+    let usa_count = read_u16_le(record, OFF_USA_COUNT) as usize;
     if usa_count == 0 {
         return Err("USA count is zero (record has no fixup array)".to_string());
     }
@@ -584,5 +604,21 @@ mod tests {
         let mut rec = synth_fixup_record(0x0001);
         rec[0..4].copy_from_slice(b"INDX");
         apply_fixup_on_read_magic(&mut rec, 512, b"INDX").unwrap();
+    }
+
+    // --- is_power_of_two ------------------------------------------------------
+
+    #[test]
+    fn is_power_of_two_accepts_valid_sector_sizes() {
+        for bps in [512u16, 1024, 2048, 4096] {
+            assert!(is_power_of_two(bps), "expected power of two for {bps}");
+        }
+    }
+
+    #[test]
+    fn is_power_of_two_rejects_zero_and_non_powers() {
+        assert!(!is_power_of_two(0));
+        assert!(!is_power_of_two(513));
+        assert!(!is_power_of_two(3000));
     }
 }

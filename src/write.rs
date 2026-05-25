@@ -3273,3 +3273,79 @@ fn navigate_to<'n, T: std::io::Read + std::io::Seek>(
     }
     Ok(current)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data_runs::DataRun;
+
+    fn run(starting_vcn: u64, length: u64, lcn: u64) -> DataRun {
+        DataRun {
+            starting_vcn,
+            length,
+            lcn: Some(lcn),
+        }
+    }
+
+    // --- find_run_for_vcn -----------------------------------------------------
+
+    #[test]
+    fn find_run_for_vcn_returns_matching_run() {
+        let runs = vec![run(0, 4, 100), run(4, 8, 200)];
+        let r = find_run_for_vcn(&runs, 5).unwrap();
+        assert_eq!(r.starting_vcn, 4);
+        assert_eq!(r.lcn, Some(200));
+    }
+
+    #[test]
+    fn find_run_for_vcn_returns_none_when_past_end() {
+        let runs = vec![run(0, 4, 100)];
+        assert!(find_run_for_vcn(&runs, 4).is_none());
+        assert!(find_run_for_vcn(&runs, 100).is_none());
+    }
+
+    #[test]
+    fn find_run_for_vcn_returns_none_on_empty_list() {
+        assert!(find_run_for_vcn(&[], 0).is_none());
+    }
+
+    // --- split_runs_for_shrink ------------------------------------------------
+
+    #[test]
+    fn split_runs_shrink_to_zero_frees_all() {
+        let runs = vec![run(0, 4, 100), run(4, 4, 200)];
+        let (kept, freed) = split_runs_for_shrink(&runs, None);
+        assert!(kept.is_empty());
+        assert_eq!(freed, vec![(100, 4), (200, 4)]);
+    }
+
+    #[test]
+    fn split_runs_shrink_mid_run_splits_correctly() {
+        // Two runs of 4 clusters each. Shrink to VCN 5 (last cluster = VCN 5).
+        // Run 0 [0..4) kept whole; run 1 [4..8) split: keep VCNs 4-5, free VCNs 6-7.
+        let runs = vec![run(0, 4, 100), run(4, 4, 200)];
+        let (kept, freed) = split_runs_for_shrink(&runs, Some(5));
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0], run(0, 4, 100));
+        assert_eq!(kept[1].starting_vcn, 4);
+        assert_eq!(kept[1].length, 2);
+        assert_eq!(freed, vec![(202, 2)]);
+    }
+
+    #[test]
+    fn split_runs_no_shrink_keeps_all_runs() {
+        let runs = vec![run(0, 4, 100), run(4, 4, 200)];
+        let (kept, freed) = split_runs_for_shrink(&runs, Some(7));
+        assert_eq!(kept, runs);
+        assert!(freed.is_empty());
+    }
+
+    #[test]
+    fn split_runs_beyond_all_runs_frees_entire_run() {
+        // new_last_vcn cuts exactly before the second run entirely.
+        let runs = vec![run(0, 4, 100), run(4, 4, 200)];
+        let (kept, freed) = split_runs_for_shrink(&runs, Some(3));
+        assert_eq!(kept, vec![run(0, 4, 100)]);
+        assert_eq!(freed, vec![(200, 4)]);
+    }
+}
