@@ -14,8 +14,14 @@
 # the letter count is the natural concurrency ceiling. Set
 # serialize_mounts = true only for drivers (e.g. WinFsp-backed ext4)
 # where the user-mode host process is a per-instance singleton.
+#
+# test_threads: how many libtest-mimic slots to spin up. Set to the
+# drive-letter ceiling so the runner's own max_parallel pool is the
+# binding constraint — the mutex around letter acquisition is brief;
+# the rest of each test (chkdsk, enumerate, etc.) runs concurrently.
 serialize_mounts = false
 max_parallel     = "drive-letters"
+test_threads     = 24
 
 [project]
 name        = "rust-fs-ntfs"
