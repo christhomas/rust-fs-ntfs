@@ -31,14 +31,30 @@ typedef enum {
     FS_NTFS_FT_JUNCTION = 8, /* NTFS mount point / junction (directory) */
 } fs_ntfs_file_type_t;
 
-/* File/directory attributes */
+/* File/directory attributes.
+ *
+ * Timestamps are split into a signed 64-bit seconds component
+ * (UNIX epoch; negative values represent pre-1970 dates) and an
+ * unsigned 32-bit nanoseconds component in [0, 1_000_000_000).
+ * Layout: all four *_sec fields first (contiguous, 8-byte aligned),
+ * then all four *_nsec fields (contiguous, 4-byte aligned) — no
+ * padding between them.
+ *
+ * ABI note: this struct grew from 44 bytes (v0.1.2 layout with
+ * uint32_t atime/mtime/ctime/crtime) to 76 bytes.  Recompile any
+ * code that passes or stores fs_ntfs_attr_t by value.
+ */
 typedef struct {
     uint64_t file_record_number;
     uint64_t size;
-    uint32_t atime;         /* Access time (UNIX epoch) */
-    uint32_t mtime;         /* Modification time */
-    uint32_t ctime;         /* MFT record change time */
-    uint32_t crtime;        /* Creation time */
+    int64_t  atime_sec;     /* Access time — seconds since UNIX epoch */
+    int64_t  mtime_sec;     /* Modification time */
+    int64_t  ctime_sec;     /* MFT record change time */
+    int64_t  crtime_sec;    /* Creation time */
+    uint32_t atime_nsec;    /* Sub-second nanoseconds for atime */
+    uint32_t mtime_nsec;
+    uint32_t ctime_nsec;
+    uint32_t crtime_nsec;
     uint16_t mode;          /* Synthesized POSIX mode bits */
     uint16_t link_count;
     fs_ntfs_file_type_t file_type;

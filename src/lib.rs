@@ -424,10 +424,17 @@ unsafe impl Sync for MountSource {}
 pub struct FsNtfsAttr {
     file_record_number: u64,
     size: u64,
-    atime: u32,
-    mtime: u32,
-    ctime: u32,
-    crtime: u32,
+    /// Seconds since the UNIX epoch (1970-01-01 UTC), signed so
+    /// pre-1970 NTFS timestamps are representable as negative values.
+    atime_sec: i64,
+    mtime_sec: i64,
+    ctime_sec: i64,
+    crtime_sec: i64,
+    /// Sub-second component in nanoseconds (0 ≤ nsec < 1_000_000_000).
+    atime_nsec: u32,
+    mtime_nsec: u32,
+    ctime_nsec: u32,
+    crtime_nsec: u32,
     mode: u16,
     link_count: u16,
     file_type: u32,
@@ -539,13 +546,18 @@ pub struct FsNtfsDirIter {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Convert an NTFS timestamp (100ns intervals since 1601-01-01) to UNIX epoch.
-fn ntfs_time_to_unix(ntfs_time: ntfs::NtfsTime) -> u32 {
-    // NTFS epoch is 1601-01-01, UNIX epoch is 1970-01-01.
-    // Difference is 11644473600 seconds.
-    const EPOCH_DIFF: u64 = 11_644_473_600;
-    let secs = ntfs_time.nt_timestamp() / 10_000_000;
-    secs.saturating_sub(EPOCH_DIFF) as u32
+/// Convert an NTFS timestamp (100 ns intervals since 1601-01-01 UTC) to a
+/// `(seconds, nanoseconds)` UNIX pair. Seconds are signed so pre-1970
+/// timestamps are representable as negative values. The nsec component is
+/// always in `[0, 1_000_000_000)`.
+fn ntfs_time_to_unix(ntfs_time: ntfs::NtfsTime) -> (i64, u32) {
+    // NTFS epoch is 1601-01-01 UTC; UNIX epoch is 1970-01-01 UTC.
+    // Difference = 11 644 473 600 seconds.
+    const EPOCH_DIFF: i64 = 11_644_473_600;
+    let ts = ntfs_time.nt_timestamp();
+    let secs = (ts / 10_000_000) as i64 - EPOCH_DIFF;
+    let nsec = ((ts % 10_000_000) * 100) as u32;
+    (secs, nsec)
 }
 
 /// Build a synthesized dirent (used for "." / "..").
@@ -665,10 +677,13 @@ fn fill_attr(
                 if let Ok(std_info) =
                     attribute.resident_structured_value::<NtfsStandardInformation>()
                 {
-                    attr.crtime = ntfs_time_to_unix(std_info.creation_time());
-                    attr.mtime = ntfs_time_to_unix(std_info.modification_time());
-                    attr.atime = ntfs_time_to_unix(std_info.access_time());
-                    attr.ctime = ntfs_time_to_unix(std_info.mft_record_modification_time());
+                    (attr.crtime_sec, attr.crtime_nsec) =
+                        ntfs_time_to_unix(std_info.creation_time());
+                    (attr.mtime_sec, attr.mtime_nsec) =
+                        ntfs_time_to_unix(std_info.modification_time());
+                    (attr.atime_sec, attr.atime_nsec) = ntfs_time_to_unix(std_info.access_time());
+                    (attr.ctime_sec, attr.ctime_nsec) =
+                        ntfs_time_to_unix(std_info.mft_record_modification_time());
                     attr.attributes = std_info.file_attributes().bits();
                 }
             }
@@ -1388,10 +1403,14 @@ pub extern "C" fn fs_ntfs_stat(
     *out = FsNtfsAttr {
         file_record_number: 0,
         size: 0,
-        atime: 0,
-        mtime: 0,
-        ctime: 0,
-        crtime: 0,
+        atime_sec: 0,
+        mtime_sec: 0,
+        ctime_sec: 0,
+        crtime_sec: 0,
+        atime_nsec: 0,
+        mtime_nsec: 0,
+        ctime_nsec: 0,
+        crtime_nsec: 0,
         mode: 0,
         link_count: 0,
         file_type: 0,
@@ -3551,5 +3570,50 @@ pub extern "C" fn fs_ntfs_mkfs(cfg: *const FsNtfsBlockdevCfg) -> c_int {
             set_error(&e);
             -1
         }
+    }
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::ntfs_time_to_unix;
+
+    fn make_ts(hundred_ns: u64) -> ntfs::NtfsTime {
+        ntfs::NtfsTime::from(hundred_ns)
+    }
+
+    #[test]
+    fn unix_epoch_itself() {
+        // 1970-01-01T00:00:00Z = 11644473600 seconds after 1601-01-01
+        let ts = make_ts(11_644_473_600u64 * 10_000_000);
+        let (sec, nsec) = ntfs_time_to_unix(ts);
+        assert_eq!(sec, 0);
+        assert_eq!(nsec, 0);
+    }
+
+    #[test]
+    fn positive_timestamp_with_subseconds() {
+        // 1 second + 250 ms after UNIX epoch
+        let hundred_ns = (11_644_473_600u64 + 1) * 10_000_000 + 2_500_000; // +250ms
+        let (sec, nsec) = ntfs_time_to_unix(make_ts(hundred_ns));
+        assert_eq!(sec, 1);
+        assert_eq!(nsec, 250_000_000);
+    }
+
+    #[test]
+    fn pre_epoch_timestamp() {
+        // 1 second before UNIX epoch → sec = -1, nsec = 0
+        let hundred_ns = (11_644_473_600u64 - 1) * 10_000_000;
+        let (sec, nsec) = ntfs_time_to_unix(make_ts(hundred_ns));
+        assert_eq!(sec, -1);
+        assert_eq!(nsec, 0);
+    }
+
+    #[test]
+    fn nsec_max_value() {
+        // 999_999_900 ns = 9_999_999 × 100 ns intervals (just under 1 second)
+        let hundred_ns = 11_644_473_600u64 * 10_000_000 + 9_999_999;
+        let (sec, nsec) = ntfs_time_to_unix(make_ts(hundred_ns));
+        assert_eq!(sec, 0);
+        assert_eq!(nsec, 999_999_900);
     }
 }
