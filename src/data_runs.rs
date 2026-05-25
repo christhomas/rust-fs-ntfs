@@ -28,6 +28,35 @@ pub struct DataRun {
     pub lcn: Option<u64>,
 }
 
+/// Sign-extend a variable-width integer to a full `i64`.
+///
+/// NTFS LCN delta fields are little-endian signed integers packed into
+/// 1–8 bytes. After reading `nbytes` bytes into `raw` (with the rest of
+/// the `i64` zero), the value is only correct if the high bit of the
+/// `nbytes`-wide field is 0 (positive). If that bit is 1, all upper bits
+/// must be filled with 1s to produce the correct two's-complement negative.
+///
+/// Example: a 1-byte field `0xF6` represents −10, not 246. Without sign
+/// extension the raw read gives `0x00000000000000F6` (= 246); after
+/// extension it becomes `0xFFFFFFFFFFFFFFF6` (= −10).
+fn sign_extend_i64(raw: i64, nbytes: usize) -> i64 {
+    if nbytes >= 8 {
+        // All 64 bits are already in use — no extension possible.
+        return raw;
+    }
+    let sign_bit = 1i64 << (8 * nbytes - 1);
+    if raw & sign_bit != 0 {
+        // High bit of the field is set — fill every bit above it with 1s.
+        // (sign_bit << 1) is the first bit above the field; subtracting 1
+        // gives a mask of all bits AT or below the field; NOT flips it to
+        // give all bits ABOVE the field.
+        let upper_bits_mask = !((sign_bit << 1) - 1);
+        raw | upper_bits_mask
+    } else {
+        raw
+    }
+}
+
 /// Decode a mapping-pairs blob into an ordered list of runs. Stops at
 /// the first 0x00 header byte or the end of `bytes`, whichever comes
 /// first. Validates that LCN deltas don't produce negative absolute
@@ -72,16 +101,13 @@ pub fn decode_runs(bytes: &[u8]) -> Result<Vec<DataRun>, String> {
         let lcn = if lcn_bytes == 0 {
             None
         } else {
-            // Signed delta, little-endian, variable width. Sign-extend.
-            let mut delta: i64 = 0;
+            // LCN field is a signed variable-width little-endian integer.
+            // Assemble the raw bytes, then sign-extend to fill the full i64.
+            let mut raw: i64 = 0;
             for i in 0..lcn_bytes {
-                delta |= (bytes[p + i] as i64) << (8 * i);
+                raw |= (bytes[p + i] as i64) << (8 * i);
             }
-            let sign_bit_pos = 8 * lcn_bytes - 1;
-            if delta & (1i64 << sign_bit_pos) != 0 {
-                let mask = !((1i64 << (sign_bit_pos + 1)).wrapping_sub(1));
-                delta |= mask;
-            }
+            let delta = sign_extend_i64(raw, lcn_bytes);
             p += lcn_bytes;
             let new_lcn = prev_lcn
                 .checked_add(delta)
@@ -224,6 +250,33 @@ pub fn range_has_hole_or_past_end(runs: &[DataRun], vcn_start: u64, n_clusters: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- sign_extend_i64 ---------------------------------------------------
+
+    #[test]
+    fn sign_extend_positive_byte_unchanged() {
+        // 0x64 = 100; high bit clear → no extension needed.
+        assert_eq!(sign_extend_i64(0x64, 1), 100);
+    }
+
+    #[test]
+    fn sign_extend_negative_byte_fills_upper_bits() {
+        // 0xF6 = 246 unsigned; high bit set → sign-extend → -10.
+        assert_eq!(sign_extend_i64(0xF6, 1), -10);
+    }
+
+    #[test]
+    fn sign_extend_two_byte_negative() {
+        // 0xFF9C = 65436 unsigned; should extend to -100.
+        assert_eq!(sign_extend_i64(0xFF9C, 2), -100);
+    }
+
+    #[test]
+    fn sign_extend_full_eight_bytes_is_identity() {
+        // 8-byte values already fill i64 — extension is a no-op.
+        assert_eq!(sign_extend_i64(-42i64, 8), -42);
+        assert_eq!(sign_extend_i64(42, 8), 42);
+    }
 
     // --- decode_runs: happy paths ------------------------------------------
 

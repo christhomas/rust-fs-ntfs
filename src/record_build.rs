@@ -60,6 +60,18 @@ const ATTR_FILE_NAME: u32 = 0x30;
 const ATTR_DATA: u32 = 0x80;
 const ATTR_END_MARKER: u32 = 0xFFFF_FFFF;
 
+/// File-attribute bits stored in `$STANDARD_INFORMATION` and `$FILE_NAME`
+/// (MS-FSCC §2.6). The first three are standard Win32 values; the last two
+/// are NTFS-internal bits observed in Microsoft's `format.com` and
+/// `chkdsk` reference output but not documented in MS-FSCC.
+pub(crate) const FA_HIDDEN: u32 = 0x0000_0002;
+pub(crate) const FA_SYSTEM: u32 = 0x0000_0004;
+pub(crate) const FA_ARCHIVE: u32 = 0x0000_0020;
+/// Set on directory `$FILE_NAME` entries by `format.com` (bit 28).
+pub(crate) const FA_NTFS_DIRECTORY: u32 = 0x1000_0000;
+/// Set on view-index records (`$ObjId`, `$Reparse`) after `chkdsk` repair (bit 29).
+pub(crate) const FA_NTFS_VIEW_INDEX: u32 = 0x2000_0000;
+
 /// `$FILE_NAME.namespace` values per MS-FSCC §2.4.4. Picking the
 /// wrong value for a given name is what chkdsk reports as
 /// "An invalid filename X (N) was found in directory M / All
@@ -720,6 +732,13 @@ pub fn build_named_resident_data_attribute(
     Ok(buf)
 }
 
+/// Round `n` up to the next 8-byte boundary.
+///
+/// NTFS requires all attribute headers and values to start at offsets that
+/// are a multiple of 8 within the MFT record (MS-FSCC §2.3). The formula
+/// `(n + 7) & !7` is the standard power-of-two alignment trick: adding 7
+/// ensures we cross the next boundary, then masking off the low 3 bits
+/// snaps back to it.
 pub fn align8(n: usize) -> usize {
     (n + 7) & !7
 }
@@ -861,7 +880,11 @@ fn write_standard_information(
     rec[v + 8..v + 16].copy_from_slice(&nt_time.to_le_bytes()); // modification
     rec[v + 16..v + 24].copy_from_slice(&nt_time.to_le_bytes()); // mft change
     rec[v + 24..v + 32].copy_from_slice(&nt_time.to_le_bytes()); // access
-    let fa: u32 = if is_dir { 0x10000000 | 0x20 } else { 0x20 }; // FILE_ATTRIBUTE_ARCHIVE
+    let fa: u32 = if is_dir {
+        FA_NTFS_DIRECTORY | FA_ARCHIVE
+    } else {
+        FA_ARCHIVE
+    };
     rec[v + 32..v + 36].copy_from_slice(&fa.to_le_bytes()); // file_attributes
                                                             // rest (max_versions .. usn) stays 0
     at + attr_length
@@ -914,7 +937,11 @@ pub fn build_file_name_attribute(
     buf[v + 32..v + 40].copy_from_slice(&nt_time.to_le_bytes());
     buf[v + 40..v + 48].copy_from_slice(&0u64.to_le_bytes());
     buf[v + 48..v + 56].copy_from_slice(&0u64.to_le_bytes());
-    let fa: u32 = if is_dir { 0x10000000 | 0x20 } else { 0x20 };
+    let fa: u32 = if is_dir {
+        FA_NTFS_DIRECTORY | FA_ARCHIVE
+    } else {
+        FA_ARCHIVE
+    };
     buf[v + 56..v + 60].copy_from_slice(&fa.to_le_bytes());
     buf[v + 60..v + 64].copy_from_slice(&0u32.to_le_bytes());
     buf[v + 64] = utf16.len() as u8;
@@ -964,7 +991,11 @@ fn write_file_name(
     rec[v + 32..v + 40].copy_from_slice(&nt_time.to_le_bytes()); // access
     rec[v + 40..v + 48].copy_from_slice(&0u64.to_le_bytes()); // allocated_size
     rec[v + 48..v + 56].copy_from_slice(&0u64.to_le_bytes()); // real_size
-    let fa: u32 = if is_dir { 0x10000000 | 0x20 } else { 0x20 };
+    let fa: u32 = if is_dir {
+        FA_NTFS_DIRECTORY | FA_ARCHIVE
+    } else {
+        FA_ARCHIVE
+    };
     rec[v + 56..v + 60].copy_from_slice(&fa.to_le_bytes()); // file_attributes
     rec[v + 60..v + 64].copy_from_slice(&0u32.to_le_bytes()); // ea/reparse
     rec[v + 64] = name_utf16.len() as u8; // name_length

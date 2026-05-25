@@ -18,7 +18,8 @@ use crate::block_io::BlockIo;
 use crate::data_runs::{encode_runs, DataRun};
 use crate::mft_io::apply_fixup_on_write;
 use crate::record_build::{
-    align8, build_nonresident_attribute, build_nonresident_data_attribute, nt_time_now,
+    align8, build_nonresident_attribute, build_nonresident_data_attribute, nt_time_now, FA_ARCHIVE,
+    FA_HIDDEN, FA_NTFS_DIRECTORY, FA_NTFS_VIEW_INDEX, FA_SYSTEM,
 };
 use crate::upcase;
 
@@ -1848,17 +1849,18 @@ fn write_standard_information(
     rec[v + 8..v + 16].copy_from_slice(&nt_time.to_le_bytes());
     rec[v + 16..v + 24].copy_from_slice(&nt_time.to_le_bytes());
     rec[v + 24..v + 32].copy_from_slice(&nt_time.to_le_bytes());
-    // file_attributes: system records get HIDDEN|SYSTEM only (0x06), no
-    // ARCHIVE. Microsoft `format.com`'s reference per-record byte-diff
+    // file_attributes: system records get FA_HIDDEN|FA_SYSTEM only, no
+    // FA_ARCHIVE. Microsoft `format.com`'s reference per-record byte-diff
     // (agent-8934-2026-05-02 iter19, diag iter-20260502-072713) shows
-    // file_attributes = 0x06 on every system record; ours emitted 0x26
-    // (HIDDEN|SYSTEM|ARCHIVE) before this fix. Regular files keep ARCHIVE.
+    // file_attributes = FA_HIDDEN|FA_SYSTEM (0x06) on every system record;
+    // ours emitted 0x26 (HIDDEN|SYSTEM|ARCHIVE) before this fix.
+    // Regular files keep FA_ARCHIVE.
     let mut fa: u32 = if is_system {
-        0x06 // HIDDEN | SYSTEM (matches Microsoft reference)
+        FA_HIDDEN | FA_SYSTEM // matches Microsoft format.com reference output
     } else {
-        let mut f: u32 = 0x20; // ARCHIVE
+        let mut f = FA_ARCHIVE;
         if is_dir {
-            f |= 0x10000000;
+            f |= FA_NTFS_DIRECTORY;
         }
         f
     };
@@ -1866,7 +1868,7 @@ fn write_standard_information(
     // (both $STD_INFO and $FILE_NAME). Post-/f byte-diff (2026-05-24) shows
     // this bit present on $ObjId and $Reparse after chkdsk repairs them.
     if is_view_index {
-        fa |= 0x20000000;
+        fa |= FA_NTFS_VIEW_INDEX;
     }
     rec[v + 32..v + 36].copy_from_slice(&fa.to_le_bytes());
     // SecurityId at value+0x34 (MS-FSCC §2.4.2). OwnerId (+0x30),
@@ -1924,27 +1926,29 @@ fn write_file_name(
     rec[v + 32..v + 40].copy_from_slice(&nt_time.to_le_bytes());
     rec[v + 40..v + 48].copy_from_slice(&data_alloc.to_le_bytes());
     rec[v + 48..v + 56].copy_from_slice(&data_real.to_le_bytes());
-    // file_attributes: HIDDEN|SYSTEM (0x06) for system records, ARCHIVE
-    // (0x20) for regular files. The DIRECTORY bit (0x10000000) is OR'd
-    // on for any directory (including the root, which is both system
-    // AND a directory).
+    // file_attributes: FA_HIDDEN|FA_SYSTEM for system records, FA_ARCHIVE
+    // for regular files, plus FA_NTFS_DIRECTORY for any directory (including
+    // the root, which is both system and a directory).
     //
     // Byte-corroboration (run-20260503-011545/mac-format-label-empty,
     // rec 5 in-record $FILE_NAME):
-    //   reference bytes 0xE0..0xE3: 06 00 00 10  (= 0x10000006)
-    //   ours pre-fix:                06 00 00 00  (= 0x00000006)
+    //   reference bytes 0xE0..0xE3: 06 00 00 10  (= FA_NTFS_DIRECTORY|FA_HIDDEN|FA_SYSTEM)
+    //   ours pre-fix:                06 00 00 00  (= FA_HIDDEN|FA_SYSTEM only)
     //
-    // Without the DIRECTORY bit on the root's in-record FN, ntfs.sys
+    // Without FA_NTFS_DIRECTORY on the root's in-record FN, ntfs.sys
     // reports `$I30:$INDEX_ROOT corrupt` against rec 5 (Event ID 55
-    // with file reference 0x5000000000005, "corrupted index attribute
-    // is :$I30:$INDEX_ROOT"). chkdsk readonly tolerates it but /scan
-    // queues offline repair (exit 13).
-    let mut fa: u32 = if is_system { 0x06 } else { 0x20 };
+    // with file reference 0x5000000000005). chkdsk readonly tolerates
+    // it but /scan queues offline repair (exit 13).
+    let mut fa: u32 = if is_system {
+        FA_HIDDEN | FA_SYSTEM
+    } else {
+        FA_ARCHIVE
+    };
     if is_dir {
-        fa |= 0x10000000;
+        fa |= FA_NTFS_DIRECTORY;
     }
     if is_view_index {
-        fa |= 0x20000000;
+        fa |= FA_NTFS_VIEW_INDEX;
     }
     rec[v + 56..v + 60].copy_from_slice(&fa.to_le_bytes());
     rec[v + 60..v + 64].copy_from_slice(&0u32.to_le_bytes());
@@ -2207,11 +2211,13 @@ fn build_file_name_stream(
     buf[32..40].copy_from_slice(&nt_time.to_le_bytes());
     buf[40..48].copy_from_slice(&data_alloc.to_le_bytes());
     buf[48..56].copy_from_slice(&data_real.to_le_bytes());
-    // Same convention as write_file_name above (system → 0x06, regular
-    // → 0x20, plus 0x10000000 for any directory).
-    let mut fa: u32 = if is_system { 0x06 } else { 0x20 };
+    let mut fa: u32 = if is_system {
+        FA_HIDDEN | FA_SYSTEM
+    } else {
+        FA_ARCHIVE
+    };
     if is_dir {
-        fa |= 0x10000000;
+        fa |= FA_NTFS_DIRECTORY;
     }
     buf[56..60].copy_from_slice(&fa.to_le_bytes());
     buf[60..64].copy_from_slice(&0u32.to_le_bytes());
