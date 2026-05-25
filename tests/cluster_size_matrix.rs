@@ -161,17 +161,7 @@ fn round_trip_32k() {
     round_trip(c, v, l);
 }
 
-/// 64 KiB clusters require sectors_per_cluster=128, encoded as the
-/// byte 0x80 at BPB offset 0x0D. mkfs writes 0x80 as a literal `u8`
-/// (src/mkfs.rs:805), but the reader in src/mft_io.rs:58 treats any
-/// value `>= 0x80` as the rare log2 encoding and computes
-/// `1 << (256 - 0x80) = 1 << 128`, which panics with `attempt to
-/// shift left with overflow`. The boundary check should be `< 0x80`
-/// → `<= 0x80` (or the reader should match Microsoft's actual
-/// convention: only `>= 0xF0` triggers the log2 branch). Drop
-/// `#[ignore]` once that's fixed.
 #[test]
-#[ignore = "driver: 64 KiB cluster reader panics on shift-left overflow"]
 fn round_trip_64k() {
     let (c, v, l) = cases()[7];
     round_trip(c, v, l);

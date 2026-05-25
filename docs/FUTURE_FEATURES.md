@@ -281,27 +281,28 @@ exercises 1 GiB, 4 GiB (cluster 4k + 64k), and 16 GiB (cluster 4k)
 volumes alongside the original 32–64 MiB fixtures — see
 `test-matrix.json` for `mac-format-large-1gib`,
 `mac-format-volume-{4gib,16gib}-*`, and
-`mac-format-volume-32mib-cluster-512`. The 4 KiB-sector
-("Advanced Format") axis isn't exercised yet; that's the remaining
-gap, smaller in scope than the original "add a fixture matrix" item.
+`mac-format-volume-32mib-cluster-512`.
 
-### §2.5 Dirent eager materialization
+**64 KiB cluster fix (shipped 2026-05-25)**: `round_trip_64k` was
+`#[ignore]` because `src/mft_io.rs` decoded `sectors_per_cluster=0x80`
+(128, literal) as the log2 form `1 << (256 - 128) = 1 << 128`, causing
+a shift-overflow panic. Fixed by treating values 0x01–0x80 as literals
+(unlike `clusters_per_mft_record` which is signed i8 and uses a different
+encoding). Two new unit tests added: `parse_boot_spc_128_is_literal_not_log2`
+and `parse_boot_advanced_format_4096_bps`. `round_trip_64k` is now active.
 
-**Today**: `fs_ntfs_dir_open` reads every entry into a `Vec`
-(`src/lib.rs:1175-1265`; iterator struct at `src/lib.rs:415`).
+**Remaining gap**: full format+remount round-trip at `bytes_per_sector=4096`
+(4Kn "native Advanced Format"). `format_filesystem` hardcodes 512-byte
+sectors; adding a `bytes_per_sector` parameter touches the boot-sector
+builder, backup-boot offset, and all callers.
 
-**Problem**: 270 MB on a 1M-entry directory. FSKit OOMs. Eager
-materialization also blocks the first `readdir` by seconds and
-visibly stalls Finder on large dirs. (Cross-referenced in STATUS.md
-"Phase 3 #9" and "#### Eager directory materialization — unbounded
-memory".)
+### §2.5 Dirent eager materialization — shipped (2026-05-25)
 
-**Fix**: lazy iterator holding upstream's `NtfsIndexEntries` +
-reader reference. C-ABI shape change: store the upstream iterator
-inside `FsNtfsDirIter` and advance it in `fs_ntfs_dir_next`
-(`src/lib.rs:1286`). Lifetime plumbing is awkward but bounded.
-~100 LOC. Add a ≥100k-entry stress fixture (none exists today) for
-the baseline.
+`fs_ntfs_dir_open` now uses a lazy phase-based iterator (`LazyDirState`)
+with an independent reader per open directory. `FsNtfsDirIter` no longer
+pre-loads entries into a `Vec`; entries are streamed from the on-disk
+index in `fs_ntfs_dir_next`. Memory is bounded to one `FsNtfsDirent`
+scratch buffer regardless of directory size.
 
 ---
 

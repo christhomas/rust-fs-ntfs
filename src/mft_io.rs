@@ -73,14 +73,11 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
         ));
     }
 
-    // sectors_per_cluster encoding: high bit set ⇒ 2^(256-val) (rare, for very
-    // large clusters). Positive: literal value.
+    // sectors_per_cluster: values 1–128 (0x01–0x80) are literal. 0x80 = 128
+    // sectors per cluster = 64 KiB with 512-byte sectors. No log2 encoding
+    // exists for this field (unlike clusters_per_mft_record which uses i8).
     let spc_raw = boot[0x0D];
-    let sectors_per_cluster: u64 = if spc_raw < 0x80 {
-        spc_raw as u64
-    } else {
-        1u64 << (256u32.saturating_sub(spc_raw as u32))
-    };
+    let sectors_per_cluster: u64 = spc_raw as u64;
     if sectors_per_cluster == 0 {
         return Err(format!(
             "sectors_per_cluster decoded to 0 (raw {spc_raw:#x})"
@@ -413,6 +410,27 @@ mod tests {
         let boot = synth_boot(512, 8, 4, -12);
         let bp = parse_boot_params_from_bytes(&boot).unwrap();
         assert_eq!(bp.file_record_size, 4096);
+    }
+
+    #[test]
+    fn parse_boot_advanced_format_4096_bps() {
+        // 4 KiB native-sector ("4Kn") drive: bytes_per_sector=4096, spc=1
+        // → cluster_size=4096.  BPB is otherwise identical to 512e volumes.
+        let boot = synth_boot(4096, 1, 4, -10);
+        let bp = parse_boot_params_from_bytes(&boot).unwrap();
+        assert_eq!(bp.bytes_per_sector, 4096);
+        assert_eq!(bp.sectors_per_cluster, 1);
+        assert_eq!(bp.cluster_size, 4096);
+    }
+
+    #[test]
+    fn parse_boot_spc_128_is_literal_not_log2() {
+        // spc=0x80 (128) = 128 sectors × 512 B = 64 KiB per cluster.
+        // Previously decoded as 1<<(256-128)=1<<128 → overflow panic.
+        let boot = synth_boot(512, 0x80, 4, -10);
+        let bp = parse_boot_params_from_bytes(&boot).unwrap();
+        assert_eq!(bp.sectors_per_cluster, 128);
+        assert_eq!(bp.cluster_size, 65536);
     }
 
     #[test]
