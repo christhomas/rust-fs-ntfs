@@ -127,13 +127,9 @@ fn format_and_parse_back() {
         }
         names.push(key.name().to_string_lossy());
     }
-    // Slot 9 is named `$Secure` at this test's cluster_size = 4096.
-    // At smaller cluster sizes (512, 1024) chkdsk expects `$Quota`
-    // instead — see `mkfs::rec::name`'s docstring for the full Iter M
-    // matrix-trace rationale. Pulling the names from `rec::name()`
-    // routes both sides of this assertion through that single source
-    // of truth, so a typo / wrong-cluster-size choice can't produce
-    // a green test against a broken volume.
+    // Slot 9 is `$Secure` at all cluster sizes under NTFS 3.1. Pull
+    // names through `rec::name()` so a future rename propagates here
+    // automatically.
     assert_eq!(
         names,
         vec![
@@ -527,9 +523,10 @@ fn extend_record_is_empty_directory() {
         entries,
         vec![
             ("$ObjId".to_string(), rec::OBJID as u64),
+            ("$Quota".to_string(), rec::QUOTA as u64),
             ("$Reparse".to_string(), rec::REPARSE as u64),
         ],
-        "$Extend $I30 must list $ObjId and $Reparse; got {entries:?}"
+        "$Extend $I30 must list $ObjId, $Quota, and $Reparse; got {entries:?}"
     );
 }
 
@@ -587,12 +584,9 @@ fn objid_slot_is_populated() {
     );
 }
 
-/// Slot 17 ($Reparse) must be populated; slot 18+ must be zeroed.
-/// $RmMetadata is intentionally absent — chkdsk /scan accepts
-/// $ObjId+$Reparse alone, and including an empty $RmMetadata caused
-/// "corrupt basic file structure" (its $I30 needs children we don't ship).
+/// Slots 17 ($Reparse) and 18 ($Quota) must be populated; slot 19+ must be zeroed.
 #[test]
-fn extend_child_slot_17_is_populated_18_is_zeroed() {
+fn extend_child_slots_17_18_populated_19_is_zeroed() {
     let mut dev = MemDev::new(VOL_SIZE);
     format_filesystem(
         &mut dev,
@@ -616,13 +610,23 @@ fn extend_child_slot_17_is_populated_18_is_zeroed() {
         "rec 17 must have flags=0x000D (IN_USE|0x04|VIEW_INDEX)"
     );
 
-    // rec 18 must be zeroed (no $RmMetadata)
+    // rec 18 = $Quota: FILE magic + IN_USE|0x0004|VIEW_INDEX = 0x000D
     let rec18_off = mft_offset + 18 * record_size;
+    let s18 = &dev.buf[rec18_off..rec18_off + record_size];
+    assert_eq!(&s18[0..4], b"FILE", "rec 18 must have FILE magic");
+    let flags18 = u16::from_le_bytes([s18[22], s18[23]]);
+    assert_eq!(
+        flags18, 0x000D,
+        "rec 18 must have flags=0x000D (IN_USE|0x04|VIEW_INDEX)"
+    );
+
+    // rec 19 must be zeroed (no further $Extend children)
+    let rec19_off = mft_offset + 19 * record_size;
     assert!(
-        dev.buf[rec18_off..rec18_off + record_size]
+        dev.buf[rec19_off..rec19_off + record_size]
             .iter()
             .all(|&b| b == 0),
-        "rec 18 must be a zeroed MFT slot"
+        "rec 19 must be a zeroed MFT slot"
     );
 }
 

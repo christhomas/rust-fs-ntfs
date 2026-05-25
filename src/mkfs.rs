@@ -55,12 +55,14 @@ const COLLATION_FILE_NAME: u32 = 0x01;
 const COLLATION_NTOFS_SECURITY_HASH: u32 = 0x12;
 // $SII (Security ID Index) view-index — keyed by security_id.
 // `COLLATION_NTOFS_ULONG = 0x10` per the same source. Used by
-// $SII and by `$Quota:$Q` and `$Quota:$O` (not relevant at S1).
 const COLLATION_NTOFS_ULONG: u32 = 0x10;
 // $ObjId:$O and $Reparse:$R view-index — keyed by OBJECT_ID (16-byte
 // GUID-like structure) and reparse-tag+MFT-ref respectively.
 // `COLLATION_NTOFS_ULONGS = 0x13` per MS-FSCC §2.4.
 const COLLATION_NTOFS_ULONGS: u32 = 0x13;
+// $Quota:$O view-index — keyed by Security Identifier (SID).
+// `COLLATION_NTOFS_SID = 0x11` per MS-FSCC §2.4.
+const COLLATION_NTOFS_SID: u32 = 0x11;
 
 // ---------------------------------------------------------------------------
 // `SD_SYSFILE_RW`: canonical security descriptor stored in $Secure:$SDS
@@ -166,11 +168,12 @@ pub mod rec {
     // With correct flags all three ship safely.
     pub const OBJID: u32 = 16; // $Extend\$ObjId   VIEW_INDEX
     pub const REPARSE: u32 = 17; // $Extend\$Reparse VIEW_INDEX
-                                 // $RmMetadata intentionally omitted: chkdsk /scan accepts $ObjId+$Reparse
-                                 // without $RmMetadata (scan-f-scan 2026-05-24). Including an empty
-                                 // $RmMetadata causes "corrupt basic file structure" because chkdsk
-                                 // expects its $I30 to contain $Repair/$TxfLog/$Txf children; shipping
-                                 // those chains is out of scope.
+    pub const QUOTA: u32 = 18; // $Extend\$Quota   VIEW_INDEX (empty $O/$Q indexes)
+                               // $RmMetadata intentionally omitted: chkdsk /scan accepts $ObjId+$Reparse
+                               // without $RmMetadata (scan-f-scan 2026-05-24). Including an empty
+                               // $RmMetadata causes "corrupt basic file structure" because chkdsk
+                               // expects its $I30 to contain $Repair/$TxfLog/$Txf children; shipping
+                               // those chains is out of scope.
 
     /// Canonical NTFS name for each system MFT record (root → "."
     /// per filesystem convention; everything else is `$Name`). This
@@ -178,105 +181,21 @@ pub mod rec {
     /// `"$Secure"` or `"$MFT"` must go through this so a typo cannot
     /// produce a broken-but-compiling volume.
     ///
-    /// # Rec 9: `$Secure` vs `$Quota` — the cluster-size quirk
-    ///
-    /// **`cluster_size` matters for rec 9 only.** All other system
-    /// records have a single canonical name; rec 9's name depends on
-    /// the volume's cluster size:
-    ///
-    /// | cluster_size  | rec 9 name | matrix scenarios verified |
-    /// |---------------|-----------|---------------------------|
-    /// | 512 B         | `$Quota`  | `mac-format-cluster-512`    |
-    /// | 1 KiB         | `$Quota`  | `mac-format-cluster-1k`     |
-    /// | 4 KiB         | `$Secure` | `mac-format-basic-256mib`, `windows-fresh-256m.bin` |
-    /// | 8 KiB         | `$Secure` | `mac-format-cluster-8k`     |
-    /// | 64 KiB        | `$Secure` | `mac-format-cluster-64k`    |
-    ///
-    /// The split is sharp at exactly 4 KiB.
-    ///
-    /// ## How we know
-    ///
-    /// On any `cluster_size < 4096` volume that names rec 9 `$Secure`,
-    /// chkdsk Stage 2 reports — and "auto-repairs" — the name:
-    ///
-    /// ```text
-    /// Stage 2: Examining file name linkage ...
-    /// Deleting invalid system file name $Secure (9) in directory 5.
-    /// Repairing invalid system file name $Quota (9) in directory 5.
-    /// Correcting system file name errors in file 9.
-    /// Index entry $Secure in index $I30 of file 5 is incorrect.
-    /// ```
-    ///
-    /// chkdsk has hard-coded knowledge that rec 9 must be named
-    /// `$Quota` at small cluster sizes — even though the file at
-    /// rec 9 carries the `$SDH` / `$SII` / `$SDS` streams that are
-    /// the *security-descriptor catalog*, not quota tracking. The
-    /// name is purely conventional; the on-disk contents and the
-    /// well-known record number (9) are what actually identify the
-    /// file to the NT kernel.
-    ///
-    /// ## Why this most likely exists (empirically-grounded guess)
-    ///
-    /// NTFS's well-known-record reservations have shifted across
-    /// versions:
-    ///
-    /// * NTFS 1.x (NT 3.x / NT 4.x) shipped rec 9 as `$Quota`,
-    ///   tracking per-user disk quotas. There was no centralised
-    ///   security-descriptor catalog yet — every file carried an
-    ///   inline `$SECURITY_DESCRIPTOR` attribute (rec 9 had nothing
-    ///   to do with security).
-    /// * NTFS 3.0 (Windows 2000) introduced `$Secure` at the same
-    ///   well-known slot 9 and moved every file's security
-    ///   descriptor into the new central `$SDS` catalog (referenced
-    ///   by `$STD_INFO.SecurityId`). Per-user quotas moved to
-    ///   `\$Extend\$Quota` (where the matrix's Windows-fresh dump
-    ///   does in fact find rec 24 named `$Quota`, parent rec 11
-    ///   = `$Extend`).
-    /// * Default cluster size jumped from 512 B / 1 KiB on small
-    ///   NT-era disks to 4 KiB around the NTFS 3.x transition
-    ///   (matching the typical x86 page size).
-    ///
-    /// Whoever wrote chkdsk apparently keys the rec 9 name on a
-    /// "this looks like an NTFS-1.x-era volume" heuristic, and
-    /// `cluster_size < 4096` is the heuristic they picked. Probably
-    /// because small-cluster NTFS in the wild is almost exclusively
-    /// legacy media imaged from NT-era systems, and renaming
-    /// `$Secure` → `$Quota` is what those volumes need to round-trip
-    /// through chkdsk without "corruption" complaints.
-    ///
-    /// (This is informed speculation. The chkdsk behaviour is what's
-    /// testable; the *why* is what fits the historical fingerprint.
-    /// Without ntfs.sys / chkdsk.exe PDB symbols we can't read the
-    /// actual branch, only observe its effect.)
-    ///
-    /// ## Why we pre-emptively name correctly instead of letting
-    /// ## chkdsk "auto-repair"
-    ///
-    /// chkdsk's repair is non-idempotent in the matrix sense: it
-    /// renames the file, but in doing so flips the volume's "needs
-    /// fix offline" flag and returns exit 3 / 13. The matrix
-    /// scenarios require chkdsk to **exit 0** on a freshly-formatted
-    /// volume, which means our output has to match chkdsk's
-    /// already-correct expectation byte-for-byte. So we emit
-    /// whichever name chkdsk would have rewritten *to*, depending
-    /// on cluster size.
-    ///
-    /// All non-SECURE records ignore `cluster_size`; passing it
-    /// uniformly keeps the API symmetric and makes the rec 9 quirk
-    /// hard to forget at the call site (no separate "secure name"
-    /// helper to look for).
-    ///
-    /// # Return type
-    ///
     /// Returns `Some(&'static str)` for known system MFT records
     /// (0..=11 minus the reserved 5/12..15 placeholders that have
-    /// no $FILE_NAME) and `None` otherwise. Callers that know they
-    /// have a constant (`rec::SECURE`, …) should `.expect("…")` or
-    /// `.unwrap()`; callers that dispatch on a `u32` read off disk
-    /// can pattern-match without crashing the process. Returning
-    /// `Option` instead of panicking keeps `pub fn name` composable
-    /// for external crates (PR #47 review).
-    pub fn name(rec_num: u32, cluster_size: u32) -> Option<&'static str> {
+    /// no `$FILE_NAME`) and `None` otherwise.
+    ///
+    /// # Note on `cluster_size`
+    ///
+    /// Under NTFS 1.2 (pre-upgrade), rec 9 was named `$Quota` on
+    /// small-cluster volumes and chkdsk enforced that convention. With
+    /// NTFS 3.1 (our current format), the kernel performs the 1.2→3.1
+    /// upgrade (renaming `$Quota`→`$Secure`, among other changes) via
+    /// `UPGRADE_ON_MOUNT` when a 1.2 volume is first mounted. Since we
+    /// write NTFS 3.1 directly, rec 9 is `$Secure` at every cluster
+    /// size. The `cluster_size` parameter is retained for call-site
+    /// symmetry (all callers already pass it) but is currently unused.
+    pub fn name(rec_num: u32, _cluster_size: u32) -> Option<&'static str> {
         Some(match rec_num {
             MFT => "$MFT",
             MFTMIRR => "$MFTMirr",
@@ -287,17 +206,12 @@ pub mod rec {
             BITMAP => "$Bitmap",
             BOOT => "$Boot",
             BADCLUS => "$BadClus",
-            SECURE => {
-                if cluster_size < 4096 {
-                    "$Quota"
-                } else {
-                    "$Secure"
-                }
-            }
+            SECURE => "$Secure",
             UPCASE => "$UpCase",
             EXTEND => "$Extend",
             OBJID => "$ObjId",
             REPARSE => "$Reparse",
+            QUOTA => "$Quota",
             _ => return None,
         })
     }
@@ -340,6 +254,9 @@ pub mod stream {
 
     /// `$Reparse:$R` — reparse-point view index.
     pub const R: &str = "$R";
+
+    /// `$Quota:$Q` — quota table view index (keyed by owner_id).
+    pub const Q: &str = "$Q";
 
     /// UTF-16-LE encoding of a stream name. NTFS attribute headers
     /// store names as raw UTF-16 code units (no NUL); this is the
@@ -429,7 +346,7 @@ pub fn format_filesystem(
     // after — otherwise both end up at the same LCN and $AttrDef's
     // write clobbers the $MFT bitmap cluster.
     let attrdef_lcn = upcase_lcn + upcase_clusters;
-    let attrdef_clusters: u64 = (15 * 160u64).div_ceil(cluster_size as u64).max(1);
+    let attrdef_clusters: u64 = (16 * 160u64).div_ceil(cluster_size as u64).max(1);
 
     // $MFT's own $BITMAP attribute is non-resident on Microsoft's
     // reference output (per-record byte-diff: ref ships an attribute
@@ -649,12 +566,12 @@ pub fn format_filesystem(
         let bitmap_value_size = mft_records_capacity.div_ceil(8) as usize;
         // Slots 0..10: canonical system files; 11: $Extend; 12..15:
         // reserved placeholders; 16..18: $Extend children ($ObjId,
-        // $Reparse, $RmMetadata). Slots 19+ left free.
+        // $Reparse, $Quota). Slots 19+ left free.
         let mut allocated: Vec<u32> = (0u32..=10u32).collect();
         for slot in 11..mft_records_capacity.min(16) as u32 {
             allocated.push(slot);
         }
-        for slot in [rec::OBJID, rec::REPARSE] {
+        for slot in [rec::OBJID, rec::REPARSE, rec::QUOTA] {
             if (slot as u64) < mft_records_capacity {
                 allocated.push(slot);
             }
@@ -836,7 +753,7 @@ pub fn format_filesystem(
         ));
     }
 
-    // record 4: $AttrDef (canonical NTFS 3.1, 2400 bytes / 15 entries)
+    // record 4: $AttrDef (canonical NTFS 3.1, 2560 bytes / 16 entries)
     {
         let attrdef_blob = build_attrdef_table();
         // Sanity: the layout-planning attrdef_clusters must be at
@@ -1256,6 +1173,10 @@ pub fn format_filesystem(
                 rec::REPARSE,
                 rec::name(rec::REPARSE, cluster_size).expect("known"),
             ),
+            (
+                rec::QUOTA,
+                rec::name(rec::QUOTA, cluster_size).expect("known"),
+            ),
         ];
         extend_children.sort_by(|a, b| collate_file_name(a.1, b.1));
 
@@ -1342,6 +1263,51 @@ pub fn format_filesystem(
             &[r_index_root],
         )?;
         place_record(&mut mft_buf, rs, rec::REPARSE, reparse_rec)?;
+
+        // $Quota: $O (SID→owner_id) and $Q (owner_id→quota_info) view indexes.
+        // Shipping $Quota preemptively prevents the Windows NTFS driver from
+        // creating it on first mount, which for sub-4K cluster sizes results in
+        // an incomplete record (missing $O/$Q initialization) that chkdsk flags.
+        //
+        // $Q must contain a "default quota record" (OwnerID=1) with unlimited
+        // limits. Without it, chkdsk /scan exits 1 regardless of cluster size.
+        // Format extracted from a cluster-4K post-mount image: QUOTA_CONTROL
+        // v2, flags=1 (FLAG_ID_ALLOCATED), zero usage, -1 thresholds.
+        let q_name = stream::utf16(stream::Q);
+        let default_quota_key = 1u32.to_le_bytes(); // OwnerID = 1
+        let mut q_entries =
+            build_view_index_entry(&default_quota_key, &build_default_quota_control());
+        q_entries.extend_from_slice(&last_entry);
+        let q_index_root = build_populated_named_index_root_attr(
+            3,
+            &q_name,
+            0,
+            COLLATION_NTOFS_ULONG,
+            index_block_size,
+            cluster_size,
+            &q_entries,
+        );
+        let o_quota_name = stream::utf16(stream::O);
+        let o_quota_index_root = build_populated_named_index_root_attr(
+            4,
+            &o_quota_name,
+            0,
+            COLLATION_NTOFS_SID,
+            index_block_size,
+            cluster_size,
+            &last_entry,
+        );
+        let quota_rec = build_system_record_with_parent(
+            &mft_record_layout,
+            rec::QUOTA,
+            rec::EXTEND,
+            rec::name(rec::QUOTA, cluster_size).expect("known rec_num"),
+            false,
+            0,
+            0,
+            &[o_quota_index_root, q_index_root],
+        )?;
+        place_record(&mut mft_buf, rs, rec::QUOTA, quota_rec)?;
     }
 
     // record 5: root directory "." — built AFTER rec 0..4 and rec 6..11
@@ -1640,7 +1606,10 @@ fn build_system_record_with_parent(
     // byte-diff — its rec 9 is `$Quota`, not `$Secure`, so the
     // comparable flag field is uninformative. Fix is keyed on the
     // public spec rather than a flag-byte diff.
-    let is_view_index = matches!(record_number, rec::SECURE | rec::REPARSE | rec::OBJID);
+    let is_view_index = matches!(
+        record_number,
+        rec::SECURE | rec::REPARSE | rec::OBJID | rec::QUOTA
+    );
     // VIEW_INDEX records need both 0x0004 (MFT_RECORD_HAS_VIEW_INDEX, indicating
     // a named non-$I30 index root is present) and 0x0008 (MFT_RECORD_IS_VIEW_INDEX).
     // Post-/f byte-diff (2026-05-24): slots 16/17 show 0x000D after /f fixes them.
@@ -2175,6 +2144,22 @@ fn build_view_index_entry(key: &[u8], value: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// 48-byte on-disk QUOTA_CONTROL for the $Q default record (OwnerID=1).
+/// Version=2, FLAG_ID_ALLOCATED=1, zero usage, unlimited warning/hard
+/// limits (-1), zero exceeded-time. Extracted from a Windows-formatted
+/// cluster-4K image (post-mount, USA fixup applied).
+fn build_default_quota_control() -> [u8; 48] {
+    let mut buf = [0u8; 48];
+    buf[0..4].copy_from_slice(&2u32.to_le_bytes()); // Version
+    buf[4..8].copy_from_slice(&1u32.to_le_bytes()); // Flags = FLAG_ID_ALLOCATED
+                                                    // bytes_used[8..16]  = 0  (already)
+                                                    // change_time[16..24] = 0 (already)
+    buf[24..32].copy_from_slice(&(-1i64).to_le_bytes()); // WarningLimit
+    buf[32..40].copy_from_slice(&(-1i64).to_le_bytes()); // HardLimit
+                                                         // exceeded_time[40..48] = 0 (already)
+    buf
+}
+
 /// LAST sentinel for a view-index (no key, no value, flags=0x02).
 fn build_view_index_last_entry() -> Vec<u8> {
     let mut buf = vec![0u8; 0x10];
@@ -2395,8 +2380,8 @@ fn make_mft_internal_bitmap(size_bytes: usize, used_records: &[u32]) -> Vec<u8> 
 // $AttrDef table (canonical NTFS 3.1)
 // ---------------------------------------------------------------------------
 
-/// Build the canonical NTFS 3.1 $AttrDef table. 20 entries × 160 bytes
-/// + 1 zero-terminator entry = 2560 bytes total. Format per
+/// Build the canonical NTFS 3.1 $AttrDef table. 15 active entries ×
+/// 160 bytes + 1 zero-terminator entry = 2560 bytes total. Format per
 ///   MS-FSCC and Windows Internals 7th ed.: 64-byte UTF-16 name +
 ///   u32 type + u32 display_rule + u32 collation + u32 flags +
 ///   u64 min_size + u64 max_size.
@@ -2413,19 +2398,17 @@ fn build_attrdef_table() -> Vec<u8> {
     const NONRES: u32 = 0x80;
     const INDEXED: u32 = 0x02;
     const NEG1: i64 = -1;
-    // Entry contents byte-corroborated against Microsoft `format.com`'s
-    // 2400-byte $AttrDef cluster (diag run-20260502-165809). Microsoft
-    // ships the **NTFS 1.x legacy names** in $AttrDef even on modern
-    // 3.1 volumes (`$VOLUME_VERSION` for type 0x40 — not `$OBJECT_ID`;
-    // `$SYMBOLIC_LINK` for type 0xC0 — not `$REPARSE_POINT`). The
-    // attribute *type* used at runtime hasn't changed (0x40 still
-    // means object-id, 0xC0 still means reparse-point), but the
-    // $AttrDef name field is fossilised to the original NTFS 1.x
-    // labels. ntfs.sys cross-checks this table at mount.
-    //
-    // No `$LOGGED_UTILITY_STREAM` entry — Microsoft's reference table
-    // stops at $EA. Trailing 160-byte zero entry IS present (entry 14
-    // is all zeros) — the iteration below appends it.
+    // Entry contents match the NTFS 3.1 table that ntfs.sys writes on
+    // first mount of a freshly-formatted volume (extracted from a
+    // cluster-4K post-mount image, diag run-20260502). Key differences
+    // from the NTFS 1.x table that format.com emits:
+    //   - $STANDARD_INFORMATION max = 72 (not 48) — NTFS 3.x extended form
+    //   - 0x40 entry name is "$OBJECT_ID" (not "$VOLUME_VERSION"), max=256
+    //   - 0xC0 entry name is "$REPARSE_POINT" (not "$SYMBOLIC_LINK"), max=16384
+    //   - 0x100 $LOGGED_UTILITY_STREAM added (max=65536)
+    // chkdsk /scan validates on-disk attributes against this table; using
+    // the 1.x legacy form causes "Errors found in Attribute Definition
+    // Table" on sub-4K cluster volumes where ntfs.sys does not update it.
     let entries = [
         Entry {
             name: "$STANDARD_INFORMATION",
@@ -2433,7 +2416,7 @@ fn build_attrdef_table() -> Vec<u8> {
             collation: 0,
             flags: RESIDENT,
             min_size: 48,
-            max_size: 48, // ref uses min=max=48 (NTFS 1.x form)
+            max_size: 72, // NTFS 3.x extended form (quota owner, security id, USN)
         },
         Entry {
             name: "$ATTRIBUTE_LIST",
@@ -2446,18 +2429,18 @@ fn build_attrdef_table() -> Vec<u8> {
         Entry {
             name: "$FILE_NAME",
             type_code: 0x30,
-            collation: 0, // ref has 0 here, not COLLATION_FILE_NAME (1)
+            collation: 0,
             flags: RESIDENT | INDEXED,
             min_size: 68,
             max_size: 578,
         },
         Entry {
-            name: "$VOLUME_VERSION", // legacy name; type 0x40 = $OBJECT_ID at runtime
+            name: "$OBJECT_ID", // NTFS 3.x name (was "$VOLUME_VERSION" in 1.x)
             type_code: 0x40,
             collation: 0,
             flags: RESIDENT,
-            min_size: 8,
-            max_size: 8,
+            min_size: 0,
+            max_size: 256,
         },
         Entry {
             name: "$SECURITY_DESCRIPTOR",
@@ -2516,12 +2499,12 @@ fn build_attrdef_table() -> Vec<u8> {
             max_size: NEG1,
         },
         Entry {
-            name: "$SYMBOLIC_LINK", // legacy name; type 0xC0 = $REPARSE_POINT
+            name: "$REPARSE_POINT", // NTFS 3.x name (was "$SYMBOLIC_LINK" in 1.x)
             type_code: 0xC0,
             collation: 0,
             flags: NONRES,
             min_size: 0,
-            max_size: NEG1,
+            max_size: 16384, // 0x4000 per post-mount reference image
         },
         Entry {
             name: "$EA_INFORMATION",
@@ -2539,10 +2522,16 @@ fn build_attrdef_table() -> Vec<u8> {
             min_size: 0,
             max_size: 65536,
         },
+        Entry {
+            name: "$LOGGED_UTILITY_STREAM",
+            type_code: 0x100,
+            collation: 0,
+            flags: NONRES,
+            min_size: 0,
+            max_size: 65536,
+        },
     ];
-    // Reference's $AttrDef from `format.com` is exactly 15 × 160 = 2400
-    // bytes: 14 active entries + one 160-byte all-zeros terminator
-    // (entry 14). We append the terminator after the iteration.
+    // 16 active entries + one 160-byte all-zeros terminator = 2720 bytes.
     let mut out = Vec::with_capacity(160 * (entries.len() + 1));
     for e in &entries {
         let mut buf = [0u8; 160];
