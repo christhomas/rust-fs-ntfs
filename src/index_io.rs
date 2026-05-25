@@ -6,7 +6,7 @@
 //! $INDEX_ROOT, and $FILE_NAME attribute formats per Windows Internals
 //! 7th ed. ch. "NTFS On-Disk Structure" and MS-FSCC.
 
-use crate::attr_io::{self, AttrType};
+use crate::attr_io::{self, read_u32_le, AttrType};
 use crate::mkfs::stream;
 
 /// Offsets inside `$INDEX_ROOT`'s resident value.
@@ -83,18 +83,8 @@ pub fn find_index_entry(record: &[u8], wanted: &str) -> Result<Option<IndexEntry
     let ir_data_start = ir.attr_offset + ir_value_offset;
 
     let ih_start = ir_data_start + IR_INDEX_HEADER_OFFSET;
-    let first_entry_rel = u32::from_le_bytes([
-        record[ih_start + IH_FIRST_ENTRY_OFFSET],
-        record[ih_start + IH_FIRST_ENTRY_OFFSET + 1],
-        record[ih_start + IH_FIRST_ENTRY_OFFSET + 2],
-        record[ih_start + IH_FIRST_ENTRY_OFFSET + 3],
-    ]) as usize;
-    let total_size = u32::from_le_bytes([
-        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES],
-        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 1],
-        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 2],
-        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 3],
-    ]) as usize;
+    let first_entry_rel = read_u32_le(record, ih_start + IH_FIRST_ENTRY_OFFSET) as usize;
+    let total_size = read_u32_le(record, ih_start + IH_TOTAL_SIZE_OF_ENTRIES) as usize;
 
     let mut cursor = ih_start + first_entry_rel;
     let end = ih_start + total_size;
@@ -163,18 +153,8 @@ pub fn index_root_has_real_entries(record: &[u8]) -> Result<bool, String> {
     let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
     let ir_data_start = ir.attr_offset + val_off;
     let ih_start = ir_data_start + IR_INDEX_HEADER_OFFSET;
-    let first_entry_rel = u32::from_le_bytes([
-        record[ih_start + IH_FIRST_ENTRY_OFFSET],
-        record[ih_start + IH_FIRST_ENTRY_OFFSET + 1],
-        record[ih_start + IH_FIRST_ENTRY_OFFSET + 2],
-        record[ih_start + IH_FIRST_ENTRY_OFFSET + 3],
-    ]) as usize;
-    let total_size = u32::from_le_bytes([
-        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES],
-        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 1],
-        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 2],
-        record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 3],
-    ]) as usize;
+    let first_entry_rel = read_u32_le(record, ih_start + IH_FIRST_ENTRY_OFFSET) as usize;
+    let total_size = read_u32_le(record, ih_start + IH_TOTAL_SIZE_OF_ENTRIES) as usize;
     let first_entry = ih_start + first_entry_rel;
     let end = ih_start + total_size;
     if first_entry + IE_KEY_START > record.len() || first_entry + 0x10 > end {
@@ -218,18 +198,8 @@ pub fn find_entry_in_indx_block(
         return Err("not an INDX block (fixup missing?)".to_string());
     }
     let ih_start = INDX_INDEX_HEADER_OFFSET;
-    let first_entry_rel = u32::from_le_bytes([
-        block[ih_start + IH_FIRST_ENTRY_OFFSET],
-        block[ih_start + IH_FIRST_ENTRY_OFFSET + 1],
-        block[ih_start + IH_FIRST_ENTRY_OFFSET + 2],
-        block[ih_start + IH_FIRST_ENTRY_OFFSET + 3],
-    ]) as usize;
-    let total_size = u32::from_le_bytes([
-        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES],
-        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 1],
-        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 2],
-        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 3],
-    ]) as usize;
+    let first_entry_rel = read_u32_le(block, ih_start + IH_FIRST_ENTRY_OFFSET) as usize;
+    let total_size = read_u32_le(block, ih_start + IH_TOTAL_SIZE_OF_ENTRIES) as usize;
     let mut cursor = ih_start + first_entry_rel;
     let end = ih_start + total_size;
     scan_entries_for_name(block, &mut cursor, end, wanted)
@@ -601,18 +571,8 @@ pub fn insert_entry_into_indx_block_with_collation(
         return Err("not an INDX block".to_string());
     }
     let ih_start = INDX_INDEX_HEADER_OFFSET;
-    let first_entry_rel = u32::from_le_bytes([
-        block[ih_start + IH_FIRST_ENTRY_OFFSET],
-        block[ih_start + IH_FIRST_ENTRY_OFFSET + 1],
-        block[ih_start + IH_FIRST_ENTRY_OFFSET + 2],
-        block[ih_start + IH_FIRST_ENTRY_OFFSET + 3],
-    ]) as usize;
-    let total_size = u32::from_le_bytes([
-        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES],
-        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 1],
-        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 2],
-        block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 3],
-    ]) as usize;
+    let first_entry_rel = read_u32_le(block, ih_start + IH_FIRST_ENTRY_OFFSET) as usize;
+    let total_size = read_u32_le(block, ih_start + IH_TOTAL_SIZE_OF_ENTRIES) as usize;
     let allocated_size = u32::from_le_bytes([
         block[ih_start + 8],
         block[ih_start + 9],
