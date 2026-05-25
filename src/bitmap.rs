@@ -26,6 +26,21 @@ use std::path::Path;
 
 const BITMAP_RECORD_NUMBER: u64 = 6;
 
+/// Returns true iff cluster bit `bit` (0–7) within `byte` is set (= allocated).
+fn bit_is_set(byte: u8, bit: u8) -> bool {
+    (byte >> bit) & 1 != 0
+}
+
+/// Set bit `bit` (0–7) within `bytes[idx]` to 1 (mark cluster allocated).
+fn set_bit(bytes: &mut [u8], idx: usize, bit: u8) {
+    bytes[idx] |= 1 << bit;
+}
+
+/// Clear bit `bit` (0–7) within `bytes[idx]` to 0 (mark cluster free).
+fn clear_bit(bytes: &mut [u8], idx: usize, bit: u8) {
+    bytes[idx] &= !(1u8 << bit);
+}
+
 /// Info needed to reach `$Bitmap`'s data on disk.
 pub struct BitmapLocation {
     pub params: BootParams,
@@ -147,7 +162,7 @@ pub fn find_free_run_io<T: BlockIo + ?Sized>(
             let mut bit_in_byte = bit_off_in_byte;
             while cursor < end_bit {
                 let byte = bytes[byte_idx];
-                let free = (byte >> bit_in_byte) & 1 == 0;
+                let free = !bit_is_set(byte, bit_in_byte);
                 if free {
                     if run_start.is_none() {
                         run_start = Some(cursor);
@@ -231,7 +246,7 @@ fn mutate_bits_io<T: BlockIo + ?Sized>(
         let bit = lcn + i - first_byte * 8;
         let byte_idx = (bit / 8) as usize;
         let bit_in_byte = (bit % 8) as u8;
-        let cur = (bytes[byte_idx] >> bit_in_byte) & 1 != 0;
+        let cur = bit_is_set(bytes[byte_idx], bit_in_byte);
         if set && cur {
             return Err(format!("cluster {} already allocated", lcn + i));
         }
@@ -239,9 +254,9 @@ fn mutate_bits_io<T: BlockIo + ?Sized>(
             return Err(format!("cluster {} already free", lcn + i));
         }
         if set {
-            bytes[byte_idx] |= 1 << bit_in_byte;
+            set_bit(&mut bytes, byte_idx, bit_in_byte);
         } else {
-            bytes[byte_idx] &= !(1 << bit_in_byte);
+            clear_bit(&mut bytes, byte_idx, bit_in_byte);
         }
     }
     write_bitmap_bytes_io(io, bm, first_byte, &bytes)?;
@@ -359,7 +374,7 @@ pub fn is_allocated_io<T: BlockIo + ?Sized>(
     let byte_idx = lcn / 8;
     let bit = (lcn % 8) as u8;
     let bytes = read_bitmap_bytes_io(io, bm, byte_idx, 1)?;
-    Ok((bytes[0] >> bit) & 1 != 0)
+    Ok(bit_is_set(bytes[0], bit))
 }
 
 #[cfg(test)]
@@ -526,6 +541,32 @@ mod tests {
         }
         let res = find_free_run_io(&mut dev, &bm, 2, 0).unwrap();
         assert_eq!(res, None);
+    }
+
+    // --- bit helpers ----------------------------------------------------------
+
+    #[test]
+    fn bit_is_set_reads_individual_bits() {
+        assert!(bit_is_set(0b0000_0001, 0));
+        assert!(bit_is_set(0b1000_0000, 7));
+        assert!(!bit_is_set(0b1111_1110, 0));
+        assert!(!bit_is_set(0b0111_1111, 7));
+    }
+
+    #[test]
+    fn set_bit_sets_only_target_bit() {
+        let mut bytes = [0u8; 2];
+        set_bit(&mut bytes, 0, 3);
+        assert_eq!(bytes[0], 0b0000_1000);
+        assert_eq!(bytes[1], 0);
+    }
+
+    #[test]
+    fn clear_bit_clears_only_target_bit() {
+        let mut bytes = [0xFFu8; 2];
+        clear_bit(&mut bytes, 0, 3);
+        assert_eq!(bytes[0], 0b1111_0111);
+        assert_eq!(bytes[1], 0xFF);
     }
 
     #[test]

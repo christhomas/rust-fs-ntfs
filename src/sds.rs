@@ -31,6 +31,19 @@ pub struct SdEntry<'a> {
 /// SDS entry header size (hash + security_id + offset + size).
 pub const SDS_HEADER_LEN: u32 = 20;
 
+// Field offsets within the 20-byte SDS entry header (all little-endian).
+const SDS_HDR_HASH_OFF: usize = 0; // u32 SDH/SII hash
+const SDS_HDR_SECURITY_ID_OFF: usize = 4; // u32 security identifier
+const SDS_HDR_ENTRY_OFFSET_OFF: usize = 8; // u64 byte offset of this entry in $SDS
+const SDS_HDR_ENTRY_SIZE_OFF: usize = 16; // u32 unpadded entry size (header + SD)
+const SDS_HDR_SD_DATA_OFF: usize = 20; // SD payload starts immediately after the header
+
+/// Round `n` up to the next multiple of 16. NTFS pads SDS entries to 16-byte
+/// boundaries so successive entries remain naturally aligned in the $SDS stream.
+fn align_to_16(n: usize) -> usize {
+    (n + 15) & !15
+}
+
 /// NTFS mirrors every `$SDS` entry at `offset + MIRROR_GAP`. Per the
 /// public Microsoft layout this is exactly 256 KiB.
 pub const SDS_MIRROR_GAP: u64 = 0x40000;
@@ -64,8 +77,7 @@ pub fn sdh_hash(sd: &[u8]) -> u32 {
 /// reads `sds_size` (unpadded) but the next entry begins at the
 /// padded offset.
 fn sds_entry_total_len(sd_len: usize) -> usize {
-    let unpadded = SDS_HEADER_LEN as usize + sd_len;
-    (unpadded + 15) & !15
+    align_to_16(SDS_HEADER_LEN as usize + sd_len)
 }
 
 /// Serialise one entry into `out` at `offset`, returning the unpadded
@@ -81,11 +93,15 @@ fn write_one_entry(out: &mut Vec<u8>, offset: u64, entry: &SdEntry<'_>) -> u32 {
     }
 
     let at = offset as usize;
-    out[at..at + 4].copy_from_slice(&hash.to_le_bytes());
-    out[at + 4..at + 8].copy_from_slice(&entry.security_id.to_le_bytes());
-    out[at + 8..at + 16].copy_from_slice(&offset.to_le_bytes());
-    out[at + 16..at + 20].copy_from_slice(&(unpadded as u32).to_le_bytes());
-    out[at + 20..at + 20 + entry.sd.len()].copy_from_slice(entry.sd);
+    out[at + SDS_HDR_HASH_OFF..at + SDS_HDR_HASH_OFF + 4].copy_from_slice(&hash.to_le_bytes());
+    out[at + SDS_HDR_SECURITY_ID_OFF..at + SDS_HDR_SECURITY_ID_OFF + 4]
+        .copy_from_slice(&entry.security_id.to_le_bytes());
+    out[at + SDS_HDR_ENTRY_OFFSET_OFF..at + SDS_HDR_ENTRY_OFFSET_OFF + 8]
+        .copy_from_slice(&offset.to_le_bytes());
+    out[at + SDS_HDR_ENTRY_SIZE_OFF..at + SDS_HDR_ENTRY_SIZE_OFF + 4]
+        .copy_from_slice(&(unpadded as u32).to_le_bytes());
+    out[at + SDS_HDR_SD_DATA_OFF..at + SDS_HDR_SD_DATA_OFF + entry.sd.len()]
+        .copy_from_slice(entry.sd);
     // Bytes at + unpadded .. at + total stay zero (alignment pad).
 
     unpadded as u32
@@ -157,6 +173,34 @@ mod tests {
             b'A'..=b'F' => b - b'A' + 10,
             _ => panic!("bad hex digit {b}"),
         }
+    }
+
+    // --- align_to_16 ----------------------------------------------------------
+
+    #[test]
+    fn align_to_16_already_aligned_is_unchanged() {
+        assert_eq!(align_to_16(0), 0);
+        assert_eq!(align_to_16(16), 16);
+        assert_eq!(align_to_16(32), 32);
+    }
+
+    #[test]
+    fn align_to_16_rounds_up_to_next_multiple() {
+        assert_eq!(align_to_16(1), 16);
+        assert_eq!(align_to_16(15), 16);
+        assert_eq!(align_to_16(17), 32);
+    }
+
+    // --- sds_entry_total_len --------------------------------------------------
+
+    #[test]
+    fn sds_entry_total_len_pads_to_16_boundary() {
+        // header=20 + sd=0 = 20 → pad to 32
+        assert_eq!(sds_entry_total_len(0), 32);
+        // header=20 + sd=12 = 32 → already aligned
+        assert_eq!(sds_entry_total_len(12), 32);
+        // header=20 + sd=52 = 72 → pad to 80
+        assert_eq!(sds_entry_total_len(52), 80);
     }
 
     #[test]
