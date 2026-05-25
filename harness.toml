@@ -8,6 +8,15 @@
 # through the runner; mac-side (host) ops live in this file alongside
 # the win-side ops invoked over SSH on the Windows VM.
 
+[runner]
+# Run scenarios in parallel, bounded by available Windows drive letters.
+# Each win-* op claims one drive letter for the VHD mount duration, so
+# the letter count is the natural concurrency ceiling. Set
+# serialize_mounts = true only for drivers (e.g. WinFsp-backed ext4)
+# where the user-mode host process is a per-instance singleton.
+serialize_mounts = false
+max_parallel     = "drive-letters"
+
 [project]
 name        = "rust-fs-ntfs"
 binary      = "target/release/rust-ntfs"
