@@ -103,4 +103,9 @@ echo "[matrix-baseline] wrote test-diagnostics/matrix-results.json"
 echo "[matrix-baseline] tested_at_sha=$(git rev-parse HEAD)"
 echo "[matrix-baseline] binary_sha256=$(sha256sum target/release/rust-ntfs | awk '{print $1}')"
 
+if [ "$run_exit" -eq 0 ]; then
+    echo "[matrix-baseline] DONE — all scenarios passed (exit 0)"
+else
+    echo "[matrix-baseline] DONE — exit $run_exit (at least one scenario failed)"
+fi
 exit "$run_exit"
