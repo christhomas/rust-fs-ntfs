@@ -23,25 +23,21 @@ cd "$repo_root"
 # shellcheck disable=SC1091
 source .test-env
 
-# Ship the small VM info collector if not already there
-ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_HOST" \
-    "powershell -Command \"New-Item -Force -ItemType Directory -Path '$VM_WORKDIR' | Out-Null\"" >/dev/null
-
-scp -i "$SSH_KEY" -o StrictHostKeyChecking=no \
-    "$repo_root/scripts/win/vm-info.ps1" "$VM_HOST:$VM_WORKDIR/vm-info.ps1" >/dev/null
-scp -i "$SSH_KEY" -o StrictHostKeyChecking=no \
-    "$repo_root/scripts/win/verdict-collect.ps1" "$VM_HOST:$VM_WORKDIR/verdict-collect.ps1" >/dev/null
+# vm-info.ps1 and verdict-collect.ps1 are shipped to the VM by the
+# harness runner (via scripts_dir = "scripts/fs-test-harness" in
+# fs-test-harness.toml) before the matrix run starts — no scp needed here.
+scripts_vm="$VM_WORKDIR/scripts/fs-test-harness"
 
 # Gather VM info
 vm_info_json="$(mktemp -t vm-info.XXXXXX.json)"
 ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_HOST" \
-    "powershell -ExecutionPolicy Bypass -File $VM_WORKDIR/vm-info.ps1" \
+    "powershell -ExecutionPolicy Bypass -File $scripts_vm/vm-info.ps1" \
     > "$vm_info_json"
 
 # Gather per-scenario verdicts
 verdicts_json="$(mktemp -t verdicts.XXXXXX.json)"
 ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_HOST" \
-    "powershell -ExecutionPolicy Bypass -File $VM_WORKDIR/verdict-collect.ps1" \
+    "powershell -ExecutionPolicy Bypass -File $scripts_vm/verdict-collect.ps1" \
     > "$verdicts_json"
 
 trap 'rm -f "$vm_info_json" "$verdicts_json"' EXIT
