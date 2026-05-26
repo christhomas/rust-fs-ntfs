@@ -83,8 +83,12 @@ pub fn find_index_entry(record: &[u8], wanted: &str) -> Result<Option<IndexEntry
     let ir_data_start = ir.attr_offset + ir_value_offset;
 
     let ih_start = ir_data_start + IR_INDEX_HEADER_OFFSET;
-    let first_entry_rel = read_u32_le(record, ih_start + IH_FIRST_ENTRY_OFFSET) as usize;
-    let total_size = read_u32_le(record, ih_start + IH_TOTAL_SIZE_OF_ENTRIES) as usize;
+    let first_entry_rel = read_u32_le(record, ih_start + IH_FIRST_ENTRY_OFFSET)
+        .ok_or_else(|| "index header too short to read first_entry_offset".to_string())?
+        as usize;
+    let total_size = read_u32_le(record, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
+        .ok_or_else(|| "index header too short to read total_size".to_string())?
+        as usize;
 
     let mut cursor = ih_start + first_entry_rel;
     let end = ih_start + total_size;
@@ -153,8 +157,12 @@ pub fn index_root_has_real_entries(record: &[u8]) -> Result<bool, String> {
     let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
     let ir_data_start = ir.attr_offset + val_off;
     let ih_start = ir_data_start + IR_INDEX_HEADER_OFFSET;
-    let first_entry_rel = read_u32_le(record, ih_start + IH_FIRST_ENTRY_OFFSET) as usize;
-    let total_size = read_u32_le(record, ih_start + IH_TOTAL_SIZE_OF_ENTRIES) as usize;
+    let first_entry_rel = read_u32_le(record, ih_start + IH_FIRST_ENTRY_OFFSET)
+        .ok_or_else(|| "index header too short to read first_entry_offset".to_string())?
+        as usize;
+    let total_size = read_u32_le(record, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
+        .ok_or_else(|| "index header too short to read total_size".to_string())?
+        as usize;
     let first_entry = ih_start + first_entry_rel;
     let end = ih_start + total_size;
     if first_entry + IE_KEY_START > record.len() || first_entry + 0x10 > end {
@@ -198,8 +206,12 @@ pub fn find_entry_in_indx_block(
         return Err("not an INDX block (fixup missing?)".to_string());
     }
     let ih_start = INDX_INDEX_HEADER_OFFSET;
-    let first_entry_rel = read_u32_le(block, ih_start + IH_FIRST_ENTRY_OFFSET) as usize;
-    let total_size = read_u32_le(block, ih_start + IH_TOTAL_SIZE_OF_ENTRIES) as usize;
+    let first_entry_rel = read_u32_le(block, ih_start + IH_FIRST_ENTRY_OFFSET)
+        .ok_or_else(|| "INDX block too short to read first_entry_offset".to_string())?
+        as usize;
+    let total_size = read_u32_le(block, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
+        .ok_or_else(|| "INDX block too short to read total_size".to_string())?
+        as usize;
     let mut cursor = ih_start + first_entry_rel;
     let end = ih_start + total_size;
     scan_entries_for_name(block, &mut cursor, end, wanted)
@@ -571,8 +583,12 @@ pub fn insert_entry_into_indx_block_with_collation(
         return Err("not an INDX block".to_string());
     }
     let ih_start = INDX_INDEX_HEADER_OFFSET;
-    let first_entry_rel = read_u32_le(block, ih_start + IH_FIRST_ENTRY_OFFSET) as usize;
-    let total_size = read_u32_le(block, ih_start + IH_TOTAL_SIZE_OF_ENTRIES) as usize;
+    let first_entry_rel = read_u32_le(block, ih_start + IH_FIRST_ENTRY_OFFSET)
+        .ok_or_else(|| "INDX block too short to read first_entry_offset".to_string())?
+        as usize;
+    let total_size = read_u32_le(block, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
+        .ok_or_else(|| "INDX block too short to read total_size".to_string())?
+        as usize;
     let allocated_size = u32::from_le_bytes([
         block[ih_start + 8],
         block[ih_start + 9],

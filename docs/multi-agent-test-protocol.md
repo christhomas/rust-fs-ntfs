@@ -249,7 +249,7 @@ Each agent instance, on starting, MUST:
    writes.
 
 2. **Read the three skills** (`dev-loop`, `corroborated-debug`,
-   `documentation-protocol`) and the latest `docs/chkdsk-findings.md`.
+   `documentation-protocol`) and the latest `docs/chkdsk-improvement-findings.md`.
 
 3. **Claim a scenario** from `test-matrix.json`.
 

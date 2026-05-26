@@ -731,7 +731,7 @@ C ABI directly. -->
    `fs_ntfs_volume_info_t::is_dirty` and the mirror cross-check
    `metadata_consistent` are still missing. -->
 
-**Phase 2 status:** item 6 shipped; items 7 (CI flip) and 8
+**Phase 2 status:** items 6 and 7 shipped; item 8
 (struct-field surface + mirror cross-check) still outstanding.
 
 ### Phase 3 — new features

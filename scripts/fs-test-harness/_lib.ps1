@@ -36,6 +36,13 @@ $script:DriveLockPath = "$env:TEMP\vhd-drive-lock"
 function Acquire-DriveLock {
     $deadline = [DateTime]::UtcNow.AddSeconds(180)
     while ($true) {
+        # Reclaim stale lock left by a crashed process (older than 180 s).
+        if (Test-Path $script:DriveLockPath) {
+            $age = ([DateTime]::UtcNow - (Get-Item $script:DriveLockPath).LastWriteTimeUtc).TotalSeconds
+            if ($age -gt 180) {
+                Remove-Item -LiteralPath $script:DriveLockPath -Force -EA SilentlyContinue
+            }
+        }
         try {
             $fs = [System.IO.File]::Open(
                 $script:DriveLockPath,

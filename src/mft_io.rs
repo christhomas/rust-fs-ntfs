@@ -83,7 +83,8 @@ pub fn read_boot_params_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BootParams
 }
 
 fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> {
-    let bytes_per_sector = read_u16_le(boot, BOOT_OFF_BYTES_PER_SECTOR);
+    let bytes_per_sector = read_u16_le(boot, BOOT_OFF_BYTES_PER_SECTOR)
+        .ok_or_else(|| "boot sector too short to read bytes_per_sector".to_string())?;
     if !is_power_of_two(bytes_per_sector) {
         return Err(format!(
             "bytes_per_sector {bytes_per_sector} not a power of two"
@@ -246,8 +247,12 @@ fn read_usa_header(record: &[u8]) -> Result<(usize, usize), String> {
     if record.len() < 8 {
         return Err("record too small to contain USA header".to_string());
     }
-    let usa_offset = read_u16_le(record, OFF_USA_OFFSET) as usize;
-    let usa_count = read_u16_le(record, OFF_USA_COUNT) as usize;
+    let usa_offset = read_u16_le(record, OFF_USA_OFFSET)
+        .ok_or_else(|| "record too short to read USA offset".to_string())?
+        as usize;
+    let usa_count = read_u16_le(record, OFF_USA_COUNT)
+        .ok_or_else(|| "record too short to read USA count".to_string())?
+        as usize;
     if usa_count == 0 {
         return Err("USA count is zero (record has no fixup array)".to_string());
     }

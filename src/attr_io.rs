@@ -260,18 +260,27 @@ const REC_OFF_ATTRS_OFFSET: usize = 0x14;
 const REC_OFF_BYTES_USED: usize = 0x18;
 
 /// Read a little-endian `u16` from `buf[offset..offset+2]`.
-pub(crate) fn read_u16_le(buf: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes(buf[offset..offset + 2].try_into().unwrap())
+/// Returns `None` if the slice is too short.
+pub(crate) fn read_u16_le(buf: &[u8], offset: usize) -> Option<u16> {
+    buf.get(offset..offset + 2)
+        .and_then(|b| b.try_into().ok())
+        .map(u16::from_le_bytes)
 }
 
 /// Read a little-endian `u32` from `buf[offset..offset+4]`.
-pub(crate) fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap())
+/// Returns `None` if the slice is too short.
+pub(crate) fn read_u32_le(buf: &[u8], offset: usize) -> Option<u32> {
+    buf.get(offset..offset + 4)
+        .and_then(|b| b.try_into().ok())
+        .map(u32::from_le_bytes)
 }
 
 /// Read a little-endian `u64` from `buf[offset..offset+8]`.
-pub(crate) fn read_u64_le(buf: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(buf[offset..offset + 8].try_into().unwrap())
+/// Returns `None` if the slice is too short.
+pub(crate) fn read_u64_le(buf: &[u8], offset: usize) -> Option<u64> {
+    buf.get(offset..offset + 8)
+        .and_then(|b| b.try_into().ok())
+        .map(u64::from_le_bytes)
 }
 
 struct AttrIter<'a> {
@@ -282,8 +291,8 @@ struct AttrIter<'a> {
 
 impl<'a> AttrIter<'a> {
     fn new(record: &'a [u8]) -> Self {
-        let attrs_offset = read_u16_le(record, REC_OFF_ATTRS_OFFSET) as usize;
-        let bytes_used = read_u32_le(record, REC_OFF_BYTES_USED) as usize;
+        let attrs_offset = read_u16_le(record, REC_OFF_ATTRS_OFFSET).unwrap_or(0) as usize;
+        let bytes_used = read_u32_le(record, REC_OFF_BYTES_USED).unwrap_or(0) as usize;
         Self {
             record,
             cursor: attrs_offset,
@@ -301,7 +310,7 @@ impl<'a> Iterator for AttrIter<'a> {
         if self.cursor + 4 > self.bytes_used {
             return None;
         }
-        let type_code = read_u32_le(self.record, self.cursor + attr_off::TYPE);
+        let type_code = read_u32_le(self.record, self.cursor + attr_off::TYPE)?;
         if type_code == END_MARKER {
             return None;
         }
@@ -310,7 +319,7 @@ impl<'a> Iterator for AttrIter<'a> {
         if self.cursor + 16 > self.bytes_used {
             return None;
         }
-        let length = read_u32_le(self.record, self.cursor + attr_off::LENGTH) as usize;
+        let length = read_u32_le(self.record, self.cursor + attr_off::LENGTH)? as usize;
         // length must be a multiple of 8, >0, and fit within bytes_used.
         if length == 0 || !length.is_multiple_of(8) || self.cursor + length > self.bytes_used {
             return None;
@@ -318,8 +327,8 @@ impl<'a> Iterator for AttrIter<'a> {
 
         let non_resident = self.record[self.cursor + attr_off::NON_RESIDENT] != 0;
         let name_length = self.record[self.cursor + attr_off::NAME_LENGTH];
-        let name_offset = read_u16_le(self.record, self.cursor + attr_off::NAME_OFFSET);
-        let attribute_id = read_u16_le(self.record, self.cursor + attr_off::ATTRIBUTE_ID);
+        let name_offset = read_u16_le(self.record, self.cursor + attr_off::NAME_OFFSET)?;
+        let attribute_id = read_u16_le(self.record, self.cursor + attr_off::ATTRIBUTE_ID)?;
 
         let mut loc = AttrLocation {
             type_code,
@@ -339,20 +348,20 @@ impl<'a> Iterator for AttrIter<'a> {
             loc.resident_value_length = Some(read_u32_le(
                 self.record,
                 self.cursor + attr_off::RESIDENT_VALUE_LENGTH,
-            ));
+            )?);
             loc.resident_value_offset = Some(read_u16_le(
                 self.record,
                 self.cursor + attr_off::RESIDENT_VALUE_OFFSET,
-            ));
+            )?);
         } else {
             loc.non_resident_value_length = Some(read_u64_le(
                 self.record,
                 self.cursor + attr_off::NONRES_DATA_LENGTH,
-            ));
+            )?);
             loc.non_resident_mapping_pairs_offset = Some(read_u16_le(
                 self.record,
                 self.cursor + attr_off::NONRES_MAPPING_PAIRS_OFFSET,
-            ));
+            )?);
         }
 
         self.cursor += length;
