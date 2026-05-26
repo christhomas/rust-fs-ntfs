@@ -1,0 +1,457 @@
+# harness.toml — fs-test-harness consumer config for rust-fs-ntfs.
+#
+# The harness scripts + Rust runner live at ./vendor/fs-test-harness/, vendored from
+# https://github.com/antimatter-studios/fs-test-harness. Run
+# `git submodule update --init --recursive` after cloning.
+#
+# All scenarios in test-matrix.json are recipe-shaped and dispatched
+# through the runner; mac-side (host) ops live in this file alongside
+# the win-side ops invoked over SSH on the Windows VM.
+
+[runner]
+# Run scenarios in parallel, bounded by available Windows drive letters.
+# Each win-* op claims one drive letter for the VHD mount duration, so
+# the letter count is the natural concurrency ceiling.
+#
+# max_parallel controls both the Rust semaphore (concurrent scenarios)
+# and the libtest-mimic --test-threads pool. "drive-letters" queries
+# the VM at startup; an integer sets an explicit cap (clamped 1..=24).
+# Default 1 = sequential (safe for any consumer).
+max_parallel = "drive-letters"
+
+[project]
+name        = "rust-fs-ntfs"
+binary      = "target/release/rust-ntfs"
+matrix_path = "test-matrix.json"
+
+[vm]
+# CONTRIBUTORS: the values below are the maintainer's local VM
+# settings, committed for convenience (matches the same pattern in
+# antimatter-studios/ext4-win-driver's harness.toml). Override
+# before running the matrix:
+#
+#   1. Edit `host` / `ssh_key` / `workdir` to point at your own
+#      Windows-ARM64 VM, OR
+#   2. Run `bash vendor/fs-test-harness/scripts/setup-local.sh` to get prompted for
+#      your settings — the script writes a gitignored `.test-env`
+#      that overrides this section at runtime without touching
+#      tracked config.
+#
+# Per-developer overrides via `.test-env` are the recommended path;
+# editing the tracked file is fine for forks.
+host           = "chris@192.168.213.145"
+ssh_key        = "privatekey"
+workdir        = "C:/Users/chris/dev/rust-fs-ntfs-matrix"
+rust_toolchain = "stable-aarch64-pc-windows-gnullvm"
+scripts_dir    = "scripts/fs-test-harness"
+# The wrapper toolchain (vhd_tool from antimatter-studios/rust-img-vhd)
+# is installed by scripts/setup-windows-vm.ps1 directly. Consumers don't
+# declare additional packages here.
+packages = []
+
+# ============================================================
+# Mac-side (host) ops — Phase 4a
+# ============================================================
+#
+# Each op invokes a `rust-ntfs` subcommand against a pre-sized .img
+# file. The image lifecycle (create empty, format, write to, ...)
+# is expressed as ordered steps in the recipe; nothing is implicit.
+#
+# Substitution surface used here:
+#   {binary}                          -> the rust-ntfs binary
+#   {scenario.image}                  -> per-scenario image filename
+#   {scenario.volume_params.label}    -> "TINY", "CITEST", ...
+#   {scenario.volume_params.size_mib} -> 32, 256, 1024, ...
+#   {scenario.volume_params.alloc_unit_size}
+#                                     -> 512, 1024, 2048, 4096, 65536
+#                                        (renamed from `cluster_size`
+#                                         per harness vocabulary
+#                                         convention; see README's
+#                                         "Scenario field translations"
+#                                         section)
+#   {step.path}                       -> e.g. "/foo.txt"
+#   {step.parent} / {step.basename}   -> for ops whose CLI takes
+#                                        them split (mkdir / touch)
+#   {step.content}                    -> mac:write payload
+
+# ----- image lifecycle -----
+
+[ops.init-image]
+# Allocate an empty {scenario.volume_params.size_mib}-MiB file at
+# {scenario.image} on the host. Equivalent to what tests/matrix.rs
+# currently does inline before each mac:format step.
+#
+# Images live under `diskimages/` (per scenario.image, which we
+# committed-prefix in test-matrix.json) — the `mkdir -p` ensures the
+# directory exists on a clean checkout. Cleanup of the directory's
+# contents happens in `scripts/run-matrix.sh` via an EXIT trap, so a
+# Ctrl-C or test failure still wipes the .img files.
+host = "host"
+command = "mkdir -p \"$(dirname {scenario.image})\" && dd if=/dev/zero of={scenario.image} bs=1m count={scenario.volume_params.size_mib} status=none"
+expect_exit = 0
+
+[ops.mac-format]
+# Format an existing pre-sized image with the rust-ntfs formatter.
+# The serial is fixed across the matrix today; future scenarios may
+# parameterise it via {step.serial?}.
+#
+# `{scenario.volume_params.label}` is single-quoted so labels with
+# spaces (e.g. "Disk éclipse" in label-latin1) and the empty-string
+# label case survive the shell parse intact rather than splitting
+# into stray positional arguments. Same caveat as mac-write's
+# `{step.content}`: single-quotes don't escape literal `'` in the
+# label; matrix labels today are simple ASCII / Unicode without
+# embedded apostrophes so this is safe. If a label with `'` is ever
+# needed, switch to a file-based transport.
+host = "host"
+command = "{binary} format -L '{scenario.volume_params.label}' -c {scenario.volume_params.alloc_unit_size} --serial deadbeefcafe1234 {scenario.image}"
+expect_exit = 0
+
+# ----- file/dir mutations -----
+
+[ops.mac-mkdir]
+# rust-ntfs mkdir takes (image, parent-dir, basename) — three args.
+# Scenarios provide step.parent and step.basename explicitly. The
+# operation_sequence -> recipe translator splits "/docs/notes" into
+# parent="/docs", basename="notes" automatically.
+host = "host"
+command = "{binary} mkdir {scenario.image} {step.parent} {step.basename}"
+expect_exit = 0
+
+[ops.mac-touch]
+# Same parent/basename split as mkdir.
+host = "host"
+command = "{binary} touch {scenario.image} {step.parent} {step.basename}"
+expect_exit = 0
+
+[ops.mac-write]
+# rust-ntfs write takes the full path and content via --content.
+# `{step.content}` is single-quoted so payloads with spaces (e.g.
+# the `mac-touch-write-enumerate` scenario's "hello world") survive
+# the shell parse intact rather than splitting into stray positional
+# arguments. Single-quotes don't escape literal single quotes in the
+# content; matrix payloads today are simple ASCII so this is safe.
+# When write content grows to include `'`, swap to a file-based
+# transport (write content to a temp file, pass the path).
+host = "host"
+command = "{binary} write {scenario.image} {step.path} --content '{step.content}'"
+expect_exit = 0
+
+[ops.mac-rm]
+host = "host"
+command = "{binary} rm {scenario.image} {step.path}"
+expect_exit = 0
+
+[ops.mac-rmdir]
+host = "host"
+command = "{binary} rmdir {scenario.image} {step.path}"
+expect_exit = 0
+
+# ----- inspection / verification -----
+
+[ops.mac-enumerate]
+# `ls -t` walks the tree recursively. Today it ignores the path
+# argument and lists everything; recipes calling mac-enumerate with
+# a path receive an unfiltered listing.
+host = "host"
+command = "{binary} ls -t {scenario.image}"
+expect_exit = 0
+
+[ops.mac-set-dirty]
+# Sets the volume-dirty flag in the image's $Volume attribute.
+# Used by dirty-volume scenarios that exercise chkdsk's repair
+# path on the Windows side.
+host = "host"
+command = "{binary} set-dirty {scenario.image}"
+expect_exit = 0
+
+# ============================================================
+# Win-side (vm) ops
+# ============================================================
+#
+# These dispatch via SSH to the Windows VM. Each step invokes a
+# focused PowerShell helper under `scripts/fs-test-harness/` — the dispatcher
+# gives per-step granularity, so each op gets its own small script.
+#
+# The VHD-wrap path inside `win-chkdsk.ps1` (and every other op
+# routed through `_lib.ps1`) uses `vhd_tool create-fixed` from
+# antimatter-studios/rust-img-vhd — see docs/phase-1e-design.md.
+
+[ops.win-chkdsk]
+# Wrap the .img into a VHD, mount it on Windows, run chkdsk with
+# the requested modes (default `readonly`), capture diag, dismount.
+#
+# Step fields:
+#   image_path     — vm-side absolute path to the .img (typically
+#                    `<vm.workdir>/<scenario.image>` after ship-to-vm)
+#   modes?         — comma-separated chkdsk-pass list, e.g.
+#                    "readonly,/scan". Empty => script default
+#   verdict_shape? — `Clean` (default) or `RepairRequired`. The latter
+#                    runs the listed modes (capture exits, don't gate),
+#                    then runs /F + post-/F /scan and gates the verdict
+#                    on pre-/scan != 0 (volume actually dirty) AND
+#                    fix_exit == 0 AND post_scan_exit == 0. Used by
+#                    `mac:set-dirty -> win:chkdsk` scenarios.
+#   keep_image?    — `true` keeps the .img + .vhd on the VM after this
+#                    op so a follow-on win-* op (e.g. win-enumerate)
+#                    can mount them. Default `false` cleans up. The
+#                    final win-* op in a multi-op recipe should omit
+#                    this (or pass `false`) so cleanup runs.
+#   diag           — vm-side directory for chkdsk-*.txt + eventlog
+#
+# Script path uses `{vm.workdir}` (added in fs-test-harness v3.1.0)
+# so the matrix workdir on the VM can be relocated without editing
+# every op command — single source of truth at `[vm].workdir` above.
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-chkdsk.ps1' -ImagePath '{step.image_path}' -Modes '{step.modes?}' -VerdictShape '{step.verdict_shape?}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+[ops.win-enumerate]
+# Mount the .img (reusing a prior op's .vhd if `keep_image=true` was
+# set on the prior step) and walk the volume root recursively. Writes
+# one line per entry to <diag>/enumerate.txt for downstream consumption
+# (today an observation; future verdict shapes can gate against it).
+#
+# Step fields:
+#   image_path  — vm-side absolute path to the .img
+#   keep_image? — `true` keeps the .img + .vhd for a follow-on op.
+#                 Default `false` cleans up. The final win-* op in a
+#                 multi-op recipe should omit this so cleanup runs.
+#   diag        — vm-side directory for enumerate.txt + wrapper-create.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-enumerate.ps1' -ImagePath '{step.image_path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+[ops.win-write-content]
+# Write a single file at `path` whose content is the literal UTF-8
+# bytes of `content`. For binary / zero-fill content use win-write-size
+# instead.
+#
+# Two ops (rather than one with both `content?` and `size_bytes?`)
+# because cmd.exe → PowerShell collapses empty single-quoted args
+# (`-SizeBytes ''` becomes "missing argument"); separate ops keep
+# every supplied arg non-empty.
+#
+# Step fields:
+#   image_path   — vm-side absolute path to the .img
+#   path         — file path inside the volume (e.g. "/tiny.txt")
+#   content      — literal UTF-8 string (no trailing newline)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+#   diag         — vm-side directory for write-result.txt + wrapper-create.txt
+#
+# `content` is single-quoted in the template so payloads with spaces
+# (e.g. "hello world") survive the cmd shell parse intact. Same caveat
+# as mac-write's `{step.content}`: single quotes don't escape literal
+# `'` in the content; matrix payloads today are simple ASCII so this
+# is safe. When write content needs `'`, swap to a file-based transport.
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-write.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Content '{step.content}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+[ops.win-write-size]
+# Write a single file at `path` filled with `size_bytes` zero bytes.
+# Streamed in 64 KiB chunks so files above the .NET 2 GiB byte[] cap
+# work. For text content use win-write-content instead.
+#
+# Step fields:
+#   image_path   — vm-side absolute path to the .img
+#   path         — file path inside the volume (e.g. "/big.bin")
+#   size_bytes   — number of zero bytes (integer as string)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+#   diag         — vm-side directory for write-result.txt + wrapper-create.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-write.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+[ops.win-delete]
+# Delete a single file at `path` from the mounted volume. Mounts the
+# .img (re-using a prior op's .vhd if `keep_image=true` was set on
+# the prior step) and runs `Remove-Item -LiteralPath -Force`.
+#
+# Step fields:
+#   image_path   — vm-side absolute path to the .img
+#   path         — file path inside the volume to remove (e.g. "/F2.txt")
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+#   diag         — vm-side directory for delete-result.txt + delete-error.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-delete.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+[ops.win-repeat-mount]
+# Mount/dismount the .vhd wrapper N times to surface any state leak
+# in ntfs.sys's volume-recognition path or the VHD miniport. No I/O
+# happens between cycles. Used by `repeat-mount(N)` scenarios that
+# sandwich this op between two chkdsk passes to verify the volume's
+# NTFS structure survives repeated remounts.
+#
+# Step fields:
+#   image_path   — vm-side absolute path to the .img
+#   cycles       — positive integer (mount-then-dismount count)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+#   diag         — vm-side directory for repeat-mount-result.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-repeat-mount.ps1' -ImagePath '{step.image_path}' -Cycles '{step.cycles}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+[ops.win-rename]
+# Rename a single file at `from_path` to `to_path` on the mounted
+# volume. Mounts the .img (re-using a prior op's .vhd if
+# `keep_image=true` was set on the prior step) and runs
+# `Move-Item -LiteralPath -Force`. Both paths are interpreted relative
+# to the volume root; their parent directories must already exist.
+#
+# Step fields:
+#   image_path   — vm-side absolute path to the .img
+#   from_path    — source path inside the volume (e.g. "/a.txt")
+#   to_path      — destination path inside the volume (e.g. "/b.txt")
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+#   diag         — vm-side directory for rename-result.txt + rename-error.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-rename.ps1' -ImagePath '{step.image_path}' -FromPath '{step.from_path}' -ToPath '{step.to_path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+[ops.win-mkdir]
+# Create a directory at `path` on the mounted volume. Uses
+# `New-Item -ItemType Directory -Force`, which creates intermediate
+# parent directories automatically — the `deep-nesting` scenario
+# relies on this so an 8-level path can be materialised in a single
+# call. A recipe that wants to surface "missing parent" as an error
+# should split into per-level mkdir calls.
+#
+# Step fields:
+#   image_path   — vm-side absolute path to the .img
+#   path         — directory path inside the volume (e.g. "/a/b/c")
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+#   diag         — vm-side directory for mkdir-result.txt + mkdir-error.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-mkdir.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+[ops.win-modify]
+# Write a deterministic 0xFF byte pattern at a specific offset inside
+# an existing file on the mounted volume. v2 equivalent of v1's
+# `win:modify(path offset=N len=M)`. Sits alongside win-write-content /
+# win-write-size: those overwrite the file from offset 0; this one
+# rewrites a window in the middle of an existing non-resident $DATA
+# (exercises the run-list rewrite path when a single run is split).
+#
+# The pattern is fixed at 0xFF so a follow-on win-read can verify the
+# modified region against a known-non-zero value (the surrounding
+# bytes, written by win-write-size, are zeros).
+#
+# Step fields:
+#   image_path   — vm-side absolute path to the .img
+#   path         — file path inside the volume (e.g. "/big.bin")
+#   offset       — byte offset to start writing at (integer as string; >= 0)
+#   len          — number of bytes to write (integer as string; >= 0)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+#   diag         — vm-side directory for modify-result.txt + modify-error.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-modify.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+[ops.win-read]
+# Read a byte range from a file on the mounted volume and dump it to a
+# diag artefact. v2 equivalent of v1's `win:read(path)`. Observation-only
+# today (always exits 0 on a successful read); a future verdict shape
+# can gate against the captured bytes (e.g. "expect 0xFF for the whole
+# window"). For the write-modify-chkdsk-read recipe, the captured bytes
+# let us verify manually that the modify op landed at the right offset.
+#
+# Step fields:
+#   image_path   — vm-side absolute path to the .img
+#   path         — file path inside the volume (e.g. "/big.bin")
+#   offset       — byte offset to start reading from (integer as string; >= 0)
+#   len          — number of bytes to read (integer as string; >= 0)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+#   diag         — vm-side directory for read-bytes.bin + read-bytes.txt + read-error.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-read.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+[ops.win-write-many-size]
+# Bulk-write `count` files of `size_bytes` zero bytes each, all in a
+# single mount/dismount cycle. Names follow `name_pattern` with the
+# literal `{N}` placeholder substituted by the iteration index,
+# zero-padded to the width of `count - 1` (count=256 → width 3 →
+# `file_000.txt` .. `file_255.txt`).
+#
+# Bulk shape (rather than N x win-write-size steps) because each
+# single-file op pays a full mount + drive-letter assignment + dismount
+# (~5–10s on the dev VM); 256 single-file ops would burn 20–40 min of
+# mount overhead per scenario for ~4 KiB of payload. One mount, looped
+# writes, one dismount.
+#
+# Step fields:
+#   image_path     — vm-side absolute path to the .img
+#   count          — positive integer (number of files to write)
+#   name_pattern   — volume-relative path containing `{N}` (e.g. "/file_{N}.txt")
+#   size_bytes     — zero-byte body length per file (>= 0, integer as string)
+#   keep_image?    — `true` keeps .img + .vhd for a follow-on op (default `false`)
+#   diag           — vm-side directory for write-many-result.txt + write-many-error.txt
+#
+# Content-mode counterpart (literal-string body) is intentionally not
+# shipped yet — no current scenario needs one. When it does, add a
+# separate `win-write-many-content` op (same cmd-shell empty-arg
+# rationale as `win-write-content` vs `win-write-size`).
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-write-many.ps1' -ImagePath '{step.image_path}' -Count '{step.count}' -NamePattern '{step.name_pattern}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+[ops.win-delete-many]
+# Bulk-delete files matching a numbered `name_pattern` from the mounted
+# volume in a single mount/dismount cycle. Iterates the half-open range
+# `[start, end)` stepped by `step` (same shape as PowerShell's
+# `for ($i = $start; $i -lt $end; $i += $step)`); indices are
+# zero-padded to the width of `end - 1` so naming lines up with files
+# emitted by `win-write-many-size` for the same `count = end`.
+#
+# Same bulk-vs-N-singletons rationale as win-write-many-size — one
+# mount, looped deletes, one dismount.
+#
+# Step fields:
+#   image_path     — vm-side absolute path to the .img
+#   start          — first index, inclusive (integer >= 0)
+#   end            — stop index, exclusive (integer > start)
+#   step           — stride (positive integer)
+#   name_pattern   — volume-relative path containing `{N}` (e.g. "/file_{N}.txt")
+#   keep_image?    — `true` keeps .img + .vhd for a follow-on op (default `false`)
+#   diag           — vm-side directory for delete-many-result.txt + delete-many-error.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-delete-many.ps1' -ImagePath '{step.image_path}' -Start '{step.start}' -End '{step.end}' -Step '{step.step}' -NamePattern '{step.name_pattern}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+[ops.win-format]
+# Format a freshly-shipped (zero-filled) .img with Microsoft's canonical
+# NTFS formatter (Format-Volume -FileSystem NTFS, which dispatches to
+# fmifs.dll's NTFS path -- the same code format.com /FS:NTFS uses).
+# Produces a Microsoft-canonical NTFS volume that subsequent steps can
+# round-trip back to the host (via ship-to-host) and feed to our
+# rust-ntfs reader. The win-format-* scenarios exist precisely to
+# isolate reader bugs from writer bugs by feeding our reader a volume
+# the canonical writer produced.
+#
+# Recipe shape:
+#   init-image -> ship-to-vm -> win-format (this op)
+#     -> [optional follow-on win-* ops with keep_image=true]
+#     -> ship-to-host -> mac-enumerate
+#
+# The init-image step sizes the .img per scenario.volume_params.size_mib;
+# there is NO mac-format step in win-format-* recipes (otherwise the .img
+# would arrive at the VM already-NTFS-formatted by rust-ntfs, defeating
+# the point). The empty .img ships as zeros; Initialize-VhdFromImg lays
+# down a partition table on the wrapper and streams those zeros into the
+# partition; Format-Volume then writes the NTFS structure in-place.
+#
+# Step fields:
+#   image_path   -- vm-side absolute path to the .img
+#   label        -- volume label (e.g. "WINFMT", "WINREF")
+#   keep_image?  -- `true` keeps .img + .vhd for a follow-on op (default `false`)
+#   diag         -- vm-side directory for format-result.txt + wrapper-create.txt
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-format.ps1' -ImagePath '{step.image_path}' -Label '{step.label}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+expect_exit = 0
+
+# Other win-side ops (win-mount/win-unmount as separate ops,
+# win-write-many-content) follow the same shape and land alongside
+# their first scenario consumer in subsequent Phase 4c PRs.
