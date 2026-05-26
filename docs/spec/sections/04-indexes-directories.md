@@ -537,24 +537,23 @@ context of `$I30` and `$Q`: [UNVERIFIED]
 
 | Value | Constant                  | Used by                            | Comparison                                                                |
 | ----- | ------------------------- | ---------------------------------- | ------------------------------------------------------------------------- |
-| 0x00  | `COLLATION_BINARY`        | `$ObjId\$O` (raw GUID)             | Byte-wise unsigned                                                        |
+| 0x00  | `COLLATION_BINARY`        | (not observed in codebase)         | Byte-wise unsigned; spec-listed but no code in this repo emits it         |
 | 0x01  | `COLLATION_FILE_NAME`     | `$I30` (directory entries)         | Case-insensitive UTF-16 via the volume's `$UpCase` table                  |
 | 0x02  | `COLLATION_UNICODE_STRING`| Generic UTF-16 view indexes        | Code-unit comparison, case-sensitive UTF-16                               |
-| 0x10  | `COLLATION_NTOFS_ULONG`   | `$Quota\$Q`                        | Little-endian `u32` numeric                                               |
+| 0x10  | `COLLATION_NTOFS_ULONG`   | `$Quota\$Q`, `$Secure\$SII`        | Little-endian `u32` numeric                                               |
 | 0x11  | `COLLATION_NTOFS_SID`     | `$Quota\$O`                        | NT SID structural ordering                                                |
 | 0x12  | `COLLATION_NTOFS_SECURITY_HASH` | `$Secure\$SDH`               | (security hash, security ID) lexicographic                                |
-| 0x13  | `COLLATION_NTOFS_ULONGS`  | `$Reparse\$R`, `$Secure\$SII`      | Sequence of little-endian `u32` lexicographic                             |
+| 0x13  | `COLLATION_NTOFS_ULONGS`  | `$Reparse\$R`, `$ObjId\$O`         | Sequence of little-endian `u32` lexicographic                             |
 
 Sources, by row:
 
-- `0x01` `COLLATION_FILE_NAME` — [OBSERVED: src/record_build.rs#L205 `collation_rule = 1`].
-- `0x10` `COLLATION_NTOFS_ULONG` — [UNVERIFIED]
-- `0x11` `COLLATION_NTOFS_SID` — [UNVERIFIED]
-- `0x00` `COLLATION_BINARY` for `$ObjId\$O` — also referred to as
-  `COLLATION_NTOFS_GUID` with raw byte comparison; common practice equates
-  that with the `BINARY` rule. [UNVERIFIED]
-- `0x02`, `0x12`, `0x13` — documented elsewhere; not yet corroborated to a
-  specific authoritative source. [UNVERIFIED]
+- `0x01` `COLLATION_FILE_NAME` — [OBSERVED: src/mkfs.rs:50, src/record_build.rs#L205 `collation_rule = 1`].
+- `0x10` `COLLATION_NTOFS_ULONG` — [OBSERVED: src/mkfs.rs:59 — comment cites MS-FSCC §2.4; emitted for `$Secure:$SII` (mkfs.rs:1148) and `$Quota:$Q`].
+- `0x11` `COLLATION_NTOFS_SID` — [UNVERIFIED] — not emitted by any code in this codebase.
+- `0x12` `COLLATION_NTOFS_SECURITY_HASH` — [OBSERVED: src/mkfs.rs:55 — comment cites MS-FSCC §2.4; emitted for `$Secure:$SDH` (mkfs.rs:1133)].
+- `0x13` `COLLATION_NTOFS_ULONGS` — [OBSERVED: src/mkfs.rs:63 — comment cites MS-FSCC §2.4; emitted for `$ObjId:$O` (mkfs.rs:1306) and `$Reparse:$R` (mkfs.rs:1329)].
+- `0x00` `COLLATION_BINARY` — [UNVERIFIED] — not emitted by any code in this codebase; `$ObjId:$O` uses `COLLATION_NTOFS_ULONGS` (0x13) per `src/mkfs.rs`.
+- `0x02` `COLLATION_UNICODE_STRING` — [UNVERIFIED].
 
 ### COLLATION_FILE_NAME details {#collation-file-name}
 
@@ -710,12 +709,12 @@ index *contents* (not just the index machinery) are described.
 | Stream | Host record                     | Key                            | Value                          | Collation                    | Source                                 |
 | ------ | ------------------------------- | ------------------------------ | ------------------------------ | ---------------------------- | -------------------------------------- |
 | `$I30` | every directory                 | `$FILE_NAME` (var)             | (none — key is value)          | `COLLATION_FILE_NAME`        | [UNVERIFIED]                           |
-| `$SDH` | `$Secure` (rec 9)               | (security hash, security ID)   | offset into `$SDS`             | `COLLATION_NTOFS_SECURITY_HASH` | [UNVERIFIED]                        |
-| `$SII` | `$Secure` (rec 9)               | security ID (`u32`)            | offset into `$SDS`             | `COLLATION_NTOFS_ULONGS`     | [UNVERIFIED]                           |
-| `$O`   | `$Extend\$ObjId`                | object GUID (16 B)             | MFT ref + 3×birth GUID         | `COLLATION_BINARY` / `_GUID` | [UNVERIFIED]                           |
+| `$SDH` | `$Secure` (rec 9)               | (security hash, security ID)   | offset into `$SDS`             | `COLLATION_NTOFS_SECURITY_HASH` (0x12) | [OBSERVED: src/mkfs.rs:1133] |
+| `$SII` | `$Secure` (rec 9)               | security ID (`u32`)            | offset into `$SDS`             | `COLLATION_NTOFS_ULONG` (0x10) | [OBSERVED: src/mkfs.rs:1148]       |
+| `$O`   | `$Extend\$ObjId`                | object GUID (16 B)             | MFT ref + 3×birth GUID         | `COLLATION_NTOFS_ULONGS` (0x13) | [OBSERVED: src/mkfs.rs:1306]        |
 | `$O`   | `$Extend\$Quota`                | user SID (var)                 | owner ID (`u32`)               | `COLLATION_NTOFS_SID`        | [UNVERIFIED]                           |
-| `$Q`   | `$Extend\$Quota`                | owner ID (`u32`)               | quota record (40 B + SID)      | `COLLATION_NTOFS_ULONG`      | [UNVERIFIED]                           |
-| `$R`   | `$Extend\$Reparse`              | (reparse tag, MFT ref)         | (none)                         | `COLLATION_NTOFS_ULONGS`     | [UNVERIFIED]                           |
+| `$Q`   | `$Extend\$Quota`                | owner ID (`u32`)               | quota record (40 B + SID)      | `COLLATION_NTOFS_ULONG` (0x10) | [UNVERIFIED]                         |
+| `$R`   | `$Extend\$Reparse`              | (reparse tag, MFT ref)         | (none)                         | `COLLATION_NTOFS_ULONGS` (0x13) | [OBSERVED: src/mkfs.rs:1329]        |
 | `$J`   | `$Extend\$UsnJrnl` (`$DATA`)    | — (sparse stream, not a B+ tree) | —                            | —                            | [UNVERIFIED] — covered in [§5](05-logfile-journal.md) |
 | `$Max` | `$Extend\$UsnJrnl` (`$DATA`)    | — (16-byte struct, not indexed) | —                            | —                            | [UNVERIFIED] — covered in [§5](05-logfile-journal.md) |
 

@@ -369,7 +369,7 @@ internal threads; across processes (the volume mounted on Windows or by a
 second fs-ntfs caller) it is the operator's responsibility to quiesce.
 [OBSERVED: src/mft_io.rs:5-23]
 
-## $MFT (#0) and $MFTMirr (#1) {#mft-mirror}
+## $MFT (record 0) and $MFTMirr (record 1) {#mft-mirror}
 
 `$MFT` (record 0) is the master file table itself. Its `$DATA` attribute is
 non-resident, with data runs spanning the clusters that physically hold every
@@ -703,15 +703,17 @@ copy "wins" on conflict, only the operational observation that
 
 A 32-bit bitfield combining DOS-era flags with NTFS extensions:
 
-| Bit          | Name                            |
-| ------------ | ------------------------------- |
-| `0x00000001` | Read-only                       |
-| `0x00000002` | Hidden                          |
-| `0x00000004` | System                          |
-| `0x00000020` | Archive                         |
-| `0x10000000` | Directory (NTFS-internal hint)  |
+| Bit            | Name                           | Source                                                                                    |
+| -------------- | ------------------------------ | ----------------------------------------------------------------------------------------- |
+| `0x00000001`   | Read-only                      |                                                                                           |
+| `0x00000002`   | Hidden                         | [OBSERVED: src/record_build.rs FA_HIDDEN]                                                 |
+| `0x00000004`   | System                         | [OBSERVED: src/record_build.rs FA_SYSTEM]                                                 |
+| `0x00000020`   | Archive                        | [OBSERVED: src/record_build.rs FA_ARCHIVE]                                                |
+| `0x00000400`   | Reparse point                  | Set on `$REPARSE_POINT` write; cleared on remove. [OBSERVED: src/write.rs FILE_ATTRIBUTE_REPARSE_POINT] |
+| `0x10000000`   | Directory (NTFS-internal)      | [OBSERVED: src/record_build.rs FA_NTFS_DIRECTORY]                                         |
+| `0x20000000`   | View-index (NTFS-internal)     | Set on view-index host records (`$Secure`, `$Quota`, `$ObjId`, `$Reparse`). [OBSERVED: src/record_build.rs FA_NTFS_VIEW_INDEX] |
 
-[OBSERVED: src/record_build.rs:658, 702]
+[OBSERVED: src/record_build.rs:67-73, 658, 702; src/write.rs:1307]
 
 System records (slots 0..11) carry exactly `0x00000006` (`HIDDEN | SYSTEM`)
 on a Microsoft-formatted reference; the `ARCHIVE` bit is omitted. Setting

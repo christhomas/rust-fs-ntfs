@@ -337,7 +337,7 @@ resident on truncate-to-zero. Behavior is implementation-defined; the
 on-disk format permits either choice
 [`[NTFSCOM: NTFS Attributes]`](#references) [UNVERIFIED].
 
-## $Bitmap (record #6) {#bitmap-overview}
+## $Bitmap (record 6) {#bitmap-overview}
 
 `$Bitmap` is the system file at MFT record number 6
 [`[OBSERVED: src/bitmap.rs:27]`](#references). It carries one
@@ -490,7 +490,7 @@ once the volume is known consistent [UNVERIFIED].
 `ioctl(BLKDISCARD)` or its equivalents
 [`[OBSERVED: src/bitmap.rs]`](#references).
 
-## $Bad (record #8) {#bad-clusters}
+## $Bad (record 8) {#bad-clusters}
 
 `$BadClus` is the system file at MFT record number 8
 [`[OBSERVED: src/mkfs.rs:64,729]`](#references).

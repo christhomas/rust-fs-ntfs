@@ -175,7 +175,7 @@ same 4096-byte INDX page spans one cluster and is encoded as `+1` [UNVERIFIED].
 - USA fixup-array entry count is `record_size / 512`, derived from the
   decoded record size [UNVERIFIED].
 
-## $Boot file (record #7) and backup boot sector {#boot-mirror-sync}
+## $Boot file (record 7) and backup boot sector {#boot-mirror-sync}
 
 The boot sector is also exposed as a regular NTFS file under MFT record 7
 (`$Boot`). Its `$DATA` attribute is non-resident and, by convention, claims
