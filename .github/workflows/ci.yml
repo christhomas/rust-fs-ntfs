@@ -166,13 +166,13 @@ jobs:
         with:
           toolchain: "1.94.1"
       - name: Install vhd_tool from rust-img-vhd
-        # Builds the in-house VHD writer (~30 s with no cache). Pinning
-        # a SHA would be nicer but the repo is small and stable; HEAD
-        # of main is fine for CI. The binary lands in ~/.cargo/bin
-        # which is on PATH after dtolnay/rust-toolchain.
+        # Builds the in-house VHD writer (~30 s with no cache). Pinned
+        # to v0.2.0 (7cddc43) so a future push to main cannot silently
+        # break CI. The binary lands in ~/.cargo/bin which is on PATH
+        # after dtolnay/rust-toolchain.
         shell: pwsh
         run: |
-          git clone --depth 1 https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
+          git clone --depth 1 --branch v0.2.0 https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
           cargo install --path $env:RUNNER_TEMP/rust-img-vhd --bin vhd_tool --locked
       - name: Build rust-ntfs (Windows)
         run: cargo build --release --bin rust-ntfs
