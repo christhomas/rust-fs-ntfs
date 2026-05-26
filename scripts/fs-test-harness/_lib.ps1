@@ -21,6 +21,42 @@
 # --bin vhd_tool puts it in ~/.cargo/bin which rustup adds to PATH).
 $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
 
+# ── Drive-letter mutex ────────────────────────────────────────────────────────
+# Serialises the "snapshot lettersBefore → Mount-DiskImage → detect new letter"
+# sequence in Mount-VhdAndGetLetter. Without this, two concurrent op scripts
+# can both capture the same lettersBefore set and then both claim the same
+# newly-assigned letter as "theirs", causing Format-Volume / chkdsk / etc. to
+# target the wrong drive letter or fail with "No MSFT_Volume objects found".
+#
+# FileMode.CreateNew is atomic on Windows NTFS — exactly one caller wins the
+# race to create the file; all others get IOException and retry.
+
+$script:DriveLockPath = "$env:TEMP\vhd-drive-lock"
+
+function Acquire-DriveLock {
+    $deadline = [DateTime]::UtcNow.AddSeconds(180)
+    while ($true) {
+        try {
+            $fs = [System.IO.File]::Open(
+                $script:DriveLockPath,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None)
+            $fs.Close()
+            return
+        } catch [System.IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Acquire-DriveLock: timed out after 180s waiting for $($script:DriveLockPath)"
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+}
+
+function Release-DriveLock {
+    Remove-Item -LiteralPath $script:DriveLockPath -Force -EA SilentlyContinue
+}
+
 function Get-VhdPathFor {
     param([Parameter(Mandatory=$true)] [string]$ImagePath)
     return [System.IO.Path]::ChangeExtension($ImagePath, ".vhd")
@@ -173,47 +209,53 @@ function Initialize-VhdFromImg {
 function Mount-VhdAndGetLetter {
     param([Parameter(Mandatory=$true)] [string]$Vhd)
 
-    # Brief pause so a prior Dismount-DiskImage (either from
-    # Initialize-VhdFromImg's tail or a prior op's
-    # Dismount-VhdAndCleanup) has a chance to fully settle before
-    # ntfs.sys is asked to recognise the volume again. The old monolithic
-    # win-chkdsk.ps1 had this `Start-Sleep -Seconds 1` between dismount
-    # and remount; the lib refactor split those across functions and
-    # dropped it. Removing it works on the dev VM but Windows' VHD stack
-    # has been known to race the dismount completion on slower hosts.
+    # Settle pause outside the lock: let any prior Dismount-DiskImage complete
+    # before we enter the critical section. The old monolithic win-chkdsk.ps1
+    # had this between dismount and remount; the lib refactor split those
+    # across functions and dropped it. Kept here so ntfs.sys has a chance to
+    # finish tearing down before we snapshot the letter table.
     Start-Sleep -Seconds 1
-    $lettersBefore = @((Get-Volume | Where-Object { $_.DriveLetter }).DriveLetter)
-    # Distinct name for the CimInstance — avoids the case-insensitive
-    # collision with the `$Vhd` path-string param. Benign here (the
-    # path isn't used again after this line), but consistent with
-    # Initialize-VhdFromImg.
-    $mountedImg = Mount-DiskImage -ImagePath $Vhd -PassThru
-    $letter = $null
-    for ($i = 0; $i -lt 10; $i++) {
-        Start-Sleep -Seconds 1
-        $lettersAfter = @((Get-Volume | Where-Object { $_.DriveLetter }).DriveLetter)
-        $new = $lettersAfter | Where-Object { $_ -notin $lettersBefore }
-        if ($new) { $letter = $new | Select-Object -First 1; break }
-    }
-    if (-not $letter) {
-        $disk2 = Get-Disk -Number $mountedImg.Number
-        $partition = Get-Partition -DiskNumber $disk2.Number |
-            Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
-        $used = (Get-Volume | ForEach-Object { $_.DriveLetter }) +
-                (Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Name })
-        foreach ($c in [char[]](68..90)) {
-            if ($c -notin $used) {
-                try {
-                    Set-Partition -DiskNumber $disk2.Number `
-                        -PartitionNumber $partition.PartitionNumber `
-                        -NewDriveLetter $c -ErrorAction Stop
-                    $letter = "$c"; break
-                } catch { }
+
+    # Hold the drive-letter mutex for the entire snapshot → mount → detect
+    # sequence. Without it, two concurrent scripts both capture the same
+    # lettersBefore set and claim the same newly-assigned letter.
+    Acquire-DriveLock
+    try {
+        $lettersBefore = @((Get-Volume | Where-Object { $_.DriveLetter }).DriveLetter)
+        # Distinct name for the CimInstance — avoids the case-insensitive
+        # collision with the `$Vhd` path-string param. Benign here (the
+        # path isn't used again after this line), but consistent with
+        # Initialize-VhdFromImg.
+        $mountedImg = Mount-DiskImage -ImagePath $Vhd -PassThru
+        $letter = $null
+        for ($i = 0; $i -lt 10; $i++) {
+            Start-Sleep -Seconds 1
+            $lettersAfter = @((Get-Volume | Where-Object { $_.DriveLetter }).DriveLetter)
+            $new = $lettersAfter | Where-Object { $_ -notin $lettersBefore }
+            if ($new) { $letter = $new | Select-Object -First 1; break }
+        }
+        if (-not $letter) {
+            $disk2 = Get-Disk -Number $mountedImg.Number
+            $partition = Get-Partition -DiskNumber $disk2.Number |
+                Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
+            $used = (Get-Volume | ForEach-Object { $_.DriveLetter }) +
+                    (Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Name })
+            foreach ($c in [char[]](68..90)) {
+                if ($c -notin $used) {
+                    try {
+                        Set-Partition -DiskNumber $disk2.Number `
+                            -PartitionNumber $partition.PartitionNumber `
+                            -NewDriveLetter $c -ErrorAction Stop
+                        $letter = "$c"; break
+                    } catch { }
+                }
             }
         }
+        if (-not $letter) { throw "no drive letter assigned" }
+        return "$letter"
+    } finally {
+        Release-DriveLock
     }
-    if (-not $letter) { throw "no drive letter assigned" }
-    return "$letter"
 }
 
 # Read the partition contents out of the mounted VHD's raw device
