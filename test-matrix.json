@@ -32,7 +32,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-basic-256mib.img"
         },
         {
@@ -50,7 +50,7 @@
           "keep_image": "false"
         }
       ],
-      "image": "diskimages/nfs-mac-format-basic-256mib.img",
+      "image": "nfs-mac-format-basic-256mib.img",
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-cluster-1k": {
@@ -61,7 +61,7 @@
         "alloc_unit_size": 1024
       },
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "image": "diskimages/nfs-mac-format-cluster-1k.img",
+      "image": "nfs-mac-format-cluster-1k.img",
       "recipe": [
         {
           "op": "init-image"
@@ -71,7 +71,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-1k.img"
         },
         {
@@ -93,7 +93,7 @@
         "alloc_unit_size": 512
       },
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "image": "diskimages/nfs-mac-format-cluster-512.img",
+      "image": "nfs-mac-format-cluster-512.img",
       "recipe": [
         {
           "op": "init-image"
@@ -103,7 +103,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-512.img"
         },
         {
@@ -125,7 +125,7 @@
         "alloc_unit_size": 65536
       },
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "image": "diskimages/nfs-mac-format-cluster-64k.img",
+      "image": "nfs-mac-format-cluster-64k.img",
       "recipe": [
         {
           "op": "init-image"
@@ -135,7 +135,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-64k.img"
         },
         {
@@ -157,7 +157,7 @@
         "alloc_unit_size": 8192
       },
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "image": "diskimages/nfs-mac-format-cluster-8k.img",
+      "image": "nfs-mac-format-cluster-8k.img",
       "recipe": [
         {
           "op": "init-image"
@@ -167,7 +167,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-8k.img"
         },
         {
@@ -189,7 +189,7 @@
         "alloc_unit_size": 4096
       },
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "image": "diskimages/nfs-mac-format-label-32chars.img",
+      "image": "nfs-mac-format-label-32chars.img",
       "recipe": [
         {
           "op": "init-image"
@@ -199,7 +199,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-32chars.img"
         },
         {
@@ -221,7 +221,7 @@
         "alloc_unit_size": 4096
       },
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "image": "diskimages/nfs-mac-format-label-cjk.img",
+      "image": "nfs-mac-format-label-cjk.img",
       "recipe": [
         {
           "op": "init-image"
@@ -231,7 +231,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-cjk.img"
         },
         {
@@ -253,7 +253,7 @@
         "alloc_unit_size": 4096
       },
       "evidence_link": "vendor/rust-fs-ntfs/test-diagnostics/run-20260502-140029/mac-format-label-empty",
-      "image": "diskimages/nfs-mac-format-label-empty.img",
+      "image": "nfs-mac-format-label-empty.img",
       "recipe": [
         {
           "op": "init-image"
@@ -263,7 +263,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-empty.img"
         },
         {
@@ -285,7 +285,7 @@
         "alloc_unit_size": 4096
       },
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "image": "diskimages/nfs-mac-format-label-latin1.img",
+      "image": "nfs-mac-format-label-latin1.img",
       "recipe": [
         {
           "op": "init-image"
@@ -295,7 +295,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-latin1.img"
         },
         {
@@ -317,7 +317,7 @@
         "alloc_unit_size": 4096
       },
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "image": "diskimages/nfs-mac-format-large-1gib.img",
+      "image": "nfs-mac-format-large-1gib.img",
       "recipe": [
         {
           "op": "init-image"
@@ -327,7 +327,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-large-1gib.img"
         },
         {
@@ -349,7 +349,7 @@
         "alloc_unit_size": 4096
       },
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/mac-only-pass3",
-      "image": "diskimages/nfs-mac-format-mac-enumerate-empty.img",
+      "image": "nfs-mac-format-mac-enumerate-empty.img",
       "recipe": [
         {
           "op": "init-image"
@@ -370,7 +370,7 @@
         "label": "MACMKDIR",
         "alloc_unit_size": 4096
       },
-      "image": "diskimages/nfs-mac-format-mac-mkdir-mac-touch-mac-enumerate.img",
+      "image": "nfs-mac-format-mac-mkdir-mac-touch-mac-enumerate.img",
       "recipe": [
         {
           "op": "init-image"
@@ -401,7 +401,7 @@
         "label": "MACONLY",
         "alloc_unit_size": 4096
       },
-      "image": "diskimages/nfs-mac-format-mac-touch-mac-write-mac-enumerate.img",
+      "image": "nfs-mac-format-mac-touch-mac-write-mac-enumerate.img",
       "recipe": [
         {
           "op": "init-image"
@@ -432,7 +432,7 @@
         "label": "MACDEL",
         "alloc_unit_size": 4096
       },
-      "image": "diskimages/nfs-mac-format-mac-write-mac-rm-mac-enumerate-empty.img",
+      "image": "nfs-mac-format-mac-write-mac-rm-mac-enumerate-empty.img",
       "recipe": [
         {
           "op": "init-image"
@@ -486,7 +486,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-mac-write-win-repeat-mount-3-win-chkdsk.img"
         },
         {
@@ -513,7 +513,7 @@
           "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-mac-write-win-repeat-mount-3-win-chkdsk"
         }
       ],
-      "image": "diskimages/nfs-mac-format-mac-write-win-repeat-mount-3-win-chkdsk.img",
+      "image": "nfs-mac-format-mac-write-win-repeat-mount-3-win-chkdsk.img",
       "_notes": "Tier-3 repeat-mount with mac-side content. Verifies our writer's metadata stays valid across multiple dismount/remount cycles after we've added a file."
     },
     "mac-format-mkdir-set-dirty-win-chkdsk": {
@@ -545,7 +545,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-mkdir-set-dirty-win-chkdsk.img"
         },
         {
@@ -557,7 +557,7 @@
           "keep_image": "false"
         }
       ],
-      "image": "diskimages/nfs-mac-format-mkdir-set-dirty-win-chkdsk.img",
+      "image": "nfs-mac-format-mkdir-set-dirty-win-chkdsk.img",
       "_notes": "Tier-3 dirty volume with directory + nested file. Stresses the parent-pointer / $I30 invariants the chkdsk dirty-bit branch would walk."
     },
     "mac-format-set-dirty-win-chkdsk": {
@@ -579,7 +579,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-set-dirty-win-chkdsk.img"
         },
         {
@@ -591,7 +591,7 @@
           "keep_image": "false"
         }
       ],
-      "image": "diskimages/nfs-mac-format-set-dirty-win-chkdsk.img",
+      "image": "nfs-mac-format-set-dirty-win-chkdsk.img",
       "_notes": "Tier-3 dirty-volume injection. Mac formats then explicitly sets VOLUME_IS_DIRTY. Windows-side chkdsk must detect the dirty bit and either repair or report it. Clean baseline for chkdsk's dirty-volume code path."
     },
     "mac-format-small-64mib": {
@@ -602,7 +602,7 @@
         "alloc_unit_size": 4096
       },
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
-      "image": "diskimages/nfs-mac-format-small-64mib.img",
+      "image": "nfs-mac-format-small-64mib.img",
       "recipe": [
         {
           "op": "init-image"
@@ -612,7 +612,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-small-64mib.img"
         },
         {
@@ -634,7 +634,7 @@
         "alloc_unit_size": 4096
       },
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072454",
-      "image": "diskimages/nfs-mac-format-tiny-32mib.img",
+      "image": "nfs-mac-format-tiny-32mib.img",
       "recipe": [
         {
           "op": "init-image"
@@ -644,7 +644,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-tiny-32mib.img"
         },
         {
@@ -665,7 +665,7 @@
         "label": "SIXTEEN_GIB",
         "alloc_unit_size": 4096
       },
-      "image": "diskimages/nfs-mac-format-volume-16gib-cluster-4k.img",
+      "image": "nfs-mac-format-volume-16gib-cluster-4k.img",
       "recipe": [
         {
           "op": "init-image"
@@ -675,7 +675,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-16gib-cluster-4k.img"
         },
         {
@@ -696,7 +696,7 @@
         "label": "TINY_512",
         "alloc_unit_size": 512
       },
-      "image": "diskimages/nfs-mac-format-volume-32mib-cluster-512.img",
+      "image": "nfs-mac-format-volume-32mib-cluster-512.img",
       "recipe": [
         {
           "op": "init-image"
@@ -706,7 +706,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-32mib-cluster-512.img"
         },
         {
@@ -727,7 +727,7 @@
         "label": "FOUR_GIB_4K",
         "alloc_unit_size": 4096
       },
-      "image": "diskimages/nfs-mac-format-volume-4gib-cluster-4k.img",
+      "image": "nfs-mac-format-volume-4gib-cluster-4k.img",
       "recipe": [
         {
           "op": "init-image"
@@ -737,7 +737,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-4gib-cluster-4k.img"
         },
         {
@@ -758,7 +758,7 @@
         "label": "FOUR_GIB_64K",
         "alloc_unit_size": 65536
       },
-      "image": "diskimages/nfs-mac-format-volume-4gib-cluster-64k.img",
+      "image": "nfs-mac-format-volume-4gib-cluster-64k.img",
       "recipe": [
         {
           "op": "init-image"
@@ -768,7 +768,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-4gib-cluster-64k.img"
         },
         {
@@ -798,7 +798,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-10-win-chkdsk.img"
         },
         {
@@ -825,7 +825,7 @@
           "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-repeat-mount-10-win-chkdsk"
         }
       ],
-      "image": "diskimages/nfs-mac-format-win-repeat-mount-10-win-chkdsk.img",
+      "image": "nfs-mac-format-win-repeat-mount-10-win-chkdsk.img",
       "_notes": "Same as repeat-mount-5 but \u00d710 cycles. If our writer leaves a slowly-degrading state, this surfaces it past the 5-cycle ceiling."
     },
     "mac-format-win-repeat-mount-5-win-chkdsk": {
@@ -844,7 +844,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-5-win-chkdsk.img"
         },
         {
@@ -871,7 +871,7 @@
           "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-repeat-mount-5-win-chkdsk"
         }
       ],
-      "image": "diskimages/nfs-mac-format-win-repeat-mount-5-win-chkdsk.img",
+      "image": "nfs-mac-format-win-repeat-mount-5-win-chkdsk.img",
       "_notes": "Tier-3 repeat-mount. After initial chkdsk, dismount/remount \u00d7 5, then run trailing chkdsk. Catches bugs where the volume only goes inconsistent after multiple clean dismounts (e.g. $LogFile state ntfs.sys tolerates once but rejects on later mounts)."
     },
     "mac-format-win-write-deep-nesting-win-chkdsk": {
@@ -890,7 +890,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-deep-nesting-win-chkdsk.img"
         },
         {
@@ -931,7 +931,7 @@
           "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-deep-nesting-win-chkdsk"
         }
       ],
-      "image": "diskimages/nfs-mac-format-win-write-deep-nesting-win-chkdsk.img",
+      "image": "nfs-mac-format-win-write-deep-nesting-win-chkdsk.img",
       "_notes": "Deep parent-pointer chain. Each $FILE_NAME's parent reference must point at the right MFT record; broken pointers surface as 'orphan' under chkdsk Stage 2."
     },
     "mac-format-win-write-large": {
@@ -951,7 +951,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-large.img"
         },
         {
@@ -985,7 +985,7 @@
           "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-large"
         }
       ],
-      "image": "diskimages/nfs-mac-format-win-write-large.img",
+      "image": "nfs-mac-format-win-write-large.img",
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-mac-enumerate": {
@@ -996,7 +996,7 @@
         "alloc_unit_size": 4096
       },
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
-      "image": "diskimages/nfs-mac-format-win-write-mac-enumerate.img",
+      "image": "nfs-mac-format-win-write-mac-enumerate.img",
       "recipe": [
         {
           "op": "init-image"
@@ -1006,7 +1006,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-mac-enumerate.img"
         },
         {
@@ -1053,7 +1053,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-small.img"
         },
         {
@@ -1088,7 +1088,7 @@
           "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-small"
         }
       ],
-      "image": "diskimages/nfs-mac-format-win-write-many-small.img",
+      "image": "nfs-mac-format-win-write-many-small.img",
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-many-win-delete-half-win-chkdsk": {
@@ -1107,7 +1107,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img"
         },
         {
@@ -1152,7 +1152,7 @@
           "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-win-delete-half-win-chkdsk"
         }
       ],
-      "image": "diskimages/nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img",
+      "image": "nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img",
       "_notes": "$Bitmap free-then-reuse and $I30 entry-removal churn. If our writer leaves dangling free-bitmap state, chkdsk after delete catches it."
     },
     "mac-format-win-write-medium": {
@@ -1172,7 +1172,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-medium.img"
         },
         {
@@ -1206,7 +1206,7 @@
           "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-medium"
         }
       ],
-      "image": "diskimages/nfs-mac-format-win-write-medium.img",
+      "image": "nfs-mac-format-win-write-medium.img",
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-modify-win-chkdsk": {
@@ -1225,7 +1225,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-modify-win-chkdsk.img"
         },
         {
@@ -1277,7 +1277,7 @@
           "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-modify-win-chkdsk"
         }
       ],
-      "image": "diskimages/nfs-mac-format-win-write-modify-win-chkdsk.img",
+      "image": "nfs-mac-format-win-write-modify-win-chkdsk.img",
       "_notes": "Overwrites a middle range of an existing non-resident $DATA. Surfaces bugs in run-list rewrite when a single run is split. v2 recipe substitutes a 4 MiB zero-fill for 'random' content (chkdsk's structural checks don't care about $DATA payload bytes), and uses win-modify with a fixed 0xFF pattern at offset=1 MiB len=4 KiB so win-read can eyeball the modified window against a known-non-zero value."
     },
     "mac-format-win-write-remount-win-chkdsk": {
@@ -1296,7 +1296,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-remount-win-chkdsk.img"
         },
         {
@@ -1337,7 +1337,7 @@
           "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-remount-win-chkdsk"
         }
       ],
-      "image": "diskimages/nfs-mac-format-win-write-remount-win-chkdsk.img",
+      "image": "nfs-mac-format-win-write-remount-win-chkdsk.img",
       "_notes": "Adds a dismount/remount cycle in the middle. Catches bugs where our writer leaves the volume in a state that's only inconsistent after a clean dismount. Originally written as `win:dismount -> win:remount` in v1; collapsed to `win:repeat-mount(1)` in v2 since the per-op model already mounts/dismounts implicitly per op, so a single explicit cycle on top is the equivalent unit of work."
     },
     "mac-format-win-write-rename-win-chkdsk": {
@@ -1356,7 +1356,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-rename-win-chkdsk.img"
         },
         {
@@ -1398,7 +1398,7 @@
           "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-rename-win-chkdsk"
         }
       ],
-      "image": "diskimages/nfs-mac-format-win-write-rename-win-chkdsk.img",
+      "image": "nfs-mac-format-win-write-rename-win-chkdsk.img",
       "_notes": "Same-parent rename \u2014 catches bugs where the old $FILE_NAME isn't fully retired or the parent $I30 isn't kept consistent."
     },
     "mac-format-win-write-then-delete": {
@@ -1418,7 +1418,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-then-delete.img"
         },
         {
@@ -1467,7 +1467,7 @@
           "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-then-delete"
         }
       ],
-      "image": "diskimages/nfs-mac-format-win-write-then-delete.img",
+      "image": "nfs-mac-format-win-write-then-delete.img",
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-tiny": {
@@ -1487,7 +1487,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-tiny.img"
         },
         {
@@ -1521,7 +1521,7 @@
           "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-tiny"
         }
       ],
-      "image": "diskimages/nfs-mac-format-win-write-tiny.img",
+      "image": "nfs-mac-format-win-write-tiny.img",
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-win-delete-mac-verify-empty": {
@@ -1532,7 +1532,7 @@
         "alloc_unit_size": 4096
       },
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-054925",
-      "image": "diskimages/nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
+      "image": "nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
       "recipe": [
         {
           "op": "init-image"
@@ -1542,7 +1542,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img"
         },
         {
@@ -1630,7 +1630,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-write-set-dirty-win-chkdsk.img"
         },
         {
@@ -1642,7 +1642,7 @@
           "keep_image": "false"
         }
       ],
-      "image": "diskimages/nfs-mac-format-write-set-dirty-win-chkdsk.img",
+      "image": "nfs-mac-format-write-set-dirty-win-chkdsk.img",
       "_notes": "Tier-3 dirty-volume + content. Simulates a half-completed write followed by a crash (dirty-bit set without our writer issuing a clean dismount). chkdsk must keep our partial-write file readable, not orphan or truncate it."
     },
     "win-format-mac-enumerate-empty": {
@@ -1658,7 +1658,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-mac-enumerate-empty.img"
         },
         {
@@ -1677,7 +1677,7 @@
           "op": "mac-enumerate"
         }
       ],
-      "image": "diskimages/nfs-win-format-mac-enumerate-empty.img",
+      "image": "nfs-win-format-mac-enumerate-empty.img",
       "_notes": "Pure reader test on Microsoft-canonical format. If our reader chokes here it's a reader bug, not a writer bug \u2014 orthogonal axis to all the mac:format scenarios.\n\nForward-only ship-from-vm shape: init-image (zeros) -> ship-to-vm -> win-format -> ship-to-host -> mac-enumerate. NO mac-format step (otherwise the .img would arrive at the VM already-NTFS-formatted by rust-ntfs, defeating the win-format-* axis). VM-side .img + .vhdx are intentionally left in place after win-format (keep_image=true) so ship-to-host has something to copy; cleanup happens implicitly the next time ship-to-vm overwrites the path or the user clears the VM workdir manually (~70+ GiB free)."
     },
     "win-format-win-write-mac-delete-win-verify": {
@@ -1694,7 +1694,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img"
         },
         {
@@ -1731,7 +1731,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img"
         },
         {
@@ -1749,7 +1749,7 @@
           "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-delete-win-verify"
         }
       ],
-      "image": "diskimages/nfs-win-format-win-write-mac-delete-win-verify.img",
+      "image": "nfs-win-format-win-write-mac-delete-win-verify.img",
       "_notes": "Filesystem::unlink plumbed via inspect_ntfs CLI on c5fe branch. Matrix runner glue not yet wired.\n\ndepends on Mac-side deleter"
     },
     "win-format-win-write-mac-verify": {
@@ -1766,7 +1766,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-verify.img"
         },
         {
@@ -1801,7 +1801,7 @@
           "op": "mac-enumerate"
         }
       ],
-      "image": "diskimages/nfs-win-format-win-write-mac-verify.img",
+      "image": "nfs-win-format-win-write-mac-verify.img",
       "_notes": "Operation sequence needs the chkdsk-clean state iter15+ has to deliver. mac:enumerate itself is plumbed via the new inspect_ntfs CLI on c5fe branch.\n\nMicrosoft format.com is the canonical reference; this proves our reader handles Microsoft-format output. Forward-only ship-from-vm shape: init-image (zeros) -> ship-to-vm -> win-format -> 2x win-write-content -> ship-to-host -> mac-enumerate. NO mac-format step (would defeat the win-format axis). VM-side .img + .vhdx are intentionally left in place after the last win-write-content (keep_image=true on every win-* step) so ship-to-host has something to copy; cleanup happens implicitly the next time ship-to-vm overwrites the path or the user clears the VM workdir manually (~70+ GiB free)."
     },
     "win-format-win-write-mac-write-win-verify": {
@@ -1818,7 +1818,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img"
         },
         {
@@ -1853,7 +1853,7 @@
         },
         {
           "op": "ship-to-vm",
-          "src": "{scenario.image}",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img"
         },
         {
@@ -1871,7 +1871,7 @@
           "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-write-win-verify"
         }
       ],
-      "image": "diskimages/nfs-win-format-win-write-mac-write-win-verify.img",
+      "image": "nfs-win-format-win-write-mac-write-win-verify.img",
       "_notes": "Filesystem::create_file is plumbed and exposed via the inspect_ntfs CLI on the c5fe branch. Matrix runner glue (drive a Mac-side touch in the orchestrator) is the only missing piece.\n\ndepends on Mac-side writer; first agent scaffolds it or marks blocked-on-writer"
     }
   },
