@@ -346,7 +346,7 @@ pub fn format_filesystem(
     // after — otherwise both end up at the same LCN and $AttrDef's
     // write clobbers the $MFT bitmap cluster.
     let attrdef_lcn = upcase_lcn + upcase_clusters;
-    let attrdef_clusters: u64 = (16 * 160u64).div_ceil(cluster_size as u64).max(1);
+    let attrdef_clusters: u64 = (15 * 160u64).div_ceil(cluster_size as u64).max(1);
 
     // $MFT's own $BITMAP attribute is non-resident on Microsoft's
     // reference output (per-record byte-diff: ref ships an attribute
@@ -1269,15 +1269,30 @@ pub fn format_filesystem(
         // creating it on first mount, which for sub-4K cluster sizes results in
         // an incomplete record (missing $O/$Q initialization) that chkdsk flags.
         //
-        // $Q must contain a "default quota record" (OwnerID=1) with unlimited
-        // limits. Without it, chkdsk /scan exits 1 regardless of cluster size.
-        // Format extracted from a cluster-4K post-mount image: QUOTA_CONTROL
-        // v2, flags=1 (FLAG_ID_ALLOCATED), zero usage, -1 thresholds.
+        // $Q default record (OwnerID=1) strategy:
+        //   cluster_size >= 4096 (cpib=1): Windows creates OwnerID=1 correctly on
+        //     first mount. Emitting it ourselves triggers a 180-second quota-rebuild
+        //     scan on every subsequent disk-online cycle (Windows sees $O empty and
+        //     rebuilds OwnerID→SID mappings by walking the entire MFT). Leave $Q
+        //     empty so Windows initialises it cleanly on first mount.
+        //   cluster_size < 4096 (cpib>1): Windows NTFS driver fails to create the
+        //     default quota record for sub-4K cluster volumes (observed empirically:
+        //     chkdsk /scan exits 1 with "default quota record missing in file 18"
+        //     unless OwnerID=1 is present at format time). Emit it here.
         let q_name = stream::utf16(stream::Q);
-        let default_quota_key = 1u32.to_le_bytes(); // OwnerID = 1
-        let mut q_entries =
-            build_view_index_entry(&default_quota_key, &build_default_quota_control());
-        q_entries.extend_from_slice(&last_entry);
+        let q_entries: Vec<u8> = if cluster_size < 4096 {
+            // Sub-4K: pre-populate OwnerID=1 so chkdsk /scan does not report
+            // "default quota record missing in file 18."
+            // QUOTA_CONTROL v2, FLAG_ID_ALLOCATED=1, zero usage, -1 thresholds.
+            let default_quota_key = 1u32.to_le_bytes(); // OwnerID = 1
+            let mut e = build_view_index_entry(&default_quota_key, &build_default_quota_control());
+            e.extend_from_slice(&last_entry);
+            e
+        } else {
+            // 4K+: leave $Q empty; Windows populates OwnerID=1 on first mount
+            // without triggering the MFT-wide quota rebuild that an empty $O causes.
+            last_entry.to_vec()
+        };
         let q_index_root = build_populated_named_index_root_attr(
             3,
             &q_name,
@@ -2380,11 +2395,19 @@ fn make_mft_internal_bitmap(size_bytes: usize, used_records: &[u32]) -> Vec<u8> 
 // $AttrDef table (canonical NTFS 3.1)
 // ---------------------------------------------------------------------------
 
-/// Build the canonical NTFS 3.1 $AttrDef table. 15 active entries ×
-/// 160 bytes + 1 zero-terminator entry = 2560 bytes total. Format per
+/// Build the canonical NTFS 3.1 $AttrDef table. 14 active entries ×
+/// 160 bytes + 1 zero-terminator entry = 2400 bytes total. Format per
 ///   MS-FSCC and Windows Internals 7th ed.: 64-byte UTF-16 name +
 ///   u32 type + u32 display_rule + u32 collation + u32 flags +
 ///   u64 min_size + u64 max_size.
+///
+/// Note: `$LOGGED_UTILITY_STREAM` (type 0x100) is intentionally
+/// omitted. When ntfs.sys sees that entry in $AttrDef it interprets
+/// the volume as TxF-capable and performs a ~180-second MFT-wide scan
+/// on every disk-online cycle. format.com omits it too (the table it
+/// writes uses the NTFS 1.x legacy names `$VOLUME_VERSION` and
+/// `$SYMBOLIC_LINK` and has no LUS entry). We match that shape so
+/// first-mount behaviour is identical to a format.com volume.
 fn build_attrdef_table() -> Vec<u8> {
     struct Entry {
         name: &'static str,
@@ -2398,17 +2421,17 @@ fn build_attrdef_table() -> Vec<u8> {
     const NONRES: u32 = 0x80;
     const INDEXED: u32 = 0x02;
     const NEG1: i64 = -1;
-    // Entry contents match the NTFS 3.1 table that ntfs.sys writes on
-    // first mount of a freshly-formatted volume (extracted from a
-    // cluster-4K post-mount image, diag run-20260502). Key differences
-    // from the NTFS 1.x table that format.com emits:
+    // Entry contents match the NTFS 3.1 $AttrDef that chkdsk /scan
+    // accepts without error. Key differences from format.com's NTFS 1.x
+    // legacy table:
     //   - $STANDARD_INFORMATION max = 72 (not 48) — NTFS 3.x extended form
     //   - 0x40 entry name is "$OBJECT_ID" (not "$VOLUME_VERSION"), max=256
     //   - 0xC0 entry name is "$REPARSE_POINT" (not "$SYMBOLIC_LINK"), max=16384
-    //   - 0x100 $LOGGED_UTILITY_STREAM added (max=65536)
-    // chkdsk /scan validates on-disk attributes against this table; using
-    // the 1.x legacy form causes "Errors found in Attribute Definition
-    // Table" on sub-4K cluster volumes where ntfs.sys does not update it.
+    // $LOGGED_UTILITY_STREAM is intentionally absent — see build_attrdef_table
+    // doc comment for why. chkdsk /scan validates on-disk attributes against
+    // this table; using the 1.x legacy form causes "Errors found in Attribute
+    // Definition Table" on sub-4K cluster volumes where ntfs.sys does not
+    // update it.
     let entries = [
         Entry {
             name: "$STANDARD_INFORMATION",
@@ -2522,16 +2545,10 @@ fn build_attrdef_table() -> Vec<u8> {
             min_size: 0,
             max_size: 65536,
         },
-        Entry {
-            name: "$LOGGED_UTILITY_STREAM",
-            type_code: 0x100,
-            collation: 0,
-            flags: NONRES,
-            min_size: 0,
-            max_size: 65536,
-        },
+        // $LOGGED_UTILITY_STREAM (0x100) intentionally omitted — see
+        // build_attrdef_table doc comment.
     ];
-    // 16 active entries + one 160-byte all-zeros terminator = 2720 bytes.
+    // 14 active entries + one 160-byte all-zeros terminator = 2400 bytes.
     let mut out = Vec::with_capacity(160 * (entries.len() + 1));
     for e in &entries {
         let mut buf = [0u8; 160];
