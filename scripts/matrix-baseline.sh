@@ -18,8 +18,10 @@
 #   bash scripts/matrix-baseline.sh           # full matrix, ~3-4 hours
 #   bash scripts/matrix-baseline.sh --smoke   # 5 representative scenarios, ~15 min
 #
-# If you pipe to tee, use pipefail to preserve the exit code:
-#   bash scripts/matrix-baseline.sh 2>&1 | tee run.log; exit "${PIPESTATUS[0]}"
+# All output (stdout + stderr) is always tee'd to:
+#   /tmp/test-harness-full-matrix.log
+# Tail that file in a second terminal to follow progress:
+#   tail -f /tmp/test-harness-full-matrix.log
 #
 # Reads .test-env for VM_HOST / SSH_KEY. Writes:
 #   * test-diagnostics/matrix-results.json
@@ -29,6 +31,10 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+
+# Tee all output to a fixed path so `tail -f /tmp/test-harness-full-matrix.log`
+# always works regardless of how the script is invoked.
+exec > >(tee /tmp/test-harness-full-matrix.log) 2>&1
 
 mode="full"
 case "${1:-}" in
@@ -61,6 +67,9 @@ cargo build --release --quiet
 # 2. Run the matrix.
 matrix_log="$(mktemp -t matrix-baseline.XXXXXX.log)"
 trap 'rm -f "$matrix_log"' EXIT
+# Note: matrix_log is a separate internal temp file used only by
+# _matrix-collect-vm.sh for metadata extraction. The user-facing
+# output always goes to /tmp/test-harness-full-matrix.log (above).
 
 run_exit=0
 if [ "$mode" = "smoke" ]; then
