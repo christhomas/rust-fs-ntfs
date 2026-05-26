@@ -106,7 +106,7 @@ jobs:
   # silently. Nightly-only; non-blocking via continue-on-error so
   # nightly toolchain breakage doesn't block PRs against stable.
   asan:
-    name: AddressSanitizer (nightly)
+    name: unit tests under AddressSanitizer (nightly)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
