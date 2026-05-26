@@ -33,25 +33,21 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-basic-256mib.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-basic-256mib.img",
           "modes": "readonly,/scan",
           "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-basic-256mib",
           "verdict_shape": "Clean"
         },
         {
           "op": "win-enumerate",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-basic-256mib.img",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-basic-256mib",
           "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-basic-256mib.img",
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 — bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-cluster-1k": {
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
@@ -72,18 +68,16 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-1k.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-1k.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-cluster-1k",
           "verdict_shape": "Clean",
           "keep_image": "false"
         }
       ],
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-cluster-512": {
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
@@ -104,18 +98,16 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-512.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-512.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-cluster-512",
           "verdict_shape": "Clean",
           "keep_image": "false"
         }
       ],
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-cluster-64k": {
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
@@ -136,18 +128,16 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-64k.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-64k.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-cluster-64k",
           "verdict_shape": "Clean",
           "keep_image": "false"
         }
       ],
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-cluster-8k": {
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
@@ -168,18 +158,16 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-8k.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-cluster-8k.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-cluster-8k",
           "verdict_shape": "Clean",
           "keep_image": "false"
         }
       ],
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-label-32chars": {
       "status": "passed-to-frs60f-ceiling-agent-8a29-2026-05-02",
@@ -200,24 +188,22 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-32chars.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-32chars.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-label-32chars",
           "verdict_shape": "Clean",
           "keep_image": "false"
         }
       ],
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 — bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-label-cjk": {
       "status": "passed-to-frs60f-ceiling-agent-8a29-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "label": "\u65e5\u672c\u8a9e\u30e9\u30d9\u30eb",
+        "label": "日本語ラベル",
         "alloc_unit_size": 4096
       },
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
@@ -232,18 +218,16 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-cjk.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-cjk.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-label-cjk",
           "verdict_shape": "Clean",
           "keep_image": "false"
         }
       ],
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 — bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-label-empty": {
       "status": "passed-to-frs60f-ceiling-agent-fixture-2026-05-02",
@@ -264,24 +248,22 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-empty.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-empty.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-label-empty",
           "verdict_shape": "Clean",
           "keep_image": "false"
         }
       ],
-      "_notes": "Empirically confirmed at the frs.cxx:60f ceiling (run-20260502-140029, ro=3 scan=11, same upcase + frs.cxx assert as the other 11 scenarios). chkdsk-readonly line 4 is blank where labelled scenarios print 'Volume label is X' \u2014 empty label propagates through mkfs_ntfs cleanly, no label-specific bug. Earlier run-20260502-132455 had errored at PowerShell param binding ('Cannot bind argument to parameter Label because it is an empty string'); fixed in scripts/run-scenario.ps1 by adding [AllowEmptyString()] to $Label. $Label is param-only \u2014 never read in script body \u2014 so the fix has zero behavioural effect beyond unblocking empty-string scenarios."
+      "_notes": "Empirically confirmed at the frs.cxx:60f ceiling (run-20260502-140029, ro=3 scan=11, same upcase + frs.cxx assert as the other 11 scenarios). chkdsk-readonly line 4 is blank where labelled scenarios print 'Volume label is X' — empty label propagates through mkfs_ntfs cleanly, no label-specific bug. Earlier run-20260502-132455 had errored at PowerShell param binding ('Cannot bind argument to parameter Label because it is an empty string'); fixed in scripts/run-scenario.ps1 by adding [AllowEmptyString()] to $Label. $Label is param-only — never read in script body — so the fix has zero behavioural effect beyond unblocking empty-string scenarios."
     },
     "mac-format-label-latin1": {
       "status": "passed-to-frs60f-ceiling-agent-8a29-2026-05-02",
       "volume_params": {
         "size_mib": 256,
-        "label": "Disk \u00e9clipse",
+        "label": "Disk éclipse",
         "alloc_unit_size": 4096
       },
       "evidence_link": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02/iter-20260502-072332",
@@ -296,18 +278,16 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-latin1.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-label-latin1.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-label-latin1",
           "verdict_shape": "Clean",
           "keep_image": "false"
         }
       ],
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 — bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-large-1gib": {
       "status": "passed-to-frs60f-ceiling-agent-8a29-2026-05-02",
@@ -328,18 +308,16 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-large-1gib.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-large-1gib.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-large-1gib",
           "verdict_shape": "Clean",
           "keep_image": "false"
         }
       ],
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 — bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-mac-enumerate-empty": {
       "status": "passed-with-system-files-visible-agent-c6a1-2026-05-02",
@@ -487,30 +465,24 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-mac-write-win-repeat-mount-3-win-chkdsk.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-mac-write-win-repeat-mount-3-win-chkdsk.img",
           "modes": "readonly",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-mac-write-win-repeat-mount-3-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-repeat-mount",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-mac-write-win-repeat-mount-3-win-chkdsk.img",
           "cycles": "3",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-mac-write-win-repeat-mount-3-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-mac-write-win-repeat-mount-3-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "false",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-mac-write-win-repeat-mount-3-win-chkdsk"
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-mac-write-win-repeat-mount-3-win-chkdsk.img",
@@ -546,14 +518,12 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-mkdir-set-dirty-win-chkdsk.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-mkdir-set-dirty-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "RepairRequired",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-mkdir-set-dirty-win-chkdsk",
           "keep_image": "false"
         }
       ],
@@ -580,14 +550,12 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-set-dirty-win-chkdsk.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-set-dirty-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "RepairRequired",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-set-dirty-win-chkdsk",
           "keep_image": "false"
         }
       ],
@@ -613,18 +581,16 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-small-64mib.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-small-64mib.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-small-64mib",
           "verdict_shape": "Clean",
           "keep_image": "false"
         }
       ],
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 — bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-tiny-32mib": {
       "status": "passed-to-frs60f-ceiling-agent-8a29-2026-05-02",
@@ -645,18 +611,16 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-tiny-32mib.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-tiny-32mib.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-tiny-32mib",
           "verdict_shape": "Clean",
           "keep_image": "false"
         }
       ],
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 — bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-volume-16gib-cluster-4k": {
       "status": "pending",
@@ -676,13 +640,11 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-16gib-cluster-4k.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-16gib-cluster-4k.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-volume-16gib-cluster-4k",
           "verdict_shape": "Clean",
           "keep_image": "false"
         }
@@ -707,18 +669,16 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-32mib-cluster-512.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-32mib-cluster-512.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-volume-32mib-cluster-512",
           "verdict_shape": "Clean",
           "keep_image": "false"
         }
       ],
-      "_notes": "Smallest viable + smallest cluster \u2014 stresses runlist packing and minimum-size $MFT layout."
+      "_notes": "Smallest viable + smallest cluster — stresses runlist packing and minimum-size $MFT layout."
     },
     "mac-format-volume-4gib-cluster-4k": {
       "status": "pending",
@@ -738,13 +698,11 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-4gib-cluster-4k.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-4gib-cluster-4k.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-volume-4gib-cluster-4k",
           "verdict_shape": "Clean",
           "keep_image": "false"
         }
@@ -769,18 +727,16 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-4gib-cluster-64k.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-volume-4gib-cluster-64k.img",
           "modes": "readonly,/scan",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-volume-4gib-cluster-64k",
           "verdict_shape": "Clean",
           "keep_image": "false"
         }
       ],
-      "_notes": "Large clusters at large volume \u2014 MFT runs may compact differently and $Bitmap is denser."
+      "_notes": "Large clusters at large volume — MFT runs may compact differently and $Bitmap is denser."
     },
     "mac-format-win-repeat-mount-10-win-chkdsk": {
       "status": "pending",
@@ -799,34 +755,28 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-10-win-chkdsk.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-10-win-chkdsk.img",
           "modes": "readonly",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-repeat-mount-10-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-repeat-mount",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-10-win-chkdsk.img",
           "cycles": "10",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-repeat-mount-10-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-10-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "false",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-repeat-mount-10-win-chkdsk"
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-win-repeat-mount-10-win-chkdsk.img",
-      "_notes": "Same as repeat-mount-5 but \u00d710 cycles. If our writer leaves a slowly-degrading state, this surfaces it past the 5-cycle ceiling."
+      "_notes": "Same as repeat-mount-5 but ×10 cycles. If our writer leaves a slowly-degrading state, this surfaces it past the 5-cycle ceiling."
     },
     "mac-format-win-repeat-mount-5-win-chkdsk": {
       "status": "pending",
@@ -845,34 +795,28 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-5-win-chkdsk.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-5-win-chkdsk.img",
           "modes": "readonly",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-repeat-mount-5-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-repeat-mount",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-5-win-chkdsk.img",
           "cycles": "5",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-repeat-mount-5-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-repeat-mount-5-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "false",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-repeat-mount-5-win-chkdsk"
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-win-repeat-mount-5-win-chkdsk.img",
-      "_notes": "Tier-3 repeat-mount. After initial chkdsk, dismount/remount \u00d7 5, then run trailing chkdsk. Catches bugs where the volume only goes inconsistent after multiple clean dismounts (e.g. $LogFile state ntfs.sys tolerates once but rejects on later mounts)."
+      "_notes": "Tier-3 repeat-mount. After initial chkdsk, dismount/remount × 5, then run trailing chkdsk. Catches bugs where the volume only goes inconsistent after multiple clean dismounts (e.g. $LogFile state ntfs.sys tolerates once but rejects on later mounts)."
     },
     "mac-format-win-write-deep-nesting-win-chkdsk": {
       "status": "pending",
@@ -891,44 +835,34 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-deep-nesting-win-chkdsk.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-deep-nesting-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-deep-nesting-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-mkdir",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-deep-nesting-win-chkdsk.img",
           "path": "/a/b/c/d/e/f/g/h",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-deep-nesting-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-deep-nesting-win-chkdsk.img",
           "path": "/a/b/c/d/e/f/g/h/leaf.txt",
           "content": "hello",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-deep-nesting-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-deep-nesting-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-deep-nesting-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-enumerate",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-deep-nesting-win-chkdsk.img",
-          "keep_image": "false",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-deep-nesting-win-chkdsk"
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-win-write-deep-nesting-win-chkdsk.img",
@@ -952,41 +886,33 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-large.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-large.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-large"
+          "keep_image": "true"
         },
         {
           "op": "win-write-size",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-large.img",
           "path": "/big.bin",
           "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-large",
           "size_bytes": "4194304"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-large.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-large"
+          "keep_image": "true"
         },
         {
           "op": "win-enumerate",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-large.img",
-          "keep_image": "false",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-large"
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-win-write-large.img",
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-mac-enumerate": {
       "status": "blocked-on-windows-write-resource-error-frs60f-agent-c6a1-2026-05-02",
@@ -1007,28 +933,24 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-mac-enumerate.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-mac-enumerate.img",
           "path": "/F1.txt",
           "content": "F1",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-mac-enumerate"
+          "keep_image": "true"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-mac-enumerate.img",
           "path": "/F2.txt",
           "content": "F2",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-mac-enumerate"
+          "keep_image": "true"
         },
         {
           "op": "ship-to-host",
-          "src": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-mac-enumerate.img",
-          "dest": "{scenario.image}"
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
         },
         {
           "op": "mac-enumerate"
@@ -1054,42 +976,34 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-small.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-small.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-small"
+          "keep_image": "true"
         },
         {
           "op": "win-write-many-size",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-small.img",
           "count": "256",
           "name_pattern": "/file_{N}.txt",
           "size_bytes": "16",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-small"
+          "keep_image": "true"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-small.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-small"
+          "keep_image": "true"
         },
         {
           "op": "win-enumerate",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-small.img",
-          "keep_image": "false",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-small"
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-win-write-many-small.img",
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-many-win-delete-half-win-chkdsk": {
       "status": "pending",
@@ -1108,48 +1022,38 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-win-delete-half-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-write-many-size",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img",
           "count": "256",
           "name_pattern": "/file_{N}.txt",
           "size_bytes": "16",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-win-delete-half-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-delete-many",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img",
           "start": "0",
           "end": "256",
           "step": "2",
           "name_pattern": "/file_{N}.txt",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-win-delete-half-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-win-delete-half-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-enumerate",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img",
-          "keep_image": "false",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-many-win-delete-half-win-chkdsk"
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-win-write-many-win-delete-half-win-chkdsk.img",
@@ -1173,41 +1077,33 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-medium.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-medium.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-medium"
+          "keep_image": "true"
         },
         {
           "op": "win-write-size",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-medium.img",
           "path": "/medium.bin",
           "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-medium",
           "size_bytes": "4096"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-medium.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-medium"
+          "keep_image": "true"
         },
         {
           "op": "win-enumerate",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-medium.img",
-          "keep_image": "false",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-medium"
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-win-write-medium.img",
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-modify-win-chkdsk": {
       "status": "pending",
@@ -1226,55 +1122,43 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-modify-win-chkdsk.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-modify-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-modify-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-write-size",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-modify-win-chkdsk.img",
           "path": "/big.bin",
           "size_bytes": "4194304",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-modify-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-modify",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-modify-win-chkdsk.img",
           "path": "/big.bin",
           "offset": "1048576",
           "len": "4096",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-modify-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-modify-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-modify-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-read",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-modify-win-chkdsk.img",
           "path": "/big.bin",
           "offset": "1048576",
           "len": "4096",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-modify-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-enumerate",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-modify-win-chkdsk.img",
-          "keep_image": "false",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-modify-win-chkdsk"
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-win-write-modify-win-chkdsk.img",
@@ -1297,44 +1181,34 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-remount-win-chkdsk.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-remount-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-remount-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-remount-win-chkdsk.img",
           "path": "/tiny.txt",
           "content": "hello",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-remount-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-repeat-mount",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-remount-win-chkdsk.img",
           "cycles": "1",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-remount-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-remount-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-remount-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-enumerate",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-remount-win-chkdsk.img",
-          "keep_image": "false",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-remount-win-chkdsk"
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-win-write-remount-win-chkdsk.img",
@@ -1357,49 +1231,39 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-rename-win-chkdsk.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-rename-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-rename-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-rename-win-chkdsk.img",
           "path": "/a.txt",
           "content": "hello",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-rename-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-rename",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-rename-win-chkdsk.img",
           "from_path": "/a.txt",
           "to_path": "/b.txt",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-rename-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-rename-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-rename-win-chkdsk"
+          "keep_image": "true"
         },
         {
           "op": "win-enumerate",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-rename-win-chkdsk.img",
-          "keep_image": "false",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-rename-win-chkdsk"
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-win-write-rename-win-chkdsk.img",
-      "_notes": "Same-parent rename \u2014 catches bugs where the old $FILE_NAME isn't fully retired or the parent $I30 isn't kept consistent."
+      "_notes": "Same-parent rename — catches bugs where the old $FILE_NAME isn't fully retired or the parent $I30 isn't kept consistent."
     },
     "mac-format-win-write-then-delete": {
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
@@ -1419,56 +1283,44 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-then-delete.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-then-delete.img",
           "path": "/F1.txt",
           "content": "F1",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-then-delete"
+          "keep_image": "true"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-then-delete.img",
           "path": "/F2.txt",
           "content": "F2",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-then-delete"
+          "keep_image": "true"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-then-delete.img",
           "path": "/F3.txt",
           "content": "F3",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-then-delete"
+          "keep_image": "true"
         },
         {
           "op": "win-delete",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-then-delete.img",
           "path": "/F2.txt",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-then-delete"
+          "keep_image": "true"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-then-delete.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-then-delete"
+          "keep_image": "true"
         },
         {
           "op": "win-enumerate",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-then-delete.img",
-          "keep_image": "false",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-then-delete"
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-win-write-then-delete.img",
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-tiny": {
       "status": "passed-to-frs60f-ceiling-agent-c5fe-2026-05-02",
@@ -1488,41 +1340,33 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-tiny.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-tiny.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-tiny"
+          "keep_image": "true"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-tiny.img",
           "path": "/tiny.txt",
           "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-tiny",
           "content": "hello world"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-tiny.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-tiny"
+          "keep_image": "true"
         },
         {
           "op": "win-enumerate",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-tiny.img",
-          "keep_image": "false",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-tiny"
+          "keep_image": "false"
         }
       ],
       "image": "nfs-mac-format-win-write-tiny.img",
-      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
+      "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) — Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  — the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-win-delete-mac-verify-empty": {
       "status": "blocked-on-windows-write-resource-error-frs60f-agent-c6a1-2026-05-02",
@@ -1543,57 +1387,45 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
           "path": "/F1.txt",
           "content": "F1",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-win-delete-mac-verify-empty"
+          "keep_image": "true"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
           "path": "/F2.txt",
           "content": "F2",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-win-delete-mac-verify-empty"
+          "keep_image": "true"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
           "path": "/F3.txt",
           "content": "F3",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-win-delete-mac-verify-empty"
+          "keep_image": "true"
         },
         {
           "op": "win-delete",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
           "path": "/F1.txt",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-win-delete-mac-verify-empty"
+          "keep_image": "true"
         },
         {
           "op": "win-delete",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
           "path": "/F2.txt",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-win-delete-mac-verify-empty"
+          "keep_image": "true"
         },
         {
           "op": "win-delete",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
           "path": "/F3.txt",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-win-write-win-delete-mac-verify-empty"
+          "keep_image": "true"
         },
         {
           "op": "ship-to-host",
-          "src": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-win-write-win-delete-mac-verify-empty.img",
-          "dest": "{scenario.image}"
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
         },
         {
           "op": "mac-enumerate"
@@ -1631,14 +1463,12 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-write-set-dirty-win-chkdsk.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-mac-format-write-set-dirty-win-chkdsk.img",
           "modes": "readonly,/scan",
           "verdict_shape": "RepairRequired",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/mac-format-write-set-dirty-win-chkdsk",
           "keep_image": "false"
         }
       ],
@@ -1659,26 +1489,24 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-mac-enumerate-empty.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-format",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-mac-enumerate-empty.img",
           "label": "WINFMT",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-mac-enumerate-empty"
+          "keep_image": "true"
         },
         {
           "op": "ship-to-host",
-          "src": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-mac-enumerate-empty.img",
-          "dest": "{scenario.image}"
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
         },
         {
           "op": "mac-enumerate"
         }
       ],
       "image": "nfs-win-format-mac-enumerate-empty.img",
-      "_notes": "Pure reader test on Microsoft-canonical format. If our reader chokes here it's a reader bug, not a writer bug \u2014 orthogonal axis to all the mac:format scenarios.\n\nForward-only ship-from-vm shape: init-image (zeros) -> ship-to-vm -> win-format -> ship-to-host -> mac-enumerate. NO mac-format step (otherwise the .img would arrive at the VM already-NTFS-formatted by rust-ntfs, defeating the win-format-* axis). VM-side .img + .vhdx are intentionally left in place after win-format (keep_image=true) so ship-to-host has something to copy; cleanup happens implicitly the next time ship-to-vm overwrites the path or the user clears the VM workdir manually (~70+ GiB free)."
+      "_notes": "Pure reader test on Microsoft-canonical format. If our reader chokes here it's a reader bug, not a writer bug — orthogonal axis to all the mac:format scenarios.\n\nForward-only ship-from-vm shape: init-image (zeros) -> ship-to-vm -> win-format -> ship-to-host -> mac-enumerate. NO mac-format step (otherwise the .img would arrive at the VM already-NTFS-formatted by rust-ntfs, defeating the win-format-* axis). VM-side .img + .vhdx are intentionally left in place after win-format (keep_image=true) so ship-to-host has something to copy; cleanup happens implicitly the next time ship-to-vm overwrites the path or the user clears the VM workdir manually (~70+ GiB free)."
     },
     "win-format-win-write-mac-delete-win-verify": {
       "status": "blocked-needs-winformat-mode-runner-refactor-agent-c6a1-2026-05-02",
@@ -1695,35 +1523,29 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-format",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img",
           "label": "{scenario.volume_params.label}",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-delete-win-verify"
+          "keep_image": "true"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img",
           "path": "/F1.txt",
           "content": "F1",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-delete-win-verify"
+          "keep_image": "true"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img",
           "path": "/F2.txt",
           "content": "F2",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-delete-win-verify"
+          "keep_image": "true"
         },
         {
           "op": "ship-to-host",
-          "src": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img",
-          "dest": "{scenario.image}"
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
         },
         {
           "op": "mac-rm",
@@ -1732,21 +1554,17 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-delete-win-verify"
+          "keep_image": "true"
         },
         {
           "op": "win-enumerate",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-delete-win-verify.img",
-          "keep_image": "false",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-delete-win-verify"
+          "keep_image": "false"
         }
       ],
       "image": "nfs-win-format-win-write-mac-delete-win-verify.img",
@@ -1767,35 +1585,29 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-verify.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-format",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-verify.img",
           "label": "WINREF",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-verify"
+          "keep_image": "true"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-verify.img",
           "path": "/F1.txt",
           "content": "F1",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-verify"
+          "keep_image": "true"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-verify.img",
           "path": "/F2.txt",
           "content": "F2",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-verify"
+          "keep_image": "true"
         },
         {
           "op": "ship-to-host",
-          "src": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-verify.img",
-          "dest": "{scenario.image}"
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
         },
         {
           "op": "mac-enumerate"
@@ -1819,27 +1631,23 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-format",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img",
           "label": "{scenario.volume_params.label}",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-write-win-verify"
+          "keep_image": "true"
         },
         {
           "op": "win-write-content",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img",
           "path": "/F1.txt",
           "content": "F1",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-write-win-verify"
+          "keep_image": "true"
         },
         {
           "op": "ship-to-host",
-          "src": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img",
-          "dest": "{scenario.image}"
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
         },
         {
           "op": "mac-touch",
@@ -1854,21 +1662,17 @@
         {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img"
+          "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-chkdsk",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img",
           "modes": "readonly,/scan",
           "verdict_shape": "Clean",
-          "keep_image": "true",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-write-win-verify"
+          "keep_image": "true"
         },
         {
           "op": "win-enumerate",
-          "image_path": "C:/Users/chris/dev/rust-fs-ntfs-matrix/nfs-win-format-win-write-mac-write-win-verify.img",
-          "keep_image": "false",
-          "diag": "C:/Users/chris/dev/rust-fs-ntfs-matrix/diag/v2/win-format-win-write-mac-write-win-verify"
+          "keep_image": "false"
         }
       ],
       "image": "nfs-win-format-win-write-mac-write-win-verify.img",
@@ -1879,25 +1683,25 @@
   "_consolidated_at": "2026-05-02 ~07:45 local",
   "_source_branch": "agent/agent-c5fe-2026-05-02",
   "_source_diag_root": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02",
-  "_iter13_commit": "1c5007a \u2014 populate root $I30 with system-file entries",
-  "_iter14_v2_commit": "f2677d3 \u2014 embed default $SECURITY_DESCRIPTOR on root (reference layout order)",
+  "_iter13_commit": "1c5007a — populate root $I30 with system-file entries",
+  "_iter14_v2_commit": "f2677d3 — embed default $SECURITY_DESCRIPTOR on root (reference layout order)",
   "_progress_summary": {
     "updated_by": "agent-8a29-2026-05-02",
     "updated_at_iso": "2026-05-02T05:??Z",
     "fixes_landed_on_branches_not_main": [
-      "iter13 root-$I30 populated with system-file entries (eliminates orphan-recovery cascade) \u2014 three independent implementations: agent-8a29 commit 6e203b9, agent-c6a1 commit 7e87e87, RootIndexEntry variant on local main HEAD",
-      "iter15 BPB.NumberSectors = volume_sectors-1 \u2014 agent-840e commit 41e601e",
-      "fs_ntfs_inspect Mac-side enumerate CLI \u2014 agent-840e commit 044735c",
-      "run-windows-test.ps1 -ClusterSize parameter \u2014 agent-840e commit 48fb998",
-      "test-windows-local.sh forwards VOL_SIZE_MB / LABEL / WRAPPER_SIZE_MB env vars \u2014 agent-8a29 commit 3f01d96",
-      "iter14 $SECURITY_DESCRIPTOR (0x50) on every system record \u2014 agent/agent-8a29-2026-05-02 commit c0fde08",
-      "iter15 FILE-magic placeholders in unused MFT slots \u2014 agent/agent-8a29-2026-05-02 commit 4ee3bad",
-      "iter16 canonical NT 3.x $UpCase table (src/upcase-canonical.bin + include_bytes! in src/upcase.rs) \u2014 agent/agent-8a29-2026-05-02 commit 06d53b4",
-      "iter17 $STANDARD_INFORMATION 48-byte NTFS 1.x form on system records \u2014 agent/agent-8a29-2026-05-02 commit 3fd37b7"
+      "iter13 root-$I30 populated with system-file entries (eliminates orphan-recovery cascade) — three independent implementations: agent-8a29 commit 6e203b9, agent-c6a1 commit 7e87e87, RootIndexEntry variant on local main HEAD",
+      "iter15 BPB.NumberSectors = volume_sectors-1 — agent-840e commit 41e601e",
+      "fs_ntfs_inspect Mac-side enumerate CLI — agent-840e commit 044735c",
+      "run-windows-test.ps1 -ClusterSize parameter — agent-840e commit 48fb998",
+      "test-windows-local.sh forwards VOL_SIZE_MB / LABEL / WRAPPER_SIZE_MB env vars — agent-8a29 commit 3f01d96",
+      "iter14 $SECURITY_DESCRIPTOR (0x50) on every system record — agent/agent-8a29-2026-05-02 commit c0fde08",
+      "iter15 FILE-magic placeholders in unused MFT slots — agent/agent-8a29-2026-05-02 commit 4ee3bad",
+      "iter16 canonical NT 3.x $UpCase table (src/upcase-canonical.bin + include_bytes! in src/upcase.rs) — agent/agent-8a29-2026-05-02 commit 06d53b4",
+      "iter17 $STANDARD_INFORMATION 48-byte NTFS 1.x form on system records — agent/agent-8a29-2026-05-02 commit 3fd37b7"
     ],
     "unfixed_blockers_to_clean_chkdsk": [
-      "src/upcase.rs generates a non-canonical mapping (chars::to_uppercase()) \u2014 chkdsk wants the exact NT 3.x table bytes. Falls back to its built-in table at runtime; warning is non-fatal but blocks \"exit 0\".",
-      "frs.cxx:1551 internal assert during chkdsk Stage 2 unindexed-file scan \u2014 likely the missing $SECURITY_DESCRIPTOR (0x50) attribute on every system MFT record (reference has 104-byte SD on each; ours has none). Confirmed via byte-diff against format.com reference."
+      "src/upcase.rs generates a non-canonical mapping (chars::to_uppercase()) — chkdsk wants the exact NT 3.x table bytes. Falls back to its built-in table at runtime; warning is non-fatal but blocks \"exit 0\".",
+      "frs.cxx:1551 internal assert during chkdsk Stage 2 unindexed-file scan — likely the missing $SECURITY_DESCRIPTOR (0x50) attribute on every system MFT record (reference has 104-byte SD on each; ours has none). Confirmed via byte-diff against format.com reference."
     ],
     "still_blocked_on_scaffolding": {
       "mac-side writer (write/modify files into mounted volume from Mac)": "blocks all win-format-* scenarios that need a Mac-write leg, plus mac-write-then-win-verify scenarios",
@@ -1905,29 +1709,29 @@
       "win fixture runner (PowerShell ops to write fixture files into the mounted drive letter)": "blocks mac-format-win-write-* scenarios",
       "win-format runner (format.com /FS:NTFS as the canonical formatter for half-2 scenarios)": "blocks win-format-* scenarios"
     },
-    "how_to_read_status_strings": "failed-orphan-fixed-by-iter13-trailing-frs60f+upcase-* = iter13 worked but two pre-existing chkdsk issues block the \"exit 0\" criterion. These are NOT regressions and NOT new bugs \u2014 they are the next iterations.",
+    "how_to_read_status_strings": "failed-orphan-fixed-by-iter13-trailing-frs60f+upcase-* = iter13 worked but two pre-existing chkdsk issues block the \"exit 0\" criterion. These are NOT regressions and NOT new bugs — they are the next iterations.",
     "session_ceiling_note": "After iter13-iter17, every system MFT record I can produce a byte-diff for is byte-identical to the format.com reference at the structural and content level. chkdsk verdict is unchanged from iter13: bad-upcase warning + frs.cxx 60f assert. The remaining symptoms are not byte-diffable from per-record dumps alone. Productive next moves require disk-read tracing (Procmon) or dumping additional system file content ($LogFile, $AttrDef, $MFT:$Bitmap) for byte-diff. The pipeline currently dumps only MFT records and boot sectors."
   },
-  "_iter15_commit": "54dda31 \u2014 drop $Extend at rec 11; cross-apply c6a1 BPB fixes (backup boot last sector + NumberSectors=N-1)",
+  "_iter15_commit": "54dda31 — drop $Extend at rec 11; cross-apply c6a1 BPB fixes (backup boot last sector + NumberSectors=N-1)",
   "_ceiling": "post-Stage-2 reconnect-scan: An unspecified error occurred (frs.cxx:60f). Stage 1 + Stage 2 verify clean.",
   "_next_iter": "iter16+: $Secure view-index attrs ($SDS/$SDH/$SII) or $LogFile RSTR invariants.",
   "_findings_log": {
     "iter11": {
       "fix": "bytes_used = end_marker_offset + 8 (4-byte type + 4-byte length, not just 4)",
-      "targeted": "\"First free byte offset corrected\" \u2014 eliminated",
-      "commit_or_branch": "landed on local main (pre-session) \u2014 f5dac2b",
+      "targeted": "\"First free byte offset corrected\" — eliminated",
+      "commit_or_branch": "landed on local main (pre-session) — f5dac2b",
       "impact_on_chkdsk": "previously hidden errors became visible in subsequent stages"
     },
     "iter12": {
       "fix": "MFT_RECORD_IS_VIEW_INDEX (0x08) flag on $Secure (rec 9)",
-      "targeted": "\"Flags for file record segment 9 are incorrect\" \u2014 eliminated",
-      "commit_or_branch": "landed on local main (pre-session) \u2014 ab75545",
+      "targeted": "\"Flags for file record segment 9 are incorrect\" — eliminated",
+      "commit_or_branch": "landed on local main (pre-session) — ab75545",
       "impact_on_chkdsk": "revealed deeper Stage 2/3 errors hidden behind rec-9 stop"
     },
     "iter13": {
       "fix": "root $I30 populated with 12 system-file entries sorted per COLLATION_FILE_NAME",
-      "targeted": "\"Detected orphaned file $X (N)\" cascade (10 messages) \u2014 ELIMINATED across all 8 verified scenarios",
-      "commit_or_branch": "agent/agent-8a29-2026-05-02 commit 6e203b9 \u2014 also independently arrived at by agent-c6a1 (commit 7e87e87) and as RootIndexEntry on local main HEAD",
+      "targeted": "\"Detected orphaned file $X (N)\" cascade (10 messages) — ELIMINATED across all 8 verified scenarios",
+      "commit_or_branch": "agent/agent-8a29-2026-05-02 commit 6e203b9 — also independently arrived at by agent-c6a1 (commit 7e87e87) and as RootIndexEntry on local main HEAD",
       "evidence": "$TMPDIR/rust-fs-ntfs-diag/agent-8a29-2026-05-02/iter-20260502-024137 (pre) vs iter-20260502-030328 (post)",
       "impact_on_chkdsk": "orphan messages gone; trailing frs.cxx 60f assert now exposed as the next blocker"
     },
@@ -1948,15 +1752,15 @@
     "iter16": {
       "fix": "Microsoft canonical NT 3.x $UpCase table baked in (replaces char::to_uppercase generator that diverged at 327 BMP code points)",
       "targeted": "\"Read-only chkdsk found bad on-disk uppercase table - using system table\" warning + (hypothesis) frs.cxx 60f assert",
-      "commit_or_branch": "agent/agent-8a29-2026-05-02 commit 06d53b4 (added src/upcase-canonical.bin SHA256 41c26bc7\u2026)",
-      "evidence": "extracted via fsutil queryextents + raw \\\\.\\F: read on a format.com reference VHDX. 327 BMP code points differ between modern Unicode and NT canonical (e.g. U+00B5 MICRO SIGN: modern \u2192 0x039C, NT preserves 0x00B5).",
-      "result": "on-disk $UpCase verified byte-identical to reference (SHA matches). chkdsk warning UNCHANGED \u2014 implies the check keys on more than table content (possibly $UpCase MFT record attr layout, or chkdsk caches an earlier check decision)."
+      "commit_or_branch": "agent/agent-8a29-2026-05-02 commit 06d53b4 (added src/upcase-canonical.bin SHA256 41c26bc7…)",
+      "evidence": "extracted via fsutil queryextents + raw \\\\.\\F: read on a format.com reference VHDX. 327 BMP code points differ between modern Unicode and NT canonical (e.g. U+00B5 MICRO SIGN: modern → 0x039C, NT preserves 0x00B5).",
+      "result": "on-disk $UpCase verified byte-identical to reference (SHA matches). chkdsk warning UNCHANGED — implies the check keys on more than table content (possibly $UpCase MFT record attr layout, or chkdsk caches an earlier check decision)."
     },
     "iter17": {
       "fix": "$STANDARD_INFORMATION 48-byte NTFS 1.x form on every system MFT record (was 72-byte NTFS 3.x form)",
       "targeted": "same warning + frs.cxx 60f assert",
       "commit_or_branch": "agent/agent-8a29-2026-05-02 commit 3fd37b7",
-      "evidence": "reference ships 48-byte $STD_INFO on every system file (rec 0/1/2/3/4/6/7/8/9/10/11); ours had 72-byte form with extension fields zero-padded. 24-byte per-record divergence \u2014 single remaining systematic byte-diff after iter16.",
+      "evidence": "reference ships 48-byte $STD_INFO on every system file (rec 0/1/2/3/4/6/7/8/9/10/11); ours had 72-byte form with extension fields zero-padded. 24-byte per-record divergence — single remaining systematic byte-diff after iter16.",
       "result": "on-disk verified: all 12 system records now content_size=48. chkdsk verdict UNCHANGED. Cause is no longer byte-diffable from per-record dumps alone."
     }
   },
@@ -1968,23 +1772,23 @@
       "next_step_no_longer_byte_diffable": "capture every disk read chkdsk performs (Windows Procmon or equivalent) and correlate with what we wrote vs reference at those exact offsets. Reveals which specific bytes chkdsk uses for the \"bad upcase\" decision."
     },
     {
-      "symptom": "\"An unspecified error occurred (6672732e637878 60f)\" \u2014 frs.cxx:1551 internal assert",
+      "symptom": "\"An unspecified error occurred (6672732e637878 60f)\" — frs.cxx:1551 internal assert",
       "severity": "fatal (chkdsk exit 11 on /scan)",
       "iter13_through_iter17_ruled_out": "NOT caused by missing root $I30 entries (iter13), missing SD (iter14), raw-zero MFT slots (iter15), non-canonical $UpCase content (iter16), or $STD_INFO size (iter17). Five evidence-corroborated layout fixes did not affect this assert. Strong indication cause is not in per-record system-file MFT layout.",
       "remaining_byte_diffable_candidates": [
-        "$LogFile content (we fill 0xFF; reference initialises with proper RSTR-led records) \u2014 needs runner patch to dump",
-        "$AttrDef blob byte-for-byte (we emit hand-rolled canonical NTFS 3.1 table; reference may differ) \u2014 needs runner patch to dump",
-        "$MFT:$Bitmap non-resident value byte-for-byte \u2014 needs runner patch to dump",
+        "$LogFile content (we fill 0xFF; reference initialises with proper RSTR-led records) — needs runner patch to dump",
+        "$AttrDef blob byte-for-byte (we emit hand-rolled canonical NTFS 3.1 table; reference may differ) — needs runner patch to dump",
+        "$MFT:$Bitmap non-resident value byte-for-byte — needs runner patch to dump",
         "$Volume $VOLUME_INFORMATION flags (we set clean=0; not corroborated)"
       ]
     }
   ],
   "_documentation_locations": {
-    "per_iteration_findings_log": "docs/chkdsk-findings.md (on each agent's branch \u2014 iter11/12 on local main; iter13/14/15 on agent/agent-8a29-2026-05-02)",
+    "per_iteration_findings_log": "docs/chkdsk-findings.md (on each agent's branch — iter11/12 on local main; iter13/14/15 on agent/agent-8a29-2026-05-02)",
     "agent_session_reports": "tests/matrix/agent-reports/<session>.md (untracked in main; one per agent)",
     "commit_messages_with_evidence": "each iter's commit cites byte-diff diag dir + spec citation + result",
     "this_shared_work_list": "_findings_log + _unfixed_blockers + _progress_summary blocks above. Updated by agents at the end of each iteration that touches a tracked scenario."
   },
-  "_iter16_attempt": "4cf548d \u2014 tried SD on every system rec (byte-identical to ref); REVERTED, broke mount with Event 55. SYSTEM_SECURITY_DESCRIPTOR const kept under #[allow(dead_code)] for iter17 redo.",
+  "_iter16_attempt": "4cf548d — tried SD on every system rec (byte-identical to ref); REVERTED, broke mount with Event 55. SYSTEM_SECURITY_DESCRIPTOR const kept under #[allow(dead_code)] for iter17 redo.",
   "_iter17_candidates": "1) pair SD-on-every-rec with security_id!=0 OR populated $Secure ($SDS/$SDH/$SII); 2) $LogFile RSTR header; 3) canonical $UpCase bytes (Bug B from iter6)."
 }

@@ -189,28 +189,12 @@ expect_exit = 0
 # the requested modes (default `readonly`), capture diag, dismount.
 #
 # Step fields:
-#   image_path     — vm-side absolute path to the .img (typically
-#                    `<vm.workdir>/<scenario.image>` after ship-to-vm)
-#   modes?         — comma-separated chkdsk-pass list, e.g.
-#                    "readonly,/scan". Empty => script default
-#   verdict_shape? — `Clean` (default) or `RepairRequired`. The latter
-#                    runs the listed modes (capture exits, don't gate),
-#                    then runs /F + post-/F /scan and gates the verdict
-#                    on pre-/scan != 0 (volume actually dirty) AND
-#                    fix_exit == 0 AND post_scan_exit == 0. Used by
-#                    `mac:set-dirty -> win:chkdsk` scenarios.
-#   keep_image?    — `true` keeps the .img + .vhd on the VM after this
-#                    op so a follow-on win-* op (e.g. win-enumerate)
-#                    can mount them. Default `false` cleans up. The
-#                    final win-* op in a multi-op recipe should omit
-#                    this (or pass `false`) so cleanup runs.
-#   diag           — vm-side directory for chkdsk-*.txt + eventlog
 #
 # Script path uses `{vm.workdir}` (added in fs-test-harness v3.1.0)
 # so the matrix workdir on the VM can be relocated without editing
 # every op command — single source of truth at `[vm].workdir` above.
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-chkdsk.ps1' -ImagePath '{step.image_path}' -Modes '{step.modes?}' -VerdictShape '{step.verdict_shape?}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-chkdsk.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Modes '{step.modes?}' -VerdictShape '{step.verdict_shape?}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-enumerate]
@@ -220,13 +204,12 @@ expect_exit = 0
 # (today an observation; future verdict shapes can gate against it).
 #
 # Step fields:
-#   image_path  — vm-side absolute path to the .img
 #   keep_image? — `true` keeps the .img + .vhd for a follow-on op.
 #                 Default `false` cleans up. The final win-* op in a
 #                 multi-op recipe should omit this so cleanup runs.
 #   diag        — vm-side directory for enumerate.txt + wrapper-create.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-enumerate.ps1' -ImagePath '{step.image_path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-enumerate.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-write-content]
@@ -240,11 +223,6 @@ expect_exit = 0
 # every supplied arg non-empty.
 #
 # Step fields:
-#   image_path   — vm-side absolute path to the .img
-#   path         — file path inside the volume (e.g. "/tiny.txt")
-#   content      — literal UTF-8 string (no trailing newline)
-#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
-#   diag         — vm-side directory for write-result.txt + wrapper-create.txt
 #
 # `content` is single-quoted in the template so payloads with spaces
 # (e.g. "hello world") survive the cmd shell parse intact. Same caveat
@@ -252,7 +230,7 @@ expect_exit = 0
 # `'` in the content; matrix payloads today are simple ASCII so this
 # is safe. When write content needs `'`, swap to a file-based transport.
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-write.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Content '{step.content}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-write.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -Content '{step.content}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-write-size]
@@ -261,13 +239,12 @@ expect_exit = 0
 # work. For text content use win-write-content instead.
 #
 # Step fields:
-#   image_path   — vm-side absolute path to the .img
 #   path         — file path inside the volume (e.g. "/big.bin")
 #   size_bytes   — number of zero bytes (integer as string)
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for write-result.txt + wrapper-create.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-write.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-write.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-delete]
@@ -276,12 +253,11 @@ expect_exit = 0
 # the prior step) and runs `Remove-Item -LiteralPath -Force`.
 #
 # Step fields:
-#   image_path   — vm-side absolute path to the .img
 #   path         — file path inside the volume to remove (e.g. "/F2.txt")
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for delete-result.txt + delete-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-delete.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-delete.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-repeat-mount]
@@ -292,12 +268,11 @@ expect_exit = 0
 # NTFS structure survives repeated remounts.
 #
 # Step fields:
-#   image_path   — vm-side absolute path to the .img
 #   cycles       — positive integer (mount-then-dismount count)
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for repeat-mount-result.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-repeat-mount.ps1' -ImagePath '{step.image_path}' -Cycles '{step.cycles}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-repeat-mount.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Cycles '{step.cycles}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-rename]
@@ -308,13 +283,12 @@ expect_exit = 0
 # to the volume root; their parent directories must already exist.
 #
 # Step fields:
-#   image_path   — vm-side absolute path to the .img
 #   from_path    — source path inside the volume (e.g. "/a.txt")
 #   to_path      — destination path inside the volume (e.g. "/b.txt")
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for rename-result.txt + rename-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-rename.ps1' -ImagePath '{step.image_path}' -FromPath '{step.from_path}' -ToPath '{step.to_path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-rename.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -FromPath '{step.from_path}' -ToPath '{step.to_path}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-mkdir]
@@ -326,12 +300,11 @@ expect_exit = 0
 # should split into per-level mkdir calls.
 #
 # Step fields:
-#   image_path   — vm-side absolute path to the .img
 #   path         — directory path inside the volume (e.g. "/a/b/c")
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for mkdir-result.txt + mkdir-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-mkdir.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-mkdir.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-modify]
@@ -347,14 +320,13 @@ expect_exit = 0
 # bytes, written by win-write-size, are zeros).
 #
 # Step fields:
-#   image_path   — vm-side absolute path to the .img
 #   path         — file path inside the volume (e.g. "/big.bin")
 #   offset       — byte offset to start writing at (integer as string; >= 0)
 #   len          — number of bytes to write (integer as string; >= 0)
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for modify-result.txt + modify-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-modify.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-modify.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-read]
@@ -366,14 +338,13 @@ expect_exit = 0
 # let us verify manually that the modify op landed at the right offset.
 #
 # Step fields:
-#   image_path   — vm-side absolute path to the .img
 #   path         — file path inside the volume (e.g. "/big.bin")
 #   offset       — byte offset to start reading from (integer as string; >= 0)
 #   len          — number of bytes to read (integer as string; >= 0)
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for read-bytes.bin + read-bytes.txt + read-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-read.ps1' -ImagePath '{step.image_path}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-read.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-write-many-size]
@@ -390,19 +361,13 @@ expect_exit = 0
 # writes, one dismount.
 #
 # Step fields:
-#   image_path     — vm-side absolute path to the .img
-#   count          — positive integer (number of files to write)
-#   name_pattern   — volume-relative path containing `{N}` (e.g. "/file_{N}.txt")
-#   size_bytes     — zero-byte body length per file (>= 0, integer as string)
-#   keep_image?    — `true` keeps .img + .vhd for a follow-on op (default `false`)
-#   diag           — vm-side directory for write-many-result.txt + write-many-error.txt
 #
 # Content-mode counterpart (literal-string body) is intentionally not
 # shipped yet — no current scenario needs one. When it does, add a
 # separate `win-write-many-content` op (same cmd-shell empty-arg
 # rationale as `win-write-content` vs `win-write-size`).
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-write-many.ps1' -ImagePath '{step.image_path}' -Count '{step.count}' -NamePattern '{step.name_pattern}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-write-many.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Count '{step.count}' -NamePattern '{step.name_pattern}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-delete-many]
@@ -417,7 +382,6 @@ expect_exit = 0
 # mount, looped deletes, one dismount.
 #
 # Step fields:
-#   image_path     — vm-side absolute path to the .img
 #   start          — first index, inclusive (integer >= 0)
 #   end            — stop index, exclusive (integer > start)
 #   step           — stride (positive integer)
@@ -425,7 +389,7 @@ expect_exit = 0
 #   keep_image?    — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag           — vm-side directory for delete-many-result.txt + delete-many-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-delete-many.ps1' -ImagePath '{step.image_path}' -Start '{step.start}' -End '{step.end}' -Step '{step.step}' -NamePattern '{step.name_pattern}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-delete-many.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Start '{step.start}' -End '{step.end}' -Step '{step.step}' -NamePattern '{step.name_pattern}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-format]
@@ -451,12 +415,11 @@ expect_exit = 0
 # partition; Format-Volume then writes the NTFS structure in-place.
 #
 # Step fields:
-#   image_path   -- vm-side absolute path to the .img
 #   label        -- volume label (e.g. "WINFMT", "WINREF")
 #   keep_image?  -- `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         -- vm-side directory for format-result.txt + wrapper-create.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-format.ps1' -ImagePath '{step.image_path}' -Label '{step.label}' -KeepImage '{step.keep_image?}' -Diag '{step.diag}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-format.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Label '{step.label}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 # Other win-side ops (win-mount/win-unmount as separate ops,
