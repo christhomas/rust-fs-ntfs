@@ -668,7 +668,7 @@ reads into a chunk store. The data-run parser MUST NOT flag
 
 ---
 
-## $Secure (record #9) {#secure-file}
+## $Secure (record 9) {#secure-file}
 
 `$Secure` is a metadata file at MFT record 9 that holds the volume's
 security descriptor catalogue. Per-record `$SECURITY_DESCRIPTOR`
@@ -779,7 +779,9 @@ fresh-format volume).
 6. Cross-check `$SDH`: every hash in `$SDH` must resolve to a valid
    `$SDS` entry; orphans deleted.
 
-The `compute_sii_hash` algorithm [UNVERIFIED]:
+The `compute_sii_hash` algorithm `[OBSERVED: src/sds.rs::sdh_hash —
+verified against 12 entries from a Microsoft Format-Volume NTFS v3.1
+reference volume; all 12 matched]`:
 
 ```
 hash = 0
@@ -790,7 +792,7 @@ for each 4-byte LE dword in the SD body:
 
 i.e. a rotate-right-29 (= rotate-left-3) accumulator with 32-bit
 truncation. Used both as the `$SDH` key prefix and as the
-`SDS_Entry.hash_key` field. [UNVERIFIED]
+`SDS_Entry.hash_key` field. `[OBSERVED: src/sds.rs]`
 
 ### Status in `rust-fs-ntfs`
 
@@ -807,7 +809,9 @@ incompletely populated `$Secure` catalogue
 
 The `:$SDS` stream is a sequence of
 fixed-header + variable-payload entries. Each entry header
-[UNVERIFIED]:
+`[OBSERVED: src/sds.rs — field offsets SDS_HDR_HASH_OFF=0,
+SDS_HDR_SECURITY_ID_OFF=4, SDS_HDR_ENTRY_OFFSET_OFF=8,
+SDS_HDR_ENTRY_SIZE_OFF=16, SDS_HDR_SD_DATA_OFF=20]`:
 
 ```
 Offset  Size  Field          Description
@@ -832,7 +836,9 @@ Every `$SDS` entry is mirrored at offset
 `+0x40000` (256 KiB) for redundancy. Validation prefers the primary
 copy; on self-offset mismatch the validator reads the mirror. Entries
 MUST NOT span a 256 KiB boundary — the mirror granularity assumes
-each block is self-contained. [UNVERIFIED]
+each block is self-contained.
+`[OBSERVED: src/sds.rs SDS_MIRROR_GAP = 0x40000; build_sds mirrors
+each primary entry verbatim at primary_offset + 0x40000]`
 
 `align_16(...)` is used to advance the cursor: each entry occupies
 `align16(length)` bytes, ensuring the next entry's header is 16-byte
@@ -849,7 +855,7 @@ treat as opaque for write-side correctness.
 
 ---
 
-## $UpCase (record #10) {#upcase}
+## $UpCase (record 10) {#upcase}
 
 `$UpCase` lives at MFT record 10 and contains a flat 128 KiB array of
 65 536 little-endian `u16` values: `upcase[c]` is the uppercase
@@ -920,7 +926,7 @@ reader rejects volumes whose `$UpCase` value length is `< 128 KiB`.
 
 ---
 
-## $Volume (record #3) {#volume-file}
+## $Volume (record 3) {#volume-file}
 
 The `$Volume` system file at MFT record 3 carries volume-wide
 metadata via two attributes that exist *only* on this record:
@@ -1028,7 +1034,7 @@ thing to a per-file GUID, not a per-volume one. `[UNVERIFIED]`.
 
 ---
 
-## $Extend directory (record #11) {#extend-directory}
+## $Extend directory (record 11) {#extend-directory}
 
 `$Extend` is a directory at MFT record 11 that holds NTFS 3.0+
 metadata children. It looks like a regular directory: it has
@@ -1067,7 +1073,7 @@ location (under `$Extend`) is mentioned here.
 
 ---
 
-## $ObjId (record #25 / under $Extend) {#objid}
+## $ObjId (record 25, under $Extend) {#objid}
 
 `$Extend\$ObjId` indexes per-file Object IDs. Each file that has been
 assigned an Object ID (via `FSCTL_CREATE_OR_GET_OBJECT_ID`) carries an
@@ -1110,7 +1116,7 @@ orphan; delete it. `[UNVERIFIED]` — derived from the general
 
 ---
 
-## $Quota (record #24 / under $Extend) {#quota}
+## $Quota (record 24, under $Extend) {#quota}
 
 `$Extend\$Quota` tracks per-user disk usage when quotas are enabled
 on the volume. It carries two indexes:
@@ -1151,7 +1157,7 @@ actively populated. No quota enforcement at runtime.
 
 ---
 
-## $Reparse (record #26 / under $Extend) {#reparse-index}
+## $Reparse (record 26, under $Extend) {#reparse-index}
 
 `$Extend\$Reparse` carries a single index `:$R` that maps reparse
 tags to the MFT references of files that own a reparse point with
