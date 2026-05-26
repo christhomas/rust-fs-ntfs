@@ -83,7 +83,6 @@ if [ "$mode" = "smoke" ]; then
         mac-format-win-write-many-win-delete-half-win-chkdsk
     )
     echo "[matrix-baseline] smoke: ${smoke_scenarios[*]}"
-    smoke_failed=0
     for s in "${smoke_scenarios[@]}"; do
         bash scripts/run-matrix.sh "$s" 2>&1 | tee -a "$matrix_log"
         s_exit=${PIPESTATUS[0]}

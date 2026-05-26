@@ -2419,11 +2419,11 @@ fn build_attrdef_table() -> Vec<u8> {
     //   - $STANDARD_INFORMATION max = 72 (not 48) — NTFS 3.x extended form
     //   - 0x40 entry name is "$OBJECT_ID" (not "$VOLUME_VERSION"), max=256
     //   - 0xC0 entry name is "$REPARSE_POINT" (not "$SYMBOLIC_LINK"), max=16384
-    // $LOGGED_UTILITY_STREAM is intentionally absent — see build_attrdef_table
-    // doc comment for why. chkdsk /scan validates on-disk attributes against
-    // this table; using the 1.x legacy form causes "Errors found in Attribute
-    // Definition Table" on sub-4K cluster volumes where ntfs.sys does not
-    // update it.
+    // $LOGGED_UTILITY_STREAM (0x100) is included — its absence caused
+    // "Errors found in Attribute Definition Table" on sub-4K cluster
+    // volumes where ntfs.sys does not update the legacy 1.x table.
+    // chkdsk /scan validates every on-disk attribute against this table,
+    // so the entry must be present and correctly sized.
     let entries = [
         Entry {
             name: "$STANDARD_INFORMATION",
