@@ -216,45 +216,33 @@ function Mount-VhdAndGetLetter {
     # finish tearing down before we snapshot the letter table.
     Start-Sleep -Seconds 1
 
-    # Phase 1 (locked): snapshot lettersBefore + Mount-DiskImage.
-    # Lock scope is narrow — just the mount — so lock hold time is ~2-3s per
-    # process instead of the full 10s poll window. With 26 concurrent scenarios
-    # the longest wait is 26 × 3s ≈ 78s, well inside the 180s timeout.
-    # Once our VHD is mounted the letter Windows assigns belongs to us; no
-    # other process can steal it from this point on.
-    $lettersBefore = $null
-    $mountedImg = $null
-    Acquire-DriveLock
-    try {
-        $lettersBefore = @((Get-Volume | Where-Object { $_.DriveLetter }).DriveLetter)
-        # Distinct name for the CimInstance — avoids the case-insensitive
-        # collision with the `$Vhd` path-string param. Benign here (the
-        # path isn't used again after this line), but consistent with
-        # Initialize-VhdFromImg.
-        $mountedImg = Mount-DiskImage -ImagePath $Vhd -PassThru
-    } finally {
-        Release-DriveLock
-    }
+    # Mount the VHD. -PassThru gives us a disk number that is unique to
+    # THIS VHD — no shared state with concurrent scripts.
+    # Distinct variable name avoids case-insensitive collision with $Vhd.
+    $mountedImg = Mount-DiskImage -ImagePath $Vhd -PassThru
+    $diskNumber = $mountedImg.Number
 
-    # Phase 2 (lock-free): poll for the auto-assigned letter.
-    # Windows assigns a drive letter to NTFS volumes automatically within a
-    # second or two. RAW volumes (win-format, before formatting) get no
-    # auto-assignment — fall through to Phase 3.
+    # Phase 1 (lock-free): poll for the drive letter Windows auto-assigns
+    # to NTFS volumes. We query specifically our disk number so there is no
+    # race with other concurrent mounts — each VHD has its own disk number
+    # and its own partitions. No lettersBefore/lettersAfter diff needed.
     $letter = $null
     for ($i = 0; $i -lt 10; $i++) {
         Start-Sleep -Seconds 1
-        $lettersAfter = @((Get-Volume | Where-Object { $_.DriveLetter }).DriveLetter)
-        $new = $lettersAfter | Where-Object { $_ -notin $lettersBefore }
-        if ($new) { $letter = $new | Select-Object -First 1; break }
+        $part = Get-Partition -DiskNumber $diskNumber -EA SilentlyContinue |
+            Where-Object { $_.Type -ne 'Reserved' -and $_.DriveLetter } |
+            Select-Object -First 1
+        if ($part) { $letter = "$($part.DriveLetter)"; break }
     }
-    if ($letter) { return "$letter" }
+    if ($letter) { return $letter }
 
-    # Phase 3 (locked): Set-Partition fallback for RAW volumes.
-    # Re-acquire the lock so two concurrent RAW-volume scripts can't both
-    # scan $used and pick the same unassigned letter simultaneously.
+    # Phase 2 (locked): Set-Partition fallback for RAW volumes (win-format
+    # scenarios where the partition has no filesystem yet and Windows will
+    # not auto-assign a letter). Lock prevents two concurrent RAW-volume
+    # scripts from picking the same unused letter simultaneously.
     Acquire-DriveLock
     try {
-        $disk2 = Get-Disk -Number $mountedImg.Number
+        $disk2 = Get-Disk -Number $diskNumber
         $partition = Get-Partition -DiskNumber $disk2.Number |
             Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
         $used = (Get-Volume | ForEach-Object { $_.DriveLetter }) +
