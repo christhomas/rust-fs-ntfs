@@ -260,7 +260,6 @@ pub mod stream {
     /// `$Quota:$Q` — quota table view index (keyed by owner_id).
     pub const Q: &str = "$Q";
 
-
     /// UTF-16-LE encoding of a stream name. NTFS attribute headers
     /// store names as raw UTF-16 code units (no NUL); this is the
     /// one place that conversion happens, so a typo upstream can't
@@ -1475,8 +1474,7 @@ pub fn format_filesystem(
         )?;
 
         let r_bitmap_value: [u8; 8] = [0x01, 0, 0, 0, 0, 0, 0, 0];
-        let r_bitmap_attr =
-            build_resident_named(ATTR_BITMAP, 6, &r_name_u16, &r_bitmap_value);
+        let r_bitmap_attr = build_resident_named(ATTR_BITMAP, 6, &r_name_u16, &r_bitmap_value);
 
         let rec_bytes = build_system_record_with_parent(
             &mft_record_layout,
@@ -2312,7 +2310,7 @@ fn build_empty_indx_block(
     // Only entry is a LAST sentinel (16 bytes, view-index shape).
     let last_entry = build_view_index_last_entry();
     let total_used = first_entry_offset_rel + last_entry.len() as u32;
-    let allocated = (block_size - 0x18) as u32; // bytes from INDEX_HEADER to end of block
+    let allocated = block_size - 0x18; // bytes from INDEX_HEADER to end of block
     buf[0x1C..0x20].copy_from_slice(&total_used.to_le_bytes());
     buf[0x20..0x24].copy_from_slice(&allocated.to_le_bytes());
     buf[0x24] = 0; // leaf node — no children below it
