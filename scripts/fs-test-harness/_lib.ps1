@@ -216,9 +216,14 @@ function Mount-VhdAndGetLetter {
     # finish tearing down before we snapshot the letter table.
     Start-Sleep -Seconds 1
 
-    # Hold the drive-letter mutex for the entire snapshot → mount → detect
-    # sequence. Without it, two concurrent scripts both capture the same
-    # lettersBefore set and claim the same newly-assigned letter.
+    # Phase 1 (locked): snapshot lettersBefore + Mount-DiskImage.
+    # Lock scope is narrow — just the mount — so lock hold time is ~2-3s per
+    # process instead of the full 10s poll window. With 26 concurrent scenarios
+    # the longest wait is 26 × 3s ≈ 78s, well inside the 180s timeout.
+    # Once our VHD is mounted the letter Windows assigns belongs to us; no
+    # other process can steal it from this point on.
+    $lettersBefore = $null
+    $mountedImg = $null
     Acquire-DriveLock
     try {
         $lettersBefore = @((Get-Volume | Where-Object { $_.DriveLetter }).DriveLetter)
@@ -227,35 +232,48 @@ function Mount-VhdAndGetLetter {
         # path isn't used again after this line), but consistent with
         # Initialize-VhdFromImg.
         $mountedImg = Mount-DiskImage -ImagePath $Vhd -PassThru
-        $letter = $null
-        for ($i = 0; $i -lt 10; $i++) {
-            Start-Sleep -Seconds 1
-            $lettersAfter = @((Get-Volume | Where-Object { $_.DriveLetter }).DriveLetter)
-            $new = $lettersAfter | Where-Object { $_ -notin $lettersBefore }
-            if ($new) { $letter = $new | Select-Object -First 1; break }
-        }
-        if (-not $letter) {
-            $disk2 = Get-Disk -Number $mountedImg.Number
-            $partition = Get-Partition -DiskNumber $disk2.Number |
-                Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
-            $used = (Get-Volume | ForEach-Object { $_.DriveLetter }) +
-                    (Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Name })
-            foreach ($c in [char[]](68..90)) {
-                if ($c -notin $used) {
-                    try {
-                        Set-Partition -DiskNumber $disk2.Number `
-                            -PartitionNumber $partition.PartitionNumber `
-                            -NewDriveLetter $c -ErrorAction Stop
-                        $letter = "$c"; break
-                    } catch { }
-                }
-            }
-        }
-        if (-not $letter) { throw "no drive letter assigned" }
-        return "$letter"
     } finally {
         Release-DriveLock
     }
+
+    # Phase 2 (lock-free): poll for the auto-assigned letter.
+    # Windows assigns a drive letter to NTFS volumes automatically within a
+    # second or two. RAW volumes (win-format, before formatting) get no
+    # auto-assignment — fall through to Phase 3.
+    $letter = $null
+    for ($i = 0; $i -lt 10; $i++) {
+        Start-Sleep -Seconds 1
+        $lettersAfter = @((Get-Volume | Where-Object { $_.DriveLetter }).DriveLetter)
+        $new = $lettersAfter | Where-Object { $_ -notin $lettersBefore }
+        if ($new) { $letter = $new | Select-Object -First 1; break }
+    }
+    if ($letter) { return "$letter" }
+
+    # Phase 3 (locked): Set-Partition fallback for RAW volumes.
+    # Re-acquire the lock so two concurrent RAW-volume scripts can't both
+    # scan $used and pick the same unassigned letter simultaneously.
+    Acquire-DriveLock
+    try {
+        $disk2 = Get-Disk -Number $mountedImg.Number
+        $partition = Get-Partition -DiskNumber $disk2.Number |
+            Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
+        $used = (Get-Volume | ForEach-Object { $_.DriveLetter }) +
+                (Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Name })
+        foreach ($c in [char[]](68..90)) {
+            if ($c -notin $used) {
+                try {
+                    Set-Partition -DiskNumber $disk2.Number `
+                        -PartitionNumber $partition.PartitionNumber `
+                        -NewDriveLetter $c -ErrorAction Stop
+                    $letter = "$c"; break
+                } catch { }
+            }
+        }
+    } finally {
+        Release-DriveLock
+    }
+    if (-not $letter) { throw "no drive letter assigned" }
+    return "$letter"
 }
 
 # Read the partition contents out of the mounted VHD's raw device
