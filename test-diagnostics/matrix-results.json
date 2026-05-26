@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "tested_at_sha": "d9595c7b71e6102d4b928476fb7432e6374d6a0d",
-  "tested_at_branch": "staging-2",
-  "tested_at_utc": "2026-05-24T07:33:20Z",
-  "binary_sha256": "6e2e96b7df61cd6753c0bbfb2ce9c5ec9ae93405fba9776c88326d18200032a9",
+  "tested_at_sha": "ee0ef700a5619792067eee923c0f1cedf71e2eab",
+  "tested_at_branch": "staging-3",
+  "tested_at_utc": "2026-05-26T17:03:16Z",
+  "binary_sha256": "26dba146b4c96c306186c9652031fef5f0ac5021bb8964a704f1fd8656b3e757",
   "test_matrix_json_sha256": "6baffc0cb1dd38f69f4c0c9f6b933f590c6feaf200943e6eb1f2bbdd18710de5",
-  "harness_submodule_sha": "36e1425408d4e17edd07ba3d1d7d4129524d0392",
+  "harness_submodule_sha": "7fabe650ec4189abb2a92ca0c6e7bb0d431dc711",
   "host": {
     "os": "Darwin",
     "version": "25.4.0",
@@ -27,7 +27,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-cluster-1k": {
@@ -51,7 +51,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-cluster-8k": {
@@ -59,7 +59,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-label-32chars": {
@@ -67,7 +67,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-label-cjk": {
@@ -75,7 +75,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-label-empty": {
@@ -83,7 +83,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-label-latin1": {
@@ -91,7 +91,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-large-1gib": {
@@ -99,7 +99,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-mac-enumerate-empty": {
@@ -119,7 +119,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-mkdir-set-dirty-win-chkdsk": {
@@ -147,7 +147,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-tiny-32mib": {
@@ -163,7 +163,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-volume-32mib-cluster-512": {
@@ -179,7 +179,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-volume-4gib-cluster-64k": {
@@ -187,7 +187,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-win-repeat-mount-10-win-chkdsk": {
@@ -195,7 +195,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-win-repeat-mount-5-win-chkdsk": {
@@ -203,7 +203,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-win-write-deep-nesting-win-chkdsk": {
@@ -211,7 +211,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-win-write-large": {
@@ -219,7 +219,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-win-write-mac-enumerate": {
@@ -230,7 +230,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-win-write-many-win-delete-half-win-chkdsk": {
@@ -238,7 +238,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-win-write-medium": {
@@ -246,7 +246,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-win-write-modify-win-chkdsk": {
@@ -254,7 +254,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-win-write-remount-win-chkdsk": {
@@ -262,7 +262,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-win-write-rename-win-chkdsk": {
@@ -270,7 +270,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-win-write-then-delete": {
@@ -278,7 +278,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-win-write-tiny": {
@@ -286,7 +286,7 @@
       "verdict_shape": "clean",
       "exits": {
         "readonly": 0,
-        "/scan": 13
+        "/scan": 0
       }
     },
     "mac-format-win-write-win-delete-mac-verify-empty": {
@@ -299,6 +299,13 @@
         "/scan": 13,
         "/scan-post": 0,
         "/F /X": 0,
+        "readonly": 0
+      }
+    },
+    "quota-probe": {
+      "status": "unknown",
+      "verdict_shape": "clean",
+      "exits": {
         "readonly": 0
       }
     },
@@ -328,8 +335,8 @@
   "summary": {
     "passed": 42,
     "failed": 0,
-    "unknown": 0,
-    "total": 42,
-    "total_duration_s": 13794.5
+    "unknown": 1,
+    "total": 43,
+    "total_duration_s": 1904.71
   }
 }
