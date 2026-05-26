@@ -73,21 +73,12 @@ trap 'rm -f "$matrix_log"' EXIT
 
 run_exit=0
 if [ "$mode" = "smoke" ]; then
-    # Smoke set: 5 scenarios covering small + large volume, write op,
-    # mkdir+chkdsk, repeat mounts, delete path.
-    smoke_scenarios=(
-        mac-format-basic-256mib
-        mac-format-tiny-32mib
-        mac-format-mkdir-set-dirty-win-chkdsk
-        mac-format-mac-write-win-repeat-mount-3-win-chkdsk
-        mac-format-win-write-many-win-delete-half-win-chkdsk
-    )
-    echo "[matrix-baseline] smoke: ${smoke_scenarios[*]}"
-    for s in "${smoke_scenarios[@]}"; do
-        bash scripts/run-matrix.sh "$s" 2>&1 | tee -a "$matrix_log"
-        s_exit=${PIPESTATUS[0]}
-        [ "$s_exit" -ne 0 ] && run_exit="$s_exit"
-    done
+    # Smoke set defined in fs-test-harness.toml [groups].smoke.
+    # The harness runner expands the group and runs all 5 scenarios in
+    # parallel (same drive-letter semaphore as the full matrix).
+    echo "[matrix-baseline] smoke (parallel via harness group)"
+    bash scripts/run-matrix.sh smoke 2>&1 | tee "$matrix_log"
+    run_exit=${PIPESTATUS[0]}
 else
     echo "[matrix-baseline] full matrix (~3-4 hours)"
     bash scripts/run-matrix.sh 2>&1 | tee "$matrix_log"
