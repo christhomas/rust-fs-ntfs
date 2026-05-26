@@ -346,7 +346,7 @@ pub fn format_filesystem(
     // after — otherwise both end up at the same LCN and $AttrDef's
     // write clobbers the $MFT bitmap cluster.
     let attrdef_lcn = upcase_lcn + upcase_clusters;
-    let attrdef_clusters: u64 = (15 * 160u64).div_ceil(cluster_size as u64).max(1);
+    let attrdef_clusters: u64 = (16 * 160u64).div_ceil(cluster_size as u64).max(1);
 
     // $MFT's own $BITMAP attribute is non-resident on Microsoft's
     // reference output (per-record byte-diff: ref ships an attribute
@@ -2395,19 +2395,11 @@ fn make_mft_internal_bitmap(size_bytes: usize, used_records: &[u32]) -> Vec<u8> 
 // $AttrDef table (canonical NTFS 3.1)
 // ---------------------------------------------------------------------------
 
-/// Build the canonical NTFS 3.1 $AttrDef table. 14 active entries ×
-/// 160 bytes + 1 zero-terminator entry = 2400 bytes total. Format per
+/// Build the canonical NTFS 3.1 $AttrDef table. 15 active entries ×
+/// 160 bytes + 1 zero-terminator entry = 2560 bytes total. Format per
 ///   MS-FSCC and Windows Internals 7th ed.: 64-byte UTF-16 name +
 ///   u32 type + u32 display_rule + u32 collation + u32 flags +
 ///   u64 min_size + u64 max_size.
-///
-/// Note: `$LOGGED_UTILITY_STREAM` (type 0x100) is intentionally
-/// omitted. When ntfs.sys sees that entry in $AttrDef it interprets
-/// the volume as TxF-capable and performs a ~180-second MFT-wide scan
-/// on every disk-online cycle. format.com omits it too (the table it
-/// writes uses the NTFS 1.x legacy names `$VOLUME_VERSION` and
-/// `$SYMBOLIC_LINK` and has no LUS entry). We match that shape so
-/// first-mount behaviour is identical to a format.com volume.
 fn build_attrdef_table() -> Vec<u8> {
     struct Entry {
         name: &'static str,
@@ -2545,10 +2537,16 @@ fn build_attrdef_table() -> Vec<u8> {
             min_size: 0,
             max_size: 65536,
         },
-        // $LOGGED_UTILITY_STREAM (0x100) intentionally omitted — see
-        // build_attrdef_table doc comment.
+        Entry {
+            name: "$LOGGED_UTILITY_STREAM",
+            type_code: 0x100,
+            collation: 0,
+            flags: NONRES,
+            min_size: 0,
+            max_size: 65536,
+        },
     ];
-    // 14 active entries + one 160-byte all-zeros terminator = 2400 bytes.
+    // 15 active entries + one 160-byte all-zeros terminator = 2560 bytes.
     let mut out = Vec::with_capacity(160 * (entries.len() + 1));
     for e in &entries {
         let mut buf = [0u8; 160];
