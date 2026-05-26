@@ -1259,29 +1259,6 @@ pub fn format_filesystem(
         )?;
         place_record(&mut mft_buf, rs, rec::OBJID, objid_rec)?;
 
-        // $Reparse: empty $R view index (COLLATION_NTOFS_ULONGS = 0x13)
-        let r_name = stream::utf16(stream::R);
-        let r_index_root = build_populated_named_index_root_attr(
-            3,
-            &r_name,
-            0,
-            COLLATION_NTOFS_ULONGS,
-            index_block_size,
-            cluster_size,
-            &last_entry,
-        );
-        let reparse_rec = build_system_record_with_parent(
-            &mft_record_layout,
-            rec::REPARSE,
-            rec::EXTEND,
-            rec::name(rec::REPARSE, cluster_size).expect("known rec_num"),
-            false,
-            0,
-            0,
-            &[r_index_root],
-        )?;
-        place_record(&mut mft_buf, rs, rec::REPARSE, reparse_rec)?;
-
         // $Quota: $O (SID→owner_id) and $Q (owner_id→quota_info) view indexes.
         // Shipping $Quota preemptively prevents the Windows NTFS driver from
         // creating it on first mount, which for sub-4K cluster sizes results in
