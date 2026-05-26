@@ -31,13 +31,13 @@ scripts_vm="$VM_WORKDIR/scripts/fs-test-harness"
 # Gather VM info
 vm_info_json="$(mktemp -t vm-info.XXXXXX.json)"
 ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_HOST" \
-    "powershell -ExecutionPolicy Bypass -File $scripts_vm/vm-info.ps1" \
+    "powershell -ExecutionPolicy Bypass -File '$scripts_vm/vm-info.ps1'" \
     > "$vm_info_json"
 
 # Gather per-scenario verdicts
 verdicts_json="$(mktemp -t verdicts.XXXXXX.json)"
 ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_HOST" \
-    "powershell -ExecutionPolicy Bypass -File $scripts_vm/verdict-collect.ps1" \
+    "powershell -ExecutionPolicy Bypass -File '$scripts_vm/verdict-collect.ps1'" \
     > "$verdicts_json"
 
 trap 'rm -f "$vm_info_json" "$verdicts_json"' EXIT
