@@ -6,16 +6,14 @@
 # Why a wrapper instead of fixing the harness directly:
 # * The harness lives in `vendor/fs-test-harness/` (git submodule);
 #   we don't own its lifecycle. Cleanup belongs in consumer code.
-# * Each scenario in `test-matrix.json` points at
-#   `diskimages/nfs-<scenario>.img`; `init-image` populates them and
-#   has no opinion about who removes them. Without this trap the
+# * `init-image` (and ship-to-host) create .img files under HOST_IMAGE_DIR
+#   and have no opinion about who removes them. Without this trap the
 #   directory accumulates ~3-5 GiB of stale images across runs.
 #
 # Multi-instance safety:
-# * Each invocation creates its own /tmp backing dir ($$-suffixed) so
-#   the EXIT cleanup cannot destroy a sibling instance's images.
-# * The diskimages/ symlink is created only when absent — never
-#   overwritten — so a persistent or manually-set symlink is left alone.
+# * The harness generates a unique run_id (ms timestamp) per invocation
+#   so parallel run-matrix.sh instances write to separate subdirectories
+#   under HOST_IMAGE_DIR and cannot trample each other's images.
 # * A mkdir-based lock keyed on the scenario filter prevents two
 #   instances from running the same scenario set simultaneously.
 #   Stale locks (from killed processes) can be removed with:
@@ -53,22 +51,24 @@ for arg in "$@"; do
     esac
 done
 
-# ── Per-instance disk-image directory ──────────────────────────────────────
-# Each run-matrix.sh instance gets its own /tmp backing dir ($$-suffixed).
-# EXIT cleanup removes that dir directly so it can't affect a sibling
-# instance's images. The diskimages/ symlink is created only when absent;
-# a pre-existing symlink (persistent or set by another instance) is left
-# as-is.
-diskimages_tmp="/tmp/ntfs-matrix-diskimages-$$"
-mkdir -p "$diskimages_tmp"
-if [[ ! -L "$repo_root/diskimages" && ! -e "$repo_root/diskimages" ]]; then
-    ln -s "$diskimages_tmp" "$repo_root/diskimages"
+# ── Resolve image directory ─────────────────────────────────────────────────
+# Read HOST_IMAGE_DIR from .test-env (same source the harness uses).
+# Default: diskimages/ relative to the repo root.
+host_image_dir=""
+if [ -f "$repo_root/.test-env" ]; then
+    host_image_dir=$(grep '^HOST_IMAGE_DIR=' "$repo_root/.test-env" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]')
 fi
+host_image_dir="${host_image_dir:-diskimages}"
+# Resolve relative paths against repo_root.
+if [[ "$host_image_dir" != /* ]]; then
+    host_image_dir="$repo_root/$host_image_dir"
+fi
+mkdir -p "$host_image_dir"
 
 # ── Per-scenario-filter lock ────────────────────────────────────────────────
-# Prevent two invocations with the same scenario filter from racing (they
-# would write to the same .img file). Uses mkdir atomicity. The lock key
-# is the normalised filter string (or "full" for no filter).
+# Prevent two invocations with the same scenario filter from racing.
+# Uses mkdir atomicity. The lock key is the normalised filter string
+# (or "full" for no filter). Stale locks: rm -rf /tmp/ntfs-matrix-lock-*
 lock_key="${forwarded_args[*]:-full}"
 lock_key="${lock_key//[^a-zA-Z0-9_-]/_}"
 scenario_lock="/tmp/ntfs-matrix-lock-${lock_key}"
@@ -82,14 +82,16 @@ echo "$$" > "$scenario_lock/pid"
 
 cleanup() {
     if [ "$keep_images" -eq 1 ]; then
-        echo "[run-matrix] --keep-images set; leaving $diskimages_tmp in place" >&2
+        echo "[run-matrix] --keep-images set; leaving images in $host_image_dir" >&2
     else
         local count
-        count=$(find "$diskimages_tmp" -maxdepth 1 -name '*.img' -type f 2>/dev/null | wc -l | tr -d ' ')
+        count=$(find "$host_image_dir" -name 'nfs-*.img' -type f 2>/dev/null | wc -l | tr -d ' ')
         if [ "$count" -gt 0 ]; then
-            echo "[run-matrix] cleanup: removing $count image(s) from $diskimages_tmp" >&2
-            find "$diskimages_tmp" -maxdepth 1 -name '*.img' -type f -delete
+            echo "[run-matrix] cleanup: removing $count image(s) from $host_image_dir" >&2
+            find "$host_image_dir" -name 'nfs-*.img' -type f -delete
         fi
+        # Remove empty run_id subdirectories left behind.
+        find "$host_image_dir" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
     fi
     rm -rf "$scenario_lock"
 }
