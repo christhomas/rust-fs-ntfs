@@ -17,7 +17,7 @@
 # and the libtest-mimic --test-threads pool. "drive-letters" queries
 # the VM at startup; an integer sets an explicit cap (clamped 1..=24).
 # Default 1 = sequential (safe for any consumer).
-max_parallel = "drive-letters"
+max_parallel = 8
 
 [groups]
 # smoke — 5 representative scenarios for a quick sanity check (~15 min).
