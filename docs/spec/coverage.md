@@ -121,7 +121,7 @@ tables where a feature has *some* evidence but material gaps remain.
 | 59 | USA applies to MFT, INDX, RSTR, RCRD pages | **VERIFIED** | All four confirmed in implementation |
 | 60 | USN skip-zero convention | **OBSERVED** | Implemented; no permitted-source statement corroborates |
 
-### $MFT (record 0) and $MFTMirr (record 1)
+### `$MFT` (record 0) and `$MFTMirr` (record 1)
 
 | # | Item | Status | Notes |
 | --: | ---- | ------ | ----- |
@@ -288,7 +288,7 @@ tables where a feature has *some* evidence but material gaps remain.
 | 145 | `allocated_size`, `data_size`, `initialized_length` semantics | **VERIFIED** | |
 | 146 | `initialized_length` semantics for mixed sparse/physical runs | **UNVERIFIED** | Orthogonal to sparse; not stress-tested |
 
-### $Bitmap (record 6)
+### `$Bitmap` (record 6)
 
 | # | Item | Status | Notes |
 | --: | ---- | ------ | ----- |
@@ -318,7 +318,7 @@ tables where a feature has *some* evidence but material gaps remain.
 | 160 | Consensus safety barrier (EIO threshold / MFT yield / lost-cluster ratio) | **UNVERIFIED** | Algorithm documented; not implemented |
 | 161 | TRIM/DISCARD prohibited during reconciliation | **OBSERVED** | `rust-fs-ntfs` never calls TRIM |
 
-### $BadClus (record 8)
+### `$BadClus` (record 8)
 
 | # | Item | Status | Notes |
 | --: | ---- | ------ | ----- |
@@ -446,7 +446,7 @@ tables where a feature has *some* evidence but material gaps remain.
 
 ## §5 $LogFile & Journal
 
-### $LogFile structure (LFS level)
+### `$LogFile` structure (LFS level)
 
 | # | Item | Status | Notes |
 | --: | ---- | ------ | ----- |
@@ -583,7 +583,7 @@ tables where a feature has *some* evidence but material gaps remain.
 | 287 | `0xE0` | `$EA` | **VERIFIED** | |
 | 288 | `0x100` | `$LOGGED_UTILITY_STREAM` | **OBSERVED** | Opaque on read; internal layout (EFS/TxF) unknown |
 
-### $DATA — Alternate Data Streams (ADS)
+### `$DATA` — Alternate Data Streams (ADS)
 
 | # | Item | Status | Notes |
 | --: | ---- | ------ | ----- |
@@ -604,7 +604,7 @@ tables where a feature has *some* evidence but material gaps remain.
 | 298 | LZNT1 read / write path | **UNKNOWN** | Not implemented; no plan to implement in near term |
 | 299 | Compressed data runs interleaving | **UNKNOWN** | Described; not implemented |
 
-### $EA_INFORMATION (0xD0) and $EA (0xE0)
+### `$EA_INFORMATION` (0xD0) and `$EA` (0xE0)
 
 | # | Item | Status | Notes |
 | --: | ---- | ------ | ----- |
@@ -613,7 +613,7 @@ tables where a feature has *some* evidence but material gaps remain.
 | 302 | Non-resident `$EA` | **UNVERIFIED** | Not implemented; resident-only MVP |
 | 303 | EA key enumeration API | **VERIFIED** | `fs_ntfs_list_ea_keys` return code `-2` for buffer-too-small |
 
-### $REPARSE_POINT (0xC0)
+### `$REPARSE_POINT` (0xC0)
 
 | # | Item | Status | Notes |
 | --: | ---- | ------ | ----- |
@@ -622,7 +622,7 @@ tables where a feature has *some* evidence but material gaps remain.
 | 306 | `FILE_ATTRIBUTE_REPARSE_POINT` flag set/cleared atomically | **VERIFIED** | `src/write.rs` |
 | 307 | Reparse tag constants (symlink, mount point, OneDrive, etc.) | **UNVERIFIED** | Tag values listed in MS-FSCC; not individually tested |
 
-### $LOGGED_UTILITY_STREAM (0x100)
+### `$LOGGED_UTILITY_STREAM` (0x100)
 
 | # | Item | Status | Notes |
 | --: | ---- | ------ | ----- |
@@ -630,14 +630,14 @@ tables where a feature has *some* evidence but material gaps remain.
 | 309 | EFS internal layout | **UNKNOWN** | Out of scope for current implementation |
 | 310 | TxF internal layout | **UNKNOWN** | Out of scope |
 
-### $SECURITY_DESCRIPTOR (0x50) on system records
+### `$SECURITY_DESCRIPTOR` (0x50) on system records
 
 | # | Item | Status | Notes |
 | --: | ---- | ------ | ----- |
 | 311 | SD required on every system record (slots 0–11) | **VERIFIED** | Confirmed via chkdsk; Bug 4-related observation |
 | 312 | SD internal format (security descriptor header, ACE, DACL, SACL) | **UNVERIFIED** | Format comes from Windows security model; not reproduced in spec |
 
-### $Volume (record 3): $VOLUME_NAME and $VOLUME_INFORMATION
+### `$Volume` (record 3): `$VOLUME_NAME` and `$VOLUME_INFORMATION`
 
 | # | Item | Status | Notes |
 | --: | ---- | ------ | ----- |
@@ -646,14 +646,14 @@ tables where a feature has *some* evidence but material gaps remain.
 | 315 | Volume dirty flag in `$VOLUME_INFORMATION` | **UNVERIFIED** | `clear_dirty` in fsck; full flag semantics unverified |
 | 316 | Other `$VOLUME_INFORMATION` flag bits | **UNKNOWN** | Field present; flag enumeration not in our spec |
 
-### $OBJECT_ID (0x40)
+### `$OBJECT_ID` (0x40)
 
 | # | Item | Status | Notes |
 | --: | ---- | ------ | ----- |
 | 317 | 16-byte GUID | **OBSERVED** | In type map |
 | 318 | Optional birth-volume / birth-object / domain IDs | **UNVERIFIED** | Documented in MS-FSCC; not implemented or tested |
 
-### $UpCase (record 10)
+### `$UpCase` (record 10)
 
 | # | Item | Status | Notes |
 | --: | ---- | ------ | ----- |
@@ -661,7 +661,7 @@ tables where a feature has *some* evidence but material gaps remain.
 | 320 | Volume's own table must be used (not OS Unicode tables) | **VERIFIED** | `src/upcase.rs` |
 | 321 | Fallback for missing `$UpCase` | **UNVERIFIED** | Rule described; fallback not implemented |
 
-### $Secure (record 9)
+### `$Secure` (record 9)
 
 | # | Item | Status | Notes |
 | --: | ---- | ------ | ----- |
@@ -673,7 +673,7 @@ tables where a feature has *some* evidence but material gaps remain.
 | 327 | Runtime SD insertion / security_id assignment | **UNVERIFIED** | Not implemented; all records share security_id=0x100 |
 | 328 | SD lookup by security_id (runtime path) | **UNVERIFIED** | Not implemented |
 
-### $Extend (record 11) and children
+### `$Extend` (record 11) and children
 
 | # | Item | Status | Notes |
 | --: | ---- | ------ | ----- |
