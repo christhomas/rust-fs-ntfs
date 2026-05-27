@@ -549,7 +549,7 @@ Sources, by row:
 
 - `0x01` `COLLATION_FILE_NAME` — [OBSERVED: src/mkfs.rs:50, src/record_build.rs#L205 `collation_rule = 1`].
 - `0x10` `COLLATION_NTOFS_ULONG` — [OBSERVED: src/mkfs.rs:59 — comment cites MS-FSCC §2.4; emitted for `$Secure:$SII` (mkfs.rs:1148) and `$Quota:$Q`].
-- `0x11` `COLLATION_NTOFS_SID` — [UNVERIFIED] — not emitted by any code in this codebase.
+- `0x11` `COLLATION_NTOFS_SID` — [OBSERVED: src/mkfs.rs:65 — comment cites MS-FSCC §2.4; emitted for `$Quota:$O` (mkfs.rs:1304)].
 - `0x12` `COLLATION_NTOFS_SECURITY_HASH` — [OBSERVED: src/mkfs.rs:55 — comment cites MS-FSCC §2.4; emitted for `$Secure:$SDH` (mkfs.rs:1133)].
 - `0x13` `COLLATION_NTOFS_ULONGS` — [OBSERVED: src/mkfs.rs:63 — comment cites MS-FSCC §2.4; emitted for `$ObjId:$O` (mkfs.rs:1306) and `$Reparse:$R` (mkfs.rs:1329)].
 - `0x00` `COLLATION_BINARY` — [UNVERIFIED] — not emitted by any code in this codebase; `$ObjId:$O` uses `COLLATION_NTOFS_ULONGS` (0x13) per `src/mkfs.rs`.

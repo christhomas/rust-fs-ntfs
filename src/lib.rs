@@ -2253,7 +2253,7 @@ pub extern "C" fn fs_ntfs_remove_ea(
 /// Returns:
 ///   * `N >= 0` — number of EAs (also = count of NUL terminators);
 ///     0 means the file has no EAs
-///   * `2`      — EAs exist but `out_buf_len` was too small;
+///   * `-2`     — EAs exist but `out_buf_len` was too small;
 ///     `*out_total_len` holds the required size and names are NOT written
 ///   * `-1`     — error (use `fs_ntfs_last_error`)
 ///
@@ -2480,7 +2480,7 @@ pub extern "C" fn fs_ntfs_write_named_stream(
 /// Returns:
 ///   * `N >= 0` — number of named streams (matches the count of
 ///     NUL terminators in the written buffer); 0 means the file has no ADS
-///   * `2`      — at least one named stream exists but `out_buf_len`
+///   * `-2`     — at least one named stream exists but `out_buf_len`
 ///     was too small; `*out_total_len` holds the required size and names
 ///     are NOT written
 ///   * `-1`     — error (use `fs_ntfs_last_error`)
