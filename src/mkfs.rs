@@ -46,8 +46,6 @@ const ATTR_VOLUME_NAME: u32 = 0x60;
 const ATTR_VOLUME_INFORMATION: u32 = 0x70;
 const ATTR_DATA: u32 = 0x80;
 const ATTR_INDEX_ROOT: u32 = 0x90;
-const ATTR_INDEX_ALLOCATION: u32 = 0xA0;
-const ATTR_BITMAP: u32 = 0xB0;
 const ATTR_END_MARKER: u32 = 0xFFFF_FFFF;
 const COLLATION_FILE_NAME: u32 = 0x01;
 // $SDH (Security Descriptor Hash) view-index — keyed by
@@ -375,17 +373,13 @@ pub fn format_filesystem(
     let sds_mirror_lcn = sds_primary_lcn + 1;
     let sds_real_clusters: u64 = 2;
 
-    // Sub-PR S4: one cluster for $Reparse:$R's single empty INDX block
-    // at VCN 0. Lives immediately after the SDS mirror.
-    let reparse_r_indx_lcn = sds_mirror_lcn + 1;
-
     let mftmirr_lcn = cluster_count / 2;
     // Mirror records 0..3 (4 records). Round up in case record_size > cluster_size.
     let mftmirr_clusters: u64 = (4 * mft_record_size as u64).div_ceil(cluster_size as u64);
 
     let backup_boot_lcn = cluster_count - 1;
 
-    let last_used_lcn = reparse_r_indx_lcn + 1;
+    let last_used_lcn = sds_mirror_lcn + 1;
     if last_used_lcn >= mftmirr_lcn || mftmirr_lcn + mftmirr_clusters >= backup_boot_lcn {
         return Err("volume too small for chosen layout".to_string());
     }
@@ -489,7 +483,6 @@ pub fn format_filesystem(
     allocate(attrdef_lcn, attrdef_clusters)?;
     allocate(mft_bitmap_lcn, mft_bitmap_clusters)?;
     allocate(sds_primary_lcn, sds_real_clusters)?;
-    allocate(reparse_r_indx_lcn, 1)?;
     allocate(mftmirr_lcn, mftmirr_clusters)?;
     allocate(backup_boot_lcn, 1)?;
     // Trailing bits past `cluster_count` (within the final byte) must be
@@ -532,14 +525,6 @@ pub fn format_filesystem(
         &sds_stream[mirror_off_in_stream..mirror_off_in_stream + mirror_payload_len],
     );
     dev.write_all_at(sds_mirror_lcn * cluster_size as u64, &mirror_cluster)?;
-
-    // 4c. Sub-PR S4: empty INDX block backing $Reparse:$R's
-    //      $INDEX_ALLOCATION stream (single cluster at VCN 0).
-    {
-        let mut indx_block = build_empty_indx_block(4096, bytes_per_sector, 0)?;
-        crate::mft_io::apply_fixup_on_write_magic(&mut indx_block, bytes_per_sector, b"INDX")?;
-        dev.write_all_at(reparse_r_indx_lcn * cluster_size as u64, &indx_block)?;
-    }
 
     // 5. MFT records ------------------------------------------------------
     let rs = mft_record_size as usize;
@@ -1158,24 +1143,13 @@ pub fn format_filesystem(
         ));
     }
 
-    // record 11: $Extend — directory whose `$I30` enumerates lazily-
-    // created kernel metafiles. Sub-PR S4 (2026-05-23) adds an entry
-    // for `$Reparse` (slot 16); Sub-PR S5 will add `$RmMetadata`
-    // (with its full `$TxfLog` hierarchy) once that path is exercised.
-    //
-    // Iter H Procmon trace (2026-05-21, /scan against a fresh volume)
-    // shows chkdsk opens
-    // `\Device\…\$Extend\$Reparse:$R:$INDEX_ALLOCATION` during
-    // /scan; without the `$Reparse` child the open fails and /scan
-    // exits 13 ("must be fixed offline").
-    //
-    // Critical constraint from Iter L (2026-05-22): shipping
-    // `$RmMetadata\$TxfLog\$Tops` without its companion `$TxfLog.blf`
-    // + two `$TxfLogContainer` files drives the kernel TxF resource
-    // manager to fail to start (Event 136 → Event 55 → chkdsk /scan
-    // exit 13). So S4 ships ONLY `$Reparse` — which is a leaf
-    // view-index file with no TxF involvement — and S5 will ship the
-    // full `$TxfLog` group atomically if needed.
+    // record 11: $Extend — directory whose `$I30` enumerates three
+    // $Extend children: $ObjId (slot 16), $Reparse (slot 17), $Quota
+    // (slot 18). scan-f-scan experiments (2026-05-24) proved that
+    // chkdsk /scan exits 13 unless all three are present under $Extend
+    // at format time. $RmMetadata is intentionally omitted (shipping it
+    // incompletely causes TxF resource manager failures; see rec module
+    // comment).
     //
     // $Extend: $STD_INFO + $FILE_NAME + $I30 with entries for the
     // three children built immediately below.
@@ -1258,6 +1232,31 @@ pub fn format_filesystem(
             &[o_index_root],
         )?;
         place_record(&mut mft_buf, rs, rec::OBJID, objid_rec)?;
+
+        // $Reparse: empty $R view index (COLLATION_NTOFS_ULONGS = 0x13).
+        // A resident-only $INDEX_ROOT is sufficient; chkdsk accepts this
+        // layout when the MFT record flags are 0x000D (IN_USE|0x04|VIEW_INDEX).
+        let r_name = stream::utf16(stream::R);
+        let r_index_root = build_populated_named_index_root_attr(
+            3,
+            &r_name,
+            0,
+            COLLATION_NTOFS_ULONGS,
+            index_block_size,
+            cluster_size,
+            &last_entry,
+        );
+        let reparse_rec = build_system_record_with_parent(
+            &mft_record_layout,
+            rec::REPARSE,
+            rec::EXTEND,
+            rec::name(rec::REPARSE, cluster_size).expect("known rec_num"),
+            false,
+            0,
+            0,
+            &[r_index_root],
+        )?;
+        place_record(&mut mft_buf, rs, rec::REPARSE, reparse_rec)?;
 
         // $Quota: $O (SID→owner_id) and $Q (owner_id→quota_info) view indexes.
         // Shipping $Quota preemptively prevents the Windows NTFS driver from
@@ -1397,73 +1396,6 @@ pub fn format_filesystem(
     for slot in 12..mft_records_capacity.min(16) as u32 {
         let rec_bytes = build_reserved_placeholder(&mft_record_layout, slot)?;
         place_record(&mut mft_buf, rs, slot, rec_bytes)?;
-    }
-
-    // record 16: $Extend\$Reparse — view-index file with a non-resident
-    // `$R` index. Sub-PR S4-v2 (2026-05-23).
-    //
-    // S4-v1 tried a resident-only $INDEX_ROOT $R; chkdsk readonly
-    // rejected with "Index $R in file 10 is corrupt" (where "10" is
-    // hex = rec 16). The Iter H Procmon trace had already hinted at
-    // the root cause: chkdsk opens
-    // `\Device\…\$Extend\$Reparse:$R:$INDEX_ALLOCATION` during /scan
-    // unconditionally. A resident-only $INDEX_ROOT can't satisfy
-    // that open — the $INDEX_ALLOCATION attribute must exist.
-    //
-    // S4-v2 layout:
-    //   * $INDEX_ROOT "$R" with `IH_FLAG_HAS_SUBNODES = 1`. The
-    //     resident root carries only a LAST sentinel with the
-    //     `HAS_VCN` flag set, pointing at VCN 0 in the allocation
-    //     stream.
-    //   * $INDEX_ALLOCATION "$R" — non-resident, 1 cluster (allocated
-    //     up at `reparse_r_indx_lcn`), holding a single empty INDX
-    //     block at VCN 0 (just the LAST sentinel inside).
-    //   * $BITMAP "$R" — resident, 8 bytes with bit 0 set
-    //     (VCN 0 INDX block is allocated).
-    if (rec::REPARSE as u64) < mft_records_capacity {
-        let r_name_u16 = stream::utf16(stream::R);
-
-        let r_index_root = build_populated_named_index_root_attr_with_subnode(
-            4,
-            &r_name_u16,
-            0,
-            COLLATION_NTOFS_ULONGS,
-            4096,
-            cluster_size,
-            0, // VCN of the empty INDX block written in section 4c.
-        );
-
-        let r_index_alloc_runs = vec![DataRun {
-            starting_vcn: 0,
-            length: 1,
-            lcn: Some(reparse_r_indx_lcn),
-        }];
-        let r_index_alloc_mp = encode_runs(&r_index_alloc_runs)?;
-        let r_index_alloc_attr = build_nonresident_attribute(
-            ATTR_INDEX_ALLOCATION,
-            Some(stream::R),
-            5,
-            cluster_size as u64, // data_length
-            cluster_size as u64, // allocated_length
-            cluster_size as u64, // initialized_length
-            0,                   // last_vcn = 0 (one cluster, VCN 0)
-            &r_index_alloc_mp,
-        )?;
-
-        let r_bitmap_value: [u8; 8] = [0x01, 0, 0, 0, 0, 0, 0, 0];
-        let r_bitmap_attr = build_resident_named(ATTR_BITMAP, 6, &r_name_u16, &r_bitmap_value);
-
-        let rec_bytes = build_system_record_with_parent(
-            &mft_record_layout,
-            rec::REPARSE,
-            rec::EXTEND,
-            rec::name(rec::REPARSE, cluster_size).expect("known rec_num"),
-            false,
-            0,
-            0,
-            &[r_index_root, r_index_alloc_attr, r_bitmap_attr],
-        )?;
-        place_record(&mut mft_buf, rs, rec::REPARSE, rec_bytes)?;
     }
 
     // 6. Write $MFT to disk + mirror first 4 records ----------------------
@@ -2145,156 +2077,6 @@ fn build_populated_named_index_root_attr(
     buf[entries_at..entries_at + entries_blob.len()].copy_from_slice(entries_blob);
 
     buf
-}
-
-/// Build a named `$INDEX_ROOT` advertising HAS_SUBNODES — i.e. the
-/// index has spilled into a non-resident `$INDEX_ALLOCATION`. The
-/// resident root carries no real entries, just a single LAST sentinel
-/// whose 8-byte VCN tail points at the first INDX block in the
-/// allocation stream. Used by Sub-PR S4 for `$Reparse:$R`.
-///
-/// Entry shape (LAST sentinel with HAS_VCN bit set):
-///
-/// ```text
-///   +0x00 view-index union  u64  = 0      (data_offset/length/reserved)
-///   +0x08 entry_length      u16  = 0x18   (16-byte body + 8-byte VCN tail)
-///   +0x0A key_length        u16  = 0
-///   +0x0C flags             u32  = 0x03   (LAST | HAS_VCN)
-///   +0x10 vcn_subnode       u64  = `vcn_of_subnode`
-/// ```
-fn build_populated_named_index_root_attr_with_subnode(
-    attr_id: u16,
-    name_utf16: &[u16],
-    indexed_attr_type: u32,
-    collation: u32,
-    index_block_size: u32,
-    cluster_size: u32,
-    vcn_of_subnode: u64,
-) -> Vec<u8> {
-    // LAST entry with HAS_VCN flag = 0x03 (LAST=0x02 | HAS_VCN=0x01).
-    // Entry header = 16 bytes; 8-byte VCN tail = total 24 bytes.
-    let mut last_entry = vec![0u8; 0x18];
-    last_entry[8..10].copy_from_slice(&0x0018u16.to_le_bytes()); // entry_length
-    last_entry[10..12].copy_from_slice(&0u16.to_le_bytes()); // key_length
-    last_entry[12..16].copy_from_slice(&0x0000_0003u32.to_le_bytes()); // flags
-    last_entry[16..24].copy_from_slice(&vcn_of_subnode.to_le_bytes());
-
-    let header_size = 16usize + 8usize;
-    let name_offset = header_size;
-    let name_bytes = name_utf16.len() * 2;
-    let value_offset = align8(name_offset + name_bytes);
-    let ir_value_size = 16 + 16 + last_entry.len();
-    let attr_length = align8(value_offset + ir_value_size);
-
-    let mut buf = vec![0u8; attr_length];
-    buf[0..4].copy_from_slice(&ATTR_INDEX_ROOT.to_le_bytes());
-    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
-    buf[8] = 0;
-    buf[9] = name_utf16.len() as u8;
-    buf[10..12].copy_from_slice(&(name_offset as u16).to_le_bytes());
-    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
-    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
-    buf[16..20].copy_from_slice(&(ir_value_size as u32).to_le_bytes());
-    buf[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes());
-    buf[22] = 0;
-    buf[23] = 0;
-    for (i, c) in name_utf16.iter().enumerate() {
-        let off = name_offset + i * 2;
-        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
-    }
-    let v = value_offset;
-    buf[v..v + 4].copy_from_slice(&indexed_attr_type.to_le_bytes());
-    buf[v + 4..v + 8].copy_from_slice(&collation.to_le_bytes());
-    buf[v + 8..v + 12].copy_from_slice(&index_block_size.to_le_bytes());
-    let cpib_byte: u8 = if cluster_size <= index_block_size {
-        (index_block_size / cluster_size) as u8
-    } else {
-        (index_block_size / 512) as u8
-    };
-    buf[v + 12] = cpib_byte;
-
-    let ih = v + 16;
-    buf[ih..ih + 4].copy_from_slice(&16u32.to_le_bytes()); // first_entry_offset
-    let used = 16u32 + last_entry.len() as u32;
-    buf[ih + 4..ih + 8].copy_from_slice(&used.to_le_bytes()); // total_size_of_entries
-    buf[ih + 8..ih + 12].copy_from_slice(&used.to_le_bytes()); // allocated_size_of_entries
-    buf[ih + 12] = 0x01; // flags = HAS_SUBNODES (LARGE_INDEX)
-
-    let entries_at = ih + 16;
-    buf[entries_at..entries_at + last_entry.len()].copy_from_slice(&last_entry);
-
-    buf
-}
-
-/// Build an empty `INDX` block — the on-disk page format that
-/// `$INDEX_ALLOCATION` streams are composed of. Used by Sub-PR S4 for
-/// `$Reparse:$R`'s single empty INDX block at VCN 0.
-///
-/// Layout (per MS-FSCC §2.4.9 + Windows Internals 7e):
-///
-/// ```text
-///   +0x00 "INDX" magic         (4)
-///   +0x04 usa_offset           (u16) = 0x28
-///   +0x06 usa_count            (u16) = sectors_per_block + 1
-///   +0x08 lsn                  (u64) = 0
-///   +0x10 vcn_of_this_block    (u64)
-///   +0x18 INDEX_HEADER (16):
-///         +0x00 first_entry_offset    (u32, rel to INDEX_HEADER start)
-///         +0x04 total_size_of_entries (u32)
-///         +0x08 allocated_size        (u32) = block_size - 0x18
-///         +0x0C flags                 (u8)  = 0 (leaf — no children)
-///         +0x0D padding               (3)
-///   +0x28 USA: usn + saved sector-end words
-///   +(USA end, 8-aligned) entries
-/// ```
-///
-/// Returns the clean (pre-fixup) bytes. Caller is responsible for
-/// applying the fixup before writing to disk.
-fn build_empty_indx_block(
-    block_size: u32,
-    bytes_per_sector: u16,
-    vcn: u64,
-) -> Result<Vec<u8>, String> {
-    if !block_size.is_multiple_of(bytes_per_sector as u32) {
-        return Err(format!(
-            "INDX block_size {block_size} not a multiple of sector size {bytes_per_sector}"
-        ));
-    }
-    let sectors = (block_size / bytes_per_sector as u32) as usize;
-    let usa_count = sectors + 1;
-    let mut buf = vec![0u8; block_size as usize];
-    buf[0..4].copy_from_slice(b"INDX");
-    buf[4..6].copy_from_slice(&0x0028u16.to_le_bytes()); // usa_offset
-    buf[6..8].copy_from_slice(&(usa_count as u16).to_le_bytes());
-    buf[8..16].copy_from_slice(&0u64.to_le_bytes()); // LSN = 0
-    buf[16..24].copy_from_slice(&vcn.to_le_bytes()); // this block's VCN
-
-    // USA: USN at +0x28; 1-based saved words at +0x2A..+0x2A + sectors*2.
-    // Set USN = 1; saved words stay 0 (the sector-end bytes are 0 too on
-    // a freshly-zeroed buffer, so the USA reflects reality).
-    buf[0x28..0x2A].copy_from_slice(&1u16.to_le_bytes());
-
-    // Pick where entries start: after USA, 8-aligned.
-    let usa_end = 0x28 + usa_count * 2;
-    let entries_start = align8(usa_end);
-
-    // INDEX_HEADER at +0x18. first_entry_offset is RELATIVE to the
-    // INDEX_HEADER's own start (0x18), so the entries land at
-    // 0x18 + first_entry_offset.
-    let first_entry_offset_rel = (entries_start - 0x18) as u32;
-    buf[0x18..0x1C].copy_from_slice(&first_entry_offset_rel.to_le_bytes());
-
-    // Only entry is a LAST sentinel (16 bytes, view-index shape).
-    let last_entry = build_view_index_last_entry();
-    let total_used = first_entry_offset_rel + last_entry.len() as u32;
-    let allocated = block_size - 0x18; // bytes from INDEX_HEADER to end of block
-    buf[0x1C..0x20].copy_from_slice(&total_used.to_le_bytes());
-    buf[0x20..0x24].copy_from_slice(&allocated.to_le_bytes());
-    buf[0x24] = 0; // leaf node — no children below it
-
-    buf[entries_start..entries_start + last_entry.len()].copy_from_slice(&last_entry);
-
-    Ok(buf)
 }
 
 /// Build a single INDEX_ENTRY for a view-index (`$SDH` / `$SII` style).
