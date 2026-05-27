@@ -104,7 +104,7 @@ jobs:
           stage="rust-ntfs-${{ steps.meta.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "$stage"
           cp "${{ steps.meta.outputs.bin }}" "$stage/"
-          cp readme.md LICENSE-MIT LICENSE-APACHE "$stage/" 2>/dev/null || true
+          cp README.md LICENSE-MIT LICENSE-APACHE "$stage/" 2>/dev/null || true
 
           if [[ "${{ matrix.archive }}" == "zip" ]]; then
               archive="${stage}.zip"
