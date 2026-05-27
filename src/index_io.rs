@@ -683,7 +683,7 @@ pub fn compare_names(
 /// Today this comparator is **not yet wired into `find_index_entry`
 /// or the insert paths** — those still use `compare_names` (case-
 /// insensitive) unconditionally. Plumbing the per-directory flag
-/// through is the next step (FUTURE_FEATURES.md §3.9). This function
+/// through is the next step (future-features.md §3.9). This function
 /// is the building block.
 ///
 /// The bit position of `FILE_ATTRIBUTE_CASE_SENSITIVE_DIR` within

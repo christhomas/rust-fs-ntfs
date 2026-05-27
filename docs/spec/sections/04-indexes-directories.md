@@ -22,7 +22,7 @@ The canonical example is the directory index `$I30`. Its keys are
 `$FILE_NAME` (type `0x30`) attributes, sorted under the
 `COLLATION_FILE_NAME` rule (case-insensitive UTF-16 via the volume's
 `$UpCase` table — see [§6 Special streams](06-special-streams.md)).
-[OBSERVED: STATUS.md "directory indexes"]
+[OBSERVED: status.md "directory indexes"]
 
 The on-disk shape implied by these attributes is a B+ tree:
 
@@ -41,7 +41,7 @@ same-length rename). Multi-level B+-tree balancing on `$INDEX_ALLOCATION`
 is partially implemented for traversal but not for insertion; large
 directories are accepted on read, but writes refuse to operate on them
 until B+-tree split/merge lands. ✅ read / 🟡 write
-[OBSERVED: STATUS.md `$INDEX_ALLOCATION` walks; chkdsk-improvement-findings.md §2.7 root $I30 population]
+[OBSERVED: status.md `$INDEX_ALLOCATION` walks; chkdsk-improvement-findings.md §2.7 root $I30 population]
 
 The rest of this section walks the layout in order, then covers the
 named-index variants, collation rules, and the read-side awareness needed
@@ -82,13 +82,13 @@ on the *same* MFT record at the moment the link was created or last
 renamed; Windows does **not** keep the `$FILE_NAME` timestamps in sync
 with subsequent `$STANDARD_INFORMATION` updates — that mismatch is normal
 and the MS-NTFS spec calls it out as expected behaviour.
-[OBSERVED: STATUS.md "Per-field nullable; only updates SI, not the parent index"]
+[OBSERVED: status.md "Per-field nullable; only updates SI, not the parent index"]
 [UNVERIFIED]
 
 `allocated_size` and `real_size` are similarly *snapshot* values written at
 hardlink time and at rename, then maintained loosely; chkdsk does not flag
 stale sizes here as corruption.
-[OBSERVED: docs/STATUS.md `set_times` semantics] [UNVERIFIED]
+[OBSERVED: docs/status.md `set_times` semantics] [UNVERIFIED]
 
 ### Multiple $FILE_NAME attributes per record {#multiple-fns}
 
@@ -234,7 +234,7 @@ all others ship as `namespace=0` (POSIX). Names that need a strict
 `namespace=1` / `namespace=2` pair (LFN + paired DOS short alias)
 are not generated — the closest existing functional limit. ⛔
 paired-DOS-alias write
-[OBSERVED: `src/record_build.rs::fn_namespace_for`, `STATUS.md`]
+[OBSERVED: `src/record_build.rs::fn_namespace_for`, `status.md`]
 
 ## $INDEX_ROOT (0x90) {#index-root}
 
@@ -381,7 +381,7 @@ record's other attributes inside one MFT record. In practice the NTFS
 formatter **always** allocates `$INDEX_ALLOCATION` for the root directory
 (record 5) of a freshly-formatted volume, regardless of whether it is
 actually populated, because the system files inserted at format time
-overflow a single record's resident space. [OBSERVED: STATUS.md
+overflow a single record's resident space. [OBSERVED: status.md
 `ntfs-manyfiles.img` test rationale; chkdsk-improvement-findings.md
 §2.7 root $I30 overflow]
 
@@ -641,7 +641,7 @@ Win32 `FindFirstFile` API, FUSE bridges) synthesise `.`/`..` on the fly.
 [OBSERVED: src/mkfs.rs root `$I30` builder emits no `.` or `..` key entries — the loop at lines 1346–1374 only emits system-record `$FILE_NAME` streams, none named `..`; `rust-fs-ntfs` synthesises them above the raw index layer]
 
 `rust-fs-ntfs` synthesises these in its directory-listing API; they are
-never stored on disk. [OBSERVED: STATUS.md "directory listing"]
+never stored on disk. [OBSERVED: status.md "directory listing"]
 
 ### Root-directory $I30: required entries and sort order {#i30-root-required}
 
@@ -822,7 +822,7 @@ observed entry count usually indicates an in-progress or aborted unlink;
 `LinkCount` smaller than the observed count usually indicates an
 abandoned hardlink or rename. Either way, treating `LinkCount` as
 strictly authoritative will cause inconsistencies under host activity.
-[OBSERVED: STATUS.md "duplicate `$FILE_NAME` times … left stale"]
+[OBSERVED: status.md "duplicate `$FILE_NAME` times … left stale"]
 
 ## References
 
@@ -830,7 +830,7 @@ strictly authoritative will cause inconsistencies under host activity.
   [`src/index_io.rs`](../../../src/index_io.rs),
   [`src/record_build.rs`](../../../src/record_build.rs),
   [`src/attr_io.rs`](../../../src/attr_io.rs).
-- `rust-fs-ntfs` docs: [`docs/STATUS.md`](../../STATUS.md),
+- `rust-fs-ntfs` docs: [`docs/status.md`](../../status.md),
   [`docs/chkdsk-improvement-findings.md`](../../chkdsk-improvement-findings.md),
   [`docs/mkfs-bug-catalog.md`](../../mkfs-bug-catalog.md).
 - Cross-section dependencies:

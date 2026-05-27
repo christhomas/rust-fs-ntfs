@@ -4,7 +4,7 @@
 //! propagation through fs_ntfs_last_error) does what the header promises.
 
 // The C ABI functions aren't marked `unsafe extern "C"` (separate issue
-// tracked in STATUS.md), so Rust sees `unsafe { fs_ntfs_foo(...) }` as
+// tracked in status.md), so Rust sees `unsafe { fs_ntfs_foo(...) }` as
 // unnecessary. Keep the unsafe blocks here because they are the correct
 // semantic annotation — the functions deref raw pointers internally.
 #![allow(unused_unsafe)]

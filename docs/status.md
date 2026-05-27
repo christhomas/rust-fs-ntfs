@@ -76,7 +76,7 @@ All path-based ops below also have a handle-based `_h` sibling
 (e.g. `fs_ntfs_create_file_h`) that operates against an open
 `FsNtfsHandle` so the volume stays mounted through the callback
 adapter. Outstanding limits — overflowed-index parents and a full
-MFT — are tracked in [`FUTURE_FEATURES.md`](FUTURE_FEATURES.md).
+MFT — are tracked in [`future-features.md`](future-features.md).
 
 | Function | Role |
 |---|---|
@@ -157,7 +157,7 @@ All 42 scenarios reach `chkdsk readonly = 0` (no problems) and
 `chkdsk /scan ∈ {0, 11, 13}` (per-scenario distribution recorded in
 the JSON). The `/scan = 13` ceiling on fresh-format volumes is a
 known still-open differentiator tracked in
-[`docs/FUTURE_FEATURES.md` §3.1](FUTURE_FEATURES.md) — every other
+[`docs/future-features.md` §3.1](future-features.md) — every other
 verdict (mount, write, repeat-mount, repair) is clean. Detailed
 findings live in
 [`docs/chkdsk-improvement-findings.md`](chkdsk-improvement-findings.md)
@@ -381,7 +381,7 @@ The W-plan tracked the read-only-to-read-write rollout in five
 phases (W0 → W4). W0–W4 are shipped; W2.6 (MFT self-growth) and
 W3.2/3.3 (B+ tree insert / delete on overflowed `$INDEX_ALLOCATION`)
 are the two outstanding pieces, tracked in
-[`FUTURE_FEATURES.md`](FUTURE_FEATURES.md). W5 (`$LogFile`
+[`future-features.md`](future-features.md). W5 (`$LogFile`
 journaling) was intentionally skipped — `fs_ntfs_fsck` is the
 recovery path instead.
 

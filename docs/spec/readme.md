@@ -11,7 +11,7 @@ by an authoritative source or marked `[UNVERIFIED]` for follow-up.
 
 ```
 docs/spec/
-├── README.md                       (this file)
+├── readme.md                       (this file)
 ├── ntfs-specification.md           (master TOC + conventions, links to sections/)
 ├── sections/
 │   ├── 01-geometry-boot.md

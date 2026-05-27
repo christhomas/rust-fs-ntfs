@@ -1,5 +1,5 @@
 //! Write operations that modify existing MFT records in-place. No
-//! attribute resize, no cluster allocation, no new files. See STATUS.md
+//! attribute resize, no cluster allocation, no new files. See status.md
 //! Phase W1 for the exact scope.
 //!
 //! Path resolution uses upstream `ntfs` (read-only). The actual write

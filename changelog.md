@@ -25,7 +25,7 @@
 
 A family of read-only inspection helpers for byte-diff investigations
 and external tooling. All have C ABI wrappers. See
-[`docs/FUTURE_FEATURES.md` §3.11](docs/FUTURE_FEATURES.md) for the
+[`docs/future-features.md` §3.11](docs/future-features.md) for the
 full per-API table.
 
 - `read_attributes` / `describe_attributes` — every attribute on a

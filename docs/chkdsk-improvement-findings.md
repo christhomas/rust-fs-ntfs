@@ -164,7 +164,7 @@ shadow-copy storage, which fails on volumes under ~256 MiB. On
 volumes that do support `/scan` (≥256 MiB), it sometimes flags
 structural issues that readonly does not — we don't yet have a
 complete model of the differentiator (see
-[`FUTURE_FEATURES.md`](FUTURE_FEATURES.md) §3.1).
+[`future-features.md`](future-features.md) §3.1).
 
 ### 1.5 Linux test contract — what every commit must preserve
 

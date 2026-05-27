@@ -1,6 +1,6 @@
 //! Tests for `compare_names_ordinal` — the case-sensitive comparator
 //! that a `FILE_ATTRIBUTE_CASE_SENSITIVE_DIR` directory would use.
-//! Wiring it into `find_index_entry` is the follow-up (FUTURE_FEATURES.md
+//! Wiring it into `find_index_entry` is the follow-up (future-features.md
 //! §3.9); for now this just exercises the building-block function.
 
 use fs_ntfs::index_io::compare_names_ordinal;

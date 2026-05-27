@@ -34,7 +34,7 @@ What's still landing:
 
 - B+ tree insert / delete in `$INDEX_ALLOCATION` once a directory
   has overflowed out of `$INDEX_ROOT` (W3.2 / W3.3 in
-  `docs/FUTURE_FEATURES.md`).
+  `docs/future-features.md`).
 - `$MFT` self-growth when `$MFT:$Bitmap` is exhausted (W2.6).
 - A handful of mkfs scenarios in the multi-VM matrix that still
   trip `chkdsk` in repair mode — tracked in `test-matrix.json`.
@@ -255,7 +255,7 @@ history available via `git log` in the repo.
   explicit padding, smoke-mode gate failure-detection, dirty-tree
   seal false-positive guard, VM-host redaction, PowerShell short-
   read detection, portable verdict-collect path, cargo-fmt
-  hygiene. See `CHANGELOG.md` for the full per-item list.
+  hygiene. See `changelog.md` for the full per-item list.
 - `chore(hooks)`: `core.hooksPath` set to `.githooks` so
   `cargo fmt --check` + `cargo clippy -- -D warnings` run locally
   before commit (one-shot install:

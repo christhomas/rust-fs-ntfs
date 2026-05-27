@@ -1,5 +1,5 @@
 //! Tests for `fs_ntfs_get_volume_info_v2` — the extended volume-info
-//! reader added per FUTURE_FEATURES.md §7 (audit follow-up).
+//! reader added per future-features.md §7 (audit follow-up).
 
 #![allow(unused_unsafe)]
 

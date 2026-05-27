@@ -219,7 +219,7 @@ bash scripts/matrix-diff.sh /tmp/m1.json /tmp/m2.json
 - **Parallel matrix execution** on the VM (currently `--test-threads=1`).
   Each scenario can use its own drive letter; the only critical section
   is the mount step. Estimated 3–4× wall-clock speedup once wired.
-  See FUTURE_FEATURES.md.
+  See future-features.md.
 - **Pre-push hook** refusing pushes to `main` when the working tree is
   unsealed (verified via `matrix-verify.sh`).
 - **CI auto-seal**: on matrix pass, CI commits the updated JSON back to

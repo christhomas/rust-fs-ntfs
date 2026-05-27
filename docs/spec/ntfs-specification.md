@@ -1,7 +1,7 @@
 # NTFS Specification
 
 > Consolidated, attributed reference for the `rust-fs-ntfs` library. See
-> [README.md](README.md) for licensing posture, attribution scheme, and the list
+> [readme.md](readme.md) for licensing posture, attribution scheme, and the list
 > of permitted sources.
 
 ## Table of contents
@@ -17,14 +17,14 @@
 
 Supporting docs:
 
-- [README.md](README.md) — sources, attribution tags, workflow
+- [readme.md](readme.md) — sources, attribution tags, workflow
 - [notes/open-questions.md](notes/open-questions.md) — `[UNVERIFIED]` claims awaiting test
 - [notes/references.md](notes/references.md) — master reference list
 
 ## Document conventions
 
 - All factual claims carry an attribution tag — see
-  [README.md → Attribution tags](README.md#attribution-tags).
+  [readme.md → Attribution tags](readme.md#attribution-tags).
 - "MFT entry" and "MFT record" are interchangeable; prefer "record".
 - "Cluster" = NTFS allocation unit; "sector" = underlying device block. Cluster ≥ sector.
 - Hex byte offsets are zero-based within the structure unless stated otherwise.
@@ -101,13 +101,13 @@ Reading volumes that use them may be partial; writing them is not supported.
 | ------- | ------- | -------- |
 | LZNT1 compression (read + write) | §6 LZNT1 | Not started |
 | `$LogFile` crash-recovery replay | §5 WAL recovery | Not started |
-| DOS 8.3 short-name generation (write) | §4 DOS alias | `STATUS.md` |
-| B+ tree split/merge for large directories | §4 `$INDEX_ALLOCATION` | `STATUS.md` |
+| DOS 8.3 short-name generation (write) | §4 DOS alias | `status.md` |
+| B+ tree split/merge for large directories | §4 `$INDEX_ALLOCATION` | `status.md` |
 | `$MFTMirr` maintenance on every write | §2 `$MFTMirr` | Not started |
 | `$ATTRIBUTE_LIST` base-overflow emission | §2 `$ATTRIBUTE_LIST` | Not started |
-| Backup boot sector bidirectional sync | §1 backup boot | `STATUS.md` |
-| `$Extend\$Reparse` index entry maintenance | §6 `$Reparse` index | `STATUS.md` |
-| Non-resident `$BITMAP:$I30` (large dirs) | §4 index bitmap | `STATUS.md` |
+| Backup boot sector bidirectional sync | §1 backup boot | `status.md` |
+| `$Extend\$Reparse` index entry maintenance | §6 `$Reparse` index | `status.md` |
+| Non-resident `$BITMAP:$I30` (large dirs) | §4 index bitmap | `status.md` |
 | Bad-cluster relocation (`$BadClus` updates) | §3 `$BadClus` | Not started |
 | EFS (`$EFS` `$LOGGED_UTILITY_STREAM`) | §6 EFS | Not started |
 | Transactional NTFS (`$TXF_DATA`) | §6 `$TXF_DATA` | Not started |

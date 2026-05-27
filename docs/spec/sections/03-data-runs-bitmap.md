@@ -329,7 +329,7 @@ the record. There is no fixed "value > N bytes ⇒ non-resident" rule
 the writer whenever a resident attribute outgrows its record. The current
 `rust-fs-ntfs` writer does not yet implement migration in either direction;
 it errors when a resident attribute would need to grow past its record space
-[`[OBSERVED: docs/STATUS.md:436-448]`](#references) [UNVERIFIED].
+[`[OBSERVED: docs/status.md:436-448]`](#references) [UNVERIFIED].
 
 **Reverse migration (non-resident → resident).** Some operating-system
 implementations are documented to migrate a non-resident attribute back to
@@ -614,7 +614,7 @@ collected bad LCNs are USED in `$Bitmap`
 
 `rust-fs-ntfs` does not currently implement bad-sector relocation; the
 specification is captured here for the future repair-mode implementation
-[`[OBSERVED: docs/STATUS.md]`](#references) [UNVERIFIED].
+[`[OBSERVED: docs/status.md]`](#references) [UNVERIFIED].
 
 ## References
 
@@ -632,7 +632,7 @@ specification is captured here for the future repair-mode implementation
   sign-extension bug repro.
 - `[OBSERVED: run-20260503-072644]` — `$Bad` cluster-count-vs-cluster-count-1
   off-by-one repro vs. Microsoft `format.com` reference.
-- `[OBSERVED: docs/STATUS.md]` — implementation status of W2.3 (`$Bitmap`
+- `[OBSERVED: docs/status.md]` — implementation status of W2.3 (`$Bitmap`
   allocator), W2.4 (encoder), and unimplemented repair-mode features.
 
 ## Open questions

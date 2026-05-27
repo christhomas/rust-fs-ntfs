@@ -343,7 +343,7 @@ tables where a feature has *some* evidence but material gaps remain.
 | --: | ---- | ------ | ----- |
 | 171 | Migration threshold is dynamic (free space in record) | **UNVERIFIED** | Rule described; not stress-tested |
 | 172 | mkfs performs migration for `$BadClus:$Bad` | **VERIFIED** | |
-| 173 | Runtime writer migration (write path) | **UNVERIFIED** | Documented gap in `STATUS.md` |
+| 173 | Runtime writer migration (write path) | **UNVERIFIED** | Documented gap in `status.md` |
 
 **§3 item count: 51** · VERIFIED: 22 · OBSERVED: 5 · UNVERIFIED: 20 · UNKNOWN: 2 · PARTIAL: 2
 
@@ -357,7 +357,7 @@ tables where a feature has *some* evidence but material gaps remain.
 | --: | ---- | ------ | ----- |
 | 174 | Full layout (timestamps, sizes, attributes, namespace, name) | **VERIFIED** | |
 | 175 | Timestamps are snapshot (not kept in sync with `$SI`) | **UNVERIFIED** | Same as §2 item 109 |
-| 176 | `AllocatedSize`/`RealSize` are snapshot; chkdsk does not flag staleness | **OBSERVED** | Per STATUS.md |
+| 176 | `AllocatedSize`/`RealSize` are snapshot; chkdsk does not flag staleness | **OBSERVED** | Per status.md |
 
 ### `$INDEX_ROOT` (type `0x90`)
 

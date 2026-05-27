@@ -1,6 +1,6 @@
 # Procmon trace of `chkdsk /scan` — investigating the /scan exit 13 ceiling
 
-Background: [`docs/FUTURE_FEATURES.md` §3.1](./FUTURE_FEATURES.md). Our
+Background: [`docs/future-features.md` §3.1](./future-features.md). Our
 mkfs output passes `chkdsk` read-only and `chkdsk /F` (offline) cleanly
 but `chkdsk /scan` (online) consistently exits 13 ("errors queued for
 offline repair") on every mkfs scenario, while a reference volume from
