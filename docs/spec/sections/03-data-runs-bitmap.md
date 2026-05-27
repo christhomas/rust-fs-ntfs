@@ -72,7 +72,7 @@ bit  7 6 5 4   3 2 1 0
   [`[OBSERVED: src/data_runs.rs:51-53]`](#references).
 
 **Length field.** `F` little-endian bytes giving the run's cluster count
-as an unsigned integer [UNVERIFIED]. The length is
+as an unsigned integer [`[OBSERVED: src/data_runs.rs:91-95]`](#references). The length is
 **always positive** — encoders MUST use enough bytes that the value, when
 interpreted by a sign-aware reader, would still be non-negative. In practice
 that means: if the high bit of the most significant length byte would be set,
@@ -89,7 +89,7 @@ from the previous run's LCN
 - For every subsequent run, the field is a signed delta added to the running
   absolute LCN. Negative deltas (the run lives at a lower LCN than the
   previous run) are legal and must be handled with sign extension on the
-  most significant byte [UNVERIFIED].
+  most significant byte [`[OBSERVED: src/data_runs.rs:42-57]`](#references).
 - Sign extension is performed by setting bits `[V*8 .. 64)` to all-ones if
   the high bit of byte `V-1` is set
   [`[OBSERVED: src/data_runs.rs:80-84]`](#references).
@@ -118,7 +118,7 @@ Bytes:   31 20 4A 00 05
 ```
 
 Decoded: 32 clusters starting at LCN 327754. As the first run, the offset
-field reads as the absolute LCN [UNVERIFIED].
+field reads as the absolute LCN [`[OBSERVED: src/data_runs.rs:66]`](#references).
 
 ### Sparse run
 
@@ -172,7 +172,7 @@ Total length: 56 clusters; this must equal the
 ## Sparse runs {#sparse-runs}
 
 A sparse run is encoded with `V = 0` (high nibble of the header byte is zero):
-no LCN bytes follow, only the length [UNVERIFIED].
+no LCN bytes follow, only the length [`[OBSERVED: src/data_runs.rs:101-102]`](#references).
 Reads return zero; no cluster is allocated. The decoder represents this in
 [`DataRun`](../../../src/data_runs.rs) as `lcn: None`
 [`[OBSERVED: src/data_runs.rs:26-29]`](#references).
@@ -505,7 +505,7 @@ allocator never hands them out again.
 2. **Named `$DATA` with name `"$Bad"`** (UTF-16LE, name length = 4). This
    is the one that carries the bad-cluster bookkeeping.
 
-**Identifying the named attribute** [UNVERIFIED]:
+**Identifying the named attribute** [`[OBSERVED: src/mkfs.rs:47,229,905-907]`](#references):
 
 - Type code = `0x80` (`$DATA`).
 - Name length = 4.

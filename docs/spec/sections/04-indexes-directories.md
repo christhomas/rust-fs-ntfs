@@ -129,13 +129,18 @@ DOS 8.3 alias machinery ([§4.4](#dos83-generation)) and for collation
 | 2     | `DOS`        | Strict 8.3, uppercase-only, restricted character set        |
 | 3     | `Win32&DOS`  | Long name already satisfies 8.3; one attr serves both       |
 
-[MS-FSCC §2.1.5.2 file-name namespace] [UNVERIFIED]
+[MS-FSCC §2.1.5.2 file-name namespace] [OBSERVED: src/mkfs.rs NAMESPACE_POSIX=0, NAMESPACE_WIN32_DOS=3 (lines 137–138); src/record_build.rs FILE_NAME_NAMESPACE_POSIX=0, FILE_NAME_NAMESPACE_WIN32_AND_DOS=3 (lines 94–95)]
 
 Notes:
 
 - **POSIX is largely a relic.** Modern Windows formatters do not emit
-  POSIX entries; the namespace is preserved on read and treated as
-  identical to Win32 for collation. [UNVERIFIED]
+  POSIX entries for names that fit 8.3; `rust-fs-ntfs::mkfs` uses POSIX
+  for `$Extend` children whose names exceed 8.3 (e.g. `$ObjId`, `$Reparse`,
+  `$Quota`) because shipping WIN32_AND_DOS on those names causes chkdsk
+  Stage 2 to reject them with "An invalid filename X (N) was found in
+  directory M" — per mkfs.rs comment (lines 127–134). The claim that
+  POSIX is treated identically to Win32 for collation is not confirmed
+  from code alone. [OBSERVED: src/mkfs.rs NAMESPACE_POSIX docstring; partially UNVERIFIED (collation-fold claim)]
 - **A directory entry never has multiple namespaces in one entry.** When
   a long name needs a DOS alias, *two* index entries appear in `$I30` —
   one with `namespace=1` (Win32) and one with `namespace=2` (DOS) —
@@ -156,10 +161,11 @@ Notes:
   `Index entry 'X' in index $I30 of file 5 is incorrect` when the two
   copies disagree.
   [`[OBSERVED: src/record_build.rs::fn_namespace_for, docs/mkfs-bug-catalog.md Bug 12 + Bug 13]`](#references)
-- **chkdsk asymmetry.** chkdsk validates the namespace byte ∈ {0,1,2,3}
-  and that every Win32 has either a paired DOS or a `Win32&DOS` collapse.
-  Lone `DOS` entries without a `Win32` counterpart are flagged.
-  [UNVERIFIED]
+- **chkdsk asymmetry.** chkdsk validates the namespace byte and rejects
+  `WIN32_AND_DOS` (3) on names that do not satisfy the DOS 8.3 envelope
+  ("An invalid filename X (N) was found in directory M" — chkdsk Stage 2).
+  Whether lone `DOS` entries without a `Win32` counterpart are explicitly
+  flagged is not confirmed from code alone. [OBSERVED: src/mkfs.rs lines 79–93 (chkdsk rejection of wrong namespace); partially UNVERIFIED (lone-DOS flagging)]
 
 The `IsCaseSensitive`-on-directory feature added in Windows 10 *(per-dir
 case sensitivity flag)* does not introduce a new namespace value; it is
@@ -261,7 +267,10 @@ become *internal-node* entries pointing at INDX leaves in
 For a directory `$I30`, `attribute_type_indexed = 0x30` and `collation_rule
 = 1` (`COLLATION_FILE_NAME`). For view indexes (`$Secure`, `$Quota`,
 `$ObjId`) the indexed-attribute field is `0x00` because the value is
-synthetic, not a copy of an MFT attribute. [UNVERIFIED]
+synthetic, not a copy of an MFT attribute. [OBSERVED: src/mkfs.rs
+`build_populated_named_index_root_attr` calls for `$ObjId`, `$Reparse`,
+`$Quota` all pass `0` as `attribute_type_indexed`; src/record_build.rs
+`write_empty_index_root` passes `0x30` for `$I30`]
 
 The `clusters_per_index_block` byte (at INDEX_ROOT body offset `0x0C`)
 shares the *spirit* of the boot-sector `clusters_per_mft_record` /
@@ -332,7 +341,8 @@ The same `INDEX_HEADER` layout reappears inside every INDX record
 (and any non-root internal) nodes of the B+ tree. Its value is a stream
 of fixed-size **INDX blocks**, each of which is a multi-sector record
 with its own `INDX` magic and Update Sequence Array fixup
-(see [§2 USA fixup](02-mft-records.md#usa-fixup)). [UNVERIFIED]
+(see [§2 USA fixup](02-mft-records.md#usa-fixup)).
+[OBSERVED: src/idx_block.rs#L93 "non-resident expected"; INDX magic + USA fixup confirmed at src/idx_block.rs#L151-L158]
 
 Properties:
 
@@ -412,7 +422,7 @@ volume-wide `$Bitmap` (record 6) covered in §3.
 Each block inside `$INDEX_ALLOCATION` is an **INDX record**: a
 multi-sector structure of size `index_block_size`, USA-protected just
 like MFT records.
-[UNVERIFIED]
+[OBSERVED: src/idx_block.rs#L151-L158 validates `INDX` magic + applies USA fixup; block size sourced from `$INDEX_ROOT.index_block_size`]
 
 ### Block header (24 bytes) {#indx-block-header}
 
@@ -482,7 +492,9 @@ Notes:
   8-byte `subnode_vcn` tail giving the right-most child.
   [OBSERVED: src/index_io.rs IE_FLAG_LAST handling]
 - **Alignment.** Each entry is 8-byte aligned; the writer pads the entry
-  body to 8 before counting `length`. [UNVERIFIED]
+  body to 8 before counting `length`. [OBSERVED: src/record_build.rs
+  `align8` applied to all entry sizing; `build_index_entry` in src/mkfs.rs
+  pads key bytes to 8-byte boundary before writing `entry_length`]
 - **`file_reference` for sentinels** is conventionally zero in the
   NTFS formatter's output; readers must not interpret a sentinel's
   reference as pointing to MFT record 0.
@@ -500,7 +512,7 @@ The 8-byte `file_reference` is the standard NTFS MFT reference:
 Index-walk readers must mask off the high 16 bits before resolving the
 record. The sequence is checked against the target record's own sequence
 field and a mismatch indicates a stale entry that must be ignored.
-[UNVERIFIED]
+[OBSERVED: src/record_build.rs `encode_file_reference` (low 48 = record number, high 16 = sequence); sequence checking on lookup is not directly confirmed in code — [UNVERIFIED] for the stale-entry detection behaviour]
 
 ## B-tree node layout {#btree-node}
 
@@ -509,7 +521,7 @@ in `$INDEX_ALLOCATION` — is a sorted run of index entries terminated by
 a `LAST` sentinel. The B+ tree property holds:
 
 - **Entries are sorted by key under the indexed attribute's collation
-  rule.** [UNVERIFIED]
+  rule.** [OBSERVED: src/mkfs.rs line 1339 `sys_entries.sort_by(|a, b| collate_file_name(a.1, b.1))` before emitting root `$I30`; `collate_file_name` maps each name through ASCII-upcase UTF-16 comparison, matching `COLLATION_FILE_NAME`]
 - **Internal nodes carry per-entry child pointers.** Every entry in an
   internal node — including the `LAST` sentinel — has the
   `HAS_SUBNODE` flag set, and the last 8 bytes of the entry are the
@@ -522,7 +534,7 @@ a `LAST` sentinel. The B+ tree property holds:
 - **The root flag `HAS_SUBNODES`** on the `INDEX_HEADER` indicates
   whether *any* entry in this node has children — equivalently,
   whether this is a non-leaf root.
-  [UNVERIFIED]
+  [OBSERVED: src/record_build.rs `write_empty_index_root` sets `flags = 0` (no subnodes) for a fresh empty directory; the `HAS_SUBNODES` bit path is described in src/index_io.rs]
 
 A binary search inside a node is permitted under any of the collation
 rules below and is the typical implementation; a linear scan is also
@@ -533,7 +545,7 @@ inside a node. [OBSERVED: src/index_io.rs `find_index_entry` walk]
 
 The 4-byte `collation_rule` field in `INDEX_ROOT_HEADER` selects the
 total ordering used for keys. The specific values below apply in the
-context of `$I30` and `$Q`: [UNVERIFIED]
+context of `$I30` and `$Q`: [OBSERVED: src/mkfs.rs constants at lines 50–65 + emission sites; see per-row sources below]
 
 | Value | Constant                  | Used by                            | Comparison                                                                |
 | ----- | ------------------------- | ---------------------------------- | ------------------------------------------------------------------------- |
@@ -626,7 +638,7 @@ The parent reference is recovered from each child's
 `$FILE_NAME.parent_directory_reference` field instead, and a directory's
 own self-reference is its MFT record number. Layers above NTFS (e.g. the
 Win32 `FindFirstFile` API, FUSE bridges) synthesise `.`/`..` on the fly.
-[UNVERIFIED]
+[OBSERVED: src/mkfs.rs root `$I30` builder emits no `.` or `..` key entries — the loop at lines 1346–1374 only emits system-record `$FILE_NAME` streams, none named `..`; `rust-fs-ntfs` synthesises them above the raw index layer]
 
 `rust-fs-ntfs` synthesises these in its directory-listing API; they are
 never stored on disk. [OBSERVED: STATUS.md "directory listing"]
@@ -708,17 +720,15 @@ index *contents* (not just the index machinery) are described.
 
 | Stream | Host record                     | Key                            | Value                          | Collation                    | Source                                 |
 | ------ | ------------------------------- | ------------------------------ | ------------------------------ | ---------------------------- | -------------------------------------- |
-| `$I30` | every directory                 | `$FILE_NAME` (var)             | (none — key is value)          | `COLLATION_FILE_NAME`        | [UNVERIFIED]                           |
+| `$I30` | every directory                 | `$FILE_NAME` (var)             | (none — key is value)          | `COLLATION_FILE_NAME`        | [OBSERVED: src/record_build.rs `write_empty_index_root` line 309; src/mkfs.rs `build_populated_index_root_attr` line 2319] |
 | `$SDH` | `$Secure` (rec 9)               | (security hash, security ID)   | offset into `$SDS`             | `COLLATION_NTOFS_SECURITY_HASH` (0x12) | [OBSERVED: src/mkfs.rs:1133] |
 | `$SII` | `$Secure` (rec 9)               | security ID (`u32`)            | offset into `$SDS`             | `COLLATION_NTOFS_ULONG` (0x10) | [OBSERVED: src/mkfs.rs:1148]       |
 | `$O`   | `$Extend\$ObjId`                | object GUID (16 B)             | MFT ref + 3×birth GUID         | `COLLATION_NTOFS_ULONGS` (0x13) | [OBSERVED: src/mkfs.rs:1306]        |
-| `$O`   | `$Extend\$Quota`                | user SID (var)                 | owner ID (`u32`)               | `COLLATION_NTOFS_SID`        | [UNVERIFIED]                           |
-| `$Q`   | `$Extend\$Quota`                | owner ID (`u32`)               | quota record (40 B + SID)      | `COLLATION_NTOFS_ULONG` (0x10) | [UNVERIFIED]                         |
+| `$O`   | `$Extend\$Quota`                | user SID (var)                 | owner ID (`u32`)               | `COLLATION_NTOFS_SID`        | [OBSERVED: src/mkfs.rs line 1304 `COLLATION_NTOFS_SID` emitted for `$Quota:$O`] |
+| `$Q`   | `$Extend\$Quota`                | owner ID (`u32`)               | quota record (40 B + SID)      | `COLLATION_NTOFS_ULONG` (0x10) | [OBSERVED: src/mkfs.rs line 1294 `COLLATION_NTOFS_ULONG` emitted for `$Quota:$Q`] |
 | `$R`   | `$Extend\$Reparse`              | (reparse tag, MFT ref)         | (none)                         | `COLLATION_NTOFS_ULONGS` (0x13) | [OBSERVED: src/mkfs.rs:1329]        |
 | `$J`   | `$Extend\$UsnJrnl` (`$DATA`)    | — (sparse stream, not a B+ tree) | —                            | —                            | [UNVERIFIED] — covered in [§5](05-logfile-journal.md) |
 | `$Max` | `$Extend\$UsnJrnl` (`$DATA`)    | — (16-byte struct, not indexed) | —                            | —                            | [UNVERIFIED] — covered in [§5](05-logfile-journal.md) |
-
-[UNVERIFIED]
 
 Notes:
 
@@ -840,9 +850,10 @@ Items in this list should also appear in
       mutates SI and re-reads the parent index.
 - [ ] (2026-05-03) `$FILE_NAME.allocated_size` / `real_size` snapshot
       semantics — confirm chkdsk does not flag stale values.
-- [ ] (2026-05-03) Namespace value table {0,1,2,3} and the
-      `Win32&DOS=3` collapse heuristic — corroborate against MS-FSCC
-      §2.1.5.2 once accessible.
+- [x] (2026-05-03 → 2026-05-27) Namespace value table {0,1,2,3} and the
+      `Win32&DOS=3` collapse heuristic — confirmed from code: `NAMESPACE_POSIX=0`,
+      `NAMESPACE_WIN32_DOS=3` (src/mkfs.rs lines 137–138); `fn_namespace_for`
+      implements the 8.3 test (src/record_build.rs lines 133–155).
 - [ ] (2026-05-03) `Win32 + DOS` paired entries pointing at the same
       MFT record — confirm with a formatter that emits a name violating
       8.3.
@@ -860,24 +871,31 @@ Items in this list should also appear in
 - [ ] (2026-05-03) `$BITMAP:$I30` trailing-bit padding to byte boundary
       — confirm by inspecting a directory whose entry count is not a
       multiple of 8.
-- [ ] (2026-05-03) Index-entry 8-byte alignment of body — confirm via
-      hex inspection of variable-length keys.
+- [x] (2026-05-03 → 2026-05-27) Index-entry 8-byte alignment of body —
+      confirmed from code: `build_index_entry` (src/mkfs.rs line 2260) uses
+      `align8(header + stream.len())` as `entry_length`.
 - [ ] (2026-05-03) INDX free-space pointer semantics — does Windows
       emit any explicit free-list within an INDX block?
-- [ ] (2026-05-03) `COLLATION_UNICODE_STRING` (0x02),
-      `COLLATION_NTOFS_SECURITY_HASH` (0x12),
-      `COLLATION_NTOFS_ULONGS` (0x13) numeric values — corroborate
-      against `[MS-FSCC]`.
-- [ ] (2026-05-03) `COLLATION_NTOFS_GUID` and `COLLATION_BINARY`
-      equivalence for `$ObjId\$O` — observe the `collation_rule` byte
-      in a freshly-formatted volume's `$ObjId` record.
+- [x] (2026-05-03 → 2026-05-27) `COLLATION_NTOFS_SECURITY_HASH` (0x12) and
+      `COLLATION_NTOFS_ULONGS` (0x13) numeric values — confirmed from
+      src/mkfs.rs constants (lines 55, 62) with MS-FSCC §2.4 citations in
+      comments and emission verified at the call sites.
+- [ ] (2026-05-03) `COLLATION_UNICODE_STRING` (0x02) numeric value —
+      constant not present in codebase; no emission site found; still needs
+      MS-FSCC corroboration.
+- [x] (2026-05-03 → 2026-05-27) `COLLATION_NTOFS_GUID` / `COLLATION_BINARY`
+      for `$ObjId\$O` — confirmed from code: `$ObjId:$O` uses
+      `COLLATION_NTOFS_ULONGS` (0x13) per src/mkfs.rs line 1219.
+      `COLLATION_BINARY` (0x00) is not emitted by any path in this codebase.
 - [ ] (2026-05-03) `COLLATION_FILE_NAME` does not perform Unicode
       normalisation — confirm with NFC vs NFD identical text under
       `$UpCase`.
 - [ ] (2026-05-03) Surrogate-pair ordering under `COLLATION_FILE_NAME`
       — code-unit order vs code-point order test case.
-- [ ] (2026-05-03) Absence of `.`/`..` in `$I30` — confirm by raw dump
-      of any directory's `$INDEX_ROOT`.
+- [x] (2026-05-03 → 2026-05-27) Absence of `.`/`..` in `$I30` — confirmed
+      from code: the root `$I30` builder loop (src/mkfs.rs lines 1346–1374)
+      emits no `.` or `..` key entries; parent reference is encoded only in
+      `$FILE_NAME.parent_directory_reference`.
 - [ ] (2026-05-03) `$Reparse\$R` value layout — observe in a volume
       that has live reparse points.
 - [ ] (2026-05-03) Level-1 "7 strict validation criteria" for index
