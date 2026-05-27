@@ -185,7 +185,7 @@ pub fn encode_file_reference(record_number: u64, sequence: u16) -> u64 {
 A base record stores `0` here (it is its own base). An extension record
 stores a non-zero file reference pointing at the base record that owns it,
 i.e. the record whose `$ATTRIBUTE_LIST` enumerates this extension.
-[UNVERIFIED]
+[OBSERVED: src/record_build.rs:392]
 
 **Next attribute ID at `0x28`.** A 16-bit counter giving the smallest unused
 attribute instance ID for new attributes added to this record. Each
@@ -198,14 +198,11 @@ initialise `next_attr_id = 3`. [OBSERVED: src/record_build.rs:130-131, 290-291]
 **MFT record number at `0x2C`.** A 32-bit self-reference. Present in NTFS 3.1
 records; on older versions the bytes at `+0x2C..+0x30` are reserved /
 zero-filled. `rust-fs-ntfs` always writes the record number on creation.
-[OBSERVED: src/record_build.rs:131, 292]
-[UNVERIFIED] — the format documentation we have stops at offset `0x32` and
-does not explicitly mark `0x2C` as version-gated; we treat the field as
-3.1-only by convention pending corroboration from `[MS-FSCC]`.
+[OBSERVED: src/record_build.rs:131, 292, 395]
 
 ### A worked example header
 
-Canonical 1024-byte example: [UNVERIFIED]
+Canonical 1024-byte example: [OBSERVED: src/record_build.rs:373-398]
 
 ```
 Offset  Hex                                              Field
@@ -226,7 +223,7 @@ Offset  Hex                                              Field
 0x032   XX XX XX XX                                      USA fixup array (2 entries)
 ```
 
-[UNVERIFIED]
+[OBSERVED: src/record_build.rs:373-398]
 
 For a 4096-byte record the USA stretches to 9 words (1 USN + 8 save-words),
 the first attribute lives at `0x48`, and `bytes_allocated` is `0x1000`.

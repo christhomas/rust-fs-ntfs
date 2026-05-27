@@ -9,7 +9,7 @@ fixed-size **sectors** of the underlying block device. The volume's physical
 geometry, addressing units, and locations of the system files needed to bring
 the volume online are entirely described by the 512-byte **boot sector** at
 sector 0, with a byte-identical **backup boot sector** stored at the last sector
-of the partition [UNVERIFIED].
+of the partition `[OBSERVED: src/mkfs.rs lines 416–418]`.
 
 At mount time, every consumer of an NTFS volume — driver, fsck, repair tool,
 read-only library — must perform the same first steps:
@@ -17,7 +17,7 @@ read-only library — must perform the same first steps:
 1. Read sector 0.
 2. Validate the boot signature (`0x55AA`), the OEM ID (`"NTFS    "`), the
    logical sector size (must be exactly 512), and the cluster geometry
-   (`sectors_per_cluster` is a power of two) [UNVERIFIED].
+   (`sectors_per_cluster` is a power of two) `[OBSERVED: src/mkfs.rs lines 1429–1436 (written); src/mft_io.rs lines 68–106 (validated on read)]`.
 3. Decode `clusters_per_mft_record` (offset `0x40`) using the signed-byte
    `signed-log2` encoding to derive the MFT record size
    `[OBSERVED: src/mft_io.rs::parse_boot_params_from_bytes]`.
@@ -59,7 +59,7 @@ The first ~36 bytes follow the historical **BIOS Parameter Block (BPB)**
 layout inherited from FAT, with most legacy fields zeroed; the NTFS-specific
 **extended BPB** starts at offset `0x24` and runs through `0x53`. The
 remainder is x86 bootstrap code (offsets `0x54..0x1FE`) terminated by the
-boot signature [UNVERIFIED].
+boot signature `[OBSERVED: src/mkfs.rs lines 1502–1507]`.
 
 ### Field table
 
@@ -68,11 +68,11 @@ bytes. All multi-byte integers are little-endian.
 
 | Offset | Size | Field                              | Notes                                                                                       |
 | -----: | ---: | ---------------------------------- | ------------------------------------------------------------------------------------------- |
-| `0x000` |   3 | `JmpInstruction`                   | x86 jump to bootstrap. NTFS canonical: `EB 52 90` (jmp +0x52, nop) [UNVERIFIED]              |
-| `0x003` |   8 | `OemId`                            | ASCII `"NTFS    "` (4 chars + 4 spaces) [UNVERIFIED]                                         |
-| `0x00B` |   2 | `BytesPerSector`                   | Logical sector size. MUST be `512` for NTFS [UNVERIFIED]                                    |
-| `0x00D` |   1 | `SectorsPerCluster`                | See [signed-log2 encoding](#log2-encoding); positive values must be a power of two [UNVERIFIED] |
-| `0x00E` |   2 | `ReservedSectors`                  | NTFS: `0` [UNVERIFIED]                                                                       |
+| `0x000` |   3 | `JmpInstruction`                   | x86 jump to bootstrap. NTFS canonical: `EB 52 90` (jmp +0x52, nop) `[OBSERVED: src/mkfs.rs lines 1429–1431]` |
+| `0x003` |   8 | `OemId`                            | ASCII `"NTFS    "` (4 chars + 4 spaces) `[OBSERVED: src/mkfs.rs line 1433]`                  |
+| `0x00B` |   2 | `BytesPerSector`                   | Logical sector size. MUST be `512` for NTFS `[OBSERVED: src/mkfs.rs line 1435]`             |
+| `0x00D` |   1 | `SectorsPerCluster`                | See [signed-log2 encoding](#log2-encoding); positive values must be a power of two `[OBSERVED: src/mkfs.rs line 1436]` |
+| `0x00E` |   2 | `ReservedSectors`                  | NTFS: `0` `[OBSERVED: src/mkfs.rs line 1427 (zero-filled buffer, not overwritten)]`         |
 | `0x010` |   3 | (zero — historical FAT `Fats` byte + 2-byte reserved) | NTFS: `00 00 00` `[OBSERVED: src/mkfs.rs lines 967–970]`                |
 | `0x013` |   2 | (zero — historical `RootEntries`)  | NTFS: `00 00` `[OBSERVED: src/mkfs.rs line 969]`                                            |
 | `0x015` |   1 | `MediaDescriptor`                  | `0xF8` for fixed disk `[OBSERVED: src/mkfs.rs line 971]`                                     |
@@ -83,11 +83,11 @@ bytes. All multi-byte integers are little-endian.
 | `0x020` |   4 | (zero — historical `LargeSectors`) | NTFS uses the 64-bit field at `0x28` instead `[OBSERVED: src/mkfs.rs line 976]` `[UNVERIFIED]` |
 | `0x024` |   4 | `BiosDriveNumberAndExtBpbSig`      | NTFS canonical 4-byte block at `0x24..0x28` is `0x00800080` `[OBSERVED: src/mkfs.rs line 977]` `[UNVERIFIED]` |
 | `0x028` |   8 | `TotalSectors64` (NumberSectors)   | Count of *data* sectors in the volume. Microsoft format.com convention: `volume_sectors − 1` (the trailing backup-boot sector is excluded) `[OBSERVED: src/mkfs.rs lines 979–991, docs/mkfs-bug-catalog.md "Bug 6"]` |
-| `0x030` |   8 | `MFT_LCN`                          | Starting Logical Cluster Number of `$MFT` [UNVERIFIED]                                       |
-| `0x038` |   8 | `MFTMirr_LCN`                      | Starting Logical Cluster Number of `$MFTMirr` [UNVERIFIED]                                   |
-| `0x040` |   1 | `ClustersPerFileRecordSegment`     | `signed int8`. See [signed-log2 encoding](#log2-encoding). `0xF6 = −10 → 2^10 = 1024 B`; `0xF4 = −12 → 2^12 = 4096 B` [UNVERIFIED] |
+| `0x030` |   8 | `MFT_LCN`                          | Starting Logical Cluster Number of `$MFT` `[OBSERVED: src/mkfs.rs line 1462]`               |
+| `0x038` |   8 | `MFTMirr_LCN`                      | Starting Logical Cluster Number of `$MFTMirr` `[OBSERVED: src/mkfs.rs line 1463]`           |
+| `0x040` |   1 | `ClustersPerFileRecordSegment`     | `signed int8`. See [signed-log2 encoding](#log2-encoding). `0xF6 = −10 → 2^10 = 1024 B`; `0xF4 = −12 → 2^12 = 4096 B` `[OBSERVED: src/mkfs.rs lines 1467–1477]` |
 | `0x041` |   3 | (reserved, zero)                   | NTFS: `00 00 00` `[OBSERVED: src/mkfs.rs lines 1008–1010]`                                  |
-| `0x044` |   1 | `ClustersPerIndexBuffer`           | Same `signed-log2` encoding as `0x40`, applied to `$INDEX_ALLOCATION` (INDX) page size [UNVERIFIED] |
+| `0x044` |   1 | `ClustersPerIndexBuffer`           | Same `signed-log2` encoding as `0x40`, applied to `$INDEX_ALLOCATION` (INDX) page size `[OBSERVED: src/mkfs.rs lines 1484–1490]` |
 | `0x045` |   3 | (reserved, zero)                   | NTFS: `00 00 00` `[OBSERVED: src/mkfs.rs lines 1021–1023]`                                  |
 | `0x048` |   8 | `VolumeSerialNumber`               | 64-bit unique-per-volume identifier `[OBSERVED: src/mkfs.rs line 1025]`                      |
 | `0x050` |   4 | `Checksum`                         | Historically a sum of bytes `0x00..0x50`. Not validated by the major drivers `[OBSERVED: src/mkfs.rs line 1026]` `[UNVERIFIED]` |
@@ -121,7 +121,7 @@ remaining bounds checks before we observe the geometry
 
 The boot-sector fields at offsets `0x40` (`ClustersPerFileRecordSegment`) and
 `0x44` (`ClustersPerIndexBuffer`) use a signed-byte encoding so that record
-sizes **smaller than one cluster** can still be expressed [UNVERIFIED].
+sizes **smaller than one cluster** can still be expressed `[OBSERVED: src/mkfs.rs lines 1467–1490]`.
 
 ```
 function parse_record_size(boot, offset, cluster_size):
@@ -132,7 +132,7 @@ function parse_record_size(boot, offset, cluster_size):
         return 1 << abs(raw)            // record is 2^|raw| bytes, sub-cluster
 ```
 
-[UNVERIFIED]
+`[OBSERVED: src/mkfs.rs lines 1467–1490]`
 
 ### Worked examples
 
@@ -144,7 +144,7 @@ function parse_record_size(boot, offset, cluster_size):
 | `0xF6`   | `−10`        | `2^10 = 1024` bytes           |
 | `0xF4`   | `−12`        | `2^12 = 4096` bytes           |
 
-[UNVERIFIED]
+`[OBSERVED: src/mkfs.rs lines 1467–1490]`
 
 ### Why both regimes coexist
 
@@ -153,12 +153,12 @@ typically larger than one cluster, so the field expresses a count of
 clusters per record (positive value). When the cluster size is large
 (≥ 4 KiB), an MFT record is typically smaller than one cluster (1 KiB or
 4 KiB), and the field switches to the `2^|n|`-bytes representation
-(negative value) [UNVERIFIED].
+(negative value) `[OBSERVED: src/mkfs.rs lines 1467–1477]`.
 
 The same encoding governs `ClustersPerIndexBuffer` at offset `0x44`. With
 512-byte clusters, an INDX page size of 4096 bytes spans
 `4096 / 512 = 8` clusters and is encoded as `+8`; with 4 KiB clusters, the
-same 4096-byte INDX page spans one cluster and is encoded as `+1` [UNVERIFIED].
+same 4096-byte INDX page spans one cluster and is encoded as `+1` `[OBSERVED: src/mkfs.rs lines 1484–1490]`.
 
 ### Implementation notes
 
@@ -228,7 +228,7 @@ in scope.
 | Copy             | Location                                                       |
 | ---------------- | -------------------------------------------------------------- |
 | Primary boot     | Sector 0 (byte offset 0)                                       |
-| Backup boot      | Last 512-byte sector of the partition: `partition_start + (TotalSectors − 1) × bytes_per_sector` [UNVERIFIED] |
+| Backup boot      | Last 512-byte sector of the partition: `partition_start + (TotalSectors − 1) × bytes_per_sector` `[OBSERVED: src/mkfs.rs lines 319–330]` |
 
 Equivalently, with `volume_bytes = TotalClusters × cluster_size`, the backup
 lives at byte offset `volume_bytes − bytes_per_sector`
@@ -454,8 +454,8 @@ in the section listed.
 
 | Magic            | Bytes (LE)                         | Where                                   | Section                                         | Source                                       |
 | ---------------- | ---------------------------------- | --------------------------------------- | ----------------------------------------------- | -------------------------------------------- |
-| `OemId`          | `4E 54 46 53 20 20 20 20` (`"NTFS    "`) | Boot sector `0x03..0x0B`           | §1 (this section)                               | [UNVERIFIED]                                 |
-| `BootSignature`  | `55 AA` (= `0xAA55` LE16)          | Boot sector `0x1FE`                     | §1 (this section)                               | [UNVERIFIED]                                 |
+| `OemId`          | `4E 54 46 53 20 20 20 20` (`"NTFS    "`) | Boot sector `0x03..0x0B`           | §1 (this section)                               | `[OBSERVED: src/mkfs.rs line 1433]`          |
+| `BootSignature`  | `55 AA` (= `0xAA55` LE16)          | Boot sector `0x1FE`                     | §1 (this section)                               | `[OBSERVED: src/mkfs.rs lines 1506–1507]`    |
 | `FILE`           | `46 49 4C 45`                      | First 4 bytes of every MFT record       | [§2 MFT records](02-mft-records.md#mft-record-header) | `[OBSERVED: src/mft_io.rs line 122]` |
 | `INDX`           | `49 4E 44 58`                      | First 4 bytes of every `$INDEX_ALLOCATION` block | [§4 Indexes](04-indexes-directories.md)  | `[OBSERVED: src/idx_block.rs line 151]` |
 | `RSTR`           | `52 53 54 52`                      | First 4 bytes of `$LogFile` restart pages (pages 0, 1) | [§5 LogFile](05-logfile-journal.md) | `[OBSERVED: src/mkfs.rs lines 135–138]` |
