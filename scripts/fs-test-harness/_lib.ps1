@@ -37,10 +37,18 @@ function Acquire-DriveLock {
     $deadline = [DateTime]::UtcNow.AddSeconds(180)
     while ($true) {
         # Reclaim stale lock left by a crashed process (older than 180 s).
+        # Wrap Get-Item in try/catch: with FileShare.None another thread
+        # holds the file open exclusively during its CreateNew→Close window
+        # and Get-Item raises UnauthorizedAccessException under Stop pref.
+        # If we can't read the age the lock is clearly not stale — skip.
         if (Test-Path $script:DriveLockPath) {
-            $age = ([DateTime]::UtcNow - (Get-Item $script:DriveLockPath).LastWriteTimeUtc).TotalSeconds
-            if ($age -gt 180) {
-                Remove-Item -LiteralPath $script:DriveLockPath -Force -EA SilentlyContinue
+            try {
+                $age = ([DateTime]::UtcNow - (Get-Item $script:DriveLockPath).LastWriteTimeUtc).TotalSeconds
+                if ($age -gt 180) {
+                    Remove-Item -LiteralPath $script:DriveLockPath -Force -EA SilentlyContinue
+                }
+            } catch {
+                # Lock held exclusively — not stale; fall through to retry.
             }
         }
         try {
