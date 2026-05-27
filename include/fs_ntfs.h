@@ -640,7 +640,7 @@ int fs_ntfs_remove_ea(const char *image, const char *path,
  *
  * Returns:
  *   N >= 0 — number of EAs (also = count of NUL terminators)
- *   2      — at least one EA exists but out_buf_len was too small;
+ *  -2      — at least one EA exists but out_buf_len was too small;
  *            *out_total_len holds the required size, names not copied
  *  -1      — error (see fs_ntfs_last_error)
  *
@@ -728,7 +728,7 @@ int fs_ntfs_delete_named_stream(const char *image, const char *path,
  *
  * Returns:
  *   N >= 0 — number of named streams (also = count of NUL terminators)
- *   2      — at least one stream exists but out_buf_len was too small;
+ *  -2      — at least one stream exists but out_buf_len was too small;
  *            *out_total_len holds the required size, names not copied
  *  -1      — error (see fs_ntfs_last_error)
  *
