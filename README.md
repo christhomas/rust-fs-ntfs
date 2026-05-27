@@ -255,7 +255,7 @@ history available via `git log` in the repo.
   explicit padding, smoke-mode gate failure-detection, dirty-tree
   seal false-positive guard, VM-host redaction, PowerShell short-
   read detection, portable verdict-collect path, cargo-fmt
-  hygiene. See `changelog.md` for the full per-item list.
+  hygiene. See `CHANGELOG.md` for the full per-item list.
 - `chore(hooks)`: `core.hooksPath` set to `.githooks` so
   `cargo fmt --check` + `cargo clippy -- -D warnings` run locally
   before commit (one-shot install:
