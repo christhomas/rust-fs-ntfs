@@ -2288,7 +2288,7 @@ pub extern "C" fn fs_ntfs_list_ea_keys(
             let total: usize = keys.iter().map(|k| k.len() + 1).sum();
             unsafe { *out_total_len = total };
             if total > out_buf_len {
-                return 2;
+                return -2;
             }
             let mut cursor = 0usize;
             for key in &keys {
@@ -2516,7 +2516,7 @@ pub extern "C" fn fs_ntfs_list_named_streams(
             let total: usize = names.iter().map(|n| n.len() + 1).sum();
             unsafe { *out_total_len = total };
             if total > out_buf_len {
-                return 2;
+                return -2;
             }
             let mut cursor = 0usize;
             for name in &names {
@@ -3361,6 +3361,10 @@ pub extern "C" fn fs_ntfs_set_object_id_extended_h(
     birth_object: *const u8,
     birth_domain: *const u8,
 ) -> c_int {
+    if fs.is_null() {
+        set_error("fs_ntfs_set_object_id_extended_h: null handle");
+        return -1;
+    }
     let Some(fp) = cstr_to_path(path) else {
         set_error("fs_ntfs_set_object_id_extended_h: null or non-UTF-8 path");
         return -1;
