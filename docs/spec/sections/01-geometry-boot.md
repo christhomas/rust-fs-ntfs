@@ -489,7 +489,7 @@ The full USA mechanism is defined once in
   convention.
 - `[OBSERVED: docs/mkfs-bug-catalog.md "Bug 7"]` — backup boot at last
   512-byte sector (not start of last cluster).
-- `[OBSERVED: docs/STATUS.md]` — `read_boot_params` test coverage
+- `[OBSERVED: docs/status.md]` — `read_boot_params` test coverage
   description.
 
 ## Open questions

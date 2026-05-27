@@ -2,13 +2,13 @@
 
 What's *not yet* implemented in the write surface and what is needed
 to close the gap. Live status of what already ships is in
-[`STATUS.md`](STATUS.md) (see "Implemented write phases" + the
+[`status.md`](status.md) (see "Implemented write phases" + the
 "Writes" / "Recovery / volume tools" tables under "What the C ABI
 exposes today").
 
 This file used to be `WRITE_PLAN.md` — a forward-looking W0→W4
 roadmap. W0–W4 have shipped (modulo the items listed below), so the
-plan-style content moved to STATUS.md and this doc was renamed to
+plan-style content moved to status.md and this doc was renamed to
 make its scope obvious.
 
 **Guiding constraints** (still in force for any new work below):
@@ -197,7 +197,7 @@ announced in commit messages so rollback points are easy to spot in
 If a bug is discovered only after subsequent work lands on top:
 
 1. `git revert <bad commit>` is preferred over reset.
-2. The revert commit explicitly references the STATUS.md entry it
+2. The revert commit explicitly references the status.md entry it
    invalidates, so the doc can be updated in the next commit.
 
 ---
@@ -213,7 +213,7 @@ docs (MS-FSCC, Windows Internals, upstream ntfs) — never at GPL'd NTFS reimple
 
 _Last updated: 2026-05-02 — file renamed from `WRITE_PLAN.md` and
 slimmed to outstanding work only. Implemented surface lives in
-`STATUS.md`._
+`status.md`._
 
 ---
 
@@ -244,7 +244,7 @@ cross-referencing existing PRs / commit messages easy.
 The two items below break the C ABI; ship them together as a single
 breaking change so consumers re-link once. **No on-disk format
 change** for either — only the FFI projection widens. (See also
-`STATUS.md` §"Documentation cross-check" for the deeper write-up
+`status.md` §"Documentation cross-check" for the deeper write-up
 behind each.)
 
 ### §1.3 Timestamp widening to 64-bit + nanoseconds — shipped (2026-05-25)
@@ -379,7 +379,7 @@ free tail clusters; hole-punching frees middle clusters.
 
 **Minimal version (FILE_ATTRIBUTE_READONLY via
 `set_file_attributes`) is shipped** — see `src/write.rs:131-192`
-+ the W1.3 entry in `STATUS.md`. Callers can flip the READONLY
++ the W1.3 entry in `status.md`. Callers can flip the READONLY
 bit today.
 
 **`set_security_id` shipped** on branch `feature/set-security-id`
@@ -458,7 +458,7 @@ returns.
 **Real decompression** is still outstanding: requires XPRESS4K/8K/16K
 + LZX decoding of the `WofCompressedData` ADS. Third-party crate
 (`ms-compress`) does it; bindings would be ~200 LOC. Listed as the
-biggest single read-correctness gap in STATUS.md cross-check
+biggest single read-correctness gap in status.md cross-check
 "#### WOF (Windows Overlay Filter) compression not supported".
 
 ### §3.9 Case-sensitive directory flag — primitive shipped (2026-05-23), wire-through pending

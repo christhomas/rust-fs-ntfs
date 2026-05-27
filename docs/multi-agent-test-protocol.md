@@ -12,7 +12,7 @@ reader is caught **before** it lands on `main`.
 > **Current matrix entry point** (2026-05-24): `bash scripts/matrix-baseline.sh`
 > drives the full 42-scenario sweep via the `vendor/fs-test-harness/`
 > submodule against the VM described in `.test-env`. See
-> [`docs/STATUS.md` Current matrix state](STATUS.md) for the per-branch
+> [`docs/status.md` Current matrix state](status.md) for the per-branch
 > sealed-run table. Per-bug history lives in
 > [`docs/mkfs-bug-catalog.md`](mkfs-bug-catalog.md); the chkdsk byte-diff
 > protocol lives in
@@ -147,7 +147,7 @@ A volume is "valid" when ALL of:
 
 The current sealed runs (42/42 ok) prove this for the matrix
 scenarios in `vendor/fs-test-harness/test-matrix.json`. See
-[`docs/STATUS.md` Current matrix state](STATUS.md) for the per-branch
+[`docs/status.md` Current matrix state](status.md) for the per-branch
 seal table.
 
 ### Fixture axes
@@ -459,11 +459,11 @@ VM unreachable or a depended-upon tool missing.
 The matrix is "done" when **all of**:
 
 - Every scenario in `vendor/fs-test-harness/test-matrix.json` has
-  status `passed-*` (currently 42/42 on staging-2 — see STATUS.md).
+  status `passed-*` (currently 42/42 on staging-2 — see status.md).
 - All Linux tests still pass on the merged main.
 - `chkdsk readonly = 0` across the matrix (already achieved; `/scan`
   exit-13 ceiling tracked separately in
-  [`docs/FUTURE_FEATURES.md` §3.1](FUTURE_FEATURES.md)).
+  [`docs/future-features.md` §3.1](future-features.md)).
 - The findings docs include a Conclusion section summarising root-
   cause clusters and what's deliberately deferred.
 

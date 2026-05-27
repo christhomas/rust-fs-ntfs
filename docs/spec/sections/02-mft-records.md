@@ -408,7 +408,7 @@ identical to `$MFT`'s — same record size, same USA fixup, same headers.
 
 `rust-fs-ntfs` does not yet implement repair; the read path simply surfaces
 USA failures as errors and the writer never touches `$MFTMirr` itself.
-[OBSERVED: docs/STATUS.md] [UNVERIFIED] — the repair semantics above are
+[OBSERVED: docs/status.md] [UNVERIFIED] — the repair semantics above are
 not exercised by our test suite.
 
 ### What the mirror does NOT cover
@@ -542,7 +542,7 @@ data runs. The reverse migration (non-resident → resident shrink-back) is
 
 `rust-fs-ntfs`'s normal write path does perform the resident → non-resident
 migration when a `$DATA` value grows past what fits resident; the inverse
-direction is not implemented. [OBSERVED: src/attr_resize.rs] [OBSERVED: docs/STATUS.md]
+direction is not implemented. [OBSERVED: src/attr_resize.rs] [OBSERVED: docs/status.md]
 
 Existing volumes can have non-resident attributes whose value would fit
 resident — there is no format invariant that forbids it. [UNVERIFIED]
@@ -694,7 +694,7 @@ authoritative ones; the `$FILE_NAME` copies are updated lazily by Windows.
 [UNVERIFIED] — we have not found a permitted source explicitly stating which
 copy "wins" on conflict, only the operational observation that
 `fs_ntfs_set_times` updates SI but not the parent-index `$FILE_NAME` and
-"matches Windows" per `docs/STATUS.md`.
+"matches Windows" per `docs/status.md`.
 
 ### File attributes (`+0x20..+0x24`)
 
@@ -876,7 +876,7 @@ that the repair pipeline emits it sorted.
 
 `rust-fs-ntfs` does not currently emit `$ATTRIBUTE_LIST`; all base records it
 synthesises are small enough to be self-contained. The read path tolerates
-extension records via the upstream `ntfs` crate. [OBSERVED: docs/STATUS.md]
+extension records via the upstream `ntfs` crate. [OBSERVED: docs/status.md]
 
 ## Sequence numbers and reuse {#sequence-numbers}
 
@@ -1008,7 +1008,7 @@ Two related operations:
 `rust-fs-ntfs` does not currently implement either form of compaction at the
 extension-record level; its `attr_resize` operates on a single record and
 will not initiate a base ↔ extension migration. [OBSERVED: src/attr_resize.rs]
-[OBSERVED: docs/STATUS.md]
+[OBSERVED: docs/status.md]
 
 ### When the question arises in practice
 
@@ -1033,7 +1033,7 @@ not documented in our permitted sources.
   [src/attr_io.rs](../../../src/attr_io.rs),
   [src/attr_resize.rs](../../../src/attr_resize.rs).
 - `rust-fs-ntfs` operational notes:
-  [docs/STATUS.md](../../STATUS.md),
+  [docs/status.md](../../status.md),
   [docs/chkdsk-improvement-findings.md](../../chkdsk-improvement-findings.md),
   [docs/mkfs-bug-catalog.md](../../mkfs-bug-catalog.md).
 

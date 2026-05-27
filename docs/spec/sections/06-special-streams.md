@@ -74,7 +74,7 @@ public Microsoft layout documentation referenced from
 
 | Stream / file              | Read | Write | Notes                                                                                  |
 | -------------------------- | ---- | ----- | -------------------------------------------------------------------------------------- |
-| Named `$DATA` (ADS)        | ✅   | ✅    | `fs_ntfs_write_named_stream` / `fs_ntfs_delete_named_stream` (`docs/STATUS.md`).       |
+| Named `$DATA` (ADS)        | ✅   | ✅    | `fs_ntfs_write_named_stream` / `fs_ntfs_delete_named_stream` (`docs/status.md`).       |
 | LZNT1 compression          | ⛔   | ⛔    | No compression read or write path.                                                     |
 | `$EA` / `$EA_INFORMATION`  | ✅   | ✅    | Resident only, MVP. See [`src/ea_io.rs`](../../../src/ea_io.rs).                       |
 | `$REPARSE_POINT`           | ✅   | ✅    | Resident write of arbitrary tag + symlink helper.                                      |
@@ -113,7 +113,7 @@ take down the unnamed stream or the entire MFT record. [UNVERIFIED]
 - An empty name distinguishes the unnamed primary stream. The C ABI
   in `rust-fs-ntfs` exposes named streams via
   `fs_ntfs_write_named_stream` / `fs_ntfs_delete_named_stream`
-  (`[OBSERVED: docs/STATUS.md]`). The writer rejects an empty stream
+  (`[OBSERVED: docs/status.md]`). The writer rejects an empty stream
   name to prevent collision with the primary `$DATA`.
 
 ### Coexistence with directories {#ads-directories}
@@ -265,7 +265,7 @@ position past VDL even if the underlying CUs decode to non-zero data.
 Compression read and write are **not implemented**. The mkfs writer
 emits no compressed streams; the read API does not transparently
 decompress. The compression-unit exponent is left at `0` and the
-`is_compressed` flag is never set. `[OBSERVED: docs/STATUS.md]`.
+`is_compressed` flag is never set. `[OBSERVED: docs/status.md]`.
 
 ---
 
@@ -442,7 +442,7 @@ recovery passes MUST NOT prune records that have an
 ### Status in `rust-fs-ntfs`
 
 Read path preserves `$LOGGED_UTILITY_STREAM` attributes opaquely.
-Write path does not synthesize them. `[OBSERVED: docs/STATUS.md]`.
+Write path does not synthesize them. `[OBSERVED: docs/status.md]`.
 
 ---
 
@@ -591,7 +591,7 @@ The writer emits resident `$REPARSE_POINT` attributes via
 src/record_build.rs::build_resident_reparse_point_attribute,
 build_symlink_reparse_data]`. `FILE_ATTRIBUTE_REPARSE_POINT` is set
 on write and cleared on `fs_ntfs_remove_reparse_point` `[OBSERVED:
-docs/STATUS.md]`. The `$Extend\$Reparse` index entry is **not**
+docs/status.md]`. The `$Extend\$Reparse` index entry is **not**
 maintained by the writer — see [§6.17](#reparse-index).
 
 ---
@@ -999,8 +999,8 @@ sound volume.
 
 `rust-fs-ntfs` rewrites the version-pair to `3.1` with all upgrade
 flags cleared at the next opportunity, on the RW-mount path
-(`fsck::upgrade_volume_version`, see [§5 fsck](../README.md) and
-[`docs/STATUS.md`](../STATUS.md)). The transition is idempotent and
+(`fsck::upgrade_volume_version`, see [§5 fsck](../readme.md) and
+[`docs/status.md`](../status.md)). The transition is idempotent and
 mimics what `ntfs.sys` would do.
 
 #### Why earlier code emitted `0x0084` — and why that was wrong
@@ -1097,7 +1097,7 @@ Offset  Size  Field             Description
 `[UNVERIFIED]` against `[MS-NTFS]` for the optional-fields rule —
 this is the conventional public layout. The
 `fs_ntfs_read_object_id` C ABI in `rust-fs-ntfs` returns the first
-16 bytes (the canonical `ObjectId`) `[OBSERVED: docs/STATUS.md]`.
+16 bytes (the canonical `ObjectId`) `[OBSERVED: docs/status.md]`.
 
 ### `$O` index keying {#objid-index}
 
@@ -1199,7 +1199,7 @@ gets deleted.
 The writer creates `$Extend\$Reparse` at record 17 as a VIEW_INDEX file but does **not** maintain `:$R` index entries on
 reparse-point write/delete. This is tracked in the open-issues list
 (see `docs/mkfs-bug-catalog.md` and the open-questions file
-referenced below). `[OBSERVED: docs/STATUS.md]`.
+referenced below). `[OBSERVED: docs/status.md]`.
 
 ---
 
@@ -1216,7 +1216,7 @@ referenced below). `[OBSERVED: docs/STATUS.md]`.
   reference blob.
 - `[OBSERVED: src/record_build.rs]` — `$REPARSE_POINT` and named
   `$DATA` writers.
-- `[OBSERVED: docs/STATUS.md]` — C ABI surface and per-feature
+- `[OBSERVED: docs/status.md]` — C ABI surface and per-feature
   implementation status.
 - `[OBSERVED: docs/chkdsk-improvement-findings.md §2.6]` — upcase mismatch diagnostic,
   CJK label byte verification, `$Extend` rec 11 structural note.

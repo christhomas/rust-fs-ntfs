@@ -855,7 +855,7 @@ fn fill_attr(
                 // Read the 32-bit reparse tag and dispatch. The
                 // REPARSE_POINT flag on $FILE_NAME is an "SOME reparse
                 // kind" marker; only the tag tells us *which*. See
-                // docs/NEXT_PLAN.md §1.2 / docs/STATUS.md §cross-check.
+                // docs/NEXT_PLAN.md §1.2 / docs/status.md §cross-check.
                 if attr.file_type != 2 {
                     // Not a directory — default regular. The actual
                     // type depends on the tag below.
@@ -1811,7 +1811,7 @@ pub extern "C" fn fs_ntfs_read_file(
     // decompress LZNT1, so reading the bytes of a compressed `$DATA`
     // would silently return the raw compressed stream — garbage to
     // the caller. Fail loudly until we ship a real decompressor (see
-    // docs/FUTURE_FEATURES.md §3.2).
+    // docs/future-features.md §3.2).
     let attr_flags = data_attr.flags();
     if attr_flags.contains(ntfs::NtfsAttributeFlags::COMPRESSED) {
         set_error("file is compressed (LZNT1); decompression not yet supported");
@@ -1828,7 +1828,7 @@ pub extern "C" fn fs_ntfs_read_file(
     // `IO_REPARSE_TAG_WOF` (0x80000017) `$REPARSE_POINT`. Reading the
     // empty unnamed `$DATA` today would return 0 bytes — also silent
     // data loss. Detect via the reparse tag and fail loudly until we
-    // ship XPRESS/LZX decompression (see docs/FUTURE_FEATURES.md §3.8).
+    // ship XPRESS/LZX decompression (see docs/future-features.md §3.8).
     for attr_res in file.attributes_raw() {
         let a = match attr_res {
             Ok(a) => a,

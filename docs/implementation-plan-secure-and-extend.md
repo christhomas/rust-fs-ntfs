@@ -22,7 +22,7 @@ The remaining sections of this document are preserved as historical record of th
 
 ## Why this doc exists
 
-[`docs/FUTURE_FEATURES.md` §3.1](./FUTURE_FEATURES.md) documented the
+[`docs/future-features.md` §3.1](./future-features.md) documented the
 `chkdsk /scan` exit-13 ceiling: volumes that pass `chkdsk` read-only +
 `chkdsk /F` (offline) clean, but `chkdsk /scan` (online) consistently
 exits 13 with "errors queued for offline repair." A multi-month
