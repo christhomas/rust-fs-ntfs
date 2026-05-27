@@ -56,7 +56,7 @@ done
 # Default: diskimages/ relative to the repo root.
 host_image_dir=""
 if [ -f "$repo_root/.test-env" ]; then
-    host_image_dir=$(grep '^HOST_IMAGE_DIR=' "$repo_root/.test-env" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]')
+    host_image_dir=$(grep '^HOST_IMAGE_DIR=' "$repo_root/.test-env" 2>/dev/null | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 fi
 host_image_dir="${host_image_dir:-diskimages}"
 # Resolve relative paths against repo_root.
@@ -84,14 +84,24 @@ cleanup() {
     if [ "$keep_images" -eq 1 ]; then
         echo "[run-matrix] --keep-images set; leaving images in $host_image_dir" >&2
     else
-        local count
-        count=$(find "$host_image_dir" -name 'nfs-*.img' -type f 2>/dev/null | wc -l | tr -d ' ')
+        # Only remove run_id subdirectories created by THIS invocation.
+        # Pre-existing dirs (from a concurrent run with a different filter key)
+        # are left untouched.
+        local count=0 dir
+        while IFS= read -r dir; do
+            [ -z "$dir" ] && continue
+            echo "$pre_run_subdirs" | grep -qxF "$dir" && continue
+            local n
+            n=$(find "$dir" -name 'nfs-*.img' -type f 2>/dev/null | wc -l | tr -d ' ')
+            if [ "$n" -gt 0 ]; then
+                find "$dir" -name 'nfs-*.img' -type f -delete
+                count=$((count + n))
+            fi
+            rmdir "$dir" 2>/dev/null || true
+        done < <(find "$host_image_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
         if [ "$count" -gt 0 ]; then
-            echo "[run-matrix] cleanup: removing $count image(s) from $host_image_dir" >&2
-            find "$host_image_dir" -name 'nfs-*.img' -type f -delete
+            echo "[run-matrix] cleanup: removed $count image(s) from this run's dir(s)" >&2
         fi
-        # Remove empty run_id subdirectories left behind.
-        find "$host_image_dir" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
     fi
     rm -rf "$scenario_lock"
 }
@@ -105,6 +115,10 @@ trap 'exit 130' INT   # 128 + SIGINT  (2)
 trap 'exit 143' TERM  # 128 + SIGTERM (15)
 trap 'exit 129' HUP   # 128 + SIGHUP  (1)
 trap 'exit 131' QUIT  # 128 + SIGQUIT (3)
+
+# Snapshot existing run_id subdirs so cleanup only removes dirs created by
+# this invocation, not any belonging to a concurrently-running instance.
+pre_run_subdirs=$(find "$host_image_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
 
 # Forward to the real runner.
 bash "$repo_root/vendor/fs-test-harness/scripts/run-tests.sh" "${forwarded_args[@]+"${forwarded_args[@]}"}"
