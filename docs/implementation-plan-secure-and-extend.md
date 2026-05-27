@@ -1,5 +1,25 @@
 # Implementation plan — `$Secure` + `$Extend` for `chkdsk /scan` exit 13
 
+## Status update (2026-05-27)
+
+**S1–S4 shipped and sealed.** This document was written on 2026-05-21 as a forward-looking plan. By 2026-05-27 the following sub-PRs landed in `main` (PR #52, branch `staging-4`):
+
+| Sub-PR | Status | Notes |
+|:------:|:------:|-------|
+| **S1** | ✅ shipped | Empty `$SDS` stream + skeleton `$SDH`/`$SII` index roots |
+| **S2** | ✅ shipped | Canonical SD entry at security_id=0x100; all system files assigned that ID |
+| **S3** | ✅ shipped | `$Extend` directory at rec 11 with populated `$I30` |
+| **S4** | ✅ shipped | `$Extend\$Reparse` (rec 17) with empty `$R` index; VIEW_INDEX flag set |
+| **S5** | ⏭ skipped | `$RmMetadata\$TxfLog\$Tops:$T` — chkdsk /scan exits **0** without it once S1–S4 are present |
+
+`chkdsk /scan` no longer exits 13 after these changes. All 42 test matrix scenarios pass with `status: ok` (sealed at commit `dcdb46d`, 2026-05-27T03:18:48Z).
+
+The implementation also uses MFT records **16/17/18** for `$ObjId/$Reparse/$Quota` (not the conventional 24/25/26 from third-party docs) — Windows accepts either numbering.
+
+The remaining sections of this document are preserved as historical record of the investigation and as reference material for future `$Secure` runtime work (per-file ACL assignment, SD deduplication).
+
+---
+
 ## Why this doc exists
 
 [`docs/FUTURE_FEATURES.md` §3.1](./FUTURE_FEATURES.md) documented the
