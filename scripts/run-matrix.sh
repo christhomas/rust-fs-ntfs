@@ -40,6 +40,10 @@ cd "$repo_root" || {
     exit 1
 }
 
+ssh_mux_socket="/tmp/ntfs-ssh-mux-$$"
+ssh_wrapper_dir=""
+ssh_mux_pid=""
+
 # Allow `--keep-images` to opt out of cleanup. Strip it before
 # forwarding so the harness runner doesn't see an unknown flag.
 keep_images=0
@@ -80,6 +84,65 @@ if ! mkdir "$scenario_lock" 2>/dev/null; then
 fi
 echo "$$" > "$scenario_lock/pid"
 
+start_ssh_mux() {
+    # Read VM_HOST and optional SSH_KEY from .test-env (same source as harness).
+    [[ ! -f "$repo_root/.test-env" ]] && return 0
+    local vm_host ssh_key
+    vm_host=$(grep '^VM_HOST=' "$repo_root/.test-env" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    ssh_key=$(grep '^SSH_KEY=' "$repo_root/.test-env" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [[ -z "$vm_host" ]] && return 0
+
+    local key_opts=()
+    [[ -n "$ssh_key" && -f "$ssh_key" ]] && key_opts=(-i "$ssh_key" -o IdentitiesOnly=yes)
+
+    # Start a background master that holds the TCP connection open.
+    # ServerAliveInterval sends keepalives every 15 s so a silently-dropped
+    # TCP connection is detected within ~75 s rather than hanging forever.
+    ssh "${key_opts[@]+"${key_opts[@]}"}" \
+        -o ControlMaster=yes \
+        -o "ControlPath=$ssh_mux_socket" \
+        -o ControlPersist=600 \
+        -o BatchMode=yes \
+        -o ConnectTimeout=10 \
+        -o ServerAliveInterval=15 \
+        -o ServerAliveCountMax=5 \
+        -N "$vm_host" &>/dev/null &
+    ssh_mux_pid=$!
+
+    # Wait up to 5 s for the socket to appear.
+    local i
+    for i in 1 2 3 4 5; do
+        [[ -S "$ssh_mux_socket" ]] && break
+        sleep 1
+    done
+
+    if [[ ! -S "$ssh_mux_socket" ]]; then
+        echo "[run-matrix] SSH mux: master did not start; proceeding without mux" >&2
+        return 0
+    fi
+    echo "[run-matrix] SSH mux: ready ($ssh_mux_socket)" >&2
+
+    # Create a transparent ssh wrapper so the harness reuses the master
+    # without any harness-side changes.
+    local real_ssh
+    real_ssh=$(command -v ssh)
+    ssh_wrapper_dir=$(mktemp -d /tmp/ntfs-ssh-wrap-XXXXXX)
+    cat > "$ssh_wrapper_dir/ssh" <<EOF
+#!/bin/bash
+exec "$real_ssh" -o ControlMaster=auto -o ControlPath="$ssh_mux_socket" "\$@"
+EOF
+    chmod +x "$ssh_wrapper_dir/ssh"
+    export PATH="$ssh_wrapper_dir:$PATH"
+}
+
+stop_ssh_mux() {
+    [[ -S "$ssh_mux_socket" ]] && \
+        ssh -o ControlPath="$ssh_mux_socket" -O exit dummy 2>/dev/null || true
+    [[ -n "${ssh_mux_pid:-}" ]] && kill "$ssh_mux_pid" 2>/dev/null || true
+    rm -f "$ssh_mux_socket"
+    [[ -n "${ssh_wrapper_dir:-}" ]] && rm -rf "$ssh_wrapper_dir"
+}
+
 cleanup() {
     if [ "$keep_images" -eq 1 ]; then
         echo "[run-matrix] --keep-images set; leaving images in $host_image_dir" >&2
@@ -103,6 +166,7 @@ cleanup() {
             echo "[run-matrix] cleanup: removed $count image(s) from this run's dir(s)" >&2
         fi
     fi
+    stop_ssh_mux
     rm -rf "$scenario_lock"
 }
 
@@ -119,6 +183,11 @@ trap 'exit 131' QUIT  # 128 + SIGQUIT (3)
 # Snapshot existing run_id subdirs so cleanup only removes dirs created by
 # this invocation, not any belonging to a concurrently-running instance.
 pre_run_subdirs=$(find "$host_image_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+
+# Start SSH connection mux before handing off to the harness.
+# The harness opens ~42 separate SSH sessions; multiplexing them through
+# one TCP connection prevents Windows sshd MaxStartups exhaustion.
+start_ssh_mux
 
 # Forward to the real runner.
 bash "$repo_root/vendor/fs-test-harness/scripts/run-tests.sh" "${forwarded_args[@]+"${forwarded_args[@]}"}"
