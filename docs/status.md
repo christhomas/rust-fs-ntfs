@@ -154,11 +154,10 @@ bash scripts/matrix-baseline.sh --smoke   # 5 representative scenarios (~15 min)
 ```
 
 All 42 scenarios reach `chkdsk readonly = 0` (no problems) and
-`chkdsk /scan ∈ {0, 11, 13}` (per-scenario distribution recorded in
-the JSON). The `/scan = 13` ceiling on fresh-format volumes is a
-known still-open differentiator tracked in
-[`docs/future-features.md` §3.1](future-features.md) — every other
-verdict (mount, write, repeat-mount, repair) is clean. Detailed
+`chkdsk /scan = 0` (no errors queued for offline repair). The
+`/scan = 13` ceiling was resolved in PR #52 (`staging-4`) by adding
+`$Secure`, `$Extend`, and the missing `VIEW_INDEX` flags — every
+verdict (mount, write, repeat-mount, repair, scan) is clean. Detailed
 findings live in
 [`docs/chkdsk-improvement-findings.md`](chkdsk-improvement-findings.md)
 and the per-bug catalog in

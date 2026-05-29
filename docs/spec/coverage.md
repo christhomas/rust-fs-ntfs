@@ -80,7 +80,7 @@ implements the feature, independent of how well-documented it is:
 | # | Item | Impl | Evidence | Notes |
 | --: | ---- | :--: | -------- | ----- |
 | 32 | NTFS 3.1 volume (major=3, minor=1) | ✅ | **VERIFIED** | mkfs emits 3.1; all matrix scenarios pass |
-| 33 | Version read from `$VOLUME_INFORMATION` at runtime | ⛔ | **OBSERVED** | Hardcoded `(3,1)` in `src/facade.rs`; not dynamically read |
+| 33 | Version read from `$VOLUME_INFORMATION` at runtime | ⛔ | **UNVERIFIED** | Hardcoded `(3,1)` in `src/facade.rs`; not dynamically read |
 | 34 | NTFS 1.2 volume handling (skip CRC32 etc.) | ⛔ | **UNVERIFIED** | Algorithm documented; not tested |
 | 35 | NTFS 3.0 feature delta vs 3.1 | ⛔ | **UNVERIFIED** | Documented; no 3.0-specific test coverage |
 
@@ -203,7 +203,7 @@ implements the feature, independent of how well-documented it is:
 | 97 | 48-byte core (timestamps + `FileAttributes`) | ✅ | **VERIFIED** | |
 | 98 | FILETIME encoding (100-ns since 1601-01-01) | ✅ | **VERIFIED** | EPOCH_DIFF calculation confirmed |
 | 99 | `FileAttributes` bitfield (`Hidden`, `System`, `Archive`, `Directory`, `ViewIndex`, `ReparsePoint`) | ✅ | **VERIFIED** | All observed in code and chkdsk |
-| 100 | System records: `Hidden|System` only (no `Archive`) | ✅ | **VERIFIED** | Confirmed vs `format.com` reference |
+| 100 | System records: `Hidden\|System` only (no `Archive`) | ✅ | **VERIFIED** | Confirmed vs `format.com` reference |
 | 101 | 24-byte NTFS 3.x extension (`OwnerId`, `SecurityId`, `QuotaCharged`, `USN`) | ✅ | **VERIFIED** | Written by mkfs |
 | 102 | 48-byte form for system records (slots 0–11) | ✅ | **VERIFIED** | Confirmed vs `format.com` reference |
 | 103 | `$SI` timestamps are authoritative (vs `$FILE_NAME` copies) | ✅ | **UNVERIFIED** | Operational observation; no definitive permitted source |
