@@ -143,6 +143,32 @@ stop_ssh_mux() {
     [[ -n "${ssh_wrapper_dir:-}" ]] && rm -rf "$ssh_wrapper_dir"
 }
 
+ensure_vm_workdir() {
+    # Read VM_HOST, SSH_KEY, VM_WORKDIR from .test-env (same source as harness).
+    [[ ! -f "$repo_root/.test-env" ]] && return 0
+    local vm_host ssh_key vm_workdir
+    vm_host=$(grep '^VM_HOST=' "$repo_root/.test-env" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    ssh_key=$(grep '^SSH_KEY=' "$repo_root/.test-env" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    vm_workdir=$(grep '^VM_WORKDIR=' "$repo_root/.test-env" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [[ -z "$vm_host" || -z "$vm_workdir" ]] && return 0
+
+    local key_opts=()
+    [[ -n "$ssh_key" && -f "$ssh_key" ]] && key_opts=(-i "$ssh_key" -o IdentitiesOnly=yes)
+
+    # PowerShell: create the workdir if it doesn't already exist.
+    local ps_workdir="${vm_workdir//\//\\}"
+    ssh "${key_opts[@]+"${key_opts[@]}"}" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=10 \
+        "$vm_host" \
+        "powershell -NoProfile -NonInteractive -Command \"if (-not (Test-Path '$ps_workdir')) { New-Item -ItemType Directory -Path '$ps_workdir' -Force | Out-Null }; Write-Host '[vm] workdir: $ps_workdir'\"" >&2 \
+        || {
+            echo "[run-matrix] WARNING: could not ensure VM workdir ($vm_workdir); ship-to-vm ops may fail" >&2
+            return 0
+        }
+    echo "[run-matrix] VM workdir ready: $vm_workdir" >&2
+}
+
 cleanup() {
     if [ "$keep_images" -eq 1 ]; then
         echo "[run-matrix] --keep-images set; leaving images in $host_image_dir" >&2
@@ -188,6 +214,10 @@ pre_run_subdirs=$(find "$host_image_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/
 # The harness opens ~42 separate SSH sessions; multiplexing them through
 # one TCP connection prevents Windows sshd MaxStartups exhaustion.
 start_ssh_mux
+
+# Ensure the Windows VM workdir exists. Idempotent — cheap SSH round-trip,
+# skipped if VM_HOST or VM_WORKDIR is not configured in .test-env.
+ensure_vm_workdir
 
 # Forward to the real runner.
 bash "$repo_root/vendor/fs-test-harness/scripts/run-tests.sh" "${forwarded_args[@]+"${forwarded_args[@]}"}"
