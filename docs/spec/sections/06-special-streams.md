@@ -801,7 +801,7 @@ truncation. Used both as the `$SDH` key prefix and as the
 - Non-resident `$SDS` data stream with one canonical SD entry at `security_id = 0x100`.
 - Populated `$SDH` index (keyed by `sdh_hash(SD_body) + security_id`).
 - Populated `$SII` index (keyed by `security_id`).
-- All system MFT records (slots 0–18) carry `$STANDARD_INFORMATION.security_id = 0x100`.
+- All MFT records initialized by mkfs (slots 0–11 and 16–18) carry `$STANDARD_INFORMATION.security_id = 0x100`.
 - 256 KiB mirror: each SDS entry is duplicated at `primary_offset + 0x40000`.
 
 Runtime insertion of new SD entries (for per-file ACLs) is not implemented — all

@@ -157,6 +157,7 @@ ensure_vm_workdir() {
 
     # PowerShell: create the workdir if it doesn't already exist.
     local ps_workdir="${vm_workdir//\//\\}"
+    ps_workdir="${ps_workdir//\'/\'\'}"
     ssh "${key_opts[@]+"${key_opts[@]}"}" \
         -o BatchMode=yes \
         -o ConnectTimeout=10 \
