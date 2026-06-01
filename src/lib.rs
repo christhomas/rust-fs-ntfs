@@ -552,15 +552,25 @@ pub struct FsNtfsBlockdevCfg {
 }
 
 /// Directory iterator. Yields `.` and `..` first (synthesized), then the real
-/// entries, all materialised up front via the native read layer
-/// ([`read::read_dir_entries`]). The entries are owned by the heap-boxed
-/// iterator, so the pointer [`fs_ntfs_dir_next`] returns stays valid until
-/// [`fs_ntfs_dir_close`].
+/// entries. The listing is held as lightweight [`read::DirEntry`] records
+/// (name + record number + dir flag); each is widened into a fixed-size C
+/// [`FsNtfsDirent`] on demand in [`fs_ntfs_dir_next`], reusing the single
+/// `current` scratch buffer. So the heap cost is one `String` per entry, not
+/// one ~1 KiB `FsNtfsDirent` per entry.
+///
+/// The pointer returned by [`fs_ntfs_dir_next`] is the address of `current`
+/// and stays valid only until the next `fs_ntfs_dir_next` call (or
+/// `fs_ntfs_dir_close`) — the documented readdir contract, and the same
+/// scratch-buffer lifetime the previous index-walk implementation had.
 pub struct FsNtfsDirIter {
-    /// All dirents to yield in order: `.`, `..`, then the real entries.
-    entries: Vec<FsNtfsDirent>,
+    /// The full listing: synthesized `.`/`..` first, then the real entries.
+    /// Lightweight records — widened to `current` per `fs_ntfs_dir_next`.
+    entries: Vec<read::DirEntry>,
     /// Index of the next entry to return.
     pos: usize,
+    /// Scratch holding the most-recently-yielded dirent; the returned pointer
+    /// aliases this until the next call.
+    current: FsNtfsDirent,
     /// Number of index rows skipped during materialisation. The native reader
     /// fails loudly on a corrupt directory rather than skipping rows, so this
     /// is always 0 today; retained for ABI compatibility with
@@ -1432,19 +1442,26 @@ pub extern "C" fn fs_ntfs_dir_open(
         Err(e) => return err_ptr(e),
     };
 
+    // Hold the listing as lightweight records; `fs_ntfs_dir_next` widens each
+    // into the fixed-size C dirent on demand (one `String` per entry on the
+    // heap, not one ~1 KiB `FsNtfsDirent`). "." and ".." are dirs.
     let mut entries = Vec::with_capacity(real.len() + 2);
-    entries.push(make_dirent(current_record_number, 2, b"."));
-    entries.push(make_dirent(parent_record_number, 2, b".."));
-    for e in real {
-        // FS_NTFS_FT_DIR (2) / FS_NTFS_FT_REG_FILE (1). make_dirent truncates
-        // names longer than the dirent buffer.
-        let file_type = if e.is_dir { 2 } else { 1 };
-        entries.push(make_dirent(e.record_number, file_type, e.name.as_bytes()));
-    }
+    entries.push(read::DirEntry {
+        name: ".".to_string(),
+        record_number: current_record_number,
+        is_dir: true,
+    });
+    entries.push(read::DirEntry {
+        name: "..".to_string(),
+        record_number: parent_record_number,
+        is_dir: true,
+    });
+    entries.extend(real);
 
     let iter = Box::new(FsNtfsDirIter {
         entries,
         pos: 0,
+        current: make_dirent(0, 0, b""),
         skipped_count: 0,
     });
     Box::into_raw(iter)
@@ -1464,8 +1481,10 @@ pub extern "C" fn fs_ntfs_dir_skipped(iter: *const FsNtfsDirIter) -> i64 {
 }
 
 /// Advance the iterator and return a pointer to the next [`FsNtfsDirent`], or
-/// NULL when the listing is exhausted.  The returned pointer is valid until
-/// [`fs_ntfs_dir_close`] is called on the same iterator.
+/// NULL when the listing is exhausted. The returned pointer aliases the
+/// iterator's internal scratch buffer and is valid only until the next
+/// `fs_ntfs_dir_next` call (or `fs_ntfs_dir_close`) — copy out before
+/// advancing, as readdir callers already do.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_dir_next(iter: *mut FsNtfsDirIter) -> *const FsNtfsDirent {
     if iter.is_null() {
@@ -1476,11 +1495,13 @@ pub extern "C" fn fs_ntfs_dir_next(iter: *mut FsNtfsDirIter) -> *const FsNtfsDir
     if it.pos >= it.entries.len() {
         return std::ptr::null();
     }
-    // The entries Vec is owned by the heap-boxed iterator, so this pointer
-    // stays valid until `fs_ntfs_dir_close`.
-    let p = &it.entries[it.pos] as *const FsNtfsDirent;
+    // Widen the lightweight record into the fixed-size C dirent on demand,
+    // reusing the single scratch buffer. FS_NTFS_FT_DIR (2) / REG_FILE (1).
+    let e = &it.entries[it.pos];
+    let file_type = if e.is_dir { 2 } else { 1 };
+    it.current = make_dirent(e.record_number, file_type, e.name.as_bytes());
     it.pos += 1;
-    p
+    &it.current as *const FsNtfsDirent
 }
 
 /// Free a directory iterator returned by [`fs_ntfs_dir_open`]. Passing NULL
@@ -1514,6 +1535,17 @@ pub extern "C" fn fs_ntfs_read_file(
     if fs.is_null() || path.is_null() || buf.is_null() {
         return -1;
     }
+
+    // `length` is the caller-provided size of `buf`. We later build a
+    // `&mut [u8]` over it via `slice::from_raw_parts_mut`, whose safety
+    // contract requires the length to not exceed `isize::MAX` bytes (and on
+    // a 32-bit target, to fit in `usize` at all). Reject anything larger up
+    // front rather than risk UB / a truncating cast.
+    if length > isize::MAX as u64 {
+        set_error("fs_ntfs_read_file: length exceeds isize::MAX");
+        return -1;
+    }
+    let length = length as usize;
 
     let bridge = unsafe { &*fs };
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
@@ -1553,20 +1585,14 @@ pub extern "C" fn fs_ntfs_read_file(
     // Ranged native read of the unnamed `$DATA` — reads only the clusters
     // overlapping the window, so a small read of a huge file doesn't
     // materialise the whole stream. Sparse holes read as zeros.
-    let data = match read::read_attribute_range(
-        &mut io,
-        rec,
-        AttrType::Data,
-        None,
-        offset,
-        length as usize,
-    ) {
+    let data = match read::read_attribute_range(&mut io, rec, AttrType::Data, None, offset, length)
+    {
         Ok(d) => d,
         Err(e) => return err_i64(e),
     };
 
-    let n = data.len().min(length as usize);
-    let out_buf = unsafe { slice::from_raw_parts_mut(buf as *mut u8, length as usize) };
+    let n = data.len().min(length);
+    let out_buf = unsafe { slice::from_raw_parts_mut(buf as *mut u8, length) };
     out_buf[..n].copy_from_slice(&data[..n]);
     n as i64
 }
