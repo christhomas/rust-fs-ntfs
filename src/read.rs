@@ -37,15 +37,18 @@ pub const ROOT_RECORD_NUMBER: u64 = 5;
 /// Lookup is **case-insensitive**, matching NTFS's default
 /// `COLLATION_FILE_NAME`: the `$UpCase` table is loaded once (natively) and
 /// names are compared upcase-folded (so `/Foo` finds an on-disk `foo`), the
-/// same behaviour as the upstream oracle. If `$UpCase` can't be loaded we fall
-/// back to exact UTF-16 matching.
+/// same behaviour as the upstream oracle. `$UpCase` is **required** — if it
+/// can't be loaded this returns `Err` rather than silently degrading to
+/// case-sensitive matching (which would make `/foo` miss an on-disk `FOO`).
 ///
 /// (Note: the *write* path's dedup still uses the shared exact-match
 /// `index_io::find_index_entry` — making that collation-aware is the
 /// write-affecting half of C5, handled when `write.rs`'s resolver is flipped.)
 pub fn resolve_path<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<u64, String> {
-    // Load $UpCase once for the whole walk (case-insensitive collation).
-    let upcase = UpcaseTable::load_io(io).ok();
+    // Load $UpCase once for the whole walk. Required for correct collation —
+    // propagate failure instead of silently matching case-sensitively.
+    let upcase = UpcaseTable::load_io(io)
+        .map_err(|e| format!("resolve_path: load $UpCase for collation: {e}"))?;
     let mut record_number = ROOT_RECORD_NUMBER;
 
     for component in path.split('/') {
@@ -60,54 +63,70 @@ pub fn resolve_path<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<u64, 
             ));
         }
 
-        record_number =
-            lookup_in_directory(io, record_number, &dir_bytes, component, upcase.as_ref())?
-                .ok_or_else(|| format!("resolve_path: '{component}' not found"))?;
+        record_number = lookup_in_directory(io, record_number, &dir_bytes, component, &upcase)?
+            .ok_or_else(|| format!("resolve_path: '{component}' not found"))?;
     }
 
     Ok(record_number)
 }
 
-/// Look up a single name in one directory, case-insensitively when `upcase` is
-/// supplied (else exact UTF-16). `dir_bytes` is the directory's already-read
-/// (post-fixup) MFT record; `dir_record` is its number (needed to load
-/// `$INDEX_ALLOCATION` if the index has spilled). Returns the target record
-/// number, or `None` if absent.
+/// Case-insensitive (upcase-folded) match of `want` against a batch of index
+/// entries; returns the first matching entry's target record.
+fn match_name(
+    entries: &[index_io::DirEntryRaw],
+    want: &[u16],
+    upcase: &UpcaseTable,
+) -> Option<u64> {
+    entries.iter().find_map(|e| {
+        let entry_name: Vec<u16> = e.name.encode_utf16().collect();
+        (upcase.cmp_names(&entry_name, want) == std::cmp::Ordering::Equal)
+            .then_some(e.file_record_number)
+    })
+}
+
+/// Look up a single name in one directory, upcase-collated. `dir_bytes` is the
+/// directory's already-read (post-fixup) MFT record; `dir_record` is its number
+/// (needed to load `$INDEX_ALLOCATION` if the index has spilled). Returns the
+/// target record number, or `None` if absent.
 ///
-/// Enumerates entries via the shared `index_io::collect_*` iterators and
-/// compares names here, rather than the exact-match `find_index_entry`, so the
-/// case-insensitive collation lives entirely in the read layer and doesn't
-/// change the write path's exact-match dedup.
+/// Enumerates via the shared `index_io::collect_*` iterators and matches here
+/// (so the collation lives in the read layer, not the write path's dedup), but
+/// **short-circuits**: the resident `$INDEX_ROOT` is checked first, then INDX
+/// blocks one at a time, returning on the first hit instead of reading every
+/// block.
 fn lookup_in_directory<T: BlockIo + ?Sized>(
     io: &mut T,
     dir_record: u64,
     dir_bytes: &[u8],
     name: &str,
-    upcase: Option<&UpcaseTable>,
+    upcase: &UpcaseTable,
 ) -> Result<Option<u64>, String> {
-    let mut entries = Vec::new();
-    index_io::collect_index_root_entries(dir_bytes, &mut entries)?;
+    let want: Vec<u16> = name.encode_utf16().collect();
+
+    // Resident $INDEX_ROOT first — return on hit.
+    let mut root_entries = Vec::new();
+    index_io::collect_index_root_entries(dir_bytes, &mut root_entries)?;
+    if let Some(rec) = match_name(&root_entries, &want, upcase) {
+        return Ok(Some(rec));
+    }
+
+    // Spilled into $INDEX_ALLOCATION? Scan blocks one at a time, returning on
+    // the first match rather than collecting every block.
     let ir_flags = index_io::index_root_flags(dir_bytes)
         .ok_or_else(|| format!("directory record {dir_record} has no $INDEX_ROOT"))?;
     if ir_flags & IH_FLAG_HAS_SUBNODES != 0 {
         let ia = idx_block::load_for_directory_io(io, dir_record)?;
+        let mut block_entries = Vec::new();
         for vcn in ia.allocated_block_vcns() {
             let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
-            index_io::collect_indx_block_entries(&block, &mut entries)?;
+            block_entries.clear();
+            index_io::collect_indx_block_entries(&block, &mut block_entries)?;
+            if let Some(rec) = match_name(&block_entries, &want, upcase) {
+                return Ok(Some(rec));
+            }
         }
     }
 
-    let want: Vec<u16> = name.encode_utf16().collect();
-    for e in &entries {
-        let entry_name: Vec<u16> = e.name.encode_utf16().collect();
-        let hit = match upcase {
-            Some(uc) => uc.cmp_names(&entry_name, &want) == std::cmp::Ordering::Equal,
-            None => entry_name == want,
-        };
-        if hit {
-            return Ok(Some(e.file_record_number));
-        }
-    }
     Ok(None)
 }
 
