@@ -48,10 +48,16 @@ use crate::block_io::{BlockIo, PathIo};
 
 // BPB (BIOS Parameter Block) field byte offsets within the 512-byte boot sector.
 // Names match the BPB specification in Windows Internals 7th ed. / MS-FSCC.
+const BOOT_OFF_OEM: usize = 0x03; // 8-byte OEM ID — "NTFS    " on a real NTFS volume
 const BOOT_OFF_BYTES_PER_SECTOR: usize = 0x0B; // WORD BytsPerSec
 const BOOT_OFF_SECTORS_PER_CLUSTER: usize = 0x0D; // BYTE SecPerClus
+const BOOT_OFF_TOTAL_SECTORS: usize = 0x28; // NTFS extension: QWORD total sectors
 const BOOT_OFF_MFT_LCN: usize = 0x30; // NTFS extension: QWORD MFT cluster number
 const BOOT_OFF_CLUSTERS_PER_MFT_RECORD: usize = 0x40; // NTFS extension: BYTE/i8 clusters per FILE record
+const BOOT_OFF_SERIAL: usize = 0x48; // NTFS extension: QWORD volume serial number
+
+/// The OEM ID a real NTFS boot sector carries at `BOOT_OFF_OEM`.
+pub const NTFS_OEM_ID: &[u8; 8] = b"NTFS    ";
 
 /// NTFS stores USA fixup bytes in the last 2 bytes of every sector-sized
 /// stripe within a multi-sector record (MFT records, INDX blocks).
@@ -70,6 +76,17 @@ pub struct BootParams {
     pub cluster_size: u64,
     pub mft_lcn: u64,
     pub file_record_size: u64,
+    /// QWORD total sectors (+0x28). `total_sectors * bytes_per_sector` is the
+    /// NTFS volume size (one sector short of the device — the last sector
+    /// holds the backup boot sector).
+    pub total_sectors: u64,
+    /// QWORD volume serial number (+0x48).
+    pub serial_number: u64,
+    /// 8-byte OEM ID (+0x03). `NTFS_OEM_ID` on a real NTFS volume; parsed but
+    /// NOT validated here (see the doc on `read_boot_params_io`) so callers
+    /// that only need geometry are unaffected — `read::read_volume_info`
+    /// validates it on the mount path.
+    pub oem_id: [u8; 8],
 }
 
 /// Parse the 512-byte boot sector at offset 0 for the subset of fields we
@@ -129,12 +146,28 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
         ));
     }
 
+    let total_sectors = u64::from_le_bytes(
+        boot[BOOT_OFF_TOTAL_SECTORS..BOOT_OFF_TOTAL_SECTORS + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let serial_number = u64::from_le_bytes(
+        boot[BOOT_OFF_SERIAL..BOOT_OFF_SERIAL + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let mut oem_id = [0u8; 8];
+    oem_id.copy_from_slice(&boot[BOOT_OFF_OEM..BOOT_OFF_OEM + 8]);
+
     Ok(BootParams {
         bytes_per_sector,
         sectors_per_cluster,
         cluster_size,
         mft_lcn,
         file_record_size,
+        total_sectors,
+        serial_number,
+        oem_id,
     })
 }
 
@@ -500,6 +533,9 @@ mod tests {
             cluster_size: 4096,
             mft_lcn: 4,
             file_record_size: 1024,
+            total_sectors: 0,
+            serial_number: 0,
+            oem_id: *b"NTFS    ",
         };
         assert_eq!(mft_record_offset(&p, 0), 4 * 4096);
         assert_eq!(mft_record_offset(&p, 7), 4 * 4096 + 7 * 1024);
