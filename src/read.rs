@@ -304,6 +304,100 @@ fn read_value_from_record<T: BlockIo + ?Sized>(
     Ok(out)
 }
 
+/// Read up to `len` bytes of an attribute's value starting at byte `offset`,
+/// **without materialising the whole value**. An uncompressed non-resident
+/// attribute reads only the clusters overlapping the window — so a small read
+/// of a huge file doesn't allocate gigabytes. Resident values (tiny) and
+/// compressed values (decompress as a unit) fall back to a full read + slice.
+/// Follows `$ATTRIBUTE_LIST`. Returns fewer than `len` bytes only at end of
+/// value. `offset` stays `u64` throughout (no 32-bit truncation).
+pub fn read_attribute_range<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    attr_type: AttrType,
+    name: Option<&str>,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<u8>, String> {
+    let (params, record, loc) = locate_attribute(io, record_number, attr_type, name)?
+        .ok_or_else(|| {
+            format!("read_attribute_range: attribute {attr_type:?} (name {name:?}) not found in record {record_number}")
+        })?;
+
+    // Uncompressed, unencrypted, non-resident → true ranged read.
+    if !loc.is_resident {
+        let flags = u16::from_le_bytes([
+            record[loc.attr_offset + attr_off::FLAGS],
+            record[loc.attr_offset + attr_off::FLAGS + 1],
+        ]);
+        if flags & (ATTR_FLAG_COMPRESSED | ATTR_FLAG_ENCRYPTED) == 0 {
+            return read_nonresident_range(io, &params, &record, &loc, offset, len);
+        }
+    }
+
+    // Resident or compressed: read the whole value, then slice the window.
+    let full = read_value_from_record(io, &params, &record, &loc)?;
+    let full_len = full.len() as u64;
+    let start = offset.min(full_len) as usize;
+    let end = offset.saturating_add(len as u64).min(full_len) as usize;
+    Ok(full[start..end].to_vec())
+}
+
+/// Ranged read of an uncompressed non-resident attribute: reads only the
+/// clusters overlapping `[offset, offset+len)`, zero-filling sparse holes and
+/// the `[initialized_size, data_size)` tail.
+fn read_nonresident_range<T: BlockIo + ?Sized>(
+    io: &mut T,
+    params: &crate::mft_io::BootParams,
+    record: &[u8],
+    loc: &attr_io::AttrLocation,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<u8>, String> {
+    let data_size = loc
+        .non_resident_value_length
+        .ok_or("non-resident attr has no data size")?;
+    if len == 0 || offset >= data_size {
+        return Ok(Vec::new());
+    }
+    let init_size = u64::from_le_bytes(
+        record[loc.attr_offset + attr_off::NONRES_INITIALIZED_LENGTH
+            ..loc.attr_offset + attr_off::NONRES_INITIALIZED_LENGTH + 8]
+            .try_into()
+            .map_err(|_| "short record reading initialized_size")?,
+    );
+    let mpo = loc
+        .non_resident_mapping_pairs_offset
+        .ok_or("non-resident attr has no mapping-pairs offset")? as usize;
+    let runs =
+        data_runs::decode_runs(&record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length])?;
+
+    let cs = params.cluster_size; // u64
+    let end = offset.saturating_add(len as u64).min(data_size); // exclusive byte
+    let readable = data_size.min(init_size); // bytes past this read as zero
+    let mut out = vec![0u8; (end - offset) as usize];
+
+    for vcn in (offset / cs)..=((end - 1) / cs) {
+        let cluster_byte = vcn * cs;
+        let win_start = offset.max(cluster_byte);
+        let win_end = end.min(cluster_byte + cs).min(readable);
+        if win_end <= win_start {
+            continue; // beyond initialized_size or empty → stays zero
+        }
+        if let Some(lcn) = data_runs::vcn_to_lcn(&runs, vcn) {
+            let mut cluster = vec![0u8; cs as usize];
+            io.read_exact_at(lcn * cs, &mut cluster)?;
+            let in_cluster = (win_start - cluster_byte) as usize;
+            let n = (win_end - win_start) as usize;
+            let out_off = (win_start - offset) as usize;
+            out[out_off..out_off + n].copy_from_slice(&cluster[in_cluster..in_cluster + n]);
+        }
+        // else: sparse hole → leave zeros.
+    }
+
+    Ok(out)
+}
+
 /// Non-resident attribute header: compression-unit exponent (u16 at +0x22).
 /// The unit is `2^exp` clusters (4 ⇒ 16 clusters, the LZNT1 default).
 const NONRES_COMPRESSION_UNIT: usize = 0x22;
@@ -844,6 +938,35 @@ mod tests {
             upstream_read_data(&mut dev, "/sparse.bin"),
             "native vs upstream byte mismatch on sparse file"
         );
+    }
+
+    #[test]
+    fn ranged_read_returns_correct_window_without_full_read() {
+        let mut dev = fresh_vol();
+        // Non-resident file (> a cluster) with a deterministic pattern.
+        let data: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+        write::create_file_io(&mut dev, "/", "big.bin").expect("create");
+        write::write_file_contents_io(&mut dev, "/big.bin", &data).expect("write");
+        let rec = resolve_path(&mut dev, "/big.bin").unwrap();
+
+        // Windows: at 0, crossing a cluster boundary, near EOF, and past EOF.
+        for (off, len) in [
+            (0u64, 300usize),
+            (4090, 20),
+            (4096, 4096),
+            (19_990, 50),
+            (25_000, 10),
+        ] {
+            let got = read_attribute_range(&mut dev, rec, AttrType::Data, None, off, len).unwrap();
+            let s = (off as usize).min(data.len());
+            let e = (off as usize + len).min(data.len());
+            assert_eq!(got, &data[s..e], "window off={off} len={len}");
+        }
+        // Full range equals the whole-value read.
+        let whole = read_attribute_value(&mut dev, rec, AttrType::Data, None).unwrap();
+        let ranged_all =
+            read_attribute_range(&mut dev, rec, AttrType::Data, None, 0, data.len()).unwrap();
+        assert_eq!(ranged_all, whole);
     }
 
     #[test]

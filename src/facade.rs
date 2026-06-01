@@ -321,12 +321,14 @@ impl Filesystem {
     pub fn read_file(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
         let mut io = PathIo::open_ro(&self.image).map_err(Error)?;
         let rec = read::resolve_path(&mut io, path).map_err(Error)?;
-        // Native read of the unnamed $DATA (resident / non-resident / sparse /
-        // LZNT1-decompressed), then slice the requested window.
-        let data = read::read_attribute_value(&mut io, rec, AttrType::Data, None).map_err(Error)?;
-        let start = (offset as usize).min(data.len());
-        let n = buf.len().min(data.len() - start);
-        buf[..n].copy_from_slice(&data[start..start + n]);
+        // Ranged native read of the unnamed $DATA (resident / non-resident /
+        // sparse / LZNT1) — reads only the clusters overlapping the window, so
+        // a small read of a huge file doesn't materialise the whole file.
+        let data =
+            read::read_attribute_range(&mut io, rec, AttrType::Data, None, offset, buf.len())
+                .map_err(Error)?;
+        let n = data.len().min(buf.len());
+        buf[..n].copy_from_slice(&data[..n]);
         Ok(n)
     }
 
