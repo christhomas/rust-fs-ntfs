@@ -17,6 +17,7 @@ use crate::data_runs;
 use crate::idx_block;
 use crate::index_io::{self, IH_FLAG_HAS_SUBNODES};
 use crate::mft_io::{read_mft_record_io, record_flags, MFT_FLAG_DIRECTORY};
+use crate::upcase::UpcaseTable;
 
 /// Attribute data-flags (header +0x0C, low bits): the value is transformed
 /// and can't be returned as raw bytes by this reader yet.
@@ -30,20 +31,21 @@ pub const ROOT_RECORD_NUMBER: u64 = 5;
 /// tree natively (no upstream `ntfs` crate). A leading `/` is optional;
 /// `""`/`"/"` resolve to the root directory.
 ///
-/// Each component is looked up in its parent directory's index: first the
-/// resident `$INDEX_ROOT`, then — if the index has spilled — the allocated
-/// `$INDEX_ALLOCATION` (INDX) blocks.
+/// Each component is looked up in its parent directory's index (resident
+/// `$INDEX_ROOT` then, if spilled, the `$INDEX_ALLOCATION` INDX blocks).
 ///
-/// **Limitation — case-sensitive.** Lookups use the shared
-/// `index_io::find_index_entry` / `find_entry_in_indx_block`, which match the
-/// name with exact UTF-16 equality, so `/Foo` will not find an on-disk `foo`.
-/// Real NTFS is case-insensitive by default (upcase-table collation). This is
-/// the tracked C5 gap (`docs/missing-functionality.md`): the collation table
-/// exists (`compare_names_ordinal`) but is not yet wired into the index
-/// scanners. Wiring it is write-affecting (those scanners back create/rename
-/// dedup too) and matrix-gated, so it's deferred to a dedicated change rather
-/// than made case-insensitive only on the read side.
+/// Lookup is **case-insensitive**, matching NTFS's default
+/// `COLLATION_FILE_NAME`: the `$UpCase` table is loaded once (natively) and
+/// names are compared upcase-folded (so `/Foo` finds an on-disk `foo`), the
+/// same behaviour as the upstream oracle. If `$UpCase` can't be loaded we fall
+/// back to exact UTF-16 matching.
+///
+/// (Note: the *write* path's dedup still uses the shared exact-match
+/// `index_io::find_index_entry` — making that collation-aware is the
+/// write-affecting half of C5, handled when `write.rs`'s resolver is flipped.)
 pub fn resolve_path<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<u64, String> {
+    // Load $UpCase once for the whole walk (case-insensitive collation).
+    let upcase = UpcaseTable::load_io(io).ok();
     let mut record_number = ROOT_RECORD_NUMBER;
 
     for component in path.split('/') {
@@ -58,41 +60,54 @@ pub fn resolve_path<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<u64, 
             ));
         }
 
-        record_number = lookup_in_directory(io, record_number, &dir_bytes, component)?
-            .ok_or_else(|| format!("resolve_path: '{component}' not found"))?;
+        record_number =
+            lookup_in_directory(io, record_number, &dir_bytes, component, upcase.as_ref())?
+                .ok_or_else(|| format!("resolve_path: '{component}' not found"))?;
     }
 
     Ok(record_number)
 }
 
-/// Look up a single name in one directory. `dir_bytes` is the directory's
-/// already-read (post-fixup) MFT record; `dir_record` is its number (needed
-/// to load `$INDEX_ALLOCATION` if the index has spilled). Returns the target
-/// record number, or `None` if the name is absent.
+/// Look up a single name in one directory, case-insensitively when `upcase` is
+/// supplied (else exact UTF-16). `dir_bytes` is the directory's already-read
+/// (post-fixup) MFT record; `dir_record` is its number (needed to load
+/// `$INDEX_ALLOCATION` if the index has spilled). Returns the target record
+/// number, or `None` if absent.
+///
+/// Enumerates entries via the shared `index_io::collect_*` iterators and
+/// compares names here, rather than the exact-match `find_index_entry`, so the
+/// case-insensitive collation lives entirely in the read layer and doesn't
+/// change the write path's exact-match dedup.
 fn lookup_in_directory<T: BlockIo + ?Sized>(
     io: &mut T,
     dir_record: u64,
     dir_bytes: &[u8],
     name: &str,
+    upcase: Option<&UpcaseTable>,
 ) -> Result<Option<u64>, String> {
-    // Resident $INDEX_ROOT first.
-    if let Some(entry) = index_io::find_index_entry(dir_bytes, name)? {
-        return Ok(Some(entry.file_record_number));
-    }
-
-    // Spilled into $INDEX_ALLOCATION? Scan the allocated INDX blocks.
+    let mut entries = Vec::new();
+    index_io::collect_index_root_entries(dir_bytes, &mut entries)?;
     let ir_flags = index_io::index_root_flags(dir_bytes)
         .ok_or_else(|| format!("directory record {dir_record} has no $INDEX_ROOT"))?;
     if ir_flags & IH_FLAG_HAS_SUBNODES != 0 {
         let ia = idx_block::load_for_directory_io(io, dir_record)?;
         for vcn in ia.allocated_block_vcns() {
             let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
-            if let Some(entry) = index_io::find_entry_in_indx_block(&block, name)? {
-                return Ok(Some(entry.file_record_number));
-            }
+            index_io::collect_indx_block_entries(&block, &mut entries)?;
         }
     }
 
+    let want: Vec<u16> = name.encode_utf16().collect();
+    for e in &entries {
+        let entry_name: Vec<u16> = e.name.encode_utf16().collect();
+        let hit = match upcase {
+            Some(uc) => uc.cmp_names(&entry_name, &want) == std::cmp::Ordering::Equal,
+            None => entry_name == want,
+        };
+        if hit {
+            return Ok(Some(e.file_record_number));
+        }
+    }
     Ok(None)
 }
 
@@ -637,6 +652,29 @@ mod tests {
                 native, oracle,
                 "native vs upstream record number disagree for {path}"
             );
+        }
+    }
+
+    #[test]
+    fn case_insensitive_lookup_matches_upstream() {
+        let mut dev = fresh_vol();
+        // Store with mixed case, then look it up with different casings —
+        // native (upcase-collated) must find it and agree with the upstream
+        // oracle (which is case-insensitive by default).
+        write::create_file_io(&mut dev, "/", "MixedCase.txt").expect("create");
+        write::mkdir_io(&mut dev, "/", "SubDir").expect("mkdir");
+        write::create_file_io(&mut dev, "/SubDir", "Inner.BIN").expect("create inner");
+
+        for q in [
+            "/MixedCase.txt",
+            "/mixedcase.txt",
+            "/MIXEDCASE.TXT",
+            "/subdir/inner.bin",
+            "/SUBDIR/Inner.BIN",
+        ] {
+            let native = resolve_path(&mut dev, q).expect("native resolve");
+            let oracle = upstream_resolve(&mut dev, q);
+            assert_eq!(native, oracle, "case-insensitive resolve mismatch for {q}");
         }
     }
 
