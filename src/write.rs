@@ -1564,7 +1564,7 @@ where
     } else {
         let attr_id = crate::attr_resize::allocate_attribute_id(record);
         let new_attr = build(attr_id, value)?;
-        crate::attr_resize::insert_attribute_before_end(record, &new_attr)?;
+        crate::attr_resize::insert_attribute_sorted(record, &new_attr)?;
     }
     Ok(())
 }
@@ -1614,7 +1614,7 @@ pub fn write_reparse_point_io<T: BlockIo + ?Sized>(
                 reparse_tag,
                 data,
             )?;
-            crate::attr_resize::insert_attribute_before_end(record, &new_attr)?;
+            crate::attr_resize::insert_attribute_sorted(record, &new_attr)?;
         }
         set_si_file_attributes_bit(record, FILE_ATTRIBUTE_REPARSE_POINT, true)?;
         Ok(())
@@ -1979,7 +1979,7 @@ pub fn set_volume_label_io<T: BlockIo + ?Sized>(io: &mut T, label: &str) -> Resu
             let attr_id = crate::attr_resize::allocate_attribute_id(record);
             let new_attr =
                 crate::record_build::build_resident_volume_name_attribute(attr_id, &label_bytes);
-            crate::attr_resize::insert_attribute_before_end(record, &new_attr)?;
+            crate::attr_resize::insert_attribute_sorted(record, &new_attr)?;
         }
         Ok(())
     })
@@ -2185,7 +2185,7 @@ fn write_object_id_inner<T: BlockIo + ?Sized>(
             let new_attr = crate::record_build::build_resident_object_id_attribute_full(
                 attr_id, object_id, birth_ids,
             );
-            crate::attr_resize::insert_attribute_before_end(record, &new_attr)?;
+            crate::attr_resize::insert_attribute_sorted(record, &new_attr)?;
         }
         Ok(())
     })
@@ -2300,7 +2300,7 @@ pub fn link_io<T: BlockIo + ?Sized>(
             nt_time,
             /* is_dir */ false,
         )?;
-        crate::attr_resize::insert_attribute_before_end(record, &fn_attr)?;
+        crate::attr_resize::insert_attribute_sorted(record, &fn_attr)?;
         let cur = u16::from_le_bytes([record[0x12], record[0x13]]);
         record[0x12..0x14].copy_from_slice(&cur.saturating_add(1).to_le_bytes());
         Ok(())
@@ -2467,7 +2467,7 @@ pub fn write_named_stream_resident_io<T: BlockIo + ?Sized>(
                 stream_name,
                 data,
             )?;
-            crate::attr_resize::insert_attribute_before_end(record, &new_attr)
+            crate::attr_resize::insert_attribute_sorted(record, &new_attr)
         }
     })
 }
@@ -2792,7 +2792,7 @@ pub fn promote_attribute_to_nonresident_io<T: BlockIo + ?Sized>(
         if let Some(loc) = attr_io::find_attribute(record, attr_type, attr_name) {
             crate::attr_resize::replace_attribute(record, loc.attr_offset, &new_attr_bytes)?;
         } else {
-            crate::attr_resize::insert_attribute_before_end(record, &new_attr_bytes)?;
+            crate::attr_resize::insert_attribute_sorted(record, &new_attr_bytes)?;
         }
         Ok(())
     });

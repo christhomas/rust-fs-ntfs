@@ -356,8 +356,18 @@ pub fn remove_index_entry(
     buf[total_size_pos..total_size_pos + 4].copy_from_slice(&new_total_size.to_le_bytes());
 
     // For $INDEX_ROOT, also shrink the resident attribute so bytes_used
-    // in the MFT record stays in sync.
+    // in the MFT record stays in sync, and keep allocated_size ==
+    // total_size. The resident index has no slack — its allocated region
+    // IS the attribute's resident value size — so a stale allocated_size
+    // left larger than total_size after a removal is exactly what chkdsk
+    // flags as "Error detected in index $I30 for file <n>" (the mirror of
+    // the insert path's invariant; see insert_entry_into_index_root). INDX
+    // blocks keep their fixed allocated_size — slack there is normal and
+    // expected, so this only applies to $INDEX_ROOT.
     if matches!(block_kind, BlockKind::IndexRoot) {
+        let alloc_pos = ih_start + IH_ALLOCATED_SIZE_OF_ENTRIES;
+        buf[alloc_pos..alloc_pos + 4].copy_from_slice(&new_total_size.to_le_bytes());
+
         let ir = attr_io::find_attribute(buf, AttrType::IndexRoot, Some(stream::I30))
             .ok_or("$INDEX_ROOT re-find failed")?;
         let old_val_len = ir.resident_value_length.ok_or("no value_length")?;

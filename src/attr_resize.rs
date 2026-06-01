@@ -202,7 +202,7 @@ pub fn replace_attribute(
 /// end-of-attributes sentinel (`0xFFFFFFFF`). The caller supplies a
 /// fully-formed, 8-byte-aligned attribute blob — including its
 /// attribute-header `length` field set to the buffer's length.
-pub fn insert_attribute_before_end(record: &mut [u8], new_attr: &[u8]) -> Result<(), String> {
+pub fn insert_attribute_sorted(record: &mut [u8], new_attr: &[u8]) -> Result<(), String> {
     let new_len = new_attr.len();
     if new_len == 0 || !new_len.is_multiple_of(8) {
         return Err(format!(
@@ -236,26 +236,38 @@ pub fn insert_attribute_before_end(record: &mut [u8], new_attr: &[u8]) -> Result
         ));
     }
 
-    // Scan for the end-of-attributes marker. It lives at or before
-    // bytes_used — `bytes_used` is 8-byte aligned so there may be 0–7
-    // bytes of trailing zero padding after the 0xFFFFFFFF sentinel.
+    // Find the sorted insertion offset. NTFS requires the attributes in a
+    // FILE record to be ordered by type_code (chkdsk flags "attribute
+    // records ... are unsorted" otherwise). The new attribute goes just
+    // before the first existing attribute whose type_code is strictly
+    // greater than its own; equal-type attributes keep their relative
+    // order (the new one is appended after them). If nothing has a greater
+    // type the insertion point is the end-of-attributes marker — so the
+    // highest-type attributes (e.g. $DATA, $REPARSE_POINT) still land at
+    // the end as before, while a $FILE_NAME (0x30) or $OBJECT_ID (0x40) is
+    // placed ahead of $DATA (0x80) instead of after it.
+    let new_type = u32::from_le_bytes([new_attr[0], new_attr[1], new_attr[2], new_attr[3]]);
     let attrs_offset = u16::from_le_bytes([record[0x14], record[0x15]]) as usize;
     let mut end_marker_pos: Option<usize> = None;
+    let mut insert_pos: Option<usize> = None;
     let scan_end = bytes_used.min(record.len().saturating_sub(4));
     let mut cursor = attrs_offset;
     while cursor + 4 <= scan_end {
-        let marker = u32::from_le_bytes([
+        let type_code = u32::from_le_bytes([
             record[cursor],
             record[cursor + 1],
             record[cursor + 2],
             record[cursor + 3],
         ]);
-        if marker == 0xFFFF_FFFF {
+        if type_code == 0xFFFF_FFFF {
             end_marker_pos = Some(cursor);
             break;
         }
-        if marker == 0 {
+        if type_code == 0 {
             break; // hit zero padding before finding marker
+        }
+        if insert_pos.is_none() && type_code > new_type {
+            insert_pos = Some(cursor);
         }
         // skip this attribute via its `length` field.
         let attr_len = u32::from_le_bytes([
@@ -271,15 +283,16 @@ pub fn insert_attribute_before_end(record: &mut [u8], new_attr: &[u8]) -> Result
     }
     let end_marker_pos = end_marker_pos
         .ok_or_else(|| format!("no 0xFFFFFFFF end marker found before bytes_used {bytes_used}"))?;
+    let insert_pos = insert_pos.unwrap_or(end_marker_pos);
 
-    // Shift the end marker forward by new_len.
-    record.copy_within(end_marker_pos..end_marker_pos + 4, end_marker_pos + new_len);
-    // Zero the area we're about to fill (defensive; overwritten below).
-    for byte in &mut record[end_marker_pos..end_marker_pos + new_len] {
+    // Open a gap at insert_pos by shifting everything from there up to and
+    // including the end marker (i.e. up to bytes_used) forward by new_len.
+    record.copy_within(insert_pos..bytes_used, insert_pos + new_len);
+    // Zero the gap (defensive; overwritten below by the attribute bytes).
+    for byte in &mut record[insert_pos..insert_pos + new_len] {
         *byte = 0;
     }
-    // Copy the new attribute.
-    record[end_marker_pos..end_marker_pos + new_len].copy_from_slice(new_attr);
+    record[insert_pos..insert_pos + new_len].copy_from_slice(new_attr);
 
     // Update bytes_used += new_len.
     let new_bu = (bytes_used + new_len) as u32;
@@ -333,7 +346,7 @@ mod tests {
         let end_marker_pos = ATTRS_OFF + attr_len;
         // Round bytes_used up to the 8-byte boundary, matching the real record
         // layout (the end marker is followed by 0..7 zero-pad bytes). This
-        // exercises insert_attribute_before_end's padded-marker scan.
+        // exercises insert_attribute_sorted's padded-marker scan.
         let bytes_used = align_up_8(end_marker_pos + 4);
 
         let mut rec = vec![0u8; ALLOC];
@@ -466,10 +479,10 @@ mod tests {
         );
     }
 
-    // --- insert_attribute_before_end ---
+    // --- insert_attribute_sorted ---
 
     #[test]
-    fn insert_attribute_before_end_adds_attribute() {
+    fn insert_attribute_sorted_adds_attribute() {
         let (mut rec, _) = one_attr_record(b"first");
         let bu_before = u32::from_le_bytes([rec[0x18], rec[0x19], rec[0x1A], rec[0x1B]]);
 
@@ -478,7 +491,7 @@ mod tests {
         new_attr[0..4].copy_from_slice(&0x10u32.to_le_bytes()); // type: $STANDARD_INFO
         new_attr[4..8].copy_from_slice(&32u32.to_le_bytes()); // length = 32
 
-        insert_attribute_before_end(&mut rec, &new_attr).unwrap();
+        insert_attribute_sorted(&mut rec, &new_attr).unwrap();
         let bu_after = u32::from_le_bytes([rec[0x18], rec[0x19], rec[0x1A], rec[0x1B]]);
         assert_eq!(bu_after, bu_before + 32);
     }
@@ -487,6 +500,6 @@ mod tests {
     fn insert_attribute_bad_alignment_fails() {
         let (mut rec, _) = one_attr_record(b"x");
         let bad_attr = vec![0u8; 7]; // not 8-aligned
-        assert!(insert_attribute_before_end(&mut rec, &bad_attr).is_err());
+        assert!(insert_attribute_sorted(&mut rec, &bad_attr).is_err());
     }
 }
