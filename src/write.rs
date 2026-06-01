@@ -988,6 +988,27 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
         .ok_or_else(|| "no $INDEX_ROOT on parent".to_string())?;
 
+    // Reject a destination that already exists: two $I30 entries with the
+    // same key is corruption (chkdsk flags it) and a silent clobber leaks
+    // the target. An exact-equal rename is a no-op, handled above only in
+    // rename_io; guard it here too since this is also a public entrypoint.
+    if new_name != current_basename {
+        if index_io::find_index_entry(&parent_record_bytes, new_name)?.is_some() {
+            return Err(format!("'{new_name}' already exists"));
+        }
+        if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
+            let ia = idx_block::load_for_directory_io(io, parent_rec)?;
+            for vcn in ia.allocated_block_vcns() {
+                let blk = idx_block::read_indx_block_io(io, &ia, vcn)?;
+                if index_io::find_entry_in_indx_block(&blk, new_name)?.is_some() {
+                    return Err(format!("'{new_name}' already exists"));
+                }
+            }
+        }
+    } else {
+        return Ok(());
+    }
+
     let in_root = index_io::find_index_entry(&parent_record_bytes, &current_basename)?;
     if let Some(entry_found) = in_root {
         if entry_found.file_record_number != file_rec {
@@ -3170,6 +3191,38 @@ pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(),
         ));
     }
 
+    // 1b) If the file has multiple hard links, removing one name must NOT
+    //     free the record or its clusters — only drop the matching
+    //     $FILE_NAME attribute and decrement hard_link_count. Storage is
+    //     freed only when the LAST link goes away (the count==1 path below).
+    let hard_link_count = u16::from_le_bytes([file_record_bytes[0x12], file_record_bytes[0x13]]);
+    if hard_link_count > 1 {
+        let parent_seq = u16::from_le_bytes([parent_record_bytes[0x10], parent_record_bytes[0x11]]);
+        let parent_reference = crate::record_build::encode_file_reference(parent_rec, parent_seq);
+        update_mft_record_io(io, file_rec, |record| {
+            let loc =
+                find_file_name_attr(record, parent_reference, &basename).ok_or_else(|| {
+                    format!("unlink: no $FILE_NAME for '{basename}' under parent {parent_rec}")
+                })?;
+            let bytes_used =
+                u32::from_le_bytes([record[0x18], record[0x19], record[0x1A], record[0x1B]])
+                    as usize;
+            record.copy_within(
+                loc.attr_offset + loc.attr_length..bytes_used,
+                loc.attr_offset,
+            );
+            for byte in &mut record[bytes_used - loc.attr_length..bytes_used] {
+                *byte = 0;
+            }
+            let new_bu = (bytes_used - loc.attr_length) as u32;
+            record[0x18..0x1C].copy_from_slice(&new_bu.to_le_bytes());
+            let cur = u16::from_le_bytes([record[0x12], record[0x13]]);
+            record[0x12..0x14].copy_from_slice(&cur.saturating_sub(1).to_le_bytes());
+            Ok(())
+        })?;
+        return Ok(());
+    }
+
     // 2) Free data clusters. Only if non-resident — resident $DATA lives
     //    inside the MFT record and is freed as part of the record itself.
     //    truncate to 0 is a no-op for resident data anyway.
@@ -3194,6 +3247,25 @@ pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(),
     mft_bitmap::free_io(io, &mbm, file_rec)?;
 
     Ok(())
+}
+
+/// POSIX-style `remove`: dispatch by type. Directories go through
+/// [`rmdir_io`] (which enforces emptiness), regular files through
+/// [`unlink_io`]. Both `unlink` and `rmdir` deliberately refuse the
+/// other's type; this is the single entrypoint that routes correctly.
+pub fn remove(image: &Path, path: &str) -> Result<(), String> {
+    let mut io = PathIo::open_rw(image)?;
+    remove_io(&mut io, path)
+}
+
+pub fn remove_io<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<(), String> {
+    let (_, rec, _) = resolve_parent_and_child_io(io, path)?;
+    let (_, record_bytes) = read_mft_record_io(io, rec)?;
+    if crate::mft_io::record_flags(&record_bytes) & MFT_FLAG_DIRECTORY != 0 {
+        rmdir_io(io, path)
+    } else {
+        unlink_io(io, path)
+    }
 }
 
 /// Resolve `old_path` to `(parent_record_number, file_record_number, basename)`.
