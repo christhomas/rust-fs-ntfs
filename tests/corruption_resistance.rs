@@ -16,6 +16,8 @@ const VOL_SIZE: u64 = 64 * 1024 * 1024;
 const CLUSTER: u32 = 4096;
 
 fn fresh_vol(tag: &str) -> String {
+    // Self-generating: don't assume test-disks/ already exists (clean checkout).
+    std::fs::create_dir_all("test-disks").expect("create test-disks dir");
     let dst = format!("test-disks/_corrupt_{tag}.img");
     let f = std::fs::File::create(&dst).expect("create temp image");
     f.set_len(VOL_SIZE).expect("set_len");
