@@ -116,7 +116,11 @@ fn exists(img: &str, dir_path: &str, name: &str) -> bool {
     }
     let idx = cur.directory_index(&mut reader).expect("idx");
     let mut finder = idx.finder();
-    NtfsFileNameIndex::find(&mut finder, &ntfs, &mut reader, name).is_some()
+    // Treat an NtfsError during the walk as "not found" rather than
+    // silently counting it as present.
+    NtfsFileNameIndex::find(&mut finder, &ntfs, &mut reader, name)
+        .and_then(|r| r.ok())
+        .is_some()
 }
 
 // ---------------------------------------------------------------------------
