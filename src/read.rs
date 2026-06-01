@@ -10,10 +10,17 @@
 //! the index primitives the write path already uses for lookup. No upstream
 //! `ntfs` types appear here.
 
+use crate::attr_io::{self, attr_off, AttrType};
 use crate::block_io::BlockIo;
+use crate::data_runs;
 use crate::idx_block;
 use crate::index_io::{self, IH_FLAG_HAS_SUBNODES};
 use crate::mft_io::{read_mft_record_io, record_flags, MFT_FLAG_DIRECTORY};
+
+/// Attribute data-flags (header +0x0C, low bits): the value is transformed
+/// and can't be returned as raw bytes by this reader yet.
+const ATTR_FLAG_COMPRESSED: u16 = 0x0001;
+const ATTR_FLAG_ENCRYPTED: u16 = 0x4000;
 
 /// MFT record number of the root directory (`.`), fixed by the NTFS spec.
 pub const ROOT_RECORD_NUMBER: u64 = 5;
@@ -79,6 +86,90 @@ fn lookup_in_directory<T: BlockIo + ?Sized>(
     Ok(None)
 }
 
+/// Read an attribute's full value bytes natively (no upstream `ntfs` crate).
+///
+/// Handles resident values, non-resident values (walking the data runs via
+/// [`data_runs`] and reading clusters through [`BlockIo`]), and sparse holes
+/// (unmapped runs read as zeros). Bytes past the attribute's
+/// `initialized_size` read as zero even when clusters are allocated, matching
+/// NTFS semantics. The returned vector has length = the attribute's data size.
+///
+/// Compressed / encrypted attributes are refused for now (the value would be
+/// transformed, not raw) — LZNT1 decompression wiring builds on this reader in
+/// a later step.
+pub fn read_attribute_value<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    attr_type: AttrType,
+    name: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let (params, record) = read_mft_record_io(io, record_number)?;
+    let loc = attr_io::find_attribute(&record, attr_type, name).ok_or_else(|| {
+        format!("read_attribute_value: attribute {attr_type:?} (name {name:?}) not found in record {record_number}")
+    })?;
+
+    // Resident: the value lives inside the MFT record.
+    if loc.is_resident {
+        let vo = loc.attr_offset
+            + loc
+                .resident_value_offset
+                .ok_or("resident attr has no value offset")? as usize;
+        let vl = loc
+            .resident_value_length
+            .ok_or("resident attr has no value length")? as usize;
+        return Ok(record[vo..vo + vl].to_vec());
+    }
+
+    // Non-resident: refuse transformed (compressed/encrypted) values — we'd
+    // otherwise hand back raw on-disk bytes that aren't the real content.
+    let flags = u16::from_le_bytes([
+        record[loc.attr_offset + attr_off::FLAGS],
+        record[loc.attr_offset + attr_off::FLAGS + 1],
+    ]);
+    if flags & ATTR_FLAG_COMPRESSED != 0 {
+        return Err("read_attribute_value: compressed attribute (LZNT1 decompression not wired here yet)".to_string());
+    }
+    if flags & ATTR_FLAG_ENCRYPTED != 0 {
+        return Err("read_attribute_value: encrypted attribute ($EFS) unsupported".to_string());
+    }
+
+    let data_size = loc
+        .non_resident_value_length
+        .ok_or("non-resident attr has no data size")? as usize;
+    let init_size = u64::from_le_bytes(
+        record[loc.attr_offset + attr_off::NONRES_INITIALIZED_LENGTH
+            ..loc.attr_offset + attr_off::NONRES_INITIALIZED_LENGTH + 8]
+            .try_into()
+            .map_err(|_| "short record reading initialized_size")?,
+    ) as usize;
+    let mpo = loc
+        .non_resident_mapping_pairs_offset
+        .ok_or("non-resident attr has no mapping-pairs offset")? as usize;
+    let runs = data_runs::decode_runs(&record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length])?;
+
+    let cluster_size = params.cluster_size as usize;
+    // Zero-initialised: holes and the [initialized_size, data_size) tail are
+    // both zero, so we only have to fill in allocated, initialised clusters.
+    let mut out = vec![0u8; data_size];
+    let readable = data_size.min(init_size);
+    let cluster_count = data_size.div_ceil(cluster_size);
+    for vcn in 0..cluster_count as u64 {
+        let file_off = vcn as usize * cluster_size;
+        if file_off >= readable {
+            break; // rest is uninitialised → stays zero
+        }
+        if let Some(lcn) = data_runs::vcn_to_lcn(&runs, vcn) {
+            let mut cluster = vec![0u8; cluster_size];
+            io.read_exact_at(lcn * cluster_size as u64, &mut cluster)?;
+            let copy_len = (file_off + cluster_size).min(readable) - file_off;
+            out[file_off..file_off + copy_len].copy_from_slice(&cluster[..copy_len]);
+        }
+        // else: sparse hole → leave zeros.
+    }
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,7 +177,7 @@ mod tests {
     use crate::mkfs::format_filesystem;
     use crate::write;
     use ntfs::indexes::NtfsFileNameIndex;
-    use ntfs::Ntfs;
+    use ntfs::{Ntfs, NtfsReadSeek};
 
     /// In-memory volume so the cross-check has no fixture dependency.
     struct MemDev {
@@ -173,5 +264,93 @@ mod tests {
         write::create_file_io(&mut dev, "/", "f").expect("create");
         // A file is not a directory: can't descend through it.
         assert!(resolve_path(&mut dev, "/f/child").is_err());
+    }
+
+    /// Oracle: read the unnamed `$DATA` of `path` through the upstream crate.
+    fn upstream_read_data(dev: &mut MemDev, path: &str) -> Vec<u8> {
+        let mut reader = IoReadSeek::new(dev);
+        let mut ntfs = Ntfs::new(&mut reader).expect("Ntfs::new");
+        ntfs.read_upcase_table(&mut reader).expect("upcase");
+        let mut cur = ntfs.root_directory(&mut reader).expect("root");
+        for comp in path.split('/').filter(|c| !c.is_empty()) {
+            let index = cur.directory_index(&mut reader).expect("dir index");
+            let mut finder = index.finder();
+            let entry = NtfsFileNameIndex::find(&mut finder, &ntfs, &mut reader, comp)
+                .expect("entry present")
+                .expect("entry ok");
+            cur = entry.to_file(&ntfs, &mut reader).expect("to_file");
+        }
+        let data_item = cur
+            .data(&mut reader, "")
+            .expect("has $DATA")
+            .expect("data item");
+        let data = data_item.to_attribute().expect("attr");
+        let mut value = data.value(&mut reader).expect("value");
+        let mut out = vec![0u8; value.len() as usize];
+        let mut filled = 0usize;
+        while filled < out.len() {
+            let n = value.read(&mut reader, &mut out[filled..]).expect("read");
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+        out.truncate(filled);
+        out
+    }
+
+    /// Native read of the unnamed `$DATA` of `path` via resolve_path +
+    /// read_attribute_value (the code under test).
+    fn native_read_data(dev: &mut MemDev, path: &str) -> Vec<u8> {
+        let rec = resolve_path(dev, path).expect("resolve");
+        read_attribute_value(dev, rec, AttrType::Data, None).expect("read value")
+    }
+
+    #[test]
+    fn resident_data_matches_upstream() {
+        let mut dev = fresh_vol();
+        write::create_file_io(&mut dev, "/", "r.txt").expect("create");
+        write::write_file_contents_io(&mut dev, "/r.txt", b"hello resident world").expect("write");
+        let native = native_read_data(&mut dev, "/r.txt");
+        assert_eq!(native, b"hello resident world");
+        assert_eq!(native, upstream_read_data(&mut dev, "/r.txt"));
+    }
+
+    #[test]
+    fn nonresident_sparse_data_matches_upstream() {
+        // 3 clusters: data | hole (all-zero) | data. write_sparse_file makes
+        // the middle cluster a hole, exercising non-resident run reading +
+        // hole zero-fill in read_attribute_value.
+        let cs = 4096usize;
+        let mut data = vec![0u8; cs * 3];
+        for (i, b) in data[..cs].iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        for (i, b) in data[cs * 2..].iter_mut().enumerate() {
+            *b = (i % 241 + 5) as u8;
+        }
+        // middle cluster stays all-zero → a hole.
+
+        let mut dev = fresh_vol();
+        write::create_file_io(&mut dev, "/", "sparse.bin").expect("create");
+        write::write_sparse_file_io(&mut dev, "/sparse.bin", &data).expect("sparse write");
+
+        let native = native_read_data(&mut dev, "/sparse.bin");
+        assert_eq!(native.len(), data.len(), "length matches data_size");
+        assert_eq!(native, data, "native read reconstructs data incl. hole=zeros");
+        assert_eq!(
+            native,
+            upstream_read_data(&mut dev, "/sparse.bin"),
+            "native vs upstream byte mismatch on sparse file"
+        );
+    }
+
+    #[test]
+    fn missing_attribute_errors() {
+        let mut dev = fresh_vol();
+        write::create_file_io(&mut dev, "/", "x").expect("create");
+        let rec = resolve_path(&mut dev, "/x").unwrap();
+        // No $INDEX_ROOT on a regular file.
+        assert!(read_attribute_value(&mut dev, rec, AttrType::IndexRoot, None).is_err());
     }
 }
