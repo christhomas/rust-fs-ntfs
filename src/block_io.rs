@@ -13,11 +13,14 @@
 //! consumer naturally support positioned access and it keeps the write
 //! sites simple (no shared mutable cursor state to thread through).
 //!
-//! `read_exact_at`, `write_all_at`, `size`, and `sync` are exactly
-//! what `crate::fsck::FsckIo` already exposes — that trait predates
-//! this one and remains live for the fsck-only entry points so it
-//! doesn't break callers that already implement it. Internally the
-//! mutator stack uses [`BlockIo`] directly.
+//! `read_exact_at`, `write_all_at`, `size`, and `sync` are exactly what
+//! `crate::fsck::FsckIo` exposed — that trait predated this one. They have
+//! since been unified: `FsckIo` is now a zero-method supertrait of
+//! [`BlockIo`] with a blanket `impl<T: BlockIo> FsckIo for T`, so a single
+//! `impl BlockIo for MyType` serves both the mutator stack and the fsck
+//! entry points. External code that implemented `FsckIo` directly must
+//! switch to implementing `BlockIo` (the semver-breaking change behind the
+//! 0.2.0 version bump).
 
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
