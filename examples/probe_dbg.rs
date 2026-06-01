@@ -1,95 +1,41 @@
-//! Debug probe: dump the on-disk attribute layout of a file's MFT record.
-//!
-//! Reconstruction note: the original `examples/probe_dbg.rs` was an
-//! uncommitted scratch file that was lost before it could be captured.
-//! This is a fresh, functionally-equivalent debug probe built on the
-//! crate's public API — not a byte-for-byte recovery of the original.
-//!
-//! Usage:
-//!   # Probe a path inside an existing image:
-//!   cargo run --example probe_dbg -- <image.img> </path/to/file>
-//!
-//!   # No args: format a throwaway image, populate it, and probe it.
-//!   cargo run --example probe_dbg
-//!
-//! It prints, for every attribute in the target's MFT record, the type
-//! code + well-known name, attribute id, byte offset/length within the
-//! record, residency, and value length — the view you want when chasing
-//! "what attributes does this record actually carry?" during debugging.
-
-use std::path::{Path, PathBuf};
+// Recovered original: extracted verbatim from the session transcript
+// (77f00d3f, the `cat > examples/probe_dbg.rs` heredoc that preceded the
+// accidental rm). This is the true original scratch probe — it checks
+// whether a freshly-written resident file's MFT record reports
+// bytes_used > bytes_allocated (the record-overflow question it was
+// chasing). Agent 1's general-purpose rebuild is preserved in git
+// commit f51112a if the dumper form is wanted instead.
 
 use fs_ntfs::block_io::{BlockIo, PathIo};
+use fs_ntfs::mft_io::read_mft_record;
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::write;
-
-fn dump(image: &Path, file_path: &str) {
-    match write::read_attributes(image, file_path) {
-        Ok(descs) => {
-            println!(
-                "{} attribute(s) in MFT record for {file_path}:",
-                descs.len()
-            );
-            println!(
-                "  {:<24} {:>4} {:>8} {:>8} {:>9} {:>12}  name",
-                "type", "id", "offset", "length", "resident", "value_len"
-            );
-            for d in &descs {
-                println!(
-                    "  {:<24} {:>4} {:>#8x} {:>8} {:>9} {:>12}  {}",
-                    format!("{} (0x{:x})", d.type_name, d.type_code),
-                    d.attribute_id,
-                    d.attr_offset,
-                    d.attr_length,
-                    d.is_resident,
-                    d.value_length,
-                    d.name,
-                );
-            }
-        }
-        Err(e) => eprintln!("probe failed for {file_path}: {e}"),
-    }
-}
-
-/// Format a throwaway image under the temp dir, create one file, and
-/// return its path so the no-args path can demonstrate the probe.
-fn make_demo_image() -> PathBuf {
-    const SIZE: u64 = 16 * 1024 * 1024;
-    let path = std::env::temp_dir().join("fs_ntfs_probe_dbg_demo.img");
-
-    {
-        let f = std::fs::File::create(&path).expect("create demo image");
-        f.set_len(SIZE).expect("set_len");
-    }
-    {
-        let mut io = PathIo::open_rw(&path).expect("open_rw demo image");
-        format_filesystem(
-            &mut io as &mut dyn BlockIo,
-            SIZE,
-            4096,
-            4096,
-            Some("PROBE"),
-            Some(0x5052_4F42),
-        )
-        .expect("format demo image");
-    }
-    write::create_file(&path, "/", "probe.txt").expect("create probe.txt");
-    path
-}
+use std::path::Path;
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.as_slice() {
-        [image, file_path] => dump(Path::new(image), file_path),
-        [] => {
-            let img = make_demo_image();
-            println!("(no args) formatted demo image at {}", img.display());
-            dump(&img, "/probe.txt");
-            let _ = std::fs::remove_file(&img);
-        }
-        _ => {
-            eprintln!("usage: probe_dbg [<image.img> </path/to/file>]");
-            std::process::exit(2);
-        }
-    }
+    let dst = "test-disks/_probe_dbg.img";
+    let f = std::fs::File::create(dst).unwrap();
+    f.set_len(64 * 1024 * 1024).unwrap();
+    drop(f);
+    let mut io = PathIo::open_rw(Path::new(dst)).unwrap();
+    format_filesystem(&mut io, 64 * 1024 * 1024, 4096, 4096, Some("DBG"), Some(1)).unwrap();
+    <PathIo as BlockIo>::sync(&mut io).unwrap();
+    drop(io);
+
+    let rec = write::create_file(Path::new(dst), "/", "p.bin").unwrap();
+    let payload = vec![0x5Au8; 1024];
+    let wr = write::write_resident_contents(Path::new(dst), "/p.bin", &payload);
+    println!("record_number={rec} write_result={:?}", wr.map(|_| "OK"));
+
+    // Read raw record and dump header fields.
+    let (params, record) = read_mft_record(Path::new(dst), rec).unwrap();
+    let buf_len = record.len();
+    let bytes_used = u32::from_le_bytes([record[0x18], record[0x19], record[0x1A], record[0x1B]]);
+    let bytes_alloc = u32::from_le_bytes([record[0x1C], record[0x1D], record[0x1E], record[0x1F]]);
+    println!("file_record_size(param)={} buffer_len={buf_len} bytes_used={bytes_used} bytes_allocated={bytes_alloc}",
+        params.file_record_size);
+    println!(
+        "OVERFLOW? bytes_used({bytes_used}) > bytes_allocated({bytes_alloc}): {}",
+        bytes_used > bytes_alloc
+    );
 }
