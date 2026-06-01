@@ -53,6 +53,14 @@ pub fn decompress_unit(input: &[u8], max_len: usize) -> Result<Vec<u8>, String> 
 
         let chunk_len = (header & 0x0FFF) as usize + 1;
         let compressed = header & 0x8000 != 0;
+        // Bits 12-14 are a fixed signature (0b011 = 3). Reject anything else
+        // so a corrupt header isn't silently decoded as a valid chunk.
+        let signature = (header >> 12) & 0x7;
+        if signature != 3 {
+            return Err(format!(
+                "LZNT1: invalid chunk header signature {signature:#x} (expected 0b011)"
+            ));
+        }
         let chunk_end = pos
             .checked_add(chunk_len)
             .filter(|&e| e <= input.len())
@@ -106,6 +114,18 @@ fn decompress_chunk(body: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
                     return Err(format!(
                         "LZNT1: back-reference displacement {displacement} exceeds \
                          {cur} bytes decoded in chunk"
+                    ));
+                }
+                // A chunk decompresses to at most CHUNK_SIZE bytes; a copy
+                // that would cross that boundary is corrupt input. Guard the
+                // whole copy (not just the per-token entry) — a single token
+                // at cur=1 can ask for up to 4098 bytes, which would both
+                // overrun the chunk and push `cur` past 4096, corrupting the
+                // split of every later back-reference in this chunk.
+                if cur + length > CHUNK_SIZE {
+                    return Err(format!(
+                        "LZNT1: back-reference (length {length} at offset {cur}) overruns \
+                         the {CHUNK_SIZE}-byte chunk"
                     ));
                 }
                 // Copy byte-by-byte: displacement may be < length (RLE-style
@@ -247,5 +267,35 @@ mod tests {
         stream.extend_from_slice(&header.to_le_bytes());
         stream.extend_from_slice(b"short");
         assert!(decompress_unit(&stream, 4096).is_err());
+    }
+
+    #[test]
+    fn rejects_bad_chunk_signature() {
+        // Valid framing except the signature bits (12-14) are 0b000, not
+        // 0b011. A short body keeps the input otherwise well-formed.
+        let data = b"x";
+        let header: u16 = 0x8000 | ((data.len() - 1) as u16 & 0x0FFF); // no 0x3000
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&header.to_le_bytes());
+        stream.extend_from_slice(data);
+        let err = decompress_unit(&stream, 4096).unwrap_err();
+        assert!(err.contains("signature"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_back_reference_overrunning_chunk() {
+        // One literal 'A' then a back-reference whose length (4098, the max
+        // at cur=1) overruns the 4096-byte chunk. Must error rather than
+        // produce >4096 bytes and corrupt later token splits.
+        let mut body = Vec::new();
+        body.push(0b0000_0010u8); // bit0 literal, bit1 back-ref
+        body.push(b'A');
+        body.extend_from_slice(&0x0FFFu16.to_le_bytes()); // cur=1 => len 4098, disp 1
+        let mut stream = Vec::new();
+        let header: u16 = 0x8000 | 0x3000 | ((body.len() - 1) as u16 & 0x0FFF);
+        stream.extend_from_slice(&header.to_le_bytes());
+        stream.extend_from_slice(&body);
+        let err = decompress_unit(&stream, 65536).unwrap_err();
+        assert!(err.contains("overruns"), "got: {err}");
     }
 }
