@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "tested_at_sha": "dcdb46d9cd651501dc9c1f9b8133f8779e0ba433",
-  "tested_at_branch": "staging-4",
-  "tested_at_utc": "2026-05-27T03:18:48Z",
-  "binary_sha256": "2a232939c19d196bbc402b0386bdf205b274c847514c4d0a62c0fbde6754bca4",
-  "test_matrix_json_sha256": "500525e85bc387187dca2a55e89de4668085d01e908761452463f90c44bd02c0",
-  "harness_submodule_sha": "2c4b5c1d420e9d9135cfc5682d7d485095c6c51d",
+  "tested_at_sha": "aa90352602e7985fc420f07a4eac0b5e991ac6be",
+  "tested_at_branch": "feat/native-write-resolver",
+  "tested_at_utc": "2026-06-01T21:12:28Z",
+  "binary_sha256": "0be557b95cc0dd662ff8055dcd828f236876fd1e02bb6bf24dd646633e466d46",
+  "test_matrix_json_sha256": "42c8bec041fc15bf654ae89bdc58826080707ac3e05bc82e72cf6199a0cc1f7b",
+  "harness_submodule_sha": "730a7613523eed990dc3482b44f71377c7ed463e",
   "host": {
     "os": "Darwin",
     "version": "25.4.0",
@@ -57,6 +57,9 @@
         "/scan": 13
       }
     },
+    "mac-format-hardlink-unlink-win-chkdsk": {
+      "status": "ok"
+    },
     "mac-format-label-32chars": {
       "status": "ok"
     },
@@ -99,6 +102,12 @@
     "mac-format-mac-write-mac-rm-mac-enumerate-empty": {
       "status": "ok"
     },
+    "mac-format-mac-write-sparse-mixed-win-chkdsk": {
+      "status": "ok"
+    },
+    "mac-format-mac-write-sparse-zeros-win-chkdsk": {
+      "status": "ok"
+    },
     "mac-format-mac-write-win-repeat-mount-3-win-chkdsk": {
       "status": "ok"
     },
@@ -111,6 +120,9 @@
         "/F /X": 1,
         "readonly": 3
       }
+    },
+    "mac-format-rename-win-chkdsk": {
+      "status": "ok"
     },
     "mac-format-set-dirty-win-chkdsk": {
       "status": "ok"
@@ -291,10 +303,10 @@
     }
   },
   "summary": {
-    "passed": 42,
+    "passed": 46,
     "failed": 0,
     "unknown": 1,
-    "total": 43,
-    "total_duration_s": 2113.42
+    "total": 47,
+    "total_duration_s": 1376.44
   }
 }
