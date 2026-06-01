@@ -43,6 +43,8 @@ use std::path::Path;
 use ntfs::structured_values::NtfsVolumeFlags;
 use ntfs::{KnownNtfsFileRecordNumber, Ntfs, NtfsAttributeType};
 
+use crate::block_io::BlockIo;
+
 /// Offset of the 2-byte `flags` field within the `$VOLUME_INFORMATION` structure.
 /// Layout (MS-FSCC / Windows Internals 7th ed.): reserved(8) + major(1) + minor(1) + flags(2).
 const VOLUME_FLAGS_OFFSET: u64 = 10;
@@ -69,29 +71,19 @@ const LOGFILE_CHUNK: usize = 64 * 1024;
 
 /// Block-device-like I/O used by the fsck routines.
 ///
-/// Implementors serve positioned reads/writes against whatever storage
-/// layer they wrap — a file, a FSKit `FSBlockDeviceResource`, an in-memory
-/// buffer. `read_exact_at` must read exactly `buf.len()` bytes starting at
-/// `offset`; `write_all_at` must write exactly `buf.len()` bytes starting
-/// at `offset`. Both return `Err(String)` on any error.
-///
-/// `size` is the total byte length of the device, used to back the NTFS
-/// parser's `Seek::End` semantics.
-pub trait FsckIo {
-    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String>;
-    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String>;
-    fn size(&self) -> u64;
-    /// Flush any pending writes to stable storage. Path-backed impls call
-    /// `fsync`; callback-backed impls delegate to the host (FSKit drains
-    /// on the sync barrier).
-    fn sync(&mut self) -> Result<(), String> {
-        Ok(())
-    }
-}
+/// This is now a zero-method alias of [`crate::block_io::BlockIo`] — the two
+/// traits had byte-identical surfaces (`read_exact_at` / `write_all_at` /
+/// `size` / `sync`), so rather than maintain duplicate impls for every
+/// backend (path, fs-core device, host callbacks) we make `FsckIo` a
+/// supertrait of `BlockIo` with a blanket impl. Anything that implements
+/// `BlockIo` is automatically an `FsckIo`, and the fsck routines keep their
+/// `T: FsckIo` bounds unchanged.
+pub trait FsckIo: BlockIo {}
+impl<T: BlockIo + ?Sized> FsckIo for T {}
 
-/// `FsckIo` backed by a real filesystem path. The file is opened RW on
-/// construction; reads and writes are positioned via `Seek` + `read_exact`
-/// / `write_all`.
+/// `FsckIo` (via `BlockIo`) backed by a real filesystem path. The file is
+/// opened RW on construction; reads and writes are positioned via `Seek` +
+/// `read_exact` / `write_all`.
 pub struct PathIo {
     file: File,
     size: u64,
@@ -112,7 +104,7 @@ impl PathIo {
     }
 }
 
-impl FsckIo for PathIo {
+impl BlockIo for PathIo {
     fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
         self.file
             .seek(SeekFrom::Start(offset))
@@ -546,10 +538,9 @@ mod tests {
     use crate::block_io::BlockIo;
     use crate::mkfs::format_filesystem;
 
-    /// Vec-backed dev that implements both `BlockIo` (so `mkfs` can
-    /// format into it) and `FsckIo` (so the upgrade path can act on
-    /// it). The two traits have identical method signatures; we just
-    /// delegate.
+    /// Vec-backed dev implementing `BlockIo` (so `mkfs` can format into it);
+    /// the blanket impl in this module makes it an `FsckIo` too, so the
+    /// upgrade path can act on it without a separate delegating impl.
     struct MemDev {
         buf: Vec<u8>,
     }
@@ -567,18 +558,6 @@ mod tests {
         }
         fn size(&self) -> u64 {
             self.buf.len() as u64
-        }
-    }
-
-    impl FsckIo for MemDev {
-        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
-            <Self as BlockIo>::read_exact_at(self, offset, buf)
-        }
-        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
-            <Self as BlockIo>::write_all_at(self, offset, buf)
-        }
-        fn size(&self) -> u64 {
-            <Self as BlockIo>::size(self)
         }
     }
 
@@ -614,7 +593,7 @@ mod tests {
             buf[0] = 1;
             buf[1] = 2;
             buf[2..4].copy_from_slice(&upgrade_flags.to_le_bytes());
-            FsckIo::write_all_at(&mut dev, major_off, &buf).expect("downgrade write");
+            BlockIo::write_all_at(&mut dev, major_off, &buf).expect("downgrade write");
         }
 
         // Pre-condition: downgrade succeeded — 1.2 + UPGRADE_ON_MOUNT.
@@ -816,10 +795,10 @@ mod tests {
         let mut dev = fresh_dev();
         let (offset, _len) = locate_logfile_data_io(&mut dev).unwrap();
         // Write a zero sentinel, then verify reset fills with 0xFF.
-        FsckIo::write_all_at(&mut dev, offset, &[0x00u8; 8]).unwrap();
+        BlockIo::write_all_at(&mut dev, offset, &[0x00u8; 8]).unwrap();
         reset_logfile_io(&mut dev, None::<&mut dyn FnMut(&str, u64, u64)>).unwrap();
         let mut check = [0x00u8; 8];
-        FsckIo::read_exact_at(&mut dev, offset, &mut check).unwrap();
+        BlockIo::read_exact_at(&mut dev, offset, &mut check).unwrap();
         assert_eq!(
             check, [0xFFu8; 8],
             "reset_logfile must fill $LogFile with 0xFF"
@@ -833,7 +812,7 @@ mod tests {
         let mut dev = fresh_dev();
         // Write a known u16 at some offset and read it back.
         let offset = 512u64;
-        FsckIo::write_all_at(&mut dev, offset, &[0x34u8, 0x12]).unwrap();
+        BlockIo::write_all_at(&mut dev, offset, &[0x34u8, 0x12]).unwrap();
         let val = read_u16_le_io(&mut dev, offset).unwrap();
         assert_eq!(val, 0x1234);
     }
