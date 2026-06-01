@@ -398,6 +398,12 @@ impl Filesystem {
         write::rmdir(&self.image, path).map_err(Error)
     }
 
+    /// POSIX-style remove: dispatches to `rmdir` for directories and
+    /// `unlink` for regular files.
+    pub fn remove(&self, path: &str) -> Result<(), Error> {
+        write::remove(&self.image, path).map_err(Error)
+    }
+
     pub fn rename(&self, old_path: &str, new_basename: &str) -> Result<(), Error> {
         write::rename(&self.image, old_path, new_basename).map_err(Error)
     }
