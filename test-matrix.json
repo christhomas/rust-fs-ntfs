@@ -1776,6 +1776,98 @@
       ],
       "image": "nfs-win-format-win-write-mac-write-win-verify.img",
       "_notes": "Filesystem::create_file is plumbed and exposed via the inspect_ntfs CLI on the c5fe branch. Matrix runner glue (drive a Mac-side touch in the orchestrator) is the only missing piece.\n\ndepends on Mac-side writer; first agent scaffolds it or marks blocked-on-writer"
+    },
+    "mac-format-mac-write-sparse-zeros-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "SPARSEW",
+        "alloc_unit_size": 4096
+      },
+      "image": "nfs-mac-format-mac-write-sparse-zeros-win-chkdsk.img",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "sparse.bin"
+        },
+        {
+          "op": "mac-write-sparse",
+          "path": "/sparse.bin",
+          "bytes": "65536",
+          "pattern": "zeros"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ],
+      "_notes": "Sparse-file write (zeros). mac creates + writes a sparse $DATA (holes for all-zero clusters), ships to VM, chkdsk must report Clean (validates SPARSE flag + hole mapping-pairs + allocated_size)."
+    },
+    "mac-format-mac-write-sparse-mixed-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "SPARSEM",
+        "alloc_unit_size": 4096
+      },
+      "image": "nfs-mac-format-mac-write-sparse-mixed-win-chkdsk.img",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "sparse.bin"
+        },
+        {
+          "op": "mac-write-sparse",
+          "path": "/sparse.bin",
+          "bytes": "65536",
+          "pattern": "sparse"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ],
+      "_notes": "Sparse-file write (sparse). mac creates + writes a sparse $DATA (holes for all-zero clusters), ships to VM, chkdsk must report Clean (validates SPARSE flag + hole mapping-pairs + allocated_size)."
     }
   },
   "_consolidated_by": "agent-c5fe-2026-05-02",
