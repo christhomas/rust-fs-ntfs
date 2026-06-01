@@ -3146,6 +3146,24 @@ pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(),
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
         .ok_or_else(|| "no $INDEX_ROOT on parent".to_string())?;
 
+    // Pre-flight for the multi-link path (step 1b below): the file-record
+    // mutation there must be able to locate the matching $FILE_NAME. Verify
+    // that NOW, before the destructive parent-index removal — otherwise a
+    // failure in step 1b would leave the parent entry gone while the file
+    // record still holds the name and an unchanged hard_link_count (an
+    // orphaned, chkdsk-flagged inconsistency). On the happy path this is a
+    // pure read; on-disk behaviour is unchanged.
+    let hard_link_count = u16::from_le_bytes([file_record_bytes[0x12], file_record_bytes[0x13]]);
+    let parent_seq = u16::from_le_bytes([parent_record_bytes[0x10], parent_record_bytes[0x11]]);
+    let parent_reference = crate::record_build::encode_file_reference(parent_rec, parent_seq);
+    if hard_link_count > 1
+        && find_file_name_attr(&file_record_bytes, parent_reference, &basename).is_none()
+    {
+        return Err(format!(
+            "unlink: no $FILE_NAME for '{basename}' under parent {parent_rec}"
+        ));
+    }
+
     let in_root = index_io::find_index_entry(&parent_record_bytes, &basename)?;
     if let Some(entry) = in_root {
         if entry.file_record_number != file_rec {
@@ -3195,10 +3213,9 @@ pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(),
     //     free the record or its clusters — only drop the matching
     //     $FILE_NAME attribute and decrement hard_link_count. Storage is
     //     freed only when the LAST link goes away (the count==1 path below).
-    let hard_link_count = u16::from_le_bytes([file_record_bytes[0x12], file_record_bytes[0x13]]);
+    //     `hard_link_count` / `parent_reference` were computed (and the
+    //     $FILE_NAME presence verified) in the pre-flight above.
     if hard_link_count > 1 {
-        let parent_seq = u16::from_le_bytes([parent_record_bytes[0x10], parent_record_bytes[0x11]]);
-        let parent_reference = crate::record_build::encode_file_reference(parent_rec, parent_seq);
         update_mft_record_io(io, file_rec, |record| {
             let loc =
                 find_file_name_attr(record, parent_reference, &basename).ok_or_else(|| {
