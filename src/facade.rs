@@ -15,14 +15,16 @@
 //! via `fs_ntfs_mount` which keeps the parsed volume hot.
 
 use std::fs::File;
-use std::io::{BufReader, SeekFrom};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use ntfs::indexes::NtfsFileNameIndex;
-use ntfs::structured_values::{NtfsFileNamespace, NtfsStandardInformation};
-use ntfs::{KnownNtfsFileRecordNumber, Ntfs, NtfsAttributeType, NtfsReadSeek};
+// Upstream `ntfs` is still used by the not-yet-flipped volume_info/open_reader
+// path; the per-path read methods (stat/read_dir/read_file) are native.
+use ntfs::Ntfs;
 
-use crate::{fsck, write};
+use crate::attr_io::AttrType;
+use crate::block_io::PathIo;
+use crate::{fsck, read, write};
 
 /// Generic facade error. Wraps the underlying string error from the
 /// lower-level APIs.
@@ -233,116 +235,81 @@ impl Filesystem {
     }
 
     pub fn stat(&self, path: &str) -> Result<Attr, Error> {
-        let (ntfs, mut reader) = self.open_reader()?;
-        let file = navigate(&ntfs, &mut reader, path)?;
+        let mut io = PathIo::open_ro(&self.image).map_err(Error)?;
+        let rec = read::resolve_path(&mut io, path).map_err(Error)?;
+        let st = read::read_stat(&mut io, rec).map_err(Error)?;
+        let (crtime_sec, crtime_nsec) = nt_parts(st.created_nt);
+        let (mtime_sec, mtime_nsec) = nt_parts(st.modified_nt);
+        let (atime_sec, atime_nsec) = nt_parts(st.accessed_nt);
+        let (ctime_sec, ctime_nsec) = nt_parts(st.mft_modified_nt);
         let mut attr = Attr {
-            file_record_number: file.file_record_number(),
-            size: 0,
-            atime_sec: 0,
-            mtime_sec: 0,
-            ctime_sec: 0,
-            crtime_sec: 0,
-            atime_nsec: 0,
-            mtime_nsec: 0,
-            ctime_nsec: 0,
-            crtime_nsec: 0,
-            mode: if file.is_directory() {
-                0o40755
-            } else {
-                0o100644
-            },
-            link_count: file.hard_link_count(),
-            file_type: if file.is_directory() {
+            file_record_number: rec,
+            size: st.size,
+            atime_sec,
+            mtime_sec,
+            ctime_sec,
+            crtime_sec,
+            atime_nsec,
+            mtime_nsec,
+            ctime_nsec,
+            crtime_nsec,
+            mode: if st.is_dir { 0o40755 } else { 0o100644 },
+            link_count: st.link_count,
+            file_type: if st.is_dir {
                 FileType::Directory
             } else {
                 FileType::Regular
             },
-            attributes: 0,
+            attributes: st.file_attributes,
         };
-        let mut attributes = file.attributes();
-        let mut reparse_tag: Option<u32> = None;
-        while let Some(item) = attributes.next(&mut reader) {
-            let Ok(item) = item else { continue };
-            let Ok(a) = item.to_attribute() else { continue };
-            match a.ty() {
-                Ok(NtfsAttributeType::StandardInformation) => {
-                    if let Ok(si) = a.resident_structured_value::<NtfsStandardInformation>() {
-                        (attr.crtime_sec, attr.crtime_nsec) = ntfs_time_to_unix(si.creation_time());
-                        (attr.mtime_sec, attr.mtime_nsec) =
-                            ntfs_time_to_unix(si.modification_time());
-                        (attr.atime_sec, attr.atime_nsec) = ntfs_time_to_unix(si.access_time());
-                        (attr.ctime_sec, attr.ctime_nsec) =
-                            ntfs_time_to_unix(si.mft_record_modification_time());
-                        attr.attributes = si.file_attributes().bits();
-                    }
+        // Reparse tag (symlink / junction), if the file has a $REPARSE_POINT.
+        if let Ok(rp) = read::read_attribute_value(&mut io, rec, AttrType::ReparsePoint, None) {
+            if rp.len() >= 4 {
+                let tag = u32::from_le_bytes([rp[0], rp[1], rp[2], rp[3]]);
+                attr.file_type = match tag {
+                    0xA000_000C => FileType::Symlink,
+                    0xA000_0003 => FileType::Junction,
+                    _ => attr.file_type,
+                };
+                if attr.file_type == FileType::Symlink {
+                    attr.mode = 0o120777;
                 }
-                Ok(NtfsAttributeType::Data) if a.name().map(|n| n.is_empty()).unwrap_or(true) => {
-                    attr.size = a.value_length();
-                }
-                Ok(NtfsAttributeType::ReparsePoint) => {
-                    if let Ok(mut v) = a.value(&mut reader) {
-                        let mut tag = [0u8; 4];
-                        if v.read(&mut reader, &mut tag).is_ok() {
-                            reparse_tag = Some(u32::from_le_bytes(tag));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let Some(tag) = reparse_tag {
-            attr.file_type = match tag {
-                0xA000_000C => FileType::Symlink,
-                0xA000_0003 => FileType::Junction,
-                _ => attr.file_type,
-            };
-            if attr.file_type == FileType::Symlink {
-                attr.mode = 0o120777;
             }
         }
         Ok(attr)
     }
 
     pub fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>, Error> {
-        let (ntfs, mut reader) = self.open_reader()?;
-        let dir = navigate(&ntfs, &mut reader, path)?;
-        let current_rn = dir.file_record_number();
-        let parent_rn = if current_rn == KnownNtfsFileRecordNumber::RootDirectory as u64 {
+        let mut io = PathIo::open_ro(&self.image).map_err(Error)?;
+        let current_rn = read::resolve_path(&mut io, path).map_err(Error)?;
+        let parent_rn = if current_rn == read::ROOT_RECORD_NUMBER {
             current_rn
         } else {
-            parent_record_of(&dir, &mut reader).unwrap_or(current_rn)
+            read::read_parent_record(&mut io, current_rn).unwrap_or(current_rn)
         };
-        let mut out = Vec::new();
-        out.push(DirEntry {
-            file_record_number: current_rn,
-            file_type: FileType::Directory,
-            name: ".".into(),
-        });
-        out.push(DirEntry {
-            file_record_number: parent_rn,
-            file_type: FileType::Directory,
-            name: "..".into(),
-        });
-        let index = dir
-            .directory_index(&mut reader)
-            .map_err(|e| Error(format!("directory_index: {e}")))?;
-        let mut iter = index.entries();
-        while let Some(entry) = iter.next(&mut reader) {
-            let Ok(entry) = entry else { continue };
-            let Some(Ok(file_name)) = entry.key() else {
-                continue;
-            };
-            if file_name.namespace() == NtfsFileNamespace::Dos {
-                continue;
-            }
+        let mut out = vec![
+            DirEntry {
+                file_record_number: current_rn,
+                file_type: FileType::Directory,
+                name: ".".into(),
+            },
+            DirEntry {
+                file_record_number: parent_rn,
+                file_type: FileType::Directory,
+                name: "..".into(),
+            },
+        ];
+        // read_dir_entries already merges $INDEX_ROOT + INDX blocks, skips the
+        // DOS 8.3 shadow names, and sets is_dir from each entry's $FILE_NAME bit.
+        for e in read::read_dir_entries(&mut io, current_rn).map_err(Error)? {
             out.push(DirEntry {
-                file_record_number: entry.file_reference().file_record_number(),
-                file_type: if file_name.is_directory() {
+                file_record_number: e.record_number,
+                file_type: if e.is_dir {
                     FileType::Directory
                 } else {
                     FileType::Regular
                 },
-                name: file_name.name().to_string_lossy(),
+                name: e.name,
             });
         }
         Ok(out)
@@ -352,32 +319,15 @@ impl Filesystem {
     /// `offset`. Returns the number of bytes actually read (may be less
     /// than `buf.len()` if EOF is hit).
     pub fn read_file(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
-        let (ntfs, mut reader) = self.open_reader()?;
-        let file = navigate(&ntfs, &mut reader, path)?;
-        let data_item = file
-            .data(&mut reader, "")
-            .ok_or_else(|| Error("no $DATA".into()))?
-            .map_err(|e| Error(format!("$DATA: {e}")))?;
-        let data_attr = data_item
-            .to_attribute()
-            .map_err(|e| Error(format!("to_attribute: {e}")))?;
-        let mut value = data_attr
-            .value(&mut reader)
-            .map_err(|e| Error(format!("value: {e}")))?;
-        value
-            .seek(&mut reader, SeekFrom::Start(offset))
-            .map_err(|e| Error(format!("seek: {e}")))?;
-        let mut filled = 0;
-        while filled < buf.len() {
-            let n = value
-                .read(&mut reader, &mut buf[filled..])
-                .map_err(|e| Error(format!("read: {e}")))?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
-        }
-        Ok(filled)
+        let mut io = PathIo::open_ro(&self.image).map_err(Error)?;
+        let rec = read::resolve_path(&mut io, path).map_err(Error)?;
+        // Native read of the unnamed $DATA (resident / non-resident / sparse /
+        // LZNT1-decompressed), then slice the requested window.
+        let data = read::read_attribute_value(&mut io, rec, AttrType::Data, None).map_err(Error)?;
+        let start = (offset as usize).min(data.len());
+        let n = buf.len().min(data.len() - start);
+        buf[..n].copy_from_slice(&data[start..start + n]);
+        Ok(n)
     }
 
     // ---------- mutations ----------
@@ -483,67 +433,7 @@ impl Filesystem {
     }
 }
 
-fn ntfs_time_to_unix(t: ntfs::NtfsTime) -> (i64, u32) {
-    const EPOCH_DIFF: i64 = 11_644_473_600;
-    let ts = t.nt_timestamp();
-    let secs = (ts / 10_000_000) as i64 - EPOCH_DIFF;
-    let nsec = ((ts % 10_000_000) * 100) as u32;
-    (secs, nsec)
-}
-
-fn parent_record_of(file: &ntfs::NtfsFile, reader: &mut BufReader<File>) -> Result<u64, String> {
-    let mut attrs = file.attributes();
-    while let Some(item) = attrs.next(reader) {
-        let item = item.map_err(|e| format!("attr iter: {e}"))?;
-        let a = item.to_attribute().map_err(|e| format!("to_attr: {e}"))?;
-        if a.ty().ok() != Some(NtfsAttributeType::FileName) {
-            continue;
-        }
-        if let Ok(fname) = a.structured_value::<_, ntfs::structured_values::NtfsFileName>(reader) {
-            return Ok(fname.parent_directory_reference().file_record_number());
-        }
-    }
-    Err("no $FILE_NAME".into())
-}
-
-fn navigate<'n>(
-    ntfs: &'n Ntfs,
-    reader: &mut BufReader<File>,
-    path: &str,
-) -> Result<ntfs::NtfsFile<'n>, Error> {
-    let path = path.trim_start_matches('/');
-    if path.is_empty() {
-        return ntfs
-            .root_directory(reader)
-            .map_err(|e| Error(format!("root: {e}")));
-    }
-    let mut current = ntfs
-        .root_directory(reader)
-        .map_err(|e| Error(format!("root: {e}")))?;
-    for comp in path.split('/') {
-        if comp.is_empty() || comp == "." {
-            continue;
-        }
-        if comp == ".." {
-            if current.file_record_number() == KnownNtfsFileRecordNumber::RootDirectory as u64 {
-                continue;
-            }
-            let prn = parent_record_of(&current, reader).map_err(Error)?;
-            current = ntfs
-                .file(reader, prn)
-                .map_err(|e| Error(format!("open parent: {e}")))?;
-            continue;
-        }
-        let idx = current
-            .directory_index(reader)
-            .map_err(|e| Error(format!("index '{comp}': {e}")))?;
-        let mut finder = idx.finder();
-        let entry = NtfsFileNameIndex::find(&mut finder, ntfs, reader, comp)
-            .ok_or_else(|| Error(format!("not found: '{comp}'")))?
-            .map_err(|e| Error(format!("find '{comp}': {e}")))?;
-        current = entry
-            .to_file(ntfs, reader)
-            .map_err(|e| Error(format!("to_file '{comp}': {e}")))?;
-    }
-    Ok(current)
+/// Split an NTFS FILETIME (100-ns since 1601) into (Unix seconds, nanoseconds).
+fn nt_parts(nt: u64) -> (i64, u32) {
+    (read::nt_to_unix(nt), ((nt % 10_000_000) * 100) as u32)
 }
