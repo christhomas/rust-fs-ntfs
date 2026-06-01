@@ -206,3 +206,56 @@ fn upstream_mounts_after_filling_subdir() {
     let names = list_subdir(&img, "d");
     assert_eq!(names.len(), 15);
 }
+
+/// Find `name` directly in the ROOT directory's index via the upstream
+/// `ntfs` parser.
+fn found_in_root(img: &str, name: &str) -> bool {
+    let f = std::fs::File::open(img).expect("open");
+    let mut reader = BufReader::new(f);
+    let mut ntfs = Ntfs::new(&mut reader).expect("ntfs");
+    ntfs.read_upcase_table(&mut reader).expect("upcase");
+    let root = ntfs.root_directory(&mut reader).expect("root");
+    let idx = root.directory_index(&mut reader).expect("root idx");
+    let mut finder = idx.finder();
+    NtfsFileNameIndex::find(&mut finder, &ntfs, &mut reader, name).is_some()
+}
+
+/// The ROOT directory has its own resident `$INDEX_ROOT` ceiling, distinct
+/// from (and smaller than) a fresh subdirectory's — the other tests here only
+/// fill subdirectories. Fill the root directly and confirm the same
+/// guarantees hold: a graceful stop at the ceiling (clear error, no panic)
+/// and every created entry still independently findable (no silent loss).
+#[test]
+fn root_dir_fills_gracefully_at_resident_ceiling() {
+    let img = fresh_vol("root_ceiling");
+    let mut created = 0usize;
+    let mut err = String::new();
+    for i in 0..1000 {
+        let name = format!("r_{i:04}.txt");
+        match write::create_file(Path::new(&img), "/", &name) {
+            Ok(_) => created += 1,
+            Err(e) => {
+                err = e;
+                break;
+            }
+        }
+    }
+    assert!(created >= 1, "must create at least one root entry");
+    assert!(
+        !err.is_empty(),
+        "root must hit a ceiling (resident $INDEX_ROOT only, no $INDEX_ALLOCATION growth)"
+    );
+    // Spot-check first / middle / last created entries remain findable in the
+    // root after the ceiling rejection.
+    assert!(found_in_root(&img, "r_0000.txt"), "first root entry findable");
+    let mid = created / 2;
+    assert!(
+        found_in_root(&img, &format!("r_{mid:04}.txt")),
+        "middle root entry findable"
+    );
+    let last = created - 1;
+    assert!(
+        found_in_root(&img, &format!("r_{last:04}.txt")),
+        "last root entry findable"
+    );
+}
