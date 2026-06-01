@@ -88,9 +88,22 @@ fn read_data_attr(img: &str, file_path: &str) -> DataAttr {
         }
         let is_resident = attr.is_resident();
         let value_length = attr.value_length();
-        let allocated_length = if is_resident { 0 } else { attr.value_length() };
         // Read full contents.
         let mut value = attr.value(&mut reader).expect("value");
+        // For non-resident data, the true on-disk allocation is the
+        // cluster-rounded `allocated_size()` — NOT value_length (the logical
+        // size). Reading value_length here would make the alignment assertion
+        // trivially equal to the value_length check.
+        // True on-disk allocation = sum of the data runs' cluster-aligned
+        // sizes (the crate exposes allocated_size() per NtfsDataRun, not on
+        // the value as a whole). value_length/len() would be the logical size.
+        let allocated_length: u64 = match &value {
+            ntfs::attribute_value::NtfsAttributeValue::NonResident(nr) => nr
+                .data_runs()
+                .map(|r| r.expect("data run").allocated_size())
+                .sum(),
+            _ => 0,
+        };
         let mut bytes = vec![0u8; value_length as usize];
         let mut off = 0usize;
         while off < bytes.len() {
@@ -260,9 +273,12 @@ fn multi_cluster_nonresident_spans_clusters() {
     let d = read_data_attr(&img, "/m.bin");
     assert!(!d.is_resident);
     assert_eq!(d.value_length, 10_000);
+    // 10 000 bytes rounds up to 3 clusters (12 288) on a 4096-byte-cluster
+    // volume — this is what actually verifies cluster-boundary allocation,
+    // distinct from the logical value_length above.
     assert_eq!(
-        d.allocated_length, 10_000,
-        "value_length read-back matches data size"
+        d.allocated_length, 12_288,
+        "allocated size must be cluster-rounded (3 × 4096), not the logical 10 000"
     );
     assert_eq!(d.bytes, payload, "10KB multi-cluster content round-trips");
 }
