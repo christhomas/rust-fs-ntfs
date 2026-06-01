@@ -220,6 +220,28 @@ fn rename_onto_existing_name_errors() {
     );
 }
 
+#[test]
+fn rename_different_length_onto_existing_name_errors() {
+    // Different-length destination drives the variable-length rename path
+    // (distinct from the same-length path covered above).
+    let img = fresh_vol("rename_dup_vlen");
+    write::create_file(p(&img), "/", "s.txt").expect("create src");
+    write::create_file(p(&img), "/", "longer-dst.txt").expect("create dst");
+    assert!(
+        write::rename(p(&img), "/s.txt", "longer-dst.txt").is_err(),
+        "variable-length rename onto an existing name must fail"
+    );
+}
+
+#[test]
+fn rename_to_same_name_is_noop() {
+    let img = fresh_vol("rename_noop");
+    write::create_file(p(&img), "/", "keep.txt").expect("create");
+    write::rename(p(&img), "/keep.txt", "keep.txt").expect("identity rename is a no-op");
+    write::rename_same_length(p(&img), "/keep.txt", "keep.txt")
+        .expect("identity same-length rename is a no-op");
+}
+
 // ---------------------------------------------------------------------------
 // remove (POSIX-style dispatch by type)
 // ---------------------------------------------------------------------------

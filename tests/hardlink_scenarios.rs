@@ -218,9 +218,34 @@ fn three_links_unlink_middle_leaves_others() {
         exists(&img, "/", "n1") && exists(&img, "/", "n3"),
         "n1 + n3 remain"
     );
-    // NB: count-decrement after unlink is covered (and currently #[ignore]'d)
-    // by unlink_decrements_hard_link_count — see that gap note.
+    assert_eq!(
+        hard_link_count(&img, "/n1"),
+        2,
+        "count drops 3 -> 2 after unlinking the middle name"
+    );
     assert_eq!(read_data(&img, "/n3"), b"triple", "data intact");
+}
+
+#[test]
+fn cross_directory_unlink_decrements_count() {
+    let img = fresh_vol("crossdec");
+    write::mkdir(Path::new(&img), "/", "sub").expect("mkdir");
+    write::create_file(Path::new(&img), "/", "top.txt").expect("create");
+    write::write_file_contents(Path::new(&img), "/top.txt", b"xdir").expect("write");
+    write::link(Path::new(&img), "/top.txt", "/sub", "linked.txt").expect("link");
+    assert_eq!(hard_link_count(&img, "/top.txt"), 2);
+
+    // Unlink the link living in the subdirectory; the root name + data
+    // survive and the count drops to 1.
+    write::unlink(Path::new(&img), "/sub/linked.txt").expect("unlink subdir link");
+    assert!(!exists(&img, "/sub", "linked.txt"), "subdir link gone");
+    assert!(exists(&img, "/", "top.txt"), "root name remains");
+    assert_eq!(
+        hard_link_count(&img, "/top.txt"),
+        1,
+        "count drops to 1 after cross-dir unlink"
+    );
+    assert_eq!(read_data(&img, "/top.txt"), b"xdir", "data intact");
 }
 
 #[test]
