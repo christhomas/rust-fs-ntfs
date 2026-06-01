@@ -9,15 +9,13 @@
 
 use crate::attr_io::{self, AttrType};
 use crate::bitmap;
-use crate::block_io::{BlockIo, IoReadSeek, PathIo};
+use crate::block_io::{BlockIo, PathIo};
 use crate::data_runs::{self, DataRun};
 use crate::idx_block;
 use crate::index_io;
 use crate::mft_bitmap;
 use crate::mft_io::{read_mft_record_io, update_mft_record_io, MFT_FLAG_DIRECTORY};
 
-use ntfs::indexes::NtfsFileNameIndex;
-use ntfs::{Ntfs, NtfsFile};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -3485,7 +3483,7 @@ fn resolve_parent_and_child_io<T: BlockIo + ?Sized>(
     Ok((parent_rec, file_rec, basename.to_string()))
 }
 
-/// Walk `file_path` via upstream and return the target's MFT record number.
+/// Walk `file_path` natively and return the target's MFT record number.
 pub fn resolve_path_to_record_number(path: &Path, file_path: &str) -> Result<u64, String> {
     let mut io = PathIo::open_ro(path)?;
     resolve_path_to_record_number_io(&mut io, file_path)
@@ -3493,49 +3491,15 @@ pub fn resolve_path_to_record_number(path: &Path, file_path: &str) -> Result<u64
 
 /// `BlockIo`-based equivalent of [`resolve_path_to_record_number`]. Used
 /// by the handle-based mutator path so a single `BlockIo` services both
-/// the read (via `IoReadSeek`) and any subsequent writes.
+/// the resolve and any subsequent writes.
 pub fn resolve_path_to_record_number_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
 ) -> Result<u64, String> {
-    let mut reader = IoReadSeek::new(io);
-    let mut ntfs = Ntfs::new(&mut reader).map_err(|e| format!("parse: {e}"))?;
-    ntfs.read_upcase_table(&mut reader)
-        .map_err(|e| format!("upcase: {e}"))?;
-    let file = navigate_to(&ntfs, &mut reader, file_path)?;
-    Ok(file.file_record_number())
-}
-
-fn navigate_to<'n, T: std::io::Read + std::io::Seek>(
-    ntfs: &'n Ntfs,
-    reader: &mut T,
-    file_path: &str,
-) -> Result<NtfsFile<'n>, String> {
-    let p = file_path.trim_start_matches('/');
-    if p.is_empty() {
-        return ntfs
-            .root_directory(reader)
-            .map_err(|e| format!("root: {e}"));
-    }
-    let mut current = ntfs
-        .root_directory(reader)
-        .map_err(|e| format!("root: {e}"))?;
-    for comp in p.split('/') {
-        if comp.is_empty() {
-            continue;
-        }
-        let index = current
-            .directory_index(reader)
-            .map_err(|e| format!("dir index for '{comp}': {e}"))?;
-        let mut finder = index.finder();
-        let entry = NtfsFileNameIndex::find(&mut finder, ntfs, reader, comp)
-            .ok_or_else(|| format!("not found: '{comp}'"))?
-            .map_err(|e| format!("find '{comp}': {e}"))?;
-        current = entry
-            .to_file(ntfs, reader)
-            .map_err(|e| format!("to_file '{comp}': {e}"))?;
-    }
-    Ok(current)
+    // Native read layer: resolves `.`/`..` and matches names case-insensitively
+    // via the on-disk `$UpCase` table (COLLATION_FILE_NAME), same as the
+    // upstream finder did — no dependency on the `ntfs` crate.
+    crate::read::resolve_path(io, file_path)
 }
 
 #[cfg(test)]
