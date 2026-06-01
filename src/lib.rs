@@ -4149,3 +4149,120 @@ mod timestamp_tests {
         assert_eq!(nsec, 999_999_900);
     }
 }
+
+#[cfg(test)]
+mod capi_read_tests {
+    //! Self-generating C-ABI read tests: format a fresh image, populate it
+    //! via the write API, then mount and read it back through the public
+    //! `fs_ntfs_*` C-ABI — no prebuilt fixture, so these run under
+    //! `cargo test --lib`. They pin the handle-based read surface
+    //! (`fs_ntfs_stat` / `fs_ntfs_read_file` / `fs_ntfs_dir_*`) so a later
+    //! flip of that surface onto the native read layer is guarded.
+    use super::{
+        fs_ntfs_dir_close, fs_ntfs_dir_next, fs_ntfs_dir_open, fs_ntfs_mount, fs_ntfs_read_file,
+        fs_ntfs_stat, fs_ntfs_umount, FsNtfsAttr,
+    };
+    use crate::block_io::PathIo;
+    use std::ffi::{c_void, CString};
+    use std::path::Path;
+
+    /// Format a fresh image and populate it: /hello.txt (content), /sub/, and
+    /// /sub/inner.bin. Returns the image path.
+    fn fresh_image(tag: &str) -> String {
+        let path = format!("test-disks/_capi_read_{tag}.img");
+        let f = std::fs::File::create(&path).expect("create");
+        f.set_len(32 * 1024 * 1024).expect("set_len");
+        drop(f);
+        let mut io = PathIo::open_rw(Path::new(&path)).expect("open_rw");
+        crate::mkfs::format_filesystem(
+            &mut io,
+            32 * 1024 * 1024,
+            4096,
+            4096,
+            Some("CAPI"),
+            Some(9),
+        )
+        .expect("format");
+        crate::write::create_file_io(&mut io, "/", "hello.txt").expect("create hello");
+        crate::write::write_file_contents_io(&mut io, "/hello.txt", b"hello capi world")
+            .expect("write hello");
+        crate::write::mkdir_io(&mut io, "/", "sub").expect("mkdir sub");
+        crate::write::create_file_io(&mut io, "/sub", "inner.bin").expect("create inner");
+        drop(io);
+        path
+    }
+
+    fn mount(path: &str) -> *mut super::FsNtfsHandle {
+        let c = CString::new(path).unwrap();
+        let h = fs_ntfs_mount(c.as_ptr());
+        assert!(!h.is_null(), "fs_ntfs_mount returned null for {path}");
+        h
+    }
+
+    #[test]
+    fn capi_read_file_roundtrip() {
+        let img = fresh_image("readfile");
+        let h = mount(&img);
+        let mut buf = [0u8; 64];
+        let path = CString::new("/hello.txt").unwrap();
+        let n = fs_ntfs_read_file(
+            h,
+            path.as_ptr(),
+            buf.as_mut_ptr() as *mut c_void,
+            0,
+            buf.len() as u64,
+        );
+        assert_eq!(n, 16, "expected 16 bytes");
+        assert_eq!(&buf[..16], b"hello capi world");
+        // Ranged read at an offset.
+        let mut buf2 = [0u8; 5];
+        let n2 = fs_ntfs_read_file(h, path.as_ptr(), buf2.as_mut_ptr() as *mut c_void, 6, 5);
+        assert_eq!(n2, 5);
+        assert_eq!(&buf2, b"capi ");
+        fs_ntfs_umount(h);
+        let _ = std::fs::remove_file(&img);
+    }
+
+    #[test]
+    fn capi_stat_file_and_dir() {
+        let img = fresh_image("stat");
+        let h = mount(&img);
+        let mut attr: FsNtfsAttr = unsafe { std::mem::zeroed() };
+        let p = CString::new("/hello.txt").unwrap();
+        assert_eq!(fs_ntfs_stat(h, p.as_ptr(), &mut attr), 0);
+        assert_eq!(attr.size, 16);
+        assert_eq!(attr.file_type, 1, "regular file (FS_NTFS_FT_REG_FILE)");
+        assert!(attr.link_count >= 1);
+
+        let mut dattr: FsNtfsAttr = unsafe { std::mem::zeroed() };
+        let pd = CString::new("/sub").unwrap();
+        assert_eq!(fs_ntfs_stat(h, pd.as_ptr(), &mut dattr), 0);
+        assert_eq!(dattr.file_type, 2, "directory (FS_NTFS_FT_DIR)");
+        fs_ntfs_umount(h);
+        let _ = std::fs::remove_file(&img);
+    }
+
+    #[test]
+    fn capi_dir_listing() {
+        let img = fresh_image("dir");
+        let h = mount(&img);
+        let p = CString::new("/").unwrap();
+        let iter = fs_ntfs_dir_open(h, p.as_ptr());
+        assert!(!iter.is_null());
+        let mut names = Vec::new();
+        loop {
+            let e = fs_ntfs_dir_next(iter);
+            if e.is_null() {
+                break;
+            }
+            let ent = unsafe { &*e };
+            let name = String::from_utf8_lossy(&ent.name[..ent.name_len as usize]).into_owned();
+            names.push(name);
+        }
+        fs_ntfs_dir_close(iter);
+        assert!(names.iter().any(|n| n == "hello.txt"), "names: {names:?}");
+        assert!(names.iter().any(|n| n == "sub"), "names: {names:?}");
+        fs_ntfs_umount(h);
+        let _ = std::fs::remove_file(&img);
+    }
+}
