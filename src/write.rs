@@ -3505,6 +3505,60 @@ mod tests {
             .expect("unnamed $DATA");
         assert!(!data.is_resident);
         assert_eq!(data.value_length, 12_288);
+
+        // Zero-fill invariant: grow leaves initialized_length at the old
+        // value so a spec-conformant reader zero-fills the new tail. Read
+        // the content back through the upstream `ntfs` parser (which honours
+        // initialized_length) over the in-memory image and confirm the
+        // original 4096 bytes survive and [4096, 12288) reads as zeros.
+        {
+            use ntfs::NtfsReadSeek;
+            let mut cur = std::io::Cursor::new(&dev.buf);
+            let mut ntfs = ntfs::Ntfs::new(&mut cur).expect("parse ntfs");
+            ntfs.read_upcase_table(&mut cur).expect("upcase");
+            let root = ntfs.root_directory(&mut cur).expect("root");
+            let idx = root.directory_index(&mut cur).expect("idx");
+            let mut finder = idx.finder();
+            let entry =
+                ntfs::indexes::NtfsFileNameIndex::find(&mut finder, &ntfs, &mut cur, "grow.bin")
+                    .expect("present")
+                    .expect("find ok");
+            let file = entry.to_file(&ntfs, &mut cur).expect("to_file");
+            let mut attrs = file.attributes();
+            let mut content: Option<Vec<u8>> = None;
+            while let Some(item) = attrs.next(&mut cur) {
+                let item = item.expect("item");
+                let a = item.to_attribute().expect("attr");
+                if a.ty().ok() != Some(ntfs::NtfsAttributeType::Data) {
+                    continue;
+                }
+                if !a.name().map(|n| n.is_empty()).unwrap_or(true) {
+                    continue; // skip named streams
+                }
+                let mut v = a.value(&mut cur).expect("value");
+                let mut buf = vec![0u8; v.len() as usize];
+                let mut off = 0usize;
+                while off < buf.len() {
+                    let n = v.read(&mut cur, &mut buf[off..]).expect("read");
+                    if n == 0 {
+                        break;
+                    }
+                    off += n;
+                }
+                content = Some(buf);
+                break;
+            }
+            let content = content.expect("unnamed $DATA content");
+            assert_eq!(content.len(), 12_288);
+            assert!(
+                content[..4096].iter().all(|&b| b == 0xAB),
+                "original 4096 bytes must survive the grow"
+            );
+            assert!(
+                content[4096..].iter().all(|&b| b == 0),
+                "grown tail [4096, 12288) must read back as zeros (initialized_length honoured)"
+            );
+        }
     }
 
     #[test]
