@@ -284,6 +284,9 @@ mod tests {
             cluster_size,
             mft_lcn: 0,
             file_record_size: 1024,
+            total_sectors: 0,
+            serial_number: 0,
+            oem_id: *b"NTFS    ",
         }
     }
 

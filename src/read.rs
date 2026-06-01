@@ -593,10 +593,6 @@ pub fn read_parent_record<T: BlockIo + ?Sized>(
 /// `$Volume` MFT record number (fixed by the NTFS spec).
 const VOLUME_RECORD_NUMBER: u64 = 3;
 
-/// Boot-sector (BPB) field offsets used for volume metadata.
-const BOOT_OFF_TOTAL_SECTORS: usize = 0x28; // QWORD total sectors
-const BOOT_OFF_SERIAL: usize = 0x48; // QWORD volume serial number
-
 /// `$VOLUME_INFORMATION` value layout: reserved(8) + major(1) + minor(1) +
 /// flags(2). (MS-FSCC / Windows Internals 7th ed.)
 const VI_MAJOR: usize = 8;
@@ -613,8 +609,9 @@ pub struct VolumeInfo {
     pub bytes_per_sector: u16,
     pub cluster_size: u32,
     pub file_record_size: u32,
-    /// Volume size in bytes (the device/stream length, matching what the
-    /// upstream parser reported via `Ntfs::size`).
+    /// Volume size in bytes (`total_sectors × bytes_per_sector`, matching what
+    /// the upstream parser reported via `Ntfs::size` — one sector short of the
+    /// raw device).
     pub total_size: u64,
     pub total_clusters: u64,
     pub serial_number: u64,
@@ -630,29 +627,29 @@ pub struct VolumeInfo {
 /// `$Volume` record (number 3). Replaces the upstream `Ntfs` parse used by the
 /// volume-info / volume-stats entry points.
 pub fn read_volume_info<T: BlockIo + ?Sized>(io: &mut T) -> Result<VolumeInfo, String> {
+    // One boot-sector read; `BootParams` now carries serial + total_sectors +
+    // oem_id alongside the geometry, so no second read is needed.
     let params = crate::mft_io::read_boot_params_io(io)?;
 
-    let mut boot = [0u8; 512];
-    io.read_exact_at(0, &mut boot)?;
-    let serial_number = u64::from_le_bytes(
-        boot[BOOT_OFF_SERIAL..BOOT_OFF_SERIAL + 8]
-            .try_into()
-            .unwrap(),
-    );
-    let total_sectors = u64::from_le_bytes(
-        boot[BOOT_OFF_TOTAL_SECTORS..BOOT_OFF_TOTAL_SECTORS + 8]
-            .try_into()
-            .unwrap(),
-    );
+    // Validate the NTFS OEM signature here (the mount/volume-info path). The
+    // shared boot parser deliberately doesn't, so geometry-only callers aren't
+    // affected; but this entry point replaced `Ntfs::new`, which used to reject
+    // non-NTFS (FAT/exFAT/raw) images at +0x03 before any structural parse.
+    if &params.oem_id != crate::mft_io::NTFS_OEM_ID {
+        return Err(format!(
+            "not an NTFS volume: OEM id {:?} != {:?}",
+            params.oem_id,
+            crate::mft_io::NTFS_OEM_ID
+        ));
+    }
 
-    // Volume size: the boot sector's total_sectors × bytes_per_sector. This
-    // matches what the upstream parser reported via `Ntfs::size` (and thus
-    // what the C-ABI consumers have always seen) — it's one sector short of
-    // the raw device size, because NTFS reserves the final sector for the
-    // backup boot sector. Fall back to the device length only if a malformed
-    // boot sector reports zero total_sectors.
-    let total_size = if total_sectors > 0 {
-        total_sectors * params.bytes_per_sector as u64
+    // Volume size: total_sectors × bytes_per_sector. Matches what the upstream
+    // parser reported via `Ntfs::size` (and what the C-ABI consumers have
+    // always seen) — one sector short of the raw device, since NTFS reserves
+    // the final sector for the backup boot sector. Fall back to the device
+    // length only if a malformed boot sector reports zero total_sectors.
+    let total_size = if params.total_sectors > 0 {
+        params.total_sectors * params.bytes_per_sector as u64
     } else {
         io.size()
     };
@@ -667,16 +664,20 @@ pub fn read_volume_info<T: BlockIo + ?Sized>(io: &mut T) -> Result<VolumeInfo, S
     let version_minor = vi[VI_MAJOR + 1];
     let flags = u16::from_le_bytes([vi[VI_FLAGS], vi[VI_FLAGS + 1]]);
 
-    // $VOLUME_NAME (record 3, attr 0x60) — optional UTF-16LE label.
-    let label = match read_attribute_value(io, VOLUME_RECORD_NUMBER, AttrType::VolumeName, None) {
-        Ok(bytes) => {
+    // $VOLUME_NAME (record 3, attr 0x60) — optional UTF-16LE label. Locate it
+    // first so a genuinely-absent attribute yields an empty label, while a real
+    // I/O error (bad read / fixup mismatch on a corrupt $Volume extension) is
+    // surfaced rather than masked as "no label".
+    let label = match locate_attribute(io, VOLUME_RECORD_NUMBER, AttrType::VolumeName, None)? {
+        Some((p, record, loc)) => {
+            let bytes = read_value_from_record(io, &p, &record, &loc)?;
             let units: Vec<u16> = bytes
                 .chunks_exact(2)
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
                 .collect();
             String::from_utf16_lossy(&units)
         }
-        Err(_) => String::new(),
+        None => String::new(),
     };
 
     Ok(VolumeInfo {
@@ -685,7 +686,7 @@ pub fn read_volume_info<T: BlockIo + ?Sized>(io: &mut T) -> Result<VolumeInfo, S
         file_record_size: params.file_record_size as u32,
         total_size,
         total_clusters,
-        serial_number,
+        serial_number: params.serial_number,
         version_major,
         version_minor,
         flags,
@@ -1353,5 +1354,16 @@ mod tests {
         let vi = read_volume_info(&mut dev).expect("read_volume_info");
         assert_eq!(vi.label, "");
         assert_eq!(vi.serial_number, 0x1111_2222);
+    }
+
+    #[test]
+    fn volume_info_rejects_non_ntfs_oem() {
+        // A volume whose OEM ID isn't "NTFS    " (e.g. a FAT/exFAT/raw image)
+        // is rejected up front — read_volume_info replaced Ntfs::new on the
+        // mount path, which used to reject these at +0x03.
+        let mut dev = fresh_vol();
+        dev.buf[3..11].copy_from_slice(b"MSDOS5.0");
+        let err = read_volume_info(&mut dev).expect_err("should reject non-NTFS OEM");
+        assert!(err.contains("not an NTFS volume"), "err={err}");
     }
 }
