@@ -55,6 +55,16 @@ for arg in "$@"; do
     esac
 done
 
+# The harness runner now also deletes each scenario's staged host image as
+# soon as that scenario's recipe finishes, so a full run never accumulates
+# every image at once (it used to hold them all until the end-of-run trap
+# below, and a killed run skipped the trap entirely, orphaning the lot).
+# Propagate --keep-images so the opt-out covers both the runner's
+# per-scenario deletion and the end-of-run trap.
+if [ "$keep_images" -eq 1 ]; then
+    export HARNESS_KEEP_IMAGES=1
+fi
+
 # ── Resolve image directory ─────────────────────────────────────────────────
 # Read HOST_IMAGE_DIR from .test-env (same source the harness uses).
 # Default: diskimages/ relative to the repo root.
