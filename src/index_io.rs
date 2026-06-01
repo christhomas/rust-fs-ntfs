@@ -273,6 +273,100 @@ fn scan_entries_for_name(
     Ok(None)
 }
 
+/// One enumerated `$FILE_NAME` directory entry. Unlike [`IndexEntryLocation`]
+/// (which locates an entry for mutation), this carries the decoded name +
+/// namespace for read-side directory listing.
+#[derive(Debug, Clone)]
+pub struct DirEntryRaw {
+    /// Target file's MFT record number (low 48 bits of the file_reference).
+    pub file_record_number: u64,
+    /// Filename (lossy UTF-16 → UTF-8).
+    pub name: String,
+    /// `$FILE_NAME` namespace: 0=POSIX, 1=Win32, 2=DOS, 3=Win32+DOS.
+    pub namespace: u8,
+    /// `$FILE_NAME.file_attributes` (the index entry's duplicate copy). The
+    /// `IS_DIRECTORY` bit (`0x1000_0000`) is how NTFS marks a directory in an
+    /// index entry — this is what upstream's `is_directory()` reads.
+    pub file_attributes: u32,
+}
+
+/// Append every real `$FILE_NAME` entry in one index node (an `$INDEX_ROOT`
+/// value or an INDX block) to `out`. `ih_start` is the byte offset of the
+/// node's INDEX_HEADER within `buf`. Stops at the `IE_FLAG_LAST` sentinel.
+/// Shared by the two public enumerators below so the entry walk lives in one
+/// place (mirrors [`scan_entries_for_name`] but collects instead of matching).
+fn collect_entries(buf: &[u8], ih_start: usize, out: &mut Vec<DirEntryRaw>) -> Result<(), String> {
+    let first_entry_rel = read_u32_le(buf, ih_start + IH_FIRST_ENTRY_OFFSET)
+        .ok_or("index node too short to read first_entry_offset")? as usize;
+    let total_size = read_u32_le(buf, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
+        .ok_or("index node too short to read total_size")? as usize;
+    let mut cursor = ih_start + first_entry_rel;
+    let end = ih_start + total_size;
+    while cursor < end && cursor + IE_KEY_START <= buf.len() {
+        let length =
+            u16::from_le_bytes([buf[cursor + IE_LENGTH], buf[cursor + IE_LENGTH + 1]]) as usize;
+        let key_length =
+            u16::from_le_bytes([buf[cursor + IE_KEY_LENGTH], buf[cursor + IE_KEY_LENGTH + 1]])
+                as usize;
+        let flags = u16::from_le_bytes([buf[cursor + IE_FLAGS], buf[cursor + IE_FLAGS + 1]]);
+        if flags & IE_FLAG_LAST != 0 {
+            break;
+        }
+        if length == 0 || cursor + length > buf.len() {
+            return Err(format!("malformed index entry at {cursor}"));
+        }
+        if key_length >= FN_NAME_OFFSET {
+            let key_start = cursor + IE_KEY_START;
+            let name_length = buf[key_start + FN_NAME_LENGTH_OFFSET] as usize;
+            let namespace = buf[key_start + FN_NAMESPACE_OFFSET];
+            let name_start = key_start + FN_NAME_OFFSET;
+            // $FILE_NAME.file_attributes: u32 at key+0x38 (after parent_ref(8)
+            // + 4 timestamps(32) + alloc_size(8) + real_size(8)).
+            let file_attributes = read_u32_le(buf, key_start + 0x38).unwrap_or(0);
+            if name_start + name_length * 2 <= buf.len() {
+                let name: String = char::decode_utf16(
+                    buf[name_start..name_start + name_length * 2]
+                        .chunks_exact(2)
+                        .map(|c| u16::from_le_bytes([c[0], c[1]])),
+                )
+                .map(|r| r.unwrap_or('\u{FFFD}'))
+                .collect();
+                let file_ref = u64::from_le_bytes(
+                    buf[cursor + IE_FILE_REFERENCE..cursor + IE_FILE_REFERENCE + 8]
+                        .try_into()
+                        .unwrap(),
+                );
+                out.push(DirEntryRaw {
+                    file_record_number: file_ref & 0x0000_FFFF_FFFF_FFFF,
+                    name,
+                    namespace,
+                    file_attributes,
+                });
+            }
+        }
+        cursor += length;
+    }
+    Ok(())
+}
+
+/// Enumerate the `$FILE_NAME` entries in a directory's resident `$INDEX_ROOT`.
+pub fn collect_index_root_entries(record: &[u8], out: &mut Vec<DirEntryRaw>) -> Result<(), String> {
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
+        .ok_or_else(|| "$INDEX_ROOT:$I30 not found".to_string())?;
+    let ir_value_offset = ir.resident_value_offset.ok_or("no value_offset")? as usize;
+    let ih_start = ir.attr_offset + ir_value_offset + IR_INDEX_HEADER_OFFSET;
+    collect_entries(record, ih_start, out)
+}
+
+/// Enumerate the `$FILE_NAME` entries in one `$INDEX_ALLOCATION` (INDX) block
+/// (already read + USA-fixed).
+pub fn collect_indx_block_entries(block: &[u8], out: &mut Vec<DirEntryRaw>) -> Result<(), String> {
+    if block.len() < 4 || &block[0..4] != b"INDX" {
+        return Err("not an INDX block (fixup missing?)".to_string());
+    }
+    collect_entries(block, crate::idx_block::INDX_INDEX_HEADER_OFFSET, out)
+}
+
 /// Overwrite the UTF-16 name bytes inside an existing index entry's
 /// `$FILE_NAME` key. Requires `new_name.encode_utf16().count() ==
 /// entry.name_length`; other cases need entry resize, which is future

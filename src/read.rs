@@ -251,6 +251,56 @@ pub fn read_stat<T: BlockIo + ?Sized>(io: &mut T, record_number: u64) -> Result<
     })
 }
 
+/// One entry in a directory listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntry {
+    pub name: String,
+    pub record_number: u64,
+    pub is_dir: bool,
+}
+
+/// Enumerate a directory's entries natively (no upstream `ntfs` crate),
+/// merging the resident `$INDEX_ROOT` with any spilled `$INDEX_ALLOCATION`
+/// (INDX) blocks. DOS-namespace-only entries (the 8.3 shadow names) are
+/// skipped, matching the canonical Win32 listing; `is_dir` is read from each
+/// target record's flags. Order follows index/B-tree order, which is not a
+/// global sort across blocks — callers that need sorted output should sort.
+pub fn read_dir_entries<T: BlockIo + ?Sized>(
+    io: &mut T,
+    dir_record: u64,
+) -> Result<Vec<DirEntry>, String> {
+    let (_, dir_bytes) = read_mft_record_io(io, dir_record)?;
+    if record_flags(&dir_bytes) & MFT_FLAG_DIRECTORY == 0 {
+        return Err(format!(
+            "read_dir_entries: record {dir_record} is not a directory"
+        ));
+    }
+
+    let mut raw = Vec::new();
+    index_io::collect_index_root_entries(&dir_bytes, &mut raw)?;
+    if index_io::index_root_flags(&dir_bytes).is_some_and(|f| f & IH_FLAG_HAS_SUBNODES != 0) {
+        let ia = idx_block::load_for_directory_io(io, dir_record)?;
+        for vcn in ia.allocated_block_vcns() {
+            let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+            index_io::collect_indx_block_entries(&block, &mut raw)?;
+        }
+    }
+
+    /// `$FILE_NAME.file_attributes` directory bit — how NTFS marks a directory
+    /// in an index entry (matches upstream `is_directory()`).
+    const FN_IS_DIRECTORY: u32 = 0x1000_0000;
+    let out = raw
+        .into_iter()
+        .filter(|e| e.namespace != 2) // skip DOS 8.3 shadow names
+        .map(|e| DirEntry {
+            name: e.name,
+            record_number: e.file_record_number,
+            is_dir: e.file_attributes & FN_IS_DIRECTORY != 0,
+        })
+        .collect();
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,7 +308,7 @@ mod tests {
     use crate::mkfs::format_filesystem;
     use crate::write;
     use ntfs::indexes::NtfsFileNameIndex;
-    use ntfs::structured_values::NtfsStandardInformation;
+    use ntfs::structured_values::{NtfsFileNamespace, NtfsStandardInformation};
     use ntfs::{Ntfs, NtfsReadSeek};
 
     /// In-memory volume so the cross-check has no fixture dependency.
@@ -497,5 +547,88 @@ mod tests {
                 "timestamps vs upstream for {path}"
             );
         }
+    }
+
+    /// Oracle: list a directory's entries through the upstream crate, as a
+    /// sorted set of (name, record, is_dir).
+    fn upstream_list(dev: &mut MemDev, dir_path: &str) -> Vec<(String, u64, bool)> {
+        let mut reader = IoReadSeek::new(dev);
+        let mut ntfs = Ntfs::new(&mut reader).expect("Ntfs::new");
+        ntfs.read_upcase_table(&mut reader).expect("upcase");
+        let mut cur = ntfs.root_directory(&mut reader).expect("root");
+        for comp in dir_path.split('/').filter(|c| !c.is_empty()) {
+            let index = cur.directory_index(&mut reader).expect("dir index");
+            let mut finder = index.finder();
+            let entry = NtfsFileNameIndex::find(&mut finder, &ntfs, &mut reader, comp)
+                .expect("entry present")
+                .expect("entry ok");
+            cur = entry.to_file(&ntfs, &mut reader).expect("to_file");
+        }
+        let index = cur.directory_index(&mut reader).expect("directory_index");
+        let mut iter = index.entries();
+        let mut out = Vec::new();
+        while let Some(entry) = iter.next(&mut reader) {
+            let Ok(entry) = entry else { continue };
+            let Some(Ok(file_name)) = entry.key() else { continue };
+            if file_name.namespace() == NtfsFileNamespace::Dos {
+                continue;
+            }
+            out.push((
+                file_name.name().to_string_lossy(),
+                entry.file_reference().file_record_number(),
+                file_name.is_directory(),
+            ));
+        }
+        out.sort();
+        out
+    }
+
+    fn native_list(dev: &mut MemDev, dir_path: &str) -> Vec<(String, u64, bool)> {
+        let rec = resolve_path(dev, dir_path).expect("resolve dir");
+        let mut v: Vec<(String, u64, bool)> = read_dir_entries(dev, rec)
+            .expect("read_dir_entries")
+            .into_iter()
+            .map(|e| (e.name, e.record_number, e.is_dir))
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn dir_listing_matches_upstream() {
+        let mut dev = fresh_vol();
+        write::mkdir_io(&mut dev, "/", "d").expect("mkdir d");
+        write::create_file_io(&mut dev, "/d", "alpha.txt").expect("a");
+        write::create_file_io(&mut dev, "/d", "beta.bin").expect("b");
+        write::mkdir_io(&mut dev, "/d", "child").expect("child");
+        write::create_file_io(&mut dev, "/d", "zeta").expect("z");
+
+        // Subdirectory listing.
+        let native = native_list(&mut dev, "/d");
+        assert_eq!(native, upstream_list(&mut dev, "/d"), "subdir listing mismatch");
+        // Our own entries are all present + typed.
+        assert!(native.contains(&("child".to_string(), {
+            resolve_path(&mut dev, "/d/child").unwrap()
+        }, true)));
+        assert!(native
+            .iter()
+            .any(|(n, _, is_dir)| n == "alpha.txt" && !is_dir));
+
+        // Root listing (includes the $-prefixed system files) must match too —
+        // including is_dir, which (like upstream) we read from each entry's
+        // $FILE_NAME directory bit, not the target record's flags.
+        assert_eq!(
+            native_list(&mut dev, "/"),
+            upstream_list(&mut dev, "/"),
+            "root listing mismatch"
+        );
+    }
+
+    #[test]
+    fn read_dir_on_a_file_errors() {
+        let mut dev = fresh_vol();
+        write::create_file_io(&mut dev, "/", "f").expect("create");
+        let rec = resolve_path(&mut dev, "/f").unwrap();
+        assert!(read_dir_entries(&mut dev, rec).is_err());
     }
 }
