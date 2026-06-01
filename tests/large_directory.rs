@@ -217,7 +217,13 @@ fn found_in_root(img: &str, name: &str) -> bool {
     let root = ntfs.root_directory(&mut reader).expect("root");
     let idx = root.directory_index(&mut reader).expect("root idx");
     let mut finder = idx.finder();
-    NtfsFileNameIndex::find(&mut finder, &ntfs, &mut reader, name).is_some()
+    // `find` returns Option<Result<..>>: None = absent, Some(Ok) = present,
+    // Some(Err) = present-but-corrupt. Only Some(Ok) counts as a clean find;
+    // treating Some(Err) as "found" would mask the silent-loss this guards.
+    matches!(
+        NtfsFileNameIndex::find(&mut finder, &ntfs, &mut reader, name),
+        Some(Ok(_))
+    )
 }
 
 /// The ROOT directory has its own resident `$INDEX_ROOT` ceiling, distinct
@@ -241,9 +247,14 @@ fn root_dir_fills_gracefully_at_resident_ceiling() {
         }
     }
     assert!(created >= 1, "must create at least one root entry");
+    // The stop must be the resident-$INDEX_ROOT capacity ceiling specifically
+    // (mirrors subdir_fills_gracefully_at_resident_ceiling), not some other
+    // error — otherwise the "graceful stop at the ceiling" claim isn't proven.
     assert!(
-        !err.is_empty(),
-        "root must hit a ceiling (resident $INDEX_ROOT only, no $INDEX_ALLOCATION growth)"
+        err.contains("exceeds record capacity")
+            || err.contains("no room")
+            || err.contains("capacity"),
+        "root ceiling failure must be a graceful capacity error, got: {err:?}"
     );
     // Spot-check first / middle / last created entries remain findable in the
     // root after the ceiling rejection.
