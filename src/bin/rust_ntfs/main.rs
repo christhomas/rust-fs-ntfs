@@ -10,6 +10,9 @@
 //!   write   Write bytes to an existing file's unnamed `$DATA`.
 //!   rm      Remove a regular file.
 //!   rmdir   Remove an empty directory.
+//!   link    Create a hard link to an existing file.
+//!   rename  Rename an entry within its parent directory.
+//!   remove  POSIX-style remove (dispatches file/dir by type).
 //!
 //! Single binary so distribution (GitHub releases, Homebrew taps) ships
 //! one artefact rather than four. Each subcommand lives in its own
@@ -18,8 +21,11 @@
 //! Exit codes: 0 success, 1 failure, 2 usage error.
 
 mod format;
+mod link;
 mod ls;
 mod mkdir;
+mod remove;
+mod rename;
 mod rm;
 mod rmdir;
 mod set_dirty;
@@ -39,6 +45,9 @@ Subcommands:
   write   Write bytes to an existing file's $DATA stream.
   rm      Remove a regular file.
   rmdir   Remove an empty directory.
+  link    Create a hard link to an existing file.
+  rename  Rename an entry within its parent directory.
+  remove  POSIX-style remove (dispatches file/dir by type).
   set-dirty  Mark an NTFS volume as dirty (test-scenario helper).
 
 Run `rust-ntfs <subcommand> --help` for per-subcommand options.
@@ -64,6 +73,9 @@ fn main() -> ExitCode {
         "write" => write::run(rest),
         "rm" => rm::run(rest),
         "rmdir" => rmdir::run(rest),
+        "link" => link::run(rest),
+        "rename" => rename::run(rest),
+        "remove" => remove::run(rest),
         "set-dirty" => set_dirty::run(rest),
         "-h" | "--help" => {
             print!("{HELP}");

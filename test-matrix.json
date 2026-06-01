@@ -1475,6 +1475,105 @@
       "image": "nfs-mac-format-write-set-dirty-win-chkdsk.img",
       "_notes": "Tier-3 dirty-volume + content. Simulates a half-completed write followed by a crash (dirty-bit set without our writer issuing a clean dismount). chkdsk must keep our partial-write file readable, not orphan or truncate it."
     },
+    "mac-format-hardlink-unlink-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "HLNK",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "orig.txt"
+        },
+        {
+          "op": "mac-write",
+          "path": "/orig.txt",
+          "content": "shared content"
+        },
+        {
+          "op": "mac-link",
+          "existing_path": "/orig.txt",
+          "new_parent": "/",
+          "new_basename": "alias.txt"
+        },
+        {
+          "op": "mac-rm",
+          "path": "/orig.txt"
+        },
+        {
+          "op": "mac-enumerate"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-mac-format-hardlink-unlink-win-chkdsk.img",
+      "_notes": "Validates Tier-0 B1: create a file, hard-link it (count 2), then unlink the original name. The alias + shared $DATA must survive and the FILE record's hard_link_count must drop to 1 (== number of $FILE_NAME attrs). chkdsk must report Clean — a stale count or orphaned $FILE_NAME would flag."
+    },
+    "mac-format-rename-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "RNAM",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "before.txt"
+        },
+        {
+          "op": "mac-write",
+          "path": "/before.txt",
+          "content": "rename me"
+        },
+        {
+          "op": "mac-rename",
+          "path": "/before.txt",
+          "new_basename": "after.txt"
+        },
+        {
+          "op": "mac-enumerate"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-mac-format-rename-win-chkdsk.img",
+      "_notes": "Validates the mac-side rename write path end-to-end: rename before.txt -> after.txt (same-length path patches the $INDEX_ROOT entry + the file's own $FILE_NAME). chkdsk must report Clean — a duplicate/stale $I30 key or mismatched $FILE_NAME would flag."
+    },
     "win-format-mac-enumerate-empty": {
       "status": "pending",
       "volume_params": {

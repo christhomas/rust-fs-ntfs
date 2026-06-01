@@ -154,6 +154,22 @@ host = "host"
 command = "{binary} rmdir {image_dir}/{run_id}/{scenario.image} {step.path}"
 expect_exit = 0
 
+[ops.mac-link]
+# rust-ntfs link takes (image, existing-path, new-parent, new-basename).
+# Creates a second $FILE_NAME on the target + index entry in new-parent
+# and bumps hard_link_count. Pairs with mac-rm to exercise the
+# multi-link unlink path (decrement, not free).
+host = "host"
+command = "{binary} link {image_dir}/{run_id}/{scenario.image} {step.existing_path} {step.new_parent} {step.new_basename}"
+expect_exit = 0
+
+[ops.mac-rename]
+# rust-ntfs rename takes (image, old-path, new-basename) — same-parent
+# rename. Rejects a destination name that already exists.
+host = "host"
+command = "{binary} rename {image_dir}/{run_id}/{scenario.image} {step.path} {step.new_basename}"
+expect_exit = 0
+
 # ----- inspection / verification -----
 
 [ops.mac-enumerate]
