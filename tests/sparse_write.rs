@@ -22,8 +22,15 @@ fn fresh_vol(tag: &str) -> String {
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);
     let mut io = PathIo::open_rw(Path::new(&dst)).expect("open_rw");
-    format_filesystem(&mut io, VOL_SIZE, CLUSTER, CLUSTER, Some("SPW"), Some(0x5A_AB_5A_AB))
-        .expect("format_filesystem");
+    format_filesystem(
+        &mut io,
+        VOL_SIZE,
+        CLUSTER,
+        CLUSTER,
+        Some("SPW"),
+        Some(0x5A_AB_5A_AB),
+    )
+    .expect("format_filesystem");
     <PathIo as BlockIo>::sync(&mut io).expect("sync");
     drop(io);
     dst
@@ -100,7 +107,11 @@ fn sparse_hole_in_middle_roundtrips_and_saves_a_cluster() {
     let after = allocated_clusters(&img);
 
     // Content round-trips (the hole reads back as zeros).
-    assert_eq!(read_back(&img, "/sp.bin"), data, "sparse content must round-trip");
+    assert_eq!(
+        read_back(&img, "/sp.bin"),
+        data,
+        "sparse content must round-trip"
+    );
     // Only 2 of the 3 clusters were allocated — the hole cost nothing.
     assert_eq!(
         after - before,
@@ -121,8 +132,15 @@ fn fully_sparse_file_allocates_nothing_and_reads_zeros() {
     write::write_sparse_file(Path::new(&img), "/z.bin", &data).expect("write_sparse");
     let after = allocated_clusters(&img);
 
-    assert_eq!(read_back(&img, "/z.bin"), data, "fully-sparse reads all zeros");
-    assert_eq!(after, before, "a fully-sparse file must allocate ZERO clusters");
+    assert_eq!(
+        read_back(&img, "/z.bin"),
+        data,
+        "fully-sparse reads all zeros"
+    );
+    assert_eq!(
+        after, before,
+        "a fully-sparse file must allocate ZERO clusters"
+    );
 }
 
 #[test]
@@ -178,7 +196,11 @@ fn hole_at_start_roundtrips_and_saves_clusters() {
     let before = allocated_clusters(&img);
     write::write_sparse_file(Path::new(&img), "/hs.bin", &data).expect("write_sparse");
     let after = allocated_clusters(&img);
-    assert_eq!(read_back(&img, "/hs.bin"), data, "leading holes read as zeros");
+    assert_eq!(
+        read_back(&img, "/hs.bin"),
+        data,
+        "leading holes read as zeros"
+    );
     assert_eq!(after - before, 1, "3 leading holes cost nothing");
 }
 
@@ -192,7 +214,11 @@ fn hole_at_end_roundtrips_and_saves_clusters() {
     let before = allocated_clusters(&img);
     write::write_sparse_file(Path::new(&img), "/he.bin", &data).expect("write_sparse");
     let after = allocated_clusters(&img);
-    assert_eq!(read_back(&img, "/he.bin"), data, "trailing holes read as zeros");
+    assert_eq!(
+        read_back(&img, "/he.bin"),
+        data,
+        "trailing holes read as zeros"
+    );
     assert_eq!(after - before, 1, "4 trailing holes cost nothing");
 }
 
@@ -209,7 +235,11 @@ fn multiple_holes_interleaved() {
     let before = allocated_clusters(&img);
     write::write_sparse_file(Path::new(&img), "/mh.bin", &data).expect("write_sparse");
     let after = allocated_clusters(&img);
-    assert_eq!(read_back(&img, "/mh.bin"), data, "interleaved holes round-trip");
+    assert_eq!(
+        read_back(&img, "/mh.bin"),
+        data,
+        "interleaved holes round-trip"
+    );
     assert_eq!(after - before, 3, "only the 3 data clusters allocated");
 }
 
@@ -227,7 +257,11 @@ fn large_scattered_sparse_file() {
     let before = allocated_clusters(&img);
     write::write_sparse_file(Path::new(&img), "/big.bin", &data).expect("write_sparse");
     let after = allocated_clusters(&img);
-    assert_eq!(read_back(&img, "/big.bin"), data, "64-cluster scattered sparse round-trips");
+    assert_eq!(
+        read_back(&img, "/big.bin"),
+        data,
+        "64-cluster scattered sparse round-trips"
+    );
     assert_eq!(
         after - before,
         data_clusters.len() as u64,
@@ -247,7 +281,11 @@ fn sparse_write_does_not_disturb_a_sibling_file() {
     data[0] = 1;
     write::write_sparse_file(Path::new(&img), "/sp.bin", &data).expect("write_sparse");
     // Sibling must be intact.
-    assert_eq!(read_back(&img, "/keep.txt"), b"untouched", "sibling file untouched");
+    assert_eq!(
+        read_back(&img, "/keep.txt"),
+        b"untouched",
+        "sibling file untouched"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -273,5 +311,8 @@ fn write_sparse_rejects_already_nonresident_data() {
     write::promote_resident_data_to_nonresident(Path::new(&img), "/nr.bin", &vec![1u8; cs])
         .expect("promote");
     let err = write::write_sparse_file(Path::new(&img), "/nr.bin", &vec![0u8; 2 * cs]);
-    assert!(err.is_err(), "sparse write on non-resident $DATA must be refused: {err:?}");
+    assert!(
+        err.is_err(),
+        "sparse write on non-resident $DATA must be refused: {err:?}"
+    );
 }
