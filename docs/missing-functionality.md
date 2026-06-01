@@ -5,7 +5,9 @@ Status of write-API capabilities surfaced during the test-expansion effort
 from being written or marks a behaviour that diverges from NTFS.
 
 **Last verified:** 2026-06-01, against the current `main` + the write-path /
-CLI work (PRs #54–#57).
+CLI work (PRs #54–#57), including the `link` attribute-sort + `$INDEX_ROOT`
+`allocated_size` fixes (now in `main` by content; chkdsk-validated on the
+Windows VM this session).
 
 ---
 
@@ -18,6 +20,12 @@ CLI work (PRs #54–#57).
 | B3 | `write_resident_contents` "missing" upper-bound check | Not a code gap — the capacity guard already lives in `attr_resize::resize_resident_value`. The original failure was a *test* bug (wrong ceiling probe); fixed by measuring the real per-file ceiling. (PR #54) |
 | C6 | No POSIX remove dispatching by type | Added `write::remove` / `remove_io` + the `rust_ntfs remove` CLI subcommand: file → `unlink`, directory → `rmdir`. (`unlink` stays file-only by design.) (4279e8a / f92e78b) |
 | C2 | `truncate` couldn't grow (extend) | `truncate_by_record_number_io` routes `new_size > current_len` to `grow_nonresident_by_record_number_io` — the existing, matrix-validated allocation path, so no new on-disk behaviour. Tests: `truncate_grow_extends_nonresident_file`, `truncate_grow_to_same_size_is_noop`. (PR #57) |
+| — | `link` wrote the 2nd `$FILE_NAME` out of type order | `insert_attribute_before_end` → `insert_attribute_sorted`: a new attribute is inserted before the first existing one of greater `type_code`, so `link`'s 2nd `$FILE_NAME` (0x30) no longer lands after `$DATA` (0x80). Eliminates chkdsk "Attribute records … are unsorted." Also fixes the latent same bug for `$OBJECT_ID` (0x40). Found by the new `mac-format-hardlink-unlink-win-chkdsk` matrix scenario. (c3a83ec) |
+| — | `$INDEX_ROOT` `allocated_size` left stale after index-entry removal | `remove_index_entry` now updates the node header's `allocated_size` to match `total_size` for resident `$INDEX_ROOT` (the mirror of the insert-path invariant; INDX blocks keep their fixed slack). Eliminates chkdsk "Error detected in index $I30 for file 5" after a hard-link unlink. (c3a83ec) |
+
+Both `link`/index fixes are validated chkdsk-clean (readonly 0, /scan 0) by the
+two new mac-side matrix scenarios added in `f92e78b`:
+`mac-format-hardlink-unlink-win-chkdsk` and `mac-format-rename-win-chkdsk`.
 
 ---
 
@@ -25,9 +33,11 @@ CLI work (PRs #54–#57).
 
 All nine remaining gaps change **on-disk write structure** and therefore must
 be validated against Windows chkdsk via the 42-scenario matrix
-(`windows-test-matrix`) before they can land — that VM/chkdsk loop is not
-available in the current sandbox, and the write path is instance 2's active
-development area. They are **not** safe to implement blind. Listed by area.
+(`windows-test-matrix`) before they can land. The VM/chkdsk loop **is**
+available (VM `192.168.213.146`) and was used this session to validate the
+link/unlink + rename write paths — the two new scenarios above pass
+chkdsk-clean. They are **not** safe to implement blind; drive the matrix per
+the steps below. Listed by area.
 
 ### A. No API exists — scenario can't be tested at all
 
