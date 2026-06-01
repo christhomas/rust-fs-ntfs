@@ -62,10 +62,13 @@ fn read_stream_via_upstream(img: &str, file: &str, stream: &str) -> Option<Vec<u
         if a.ty().ok() != Some(NtfsAttributeType::Data) {
             continue;
         }
-        let is_match = a
-            .name()
-            .map(|n| n.to_string_lossy() == stream)
-            .unwrap_or(false);
+        // `a.name()` is a Result; the unnamed $DATA (primary stream) yields
+        // Ok("") here, so an empty `stream` matches it. Treat a name error as
+        // the unnamed case too, for robustness.
+        let is_match = match a.name() {
+            Ok(n) => n.to_string_lossy() == stream,
+            Err(_) => stream.is_empty(),
+        };
         if !is_match {
             continue;
         }
