@@ -15,6 +15,7 @@ use std::io::BufReader;
 use std::path::Path;
 
 const ATTRLIST_IMG: &str = "test-disks/ntfs-attrlist.img";
+const COMPRESSED_IMG: &str = "test-disks/ntfs-compressed.img";
 
 /// Open a fixture read-only, or return `None` (with a skip notice) if absent.
 fn open_fixture(path: &str) -> Option<PathIo> {
@@ -121,4 +122,23 @@ fn many_named_streams_all_match_upstream() {
     }
     assert!(checked > 0, "expected at least one named stream");
     eprintln!("cross-checked {checked} named $DATA streams against upstream");
+}
+
+#[test]
+fn compressed_data_decompresses_to_known_content() {
+    let Some(mut io) = open_fixture(COMPRESSED_IMG) else {
+        return;
+    };
+    let rec = resolve_path(&mut io, "/comp.txt").expect("resolve /comp.txt");
+
+    // \comp.txt is a Windows-compressed file (LZNT1) of exactly 200000 bytes
+    // of the repeating ASCII pattern "ABC" (byte[i] = "ABC"[i % 3]). Upstream
+    // ntfs 0.4 cannot decompress, so the *known original* is the oracle.
+    let expected: Vec<u8> = (0..200_000usize).map(|i| b"ABC"[i % 3]).collect();
+
+    let native = read_attribute_value(&mut io, rec, AttrType::Data, None)
+        .expect("native read of compressed $DATA");
+
+    assert_eq!(native.len(), expected.len(), "decompressed length");
+    assert_eq!(native, expected, "decompressed content mismatch");
 }

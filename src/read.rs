@@ -12,6 +12,7 @@
 
 use crate::attr_io::{self, attr_off, AttrType};
 use crate::block_io::BlockIo;
+use crate::compression;
 use crate::data_runs;
 use crate::idx_block;
 use crate::index_io::{self, IH_FLAG_HAS_SUBNODES};
@@ -162,11 +163,11 @@ fn read_value_from_record<T: BlockIo + ?Sized>(
         record[loc.attr_offset + attr_off::FLAGS],
         record[loc.attr_offset + attr_off::FLAGS + 1],
     ]);
-    if flags & ATTR_FLAG_COMPRESSED != 0 {
-        return Err("read_attribute_value: compressed attribute (LZNT1 decompression not wired here yet)".to_string());
-    }
     if flags & ATTR_FLAG_ENCRYPTED != 0 {
         return Err("read_attribute_value: encrypted attribute ($EFS) unsupported".to_string());
+    }
+    if flags & ATTR_FLAG_COMPRESSED != 0 {
+        return read_compressed_nonresident(io, params, record, loc);
     }
 
     let data_size = loc
@@ -201,6 +202,91 @@ fn read_value_from_record<T: BlockIo + ?Sized>(
             out[file_off..file_off + copy_len].copy_from_slice(&cluster[..copy_len]);
         }
         // else: sparse hole → leave zeros.
+    }
+
+    Ok(out)
+}
+
+/// Non-resident attribute header: compression-unit exponent (u16 at +0x22).
+/// The unit is `2^exp` clusters (4 ⇒ 16 clusters, the LZNT1 default).
+const NONRES_COMPRESSION_UNIT: usize = 0x22;
+
+/// Read a compressed non-resident attribute, decompressing each compression
+/// unit. A unit is `2^exp` clusters; NTFS stores it one of three ways:
+/// * all clusters allocated  ⇒ stored uncompressed (raw), copy verbatim;
+/// * some leading clusters + a trailing hole ⇒ LZNT1-compressed, decompress
+///   the leading (allocated) clusters into the unit's bytes;
+/// * no clusters (whole-unit hole) ⇒ all zeros.
+///
+/// The returned vector has length = the attribute's logical data size.
+fn read_compressed_nonresident<T: BlockIo + ?Sized>(
+    io: &mut T,
+    params: &crate::mft_io::BootParams,
+    record: &[u8],
+    loc: &attr_io::AttrLocation,
+) -> Result<Vec<u8>, String> {
+    let data_size = loc
+        .non_resident_value_length
+        .ok_or("compressed attr has no data size")? as usize;
+    let cu_exp = u16::from_le_bytes([
+        record[loc.attr_offset + NONRES_COMPRESSION_UNIT],
+        record[loc.attr_offset + NONRES_COMPRESSION_UNIT + 1],
+    ]) as u32;
+    if cu_exp == 0 {
+        return Err("compressed flag set but compression_unit is 0".to_string());
+    }
+    let unit_clusters = 1usize << cu_exp;
+    let mpo = loc
+        .non_resident_mapping_pairs_offset
+        .ok_or("compressed attr has no mapping-pairs offset")? as usize;
+    let runs =
+        data_runs::decode_runs(&record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length])?;
+
+    let cluster_size = params.cluster_size as usize;
+    let unit_size = unit_clusters * cluster_size;
+    let mut out = vec![0u8; data_size];
+
+    let mut unit_first_vcn = 0usize;
+    while unit_first_vcn * cluster_size < data_size {
+        let unit_off = unit_first_vcn * cluster_size;
+        let unit_out_len = unit_size.min(data_size - unit_off);
+
+        // Collect this unit's allocated clusters (in VCN order — the leading,
+        // real ones for a compressed unit). A compression unit is always
+        // `unit_clusters` wide on disk: a compressed unit stores its data in
+        // the leading clusters and leaves the rest a hole (so allocated <
+        // unit_clusters), while an uncompressed unit allocates all of them.
+        // Classify by `unit_clusters`, NOT by how many VCNs fall inside
+        // data_size — the final partial unit still compresses into one
+        // allocated cluster and must be decompressed, not copied raw.
+        let mut allocated_lcns = Vec::new();
+        for k in 0..unit_clusters {
+            if let Some(lcn) = data_runs::vcn_to_lcn(&runs, (unit_first_vcn + k) as u64) {
+                allocated_lcns.push(lcn);
+            }
+        }
+
+        if allocated_lcns.is_empty() {
+            // Whole-unit hole → zeros (already zero-initialised).
+        } else {
+            let mut raw = Vec::with_capacity(allocated_lcns.len() * cluster_size);
+            for lcn in &allocated_lcns {
+                let mut cluster = vec![0u8; cluster_size];
+                io.read_exact_at(lcn * cluster_size as u64, &mut cluster)?;
+                raw.extend_from_slice(&cluster);
+            }
+            let plain = if allocated_lcns.len() == unit_clusters {
+                // All clusters allocated ⇒ stored uncompressed; raw is content.
+                raw
+            } else {
+                // Fewer than a full unit ⇒ LZNT1-compressed; decompress.
+                compression::decompress_unit(&raw, unit_out_len)?
+            };
+            let copy = unit_out_len.min(plain.len());
+            out[unit_off..unit_off + copy].copy_from_slice(&plain[..copy]);
+        }
+
+        unit_first_vcn += unit_clusters;
     }
 
     Ok(out)
