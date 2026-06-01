@@ -40,16 +40,12 @@
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
-use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::PathBuf;
 use std::slice;
 
 use crate::attr_io::AttrType;
 use crate::block_io::{BlockIo as BlockIoTrait, CallbackBlockIo, PathIo as RwPathIo};
-
-use ntfs::Ntfs;
 
 pub mod attr_io;
 pub mod attr_resize;
@@ -234,170 +230,22 @@ macro_rules! cstr_or_return {
 }
 
 // ---------------------------------------------------------------------------
-// Callback-based reader for FSKit integration
+// Callback-based block I/O for FSKit integration
 // ---------------------------------------------------------------------------
 
+/// Host-supplied positioned read callback. Used by `MountSource::Callbacks`
+/// and `CallbackBlockIo` (the native read/mutator path); the old
+/// `Read + Seek` adapter that fed the upstream `ntfs` parser is gone.
 type ReadCallback = unsafe extern "C" fn(*mut c_void, *mut c_void, u64, u64) -> c_int;
 
-struct CallbackReader {
-    read_fn: ReadCallback,
-    context: *mut c_void,
-    size: u64,
-    position: u64,
-}
-
-// Safety contract for `unsafe impl Send`:
-//
-// `context: *mut c_void` is an opaque pointer the caller (Swift /
-// FSKit, Go, C, …) hands to `fs_ntfs_mount_with_callbacks` and gets
-// back unchanged on every read invocation. The pointer's lifetime
-// MUST cover the mount: i.e. the caller MUST NOT free the pointee
-// until `fs_ntfs_umount` returns.
-//
-// What FSKit's serialisation actually guarantees:
-//   - Per-volume callback serialisation. Two callbacks against the
-//     same handle never run concurrently. This is what makes a raw
-//     pointer safe to dereference from inside `read_fn` without
-//     synchronisation around `position`.
-//
-// What it does NOT guarantee, and what callers must arrange:
-//   - **Thread-confined contexts** (e.g. an `@MainActor`-bound Swift
-//     `FSBlockDeviceResource` that requires drop on the main
-//     thread): if the consumer's `context` points at a
-//     thread-confined object, the consumer MUST wrap that object in
-//     a thread-safe shell (e.g. an `Arc` or a Sendable proxy)
-//     before passing the pointer here. fs_ntfs may drop the
-//     handle on any thread.
-//   - **Re-entrancy**: the read callback must not call back into
-//     fs_ntfs against the same handle.
-unsafe impl Send for CallbackReader {}
-
-impl Read for CallbackReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.position >= self.size {
-            return Ok(0);
-        }
-        let to_read = std::cmp::min(buf.len() as u64, self.size - self.position);
-        let rc = unsafe {
-            (self.read_fn)(
-                self.context,
-                buf.as_mut_ptr() as *mut c_void,
-                self.position,
-                to_read,
-            )
-        };
-        if rc != 0 {
-            return Err(std::io::Error::other("read callback failed"));
-        }
-        self.position += to_read;
-        Ok(to_read as usize)
-    }
-}
-
-impl Seek for CallbackReader {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        let new_pos = match pos {
-            SeekFrom::Start(p) => p as i64,
-            SeekFrom::End(p) => self.size as i64 + p,
-            SeekFrom::Current(p) => self.position as i64 + p,
-        };
-        if new_pos < 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "seek before start",
-            ));
-        }
-        self.position = new_pos as u64;
-        Ok(self.position)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// fs-core-backed reader — drives reads through an Arc<dyn fs_core::BlockDevice>
-// ---------------------------------------------------------------------------
-
-/// Bridges any `fs_core::BlockDevice` into the `Read + Seek` shape ntfs
-/// needs. Used by `fs_ntfs_mount_with_fs_core_device` so callers can
-/// mount NTFS off a generic device handle (a qcow2 reader, a partition
-/// slice, etc.) without writing per-source glue.
-struct FsCoreReader {
-    inner: std::sync::Arc<dyn fs_core::BlockDevice>,
-    size: u64,
-    position: u64,
-}
-
-impl Read for FsCoreReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.position >= self.size {
-            return Ok(0);
-        }
-        let to_read = std::cmp::min(buf.len() as u64, self.size - self.position) as usize;
-        let slice = &mut buf[..to_read];
-        match fs_core::BlockRead::read_at(&self.inner, self.position, slice) {
-            Ok(()) => {
-                self.position += to_read as u64;
-                Ok(to_read)
-            }
-            Err(e) => Err(std::io::Error::other(format!("fs_core read: {e}"))),
-        }
-    }
-}
-
-impl Seek for FsCoreReader {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        let new_pos = match pos {
-            SeekFrom::Start(p) => p as i64,
-            SeekFrom::End(p) => self.size as i64 + p,
-            SeekFrom::Current(p) => self.position as i64 + p,
-        };
-        if new_pos < 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "seek before start",
-            ));
-        }
-        self.position = new_pos as u64;
-        Ok(self.position)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Bridge filesystem handle
-// ---------------------------------------------------------------------------
-
-enum ReaderKind {
-    File(BufReader<File>),
-    Callback(BufReader<CallbackReader>),
-    FsCore(BufReader<FsCoreReader>),
-}
-
-impl Read for ReaderKind {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            ReaderKind::File(r) => r.read(buf),
-            ReaderKind::Callback(r) => r.read(buf),
-            ReaderKind::FsCore(r) => r.read(buf),
-        }
-    }
-}
-
-impl Seek for ReaderKind {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        match self {
-            ReaderKind::File(r) => r.seek(pos),
-            ReaderKind::Callback(r) => r.seek(pos),
-            ReaderKind::FsCore(r) => r.seek(pos),
-        }
-    }
-}
-
 pub struct FsNtfsHandle {
-    ntfs: Ntfs,
-    reader: ReaderKind,
     /// Source of the mount, used to build a [`BlockIoTrait`] on demand for
     /// both the native read path and the handle-based mutator API. Populated
     /// by every mount entry point (including read-only mounts — writes are
-    /// gated by `writable`, not by a missing source).
+    /// gated by `writable`, not by a missing source). Every read/stat/volume
+    /// operation builds a fresh `BlockIo` from this via `handle_to_ro_io`; the
+    /// handle no longer holds an upstream `ntfs::Ntfs` parser or a long-lived
+    /// reader.
     source: Option<MountSource>,
     /// Whether mutations are permitted. `false` for read-only mounts (RO
     /// fs-core, or callbacks with a NULL write fn). The mutator API checks
@@ -632,27 +480,20 @@ pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle
         }
     };
 
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(e) => {
-            set_error(&format!("open '{path}': {e}"));
-            return std::ptr::null_mut();
-        }
-    };
-
-    let mut reader = ReaderKind::File(BufReader::new(file));
-
-    let mut ntfs = match Ntfs::new(&mut reader) {
-        Ok(n) => n,
-        Err(e) => {
+    // Validate it's a parseable NTFS volume via the native read layer (boot
+    // sector + OEM signature + `$Volume`), no upstream `Ntfs::new`.
+    {
+        let mut io = match RwPathIo::open_ro(std::path::Path::new(path)) {
+            Ok(io) => io,
+            Err(e) => {
+                set_error(&format!("open '{path}': {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        if let Err(e) = read::read_volume_info(&mut io) {
             set_error(&format!("ntfs init: {e}"));
             return std::ptr::null_mut();
         }
-    };
-
-    if let Err(e) = ntfs.read_upcase_table(&mut reader) {
-        set_error(&format!("upcase table: {e}"));
-        return std::ptr::null_mut();
     }
 
     // Mimic `ntfs.sys`'s "upgrade on mount". Path-based mount is
@@ -672,8 +513,6 @@ pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle
     }
 
     let bridge = Box::new(FsNtfsHandle {
-        ntfs,
-        reader,
         source: Some(MountSource::Path(PathBuf::from(path))),
         writable: true,
     });
@@ -696,26 +535,19 @@ pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) ->
 
     let cfg = unsafe { &*cfg };
 
-    let cb_reader = CallbackReader {
-        read_fn: cfg.read,
-        context: cfg.context,
-        size: cfg.size_bytes,
-        position: 0,
-    };
-
-    let mut reader = ReaderKind::Callback(BufReader::new(cb_reader));
-
-    let mut ntfs = match Ntfs::new(&mut reader) {
-        Ok(n) => n,
-        Err(e) => {
+    // Validate it's a parseable NTFS volume via the native read layer over a
+    // read-only callback `BlockIo` (no upstream `Ntfs::new`).
+    {
+        let mut io = CallbackBlockIo {
+            read_fn: cfg.read,
+            write_fn: None,
+            context: cfg.context,
+            size: cfg.size_bytes,
+        };
+        if let Err(e) = read::read_volume_info(&mut io) {
             set_error(&format!("ntfs init: {e}"));
             return std::ptr::null_mut();
         }
-    };
-
-    if let Err(e) = ntfs.read_upcase_table(&mut reader) {
-        set_error(&format!("upcase table: {e}"));
-        return std::ptr::null_mut();
     }
 
     // Mimic `ntfs.sys`'s "upgrade on mount". Only fire when the
@@ -743,8 +575,6 @@ pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) ->
     }
 
     let bridge = Box::new(FsNtfsHandle {
-        ntfs,
-        reader,
         source: Some(MountSource::Callbacks {
             read_fn: cfg.read,
             write_fn: cfg.write,
@@ -789,29 +619,19 @@ pub extern "C" fn fs_ntfs_mount_with_fs_core_device(
     let inner = unsafe { (*handle).inner().clone() };
     let size = fs_core::BlockRead::size_bytes(&inner);
 
-    let fs_core_reader = FsCoreReader {
-        inner: inner.clone(),
-        size,
-        position: 0,
-    };
-    let mut reader = ReaderKind::FsCore(BufReader::new(fs_core_reader));
-
-    let mut ntfs = match Ntfs::new(&mut reader) {
-        Ok(n) => n,
-        Err(e) => {
+    // Validate via the native read layer over a read-only fs-core `BlockIo`.
+    {
+        let mut io = FsCoreBlockIo {
+            device: inner.clone(),
+            size,
+        };
+        if let Err(e) = read::read_volume_info(&mut io) {
             set_error(&format!("ntfs init: {e}"));
             return std::ptr::null_mut();
         }
-    };
-
-    if let Err(e) = ntfs.read_upcase_table(&mut reader) {
-        set_error(&format!("upcase table: {e}"));
-        return std::ptr::null_mut();
     }
 
     let bridge = Box::new(FsNtfsHandle {
-        ntfs,
-        reader,
         // Record the device so the native read path can build a
         // `BlockIo`; `writable: false` is what makes this a read-only
         // mount — the mutator API refuses before ever building a
@@ -862,24 +682,16 @@ pub extern "C" fn fs_ntfs_mount_rw_with_fs_core_device(
     let device = unsafe { (*handle).inner().clone() };
     let size = fs_core::BlockRead::size_bytes(&device);
 
-    let fs_core_reader = FsCoreReader {
-        inner: device.clone(),
-        size,
-        position: 0,
-    };
-    let mut reader = ReaderKind::FsCore(BufReader::new(fs_core_reader));
-
-    let mut ntfs = match Ntfs::new(&mut reader) {
-        Ok(n) => n,
-        Err(e) => {
+    // Validate via the native read layer over the fs-core `BlockIo`.
+    {
+        let mut io = FsCoreBlockIo {
+            device: device.clone(),
+            size,
+        };
+        if let Err(e) = read::read_volume_info(&mut io) {
             set_error(&format!("ntfs init: {e}"));
             return std::ptr::null_mut();
         }
-    };
-
-    if let Err(e) = ntfs.read_upcase_table(&mut reader) {
-        set_error(&format!("upcase table: {e}"));
-        return std::ptr::null_mut();
     }
 
     // Mimic `ntfs.sys`'s "upgrade on mount": if the volume was
@@ -904,8 +716,6 @@ pub extern "C" fn fs_ntfs_mount_rw_with_fs_core_device(
     }
 
     let bridge = Box::new(FsNtfsHandle {
-        ntfs,
-        reader,
         source: Some(MountSource::FsCore { device }),
         writable: true,
     });
@@ -1102,29 +912,30 @@ pub extern "C" fn fs_ntfs_get_volume_info(
         return -1;
     }
 
-    let bridge = unsafe { &mut *fs };
+    let bridge = unsafe { &*fs };
     let out = unsafe { &mut *info };
 
-    // Zero out
+    // Native read layer: boot geometry + serial, `$VOLUME_INFORMATION`
+    // version, and `$VOLUME_NAME` label.
+    let mut io = match handle_to_ro_io(bridge) {
+        Ok(io) => io,
+        Err(e) => return err_int(e),
+    };
+    let vi = match read::read_volume_info(&mut io) {
+        Ok(v) => v,
+        Err(e) => return err_int(e),
+    };
+
     out.volume_name = [0u8; 128];
-    out.cluster_size = bridge.ntfs.cluster_size();
-    out.total_size = bridge.ntfs.size();
-    out.total_clusters = bridge.ntfs.size() / bridge.ntfs.cluster_size() as u64;
-    out.serial_number = bridge.ntfs.serial_number();
-
-    // Volume name
-    if let Some(Ok(vol_name)) = bridge.ntfs.volume_name(&mut bridge.reader) {
-        let name_str = vol_name.name().to_string_lossy();
-        let name_bytes = name_str.as_bytes();
-        let copy_len = std::cmp::min(name_bytes.len(), 127);
-        out.volume_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-    }
-
-    // Version
-    if let Ok(vol_info) = bridge.ntfs.volume_info(&mut bridge.reader) {
-        out.ntfs_version_major = vol_info.major_version() as u16;
-        out.ntfs_version_minor = vol_info.minor_version() as u16;
-    }
+    let name_bytes = vi.label.as_bytes();
+    let copy_len = std::cmp::min(name_bytes.len(), 127);
+    out.volume_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+    out.cluster_size = vi.cluster_size;
+    out.total_size = vi.total_size;
+    out.total_clusters = vi.total_clusters;
+    out.serial_number = vi.serial_number;
+    out.ntfs_version_major = vi.version_major as u16;
+    out.ntfs_version_minor = vi.version_minor as u16;
 
     0
 }
@@ -1142,36 +953,37 @@ pub extern "C" fn fs_ntfs_get_volume_info_v2(
     if fs.is_null() || info.is_null() {
         return -1;
     }
-    let bridge = unsafe { &mut *fs };
+    let bridge = unsafe { &*fs };
     let out = unsafe { &mut *info };
+
+    let mut io = match handle_to_ro_io(bridge) {
+        Ok(io) => io,
+        Err(e) => return err_int(e),
+    };
+    let vi = match read::read_volume_info(&mut io) {
+        Ok(v) => v,
+        Err(e) => return err_int(e),
+    };
+
     out.volume_name = [0u8; 128];
-    out.cluster_size = bridge.ntfs.cluster_size();
-    out.total_size = bridge.ntfs.size();
-    out.total_clusters = bridge.ntfs.size() / bridge.ntfs.cluster_size() as u64;
-    out.serial_number = bridge.ntfs.serial_number();
-    out.mft_record_size = bridge.ntfs.file_record_size();
-    out.bytes_per_sector = bridge.ntfs.sector_size() as u32;
-    out.volume_flags = 0;
-    out.is_dirty = 0;
-    out.ntfs_version_major = 0;
-    out.ntfs_version_minor = 0;
+    let name_bytes = vi.label.as_bytes();
+    let copy_len = std::cmp::min(name_bytes.len(), 127);
+    out.volume_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+    out.cluster_size = vi.cluster_size;
+    out.total_size = vi.total_size;
+    out.total_clusters = vi.total_clusters;
+    out.serial_number = vi.serial_number;
+    out.mft_record_size = vi.file_record_size;
+    out.bytes_per_sector = vi.bytes_per_sector as u32;
+    out.ntfs_version_major = vi.version_major as u16;
+    out.ntfs_version_minor = vi.version_minor as u16;
+    out.volume_flags = vi.flags;
+    out.is_dirty = if vi.flags & read::VOLUME_IS_DIRTY != 0 {
+        1
+    } else {
+        0
+    };
     out._pad = [0u8; 5];
-
-    if let Some(Ok(vol_name)) = bridge.ntfs.volume_name(&mut bridge.reader) {
-        let name_str = vol_name.name().to_string_lossy();
-        let name_bytes = name_str.as_bytes();
-        let copy_len = std::cmp::min(name_bytes.len(), 127);
-        out.volume_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-    }
-
-    if let Ok(vol_info) = bridge.ntfs.volume_info(&mut bridge.reader) {
-        out.ntfs_version_major = vol_info.major_version() as u16;
-        out.ntfs_version_minor = vol_info.minor_version() as u16;
-        let flags = vol_info.flags();
-        out.volume_flags = flags.bits();
-        // VOLUME_IS_DIRTY = 0x0001
-        out.is_dirty = if flags.bits() & 0x0001 != 0 { 1 } else { 0 };
-    }
 
     0
 }
