@@ -961,52 +961,9 @@ impl BlockIoTrait for FsCoreBlockIo {
     }
 }
 
-/// Same shape as the `BlockIo` impl above — fsck and the mutator API
-/// have parallel trait surfaces (intentional, see `src/fsck.rs`),
-/// so the adapter has to satisfy both. Bodies are identical.
-impl crate::fsck::FsckIo for FsCoreBlockIo {
-    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
-        fs_core::BlockRead::read_at(&self.device, offset, buf).map_err(|e| e.to_string())
-    }
-    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
-        if !fs_core::BlockDevice::is_writable(&self.device) {
-            return Err("device is not writable".to_string());
-        }
-        fs_core::BlockDevice::write_at(&self.device, offset, buf).map_err(|e| e.to_string())
-    }
-    fn size(&self) -> u64 {
-        self.size
-    }
-    fn sync(&mut self) -> Result<(), String> {
-        fs_core::BlockDevice::flush(&self.device).map_err(|e| e.to_string())
-    }
-}
-
-/// Same pattern as the `FsCoreBlockIo` impl above. Lets the
-/// upgrade-on-mount path drive a callback-backed volume via fsck's
-/// `FsckIo`. Bodies delegate straight to the underlying `BlockIo`
-/// impl in `block_io.rs`.
-///
-/// `sync` delegates explicitly even though both `FsckIo::sync` and
-/// `BlockIo::sync` default to `Ok(())` — the delegation is for
-/// future-proofing: if `BlockIo::sync` on `CallbackBlockIo` ever
-/// grows a real flush (e.g. a host-supplied flush callback), the
-/// fsck path picks it up automatically. Today it's still a no-op
-/// (callback-backed mounts let the host drain on its own barrier).
-impl crate::fsck::FsckIo for CallbackBlockIo {
-    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
-        <Self as BlockIoTrait>::read_exact_at(self, offset, buf)
-    }
-    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
-        <Self as BlockIoTrait>::write_all_at(self, offset, buf)
-    }
-    fn size(&self) -> u64 {
-        <Self as BlockIoTrait>::size(self)
-    }
-    fn sync(&mut self) -> Result<(), String> {
-        <Self as BlockIoTrait>::sync(self)
-    }
-}
+// `FsCoreBlockIo` and `CallbackBlockIo` both implement `BlockIo`
+// (`BlockIoTrait`) above, so the blanket `impl<T: BlockIo> FsckIo for T` in
+// `src/fsck.rs` already makes them usable as `FsckIo`. No separate impls.
 
 impl BlockIoTrait for HandleIo {
     fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
@@ -3122,7 +3079,9 @@ struct CallbackIo {
 
 unsafe impl Send for CallbackIo {}
 
-impl fsck::FsckIo for CallbackIo {
+// Implements `BlockIo`; the blanket impl in `src/fsck.rs` makes it an
+// `FsckIo` too, which is what the fsck callback entry points drive it as.
+impl BlockIoTrait for CallbackIo {
     fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
         let rc = unsafe {
             (self.read_fn)(
