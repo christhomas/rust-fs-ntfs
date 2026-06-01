@@ -793,6 +793,61 @@ pub fn build_nonresident_data_attribute(
     Ok(buf)
 }
 
+/// Build a **sparse** non-resident `$DATA` attribute.
+///
+/// A sparse (or compressed) non-resident attribute uses the *extended*
+/// header: it carries an extra `total_allocated_size` u64 at `+0x40`
+/// (the real on-disk bytes, excluding holes), so its header is `0x48`
+/// bytes and `mapping_pairs_offset` is `0x48` — not the `0x40` of a plain
+/// non-resident attribute. chkdsk validates this layout strictly: setting
+/// the SPARSE flag (`0x8000`) on a plain `0x40` header makes chkdsk read
+/// past `data`/`initialized` into the mapping pairs and report the
+/// attribute corrupt.
+///
+/// Field semantics for sparse:
+/// * `allocated_size` (`0x28`) — the full VCN-span allocation
+///   (`(last_vcn + 1) * cluster_size`), covering holes too.
+/// * `total_allocated_size` (`0x40`) — only the real (non-hole) cluster
+///   bytes; this is the on-disk footprint.
+/// * `data_size` / `initialized_size` — the logical size as usual.
+pub fn build_sparse_nonresident_data_attribute(
+    attr_id: u16,
+    data_length: u64,
+    allocated_length: u64,
+    total_allocated_length: u64,
+    initialized_length: u64,
+    last_vcn: i64,
+    mapping_pairs: &[u8],
+) -> Result<Vec<u8>, String> {
+    // Extended header: 0x40 standard fields + 8-byte total_allocated_size.
+    let header_size = 0x48usize;
+    let mapping_offset = header_size;
+    let attr_length = align8(header_size + mapping_pairs.len());
+
+    let mut buf = vec![0u8; attr_length];
+
+    buf[0..4].copy_from_slice(&ATTR_DATA.to_le_bytes());
+    buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    buf[8] = 1; // non_resident
+    buf[9] = 0; // name_length (unnamed stream)
+    buf[10..12].copy_from_slice(&(mapping_offset as u16).to_le_bytes()); // name_offset
+    buf[12..14].copy_from_slice(&0x8000u16.to_le_bytes()); // flags: SPARSE
+    buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+
+    buf[16..24].copy_from_slice(&0u64.to_le_bytes()); // first_vcn
+    buf[24..32].copy_from_slice(&last_vcn.to_le_bytes()); // last_vcn
+    buf[32..34].copy_from_slice(&(mapping_offset as u16).to_le_bytes()); // mapping_pairs_offset = 0x48
+    buf[34..36].copy_from_slice(&0u16.to_le_bytes()); // compression_unit = 0 (sparse, not compressed)
+    buf[36..40].copy_from_slice(&0u32.to_le_bytes()); // reserved
+    buf[40..48].copy_from_slice(&allocated_length.to_le_bytes()); // 0x28 allocated (full span)
+    buf[48..56].copy_from_slice(&data_length.to_le_bytes()); // 0x30 data_size
+    buf[56..64].copy_from_slice(&initialized_length.to_le_bytes()); // 0x38 initialized
+    buf[64..72].copy_from_slice(&total_allocated_length.to_le_bytes()); // 0x40 total_allocated
+
+    buf[mapping_offset..mapping_offset + mapping_pairs.len()].copy_from_slice(mapping_pairs);
+    Ok(buf)
+}
+
 /// Build a non-resident attribute of arbitrary type and optional name.
 /// Generalizes `build_nonresident_data_attribute`. Caller supplies the
 /// full attribute type code (e.g. `0x80` for `$DATA`, `0xC0` for

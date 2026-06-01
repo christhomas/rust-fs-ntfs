@@ -126,15 +126,29 @@ mod tests {
     fn sparse_pattern_alternates_4k_blocks() {
         let d = gen_pattern("sparse", 3 * SPARSE_BLOCK).unwrap();
         // block 0: non-zero, block 1: all-zero, block 2: non-zero.
-        assert!(d[0..SPARSE_BLOCK].iter().any(|&b| b != 0), "block 0 has data");
-        assert!(d[SPARSE_BLOCK..2 * SPARSE_BLOCK].iter().all(|&b| b == 0), "block 1 is a hole");
-        assert!(d[2 * SPARSE_BLOCK..3 * SPARSE_BLOCK].iter().any(|&b| b != 0), "block 2 has data");
+        assert!(
+            d[0..SPARSE_BLOCK].iter().any(|&b| b != 0),
+            "block 0 has data"
+        );
+        assert!(
+            d[SPARSE_BLOCK..2 * SPARSE_BLOCK].iter().all(|&b| b == 0),
+            "block 1 is a hole"
+        );
+        assert!(
+            d[2 * SPARSE_BLOCK..3 * SPARSE_BLOCK]
+                .iter()
+                .any(|&b| b != 0),
+            "block 2 has data"
+        );
     }
 
     #[test]
     fn incrementing_pattern_has_no_zero_bytes() {
         // Every byte non-zero → no false holes (dense control).
-        assert!(gen_pattern("incrementing", SPARSE_BLOCK).unwrap().iter().all(|&b| b != 0));
+        assert!(gen_pattern("incrementing", SPARSE_BLOCK)
+            .unwrap()
+            .iter()
+            .all(|&b| b != 0));
     }
 
     #[test]

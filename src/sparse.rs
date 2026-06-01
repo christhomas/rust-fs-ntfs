@@ -171,7 +171,13 @@ mod tests {
     #[test]
     fn all_zero_single_cluster_is_one_hole() {
         let segs = plan_sparse_segments(&vec![0u8; CS as usize], CS);
-        assert_eq!(segs, vec![SparseSegment::Hole { start_vcn: 0, clusters: 1 }]);
+        assert_eq!(
+            segs,
+            vec![SparseSegment::Hole {
+                start_vcn: 0,
+                clusters: 1
+            }]
+        );
         assert_eq!(allocated_clusters(&segs), 0);
     }
 
@@ -200,8 +206,16 @@ mod tests {
         assert_eq!(
             segs,
             vec![
-                SparseSegment::Data { start_vcn: 0, clusters: 1, byte_start: 0, byte_len: CS as usize },
-                SparseSegment::Hole { start_vcn: 1, clusters: 1 },
+                SparseSegment::Data {
+                    start_vcn: 0,
+                    clusters: 1,
+                    byte_start: 0,
+                    byte_len: CS as usize
+                },
+                SparseSegment::Hole {
+                    start_vcn: 1,
+                    clusters: 1
+                },
                 SparseSegment::Data {
                     start_vcn: 2,
                     clusters: 1,
@@ -222,7 +236,10 @@ mod tests {
         assert_eq!(
             segs,
             vec![
-                SparseSegment::Hole { start_vcn: 0, clusters: 3 },
+                SparseSegment::Hole {
+                    start_vcn: 0,
+                    clusters: 3
+                },
                 SparseSegment::Data {
                     start_vcn: 3,
                     clusters: 1,
@@ -242,7 +259,10 @@ mod tests {
         assert_eq!(
             segs,
             vec![
-                SparseSegment::Hole { start_vcn: 0, clusters: 1 },
+                SparseSegment::Hole {
+                    start_vcn: 0,
+                    clusters: 1
+                },
                 SparseSegment::Data {
                     start_vcn: 1,
                     clusters: 1,
@@ -262,8 +282,16 @@ mod tests {
         assert_eq!(
             segs,
             vec![
-                SparseSegment::Data { start_vcn: 0, clusters: 1, byte_start: 0, byte_len: CS as usize },
-                SparseSegment::Hole { start_vcn: 1, clusters: 1 },
+                SparseSegment::Data {
+                    start_vcn: 0,
+                    clusters: 1,
+                    byte_start: 0,
+                    byte_len: CS as usize
+                },
+                SparseSegment::Hole {
+                    start_vcn: 1,
+                    clusters: 1
+                },
             ]
         );
     }
@@ -279,9 +307,21 @@ mod tests {
         assert_eq!(
             runs,
             vec![
-                DataRun { starting_vcn: 0, length: 1, lcn: Some(100) },
-                DataRun { starting_vcn: 1, length: 1, lcn: None },
-                DataRun { starting_vcn: 2, length: 1, lcn: Some(200) },
+                DataRun {
+                    starting_vcn: 0,
+                    length: 1,
+                    lcn: Some(100)
+                },
+                DataRun {
+                    starting_vcn: 1,
+                    length: 1,
+                    lcn: None
+                },
+                DataRun {
+                    starting_vcn: 2,
+                    length: 1,
+                    lcn: Some(200)
+                },
             ]
         );
     }
@@ -312,7 +352,13 @@ mod tests {
     fn fully_sparse_large_file_is_single_hole() {
         // 256 all-zero clusters → one coalesced hole, zero allocation.
         let segs = plan_sparse_segments(&vec![0u8; 256 * CS as usize], CS);
-        assert_eq!(segs, vec![SparseSegment::Hole { start_vcn: 0, clusters: 256 }]);
+        assert_eq!(
+            segs,
+            vec![SparseSegment::Hole {
+                start_vcn: 0,
+                clusters: 256
+            }]
+        );
         assert_eq!(allocated_clusters(&segs), 0);
     }
 
@@ -328,14 +374,20 @@ mod tests {
         assert_eq!(
             segs,
             vec![
-                SparseSegment::Hole { start_vcn: 0, clusters: 7 },
+                SparseSegment::Hole {
+                    start_vcn: 0,
+                    clusters: 7
+                },
                 SparseSegment::Data {
                     start_vcn: 7,
                     clusters: 1,
                     byte_start: 7 * CS as usize,
                     byte_len: CS as usize
                 },
-                SparseSegment::Hole { start_vcn: 8, clusters: 8 },
+                SparseSegment::Hole {
+                    start_vcn: 8,
+                    clusters: 8
+                },
             ]
         );
         assert_eq!(allocated_clusters(&segs), 1);
@@ -350,14 +402,20 @@ mod tests {
         assert_eq!(
             segs,
             vec![
-                SparseSegment::Hole { start_vcn: 0, clusters: 1 },
+                SparseSegment::Hole {
+                    start_vcn: 0,
+                    clusters: 1
+                },
                 SparseSegment::Data {
                     start_vcn: 1,
                     clusters: 1,
                     byte_start: CS as usize,
                     byte_len: CS as usize
                 },
-                SparseSegment::Hole { start_vcn: 2, clusters: 1 },
+                SparseSegment::Hole {
+                    start_vcn: 2,
+                    clusters: 1
+                },
             ]
         );
     }
@@ -384,7 +442,10 @@ mod tests {
         assert_eq!(
             segs,
             vec![
-                SparseSegment::Hole { start_vcn: 0, clusters: 1 },
+                SparseSegment::Hole {
+                    start_vcn: 0,
+                    clusters: 1
+                },
                 SparseSegment::Data {
                     start_vcn: 1,
                     clusters: 1,
@@ -416,7 +477,14 @@ mod tests {
     fn build_runs_all_holes_needs_no_lcns() {
         let segs = plan_sparse_segments(&vec![0u8; 4 * CS as usize], CS);
         let runs = build_runs(&segs, &[]).unwrap();
-        assert_eq!(runs, vec![DataRun { starting_vcn: 0, length: 4, lcn: None }]);
+        assert_eq!(
+            runs,
+            vec![DataRun {
+                starting_vcn: 0,
+                length: 4,
+                lcn: None
+            }]
+        );
     }
 
     #[test]

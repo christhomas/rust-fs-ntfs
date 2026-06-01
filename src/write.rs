@@ -2786,7 +2786,12 @@ pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
     };
     let mapping_pairs = data_runs::encode_runs(&runs)?;
 
-    let allocated_length = crate::sparse::allocated_clusters(&segments) * cluster_size;
+    // Sparse attributes carry two distinct size fields: `allocated_size`
+    // (0x28) is the FULL VCN-span (holes included); `total_allocated`
+    // (0x40) is only the real (non-hole) cluster bytes — the on-disk
+    // footprint. See build_sparse_nonresident_data_attribute.
+    let full_allocated_length = total_clusters * cluster_size;
+    let total_allocated_length = crate::sparse::allocated_clusters(&segments) * cluster_size;
     let data_size = data.len() as u64;
     let last_vcn = if total_clusters == 0 {
         -1i64
@@ -2794,10 +2799,11 @@ pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
         (total_clusters - 1) as i64
     };
 
-    let mut new_attr_bytes = match crate::record_build::build_nonresident_data_attribute(
+    let new_attr_bytes = match crate::record_build::build_sparse_nonresident_data_attribute(
         attr_id,
         data_size,
-        allocated_length,
+        full_allocated_length,
+        total_allocated_length,
         data_size, // initialized_length: holes within it read as zeros
         last_vcn,
         &mapping_pairs,
@@ -2808,11 +2814,6 @@ pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
             return Err(e);
         }
     };
-    // Stamp the SPARSE flag (0x8000) into the attribute-header flags (+0x0C).
-    let fl = attr_io::attr_off::FLAGS;
-    let cur_flags = u16::from_le_bytes([new_attr_bytes[fl], new_attr_bytes[fl + 1]]);
-    new_attr_bytes[fl..fl + 2]
-        .copy_from_slice(&(cur_flags | crate::sparse::ATTR_FLAG_SPARSE).to_le_bytes());
 
     // In one RMW: set FILE_ATTRIBUTE_SPARSE_FILE on $STANDARD_INFORMATION
     // (in place, no shift) then replace the resident $DATA with the new
