@@ -163,3 +163,115 @@ fn dense_data_with_no_holes_allocates_every_cluster() {
     assert_eq!(read_back(&img, "/d.bin"), data);
     assert_eq!(after - before, 4, "no holes → all 4 clusters allocated");
 }
+
+// ---------------------------------------------------------------------------
+// More hole-placement scenarios.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hole_at_start_roundtrips_and_saves_clusters() {
+    let img = fresh_vol("hole_start");
+    write::create_file(Path::new(&img), "/", "hs.bin").expect("create");
+    let cs = CLUSTER as usize;
+    let mut data = vec![0u8; 4 * cs];
+    data[3 * cs..4 * cs].fill(0xCC); // only the last cluster has data
+    let before = allocated_clusters(&img);
+    write::write_sparse_file(Path::new(&img), "/hs.bin", &data).expect("write_sparse");
+    let after = allocated_clusters(&img);
+    assert_eq!(read_back(&img, "/hs.bin"), data, "leading holes read as zeros");
+    assert_eq!(after - before, 1, "3 leading holes cost nothing");
+}
+
+#[test]
+fn hole_at_end_roundtrips_and_saves_clusters() {
+    let img = fresh_vol("hole_end");
+    write::create_file(Path::new(&img), "/", "he.bin").expect("create");
+    let cs = CLUSTER as usize;
+    let mut data = vec![0u8; 5 * cs];
+    data[0..cs].fill(0xDD); // first cluster data; trailing 4 are holes
+    let before = allocated_clusters(&img);
+    write::write_sparse_file(Path::new(&img), "/he.bin", &data).expect("write_sparse");
+    let after = allocated_clusters(&img);
+    assert_eq!(read_back(&img, "/he.bin"), data, "trailing holes read as zeros");
+    assert_eq!(after - before, 1, "4 trailing holes cost nothing");
+}
+
+#[test]
+fn multiple_holes_interleaved() {
+    let img = fresh_vol("multi_hole");
+    write::create_file(Path::new(&img), "/", "mh.bin").expect("create");
+    let cs = CLUSTER as usize;
+    // data, hole, data, hole, data  (clusters 0,2,4 have data)
+    let mut data = vec![0u8; 5 * cs];
+    for c in [0usize, 2, 4] {
+        data[c * cs..(c + 1) * cs].fill(0xEE);
+    }
+    let before = allocated_clusters(&img);
+    write::write_sparse_file(Path::new(&img), "/mh.bin", &data).expect("write_sparse");
+    let after = allocated_clusters(&img);
+    assert_eq!(read_back(&img, "/mh.bin"), data, "interleaved holes round-trip");
+    assert_eq!(after - before, 3, "only the 3 data clusters allocated");
+}
+
+#[test]
+fn large_scattered_sparse_file() {
+    let img = fresh_vol("scattered");
+    write::create_file(Path::new(&img), "/", "big.bin").expect("create");
+    let cs = CLUSTER as usize;
+    // 64 clusters, data in only 5 of them.
+    let mut data = vec![0u8; 64 * cs];
+    let data_clusters = [1usize, 8, 17, 40, 63];
+    for &c in &data_clusters {
+        data[c * cs..(c + 1) * cs].fill((c as u8) | 1);
+    }
+    let before = allocated_clusters(&img);
+    write::write_sparse_file(Path::new(&img), "/big.bin", &data).expect("write_sparse");
+    let after = allocated_clusters(&img);
+    assert_eq!(read_back(&img, "/big.bin"), data, "64-cluster scattered sparse round-trips");
+    assert_eq!(
+        after - before,
+        data_clusters.len() as u64,
+        "only the {} data clusters allocated of 64",
+        data_clusters.len()
+    );
+}
+
+#[test]
+fn sparse_write_does_not_disturb_a_sibling_file() {
+    let img = fresh_vol("isolation");
+    write::create_file(Path::new(&img), "/", "keep.txt").expect("create keep");
+    write::write_file_contents(Path::new(&img), "/keep.txt", b"untouched").expect("write keep");
+    write::create_file(Path::new(&img), "/", "sp.bin").expect("create sparse");
+    let cs = CLUSTER as usize;
+    let mut data = vec![0u8; 3 * cs];
+    data[0] = 1;
+    write::write_sparse_file(Path::new(&img), "/sp.bin", &data).expect("write_sparse");
+    // Sibling must be intact.
+    assert_eq!(read_back(&img, "/keep.txt"), b"untouched", "sibling file untouched");
+}
+
+// ---------------------------------------------------------------------------
+// Error paths.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn write_sparse_to_missing_file_errors() {
+    let img = fresh_vol("missing");
+    assert!(
+        write::write_sparse_file(Path::new(&img), "/ghost.bin", &[0u8; 4096]).is_err(),
+        "sparse write to a non-existent file must fail"
+    );
+}
+
+#[test]
+fn write_sparse_rejects_already_nonresident_data() {
+    // MVP precondition: current $DATA must be resident. Promote first, then a
+    // sparse write must be refused (not silently corrupt).
+    let img = fresh_vol("already_nonres");
+    write::create_file(Path::new(&img), "/", "nr.bin").expect("create");
+    let cs = CLUSTER as usize;
+    write::promote_resident_data_to_nonresident(Path::new(&img), "/nr.bin", &vec![1u8; cs])
+        .expect("promote");
+    let err = write::write_sparse_file(Path::new(&img), "/nr.bin", &vec![0u8; 2 * cs]);
+    assert!(err.is_err(), "sparse write on non-resident $DATA must be refused: {err:?}");
+}
