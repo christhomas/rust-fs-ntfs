@@ -29,6 +29,7 @@ mod rename;
 mod rm;
 mod rmdir;
 mod set_dirty;
+mod sparse;
 mod touch;
 mod write;
 
@@ -73,6 +74,7 @@ fn main() -> ExitCode {
         "write" => write::run(rest),
         "rm" => rm::run(rest),
         "rmdir" => rmdir::run(rest),
+        "sparse" => sparse::run(rest),
         "link" => link::run(rest),
         "rename" => rename::run(rest),
         "remove" => remove::run(rest),

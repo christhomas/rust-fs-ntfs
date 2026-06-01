@@ -144,6 +144,17 @@ host = "host"
 command = "{binary} write {image_dir}/{run_id}/{scenario.image} {step.path} --content '{step.content}'"
 expect_exit = 0
 
+[ops.mac-write-sparse]
+# rust-ntfs sparse writes an existing file's $DATA as a SPARSE stream:
+# cluster-aligned all-zero regions become holes (no clusters allocated).
+# `{step.bytes}` is the logical size; `{step.pattern}` is one of
+# zeros (fully sparse) / sparse (alternating 4 KiB data/hole blocks) /
+# incrementing (dense control). The file must already exist (mac-touch
+# it first) with resident $DATA.
+host = "host"
+command = "{binary} sparse {image_dir}/{run_id}/{scenario.image} {step.path} --bytes {step.bytes} --pattern {step.pattern}"
+expect_exit = 0
+
 [ops.mac-rm]
 host = "host"
 command = "{binary} rm {image_dir}/{run_id}/{scenario.image} {step.path}"
