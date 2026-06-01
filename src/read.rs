@@ -52,8 +52,17 @@ pub fn resolve_path<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<u64, 
     let mut record_number = ROOT_RECORD_NUMBER;
 
     for component in path.split('/') {
-        if component.is_empty() {
-            continue; // leading/trailing/duplicate slashes and the root itself
+        match component {
+            "" | "." => continue, // empty (slashes) and "." stay put
+            ".." => {
+                // Parent directory, via the $FILE_NAME parent reference; the
+                // root is its own parent.
+                if record_number != ROOT_RECORD_NUMBER {
+                    record_number = read_parent_record(io, record_number)?;
+                }
+                continue;
+            }
+            _ => {}
         }
 
         let (_, dir_bytes) = read_mft_record_io(io, record_number)?;
@@ -406,6 +415,8 @@ pub struct Stat {
     pub is_dir: bool,
     /// `$STANDARD_INFORMATION.file_attributes`.
     pub file_attributes: u32,
+    /// Hard-link count from the FILE record header (+0x12).
+    pub link_count: u16,
     pub created_nt: u64,
     pub modified_nt: u64,
     pub mft_modified_nt: u64,
@@ -417,6 +428,7 @@ pub struct Stat {
 pub fn read_stat<T: BlockIo + ?Sized>(io: &mut T, record_number: u64) -> Result<Stat, String> {
     let (_, record) = read_mft_record_io(io, record_number)?;
     let is_dir = record_flags(&record) & MFT_FLAG_DIRECTORY != 0;
+    let link_count = u16::from_le_bytes([record[0x12], record[0x13]]);
 
     let si = attr_io::find_attribute(&record, AttrType::StandardInformation, None)
         .ok_or("read_stat: $STANDARD_INFORMATION not found")?;
@@ -458,11 +470,30 @@ pub fn read_stat<T: BlockIo + ?Sized>(io: &mut T, record_number: u64) -> Result<
         size,
         is_dir,
         file_attributes,
+        link_count,
         created_nt,
         modified_nt,
         mft_modified_nt,
         accessed_nt,
     })
+}
+
+/// Read a record's parent-directory record number from its `$FILE_NAME`
+/// (`parent_directory_reference` — the leading 8 bytes of the value, low 48
+/// bits). Follows `$ATTRIBUTE_LIST`. For the root directory the parent
+/// reference points at itself (record 5).
+pub fn read_parent_record<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+) -> Result<u64, String> {
+    let fname = read_attribute_value(io, record_number, AttrType::FileName, None)?;
+    if fname.len() < 8 {
+        return Err(format!(
+            "read_parent_record: $FILE_NAME of record {record_number} too short"
+        ));
+    }
+    let parent_ref = u64::from_le_bytes(fname[0..8].try_into().unwrap());
+    Ok(parent_ref & 0x0000_FFFF_FFFF_FFFF)
 }
 
 /// One entry in a directory listing.
@@ -695,6 +726,33 @@ mod tests {
             let oracle = upstream_resolve(&mut dev, q);
             assert_eq!(native, oracle, "case-insensitive resolve mismatch for {q}");
         }
+    }
+
+    #[test]
+    fn dot_and_dotdot_components_resolve() {
+        let mut dev = fresh_vol();
+        write::mkdir_io(&mut dev, "/", "sub").expect("mkdir");
+        write::create_file_io(&mut dev, "/sub", "inner.bin").expect("create");
+        let inner = resolve_path(&mut dev, "/sub/inner.bin").expect("resolve");
+
+        // "." stays put; ".." goes to the parent; root is its own parent.
+        assert_eq!(resolve_path(&mut dev, "/./sub/./inner.bin").unwrap(), inner);
+        assert_eq!(
+            resolve_path(&mut dev, "/sub/../sub/inner.bin").unwrap(),
+            inner
+        );
+        assert_eq!(
+            resolve_path(&mut dev, "/sub/..").unwrap(),
+            ROOT_RECORD_NUMBER
+        );
+        assert_eq!(resolve_path(&mut dev, "/..").unwrap(), ROOT_RECORD_NUMBER);
+        // read_parent_record agrees.
+        let sub = resolve_path(&mut dev, "/sub").unwrap();
+        assert_eq!(
+            read_parent_record(&mut dev, sub).unwrap(),
+            ROOT_RECORD_NUMBER
+        );
+        assert_eq!(read_parent_record(&mut dev, inner).unwrap(), sub);
     }
 
     #[test]
