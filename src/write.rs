@@ -3974,6 +3974,9 @@ mod tests {
         // Attribute IDs must be unique within a record.
         let ids: Vec<u16> = descs.iter().map(|d| d.attribute_id).collect();
         let mut sorted = ids.clone();
+        // dedup() only removes *consecutive* duplicates, so sort first to
+        // catch IDs that repeat out of record order.
+        sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(ids.len(), sorted.len(), "attribute IDs must be unique");
     }

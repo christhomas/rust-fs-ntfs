@@ -331,7 +331,10 @@ mod tests {
         let value_offset: u16 = header_size as u16;
         let attr_len = ((header_size + value.len()) + 7) & !7;
         let end_marker_pos = ATTRS_OFF + attr_len;
-        let bytes_used = end_marker_pos + 4;
+        // Round bytes_used up to the 8-byte boundary, matching the real record
+        // layout (the end marker is followed by 0..7 zero-pad bytes). This
+        // exercises insert_attribute_before_end's padded-marker scan.
+        let bytes_used = align_up_8(end_marker_pos + 4);
 
         let mut rec = vec![0u8; ALLOC];
         // Record header fields
