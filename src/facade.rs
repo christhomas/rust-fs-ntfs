@@ -14,14 +14,10 @@
 //! boot sector and MFT per call. FSKit and friends stay on the C ABI
 //! via `fs_ntfs_mount` which keeps the parsed volume hot.
 
-use std::fs::File;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-// Upstream `ntfs` is still used by the not-yet-flipped volume_info/open_reader
-// path; the per-path read methods (stat/read_dir/read_file) are native.
-use ntfs::Ntfs;
-
+// The facade is fully off the upstream `ntfs` crate: mount validation,
+// volume_info, and the per-path read methods all use the native read layer.
 use crate::attr_io::AttrType;
 use crate::block_io::PathIo;
 use crate::{fsck, read, write};
@@ -117,9 +113,10 @@ impl Filesystem {
     /// parseable NTFS volume.
     pub fn mount(path: impl AsRef<Path>) -> Result<Self, Error> {
         let image = path.as_ref().to_path_buf();
-        let f = File::open(&image).map_err(|e| Error(format!("open: {e}")))?;
-        let mut reader = BufReader::new(f);
-        Ntfs::new(&mut reader).map_err(|e| Error(format!("parse ntfs: {e}")))?;
+        // Validate it's a parseable NTFS volume via the native reader (boot
+        // sector + MFT + `$Volume` record) — no upstream `ntfs` crate.
+        let mut io = PathIo::open_ro(&image).map_err(Error)?;
+        read::read_volume_info(&mut io).map_err(Error)?;
         Ok(Self { image })
     }
 
@@ -157,15 +154,6 @@ impl Filesystem {
     /// Absolute path of the backing image.
     pub fn image_path(&self) -> &Path {
         &self.image
-    }
-
-    fn open_reader(&self) -> Result<(Ntfs, BufReader<File>), Error> {
-        let f = File::open(&self.image).map_err(|e| Error(format!("open: {e}")))?;
-        let mut reader = BufReader::new(f);
-        let mut ntfs = Ntfs::new(&mut reader).map_err(|e| Error(format!("parse: {e}")))?;
-        ntfs.read_upcase_table(&mut reader)
-            .map_err(|e| Error(format!("upcase: {e}")))?;
-        Ok((ntfs, reader))
     }
 
     /// Is the volume's DIRTY flag set in `$Volume`?
@@ -212,25 +200,21 @@ impl Filesystem {
     }
 
     pub fn volume_info(&self) -> Result<VolumeInfo, Error> {
-        let (ntfs, mut reader) = self.open_reader()?;
-        // Read the real $VOLUME_INFORMATION bytes off disk. A
-        // fresh-format volume reads back as 1.2 with UPGRADE_ON_MOUNT
-        // set; ntfs.sys rewrites it to 3.1 on first RW mount.
-        // Hardcoding 3.1 lied about that state.
-        let vi = ntfs
-            .volume_info(&mut reader)
-            .map_err(|e| Error(format!("read $VOLUME_INFORMATION: {e}")))?;
-        // We don't resolve $Volume's name here (that path is in lib.rs
-        // and a proper extraction is follow-up work). Provide everything
-        // the boot sector gives us.
+        // Native read layer: boot geometry + serial, real
+        // `$VOLUME_INFORMATION` version/flags, and the `$VOLUME_NAME` label.
+        // (A fresh-format volume reads back as 1.2 with UPGRADE_ON_MOUNT set;
+        // ntfs.sys rewrites it to 3.1 on first RW mount — we report the real
+        // on-disk version rather than hardcoding 3.1.)
+        let mut io = PathIo::open_ro(&self.image).map_err(Error)?;
+        let vi = read::read_volume_info(&mut io).map_err(Error)?;
         Ok(VolumeInfo {
-            volume_name: String::new(),
-            cluster_size: ntfs.cluster_size(),
-            total_clusters: ntfs.size() / ntfs.cluster_size() as u64,
-            ntfs_version_major: vi.major_version() as u16,
-            ntfs_version_minor: vi.minor_version() as u16,
-            serial_number: ntfs.serial_number(),
-            total_size: ntfs.size(),
+            volume_name: vi.label,
+            cluster_size: vi.cluster_size,
+            total_clusters: vi.total_clusters,
+            ntfs_version_major: vi.version_major as u16,
+            ntfs_version_minor: vi.version_minor as u16,
+            serial_number: vi.serial_number,
+            total_size: vi.total_size,
         })
     }
 

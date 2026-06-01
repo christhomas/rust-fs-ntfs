@@ -590,6 +590,109 @@ pub fn read_parent_record<T: BlockIo + ?Sized>(
     Ok(parent_ref & 0x0000_FFFF_FFFF_FFFF)
 }
 
+/// `$Volume` MFT record number (fixed by the NTFS spec).
+const VOLUME_RECORD_NUMBER: u64 = 3;
+
+/// Boot-sector (BPB) field offsets used for volume metadata.
+const BOOT_OFF_TOTAL_SECTORS: usize = 0x28; // QWORD total sectors
+const BOOT_OFF_SERIAL: usize = 0x48; // QWORD volume serial number
+
+/// `$VOLUME_INFORMATION` value layout: reserved(8) + major(1) + minor(1) +
+/// flags(2). (MS-FSCC / Windows Internals 7th ed.)
+const VI_MAJOR: usize = 8;
+const VI_FLAGS: usize = 10;
+
+/// `VOLUME_IS_DIRTY` bit in `$VOLUME_INFORMATION.flags`.
+pub const VOLUME_IS_DIRTY: u16 = 0x0001;
+
+/// Volume metadata read natively (no upstream `ntfs` crate): boot-sector
+/// geometry + serial, `$VOLUME_INFORMATION` version/flags, and the
+/// `$VOLUME_NAME` label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeInfo {
+    pub bytes_per_sector: u16,
+    pub cluster_size: u32,
+    pub file_record_size: u32,
+    /// Volume size in bytes (the device/stream length, matching what the
+    /// upstream parser reported via `Ntfs::size`).
+    pub total_size: u64,
+    pub total_clusters: u64,
+    pub serial_number: u64,
+    pub version_major: u8,
+    pub version_minor: u8,
+    pub flags: u16,
+    /// `$VOLUME_NAME` label, or empty if the volume has none.
+    pub label: String,
+}
+
+/// Read a volume's metadata natively: boot-sector geometry + serial number,
+/// `$VOLUME_INFORMATION` (version + flags) and `$VOLUME_NAME` (label) from the
+/// `$Volume` record (number 3). Replaces the upstream `Ntfs` parse used by the
+/// volume-info / volume-stats entry points.
+pub fn read_volume_info<T: BlockIo + ?Sized>(io: &mut T) -> Result<VolumeInfo, String> {
+    let params = crate::mft_io::read_boot_params_io(io)?;
+
+    let mut boot = [0u8; 512];
+    io.read_exact_at(0, &mut boot)?;
+    let serial_number = u64::from_le_bytes(
+        boot[BOOT_OFF_SERIAL..BOOT_OFF_SERIAL + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let total_sectors = u64::from_le_bytes(
+        boot[BOOT_OFF_TOTAL_SECTORS..BOOT_OFF_TOTAL_SECTORS + 8]
+            .try_into()
+            .unwrap(),
+    );
+
+    // Volume size: the boot sector's total_sectors × bytes_per_sector. This
+    // matches what the upstream parser reported via `Ntfs::size` (and thus
+    // what the C-ABI consumers have always seen) — it's one sector short of
+    // the raw device size, because NTFS reserves the final sector for the
+    // backup boot sector. Fall back to the device length only if a malformed
+    // boot sector reports zero total_sectors.
+    let total_size = if total_sectors > 0 {
+        total_sectors * params.bytes_per_sector as u64
+    } else {
+        io.size()
+    };
+    let total_clusters = total_size.checked_div(params.cluster_size).unwrap_or(0);
+
+    // $VOLUME_INFORMATION (record 3, attr 0x70).
+    let vi = read_attribute_value(io, VOLUME_RECORD_NUMBER, AttrType::VolumeInformation, None)?;
+    if vi.len() < VI_FLAGS + 2 {
+        return Err(format!("$VOLUME_INFORMATION too short: {} bytes", vi.len()));
+    }
+    let version_major = vi[VI_MAJOR];
+    let version_minor = vi[VI_MAJOR + 1];
+    let flags = u16::from_le_bytes([vi[VI_FLAGS], vi[VI_FLAGS + 1]]);
+
+    // $VOLUME_NAME (record 3, attr 0x60) — optional UTF-16LE label.
+    let label = match read_attribute_value(io, VOLUME_RECORD_NUMBER, AttrType::VolumeName, None) {
+        Ok(bytes) => {
+            let units: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            String::from_utf16_lossy(&units)
+        }
+        Err(_) => String::new(),
+    };
+
+    Ok(VolumeInfo {
+        bytes_per_sector: params.bytes_per_sector,
+        cluster_size: params.cluster_size as u32,
+        file_record_size: params.file_record_size as u32,
+        total_size,
+        total_clusters,
+        serial_number,
+        version_major,
+        version_minor,
+        flags,
+        label,
+    })
+}
+
 /// One entry in a directory listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
@@ -1191,5 +1294,64 @@ mod tests {
         let mut bad = al_entry(0x80, None, 0, 5, 0);
         bad[4..6].copy_from_slice(&0x0FFFu16.to_le_bytes()); // absurd length
         assert!(parse_attribute_list(&bad).is_err());
+    }
+
+    // --- read_volume_info: cross-check vs format params + upstream oracle ----
+
+    #[test]
+    fn volume_info_matches_format_params() {
+        let mut dev = fresh_vol();
+        let vi = read_volume_info(&mut dev).expect("read_volume_info");
+        // fresh_vol formats 32 MiB, 4 KiB clusters (512 B sectors), label
+        // "NREAD", serial 0xABCD1234.
+        assert_eq!(vi.cluster_size, 4096);
+        assert_eq!(vi.bytes_per_sector, 512);
+        assert_eq!(vi.serial_number, 0xABCD_1234);
+        assert_eq!(vi.label, "NREAD");
+        // total_size = total_sectors * bps, just under the 32 MiB device
+        // (NTFS reserves the final sector); total_clusters derives from it.
+        assert!(
+            vi.total_size > 0 && vi.total_size <= 32 * 1024 * 1024,
+            "total_size={}",
+            vi.total_size
+        );
+        assert_eq!(vi.total_clusters, vi.total_size / 4096);
+        // $VOLUME_INFORMATION version present (fresh mkfs stamps a real version).
+        assert!(vi.version_major >= 1, "version_major={}", vi.version_major);
+    }
+
+    #[test]
+    fn volume_info_matches_upstream_oracle() {
+        let mut dev = fresh_vol();
+        let vi = read_volume_info(&mut dev).expect("read_volume_info");
+        let mut reader = IoReadSeek::new(&mut dev);
+        let ntfs = Ntfs::new(&mut reader).expect("Ntfs::new");
+        assert_eq!(vi.cluster_size as u64, ntfs.cluster_size() as u64);
+        assert_eq!(vi.serial_number, ntfs.serial_number());
+        assert_eq!(vi.total_size, ntfs.size());
+        let ovi = ntfs.volume_info(&mut reader).expect("upstream volume_info");
+        assert_eq!(vi.version_major, ovi.major_version());
+        assert_eq!(vi.version_minor, ovi.minor_version());
+    }
+
+    #[test]
+    fn volume_info_label_empty_when_no_volume_name() {
+        // A volume with the $VOLUME_NAME omitted reads back an empty label
+        // rather than erroring.
+        let mut dev = MemDev {
+            buf: vec![0u8; 32 * 1024 * 1024],
+        };
+        format_filesystem(
+            &mut dev as &mut dyn BlockIo,
+            32 * 1024 * 1024,
+            4096,
+            4096,
+            None, // no label
+            Some(0x1111_2222),
+        )
+        .expect("format");
+        let vi = read_volume_info(&mut dev).expect("read_volume_info");
+        assert_eq!(vi.label, "");
+        assert_eq!(vi.serial_number, 0x1111_2222);
     }
 }
