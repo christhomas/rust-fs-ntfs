@@ -175,3 +175,54 @@ fn upstream_mounts_after_ea_churn() {
     let vi = ntfs.volume_info(&mut r).expect("volume_info");
     assert!(vi.major_version() >= 3);
 }
+
+#[test]
+fn ea_value_persists_after_remount() {
+    // Write an EA, then re-open the image from scratch via our own API
+    // and verify the value is still there. Catches flush-without-sync
+    // or header-only-write bugs that survive in-session reads.
+    let img = working_copy("remount");
+    write::write_ea(
+        std::path::Path::new(&img),
+        "/Documents/readme.txt",
+        b"PERSIST_KEY",
+        b"persist_value_123",
+        0,
+    )
+    .expect("write ea");
+
+    // Re-open: use our list_eas entry point which re-parses the MFT.
+    let eas = write::list_eas(std::path::Path::new(&img), "/Documents/readme.txt")
+        .expect("list_eas after remount");
+    let found = eas.iter().find(|e| e.name == b"PERSIST_KEY");
+    assert!(found.is_some(), "EA not found after remount");
+    assert_eq!(found.unwrap().value, b"persist_value_123");
+}
+
+#[test]
+fn ea_survives_second_ea_added_and_remount() {
+    // Two EAs written; verify both survive a re-open.
+    let img = working_copy("two_remount");
+    write::write_ea(
+        std::path::Path::new(&img),
+        "/Documents/readme.txt",
+        b"FIRST",
+        b"aaa",
+        0,
+    )
+    .unwrap();
+    write::write_ea(
+        std::path::Path::new(&img),
+        "/Documents/readme.txt",
+        b"SECOND",
+        b"bbb",
+        0,
+    )
+    .unwrap();
+
+    let eas =
+        write::list_eas(std::path::Path::new(&img), "/Documents/readme.txt").expect("list_eas");
+    assert_eq!(eas.len(), 2);
+    assert!(eas.iter().any(|e| e.name == b"FIRST" && e.value == b"aaa"));
+    assert!(eas.iter().any(|e| e.name == b"SECOND" && e.value == b"bbb"));
+}

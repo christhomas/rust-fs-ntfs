@@ -256,3 +256,379 @@ impl<T: BlockIo + ?Sized> Seek for IoReadSeek<'_, T> {
         Ok(self.position)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Seek, SeekFrom};
+
+    // -------------------------------------------------------------------------
+    // Minimal in-memory BlockIo for IoReadSeek tests (no disk needed).
+    // -------------------------------------------------------------------------
+
+    struct MemDev {
+        buf: Vec<u8>,
+    }
+    impl MemDev {
+        fn with_bytes(bytes: impl Into<Vec<u8>>) -> Self {
+            Self { buf: bytes.into() }
+        }
+    }
+    impl BlockIo for MemDev {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            let off = offset as usize;
+            if off + buf.len() > self.buf.len() {
+                return Err(format!("read past end: off={off} len={}", buf.len()));
+            }
+            buf.copy_from_slice(&self.buf[off..off + buf.len()]);
+            Ok(())
+        }
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            let off = offset as usize;
+            if off + buf.len() > self.buf.len() {
+                return Err(format!("write past end: off={off} len={}", buf.len()));
+            }
+            self.buf[off..off + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn size(&self) -> u64 {
+            self.buf.len() as u64
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // IoReadSeek: Read trait.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn ioreadseek_read_all_bytes_from_start() {
+        let mut dev = MemDev::with_bytes(b"hello world" as &[u8]);
+        let mut rs = IoReadSeek::new(&mut dev);
+        let mut out = Vec::new();
+        rs.read_to_end(&mut out).unwrap();
+        assert_eq!(out, b"hello world");
+    }
+
+    #[test]
+    fn ioreadseek_read_partial_buffer() {
+        let mut dev = MemDev::with_bytes(b"abcdefgh" as &[u8]);
+        let mut rs = IoReadSeek::new(&mut dev);
+        let mut buf = [0u8; 4];
+        let n = rs.read(&mut buf).unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(&buf, b"abcd");
+    }
+
+    #[test]
+    fn ioreadseek_read_at_end_returns_zero() {
+        let mut dev = MemDev::with_bytes(b"xy" as &[u8]);
+        let mut rs = IoReadSeek::new(&mut dev);
+        // Seek to end.
+        rs.seek(SeekFrom::End(0)).unwrap();
+        let mut buf = [0u8; 4];
+        let n = rs.read(&mut buf).unwrap();
+        assert_eq!(n, 0, "read at end returns 0 bytes");
+    }
+
+    #[test]
+    fn ioreadseek_sequential_reads_advance_cursor() {
+        let mut dev = MemDev::with_bytes(b"ABCDE" as &[u8]);
+        let mut rs = IoReadSeek::new(&mut dev);
+        let mut buf = [0u8; 2];
+        rs.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"AB");
+        rs.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"CD");
+    }
+
+    // -------------------------------------------------------------------------
+    // IoReadSeek: Seek trait.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn ioreadseek_seek_start_positions_cursor() {
+        let mut dev = MemDev::with_bytes(b"0123456789" as &[u8]);
+        let mut rs = IoReadSeek::new(&mut dev);
+        let pos = rs.seek(SeekFrom::Start(5)).unwrap();
+        assert_eq!(pos, 5);
+        let mut buf = [0u8; 3];
+        rs.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"567");
+    }
+
+    #[test]
+    fn ioreadseek_seek_end_minus_n_reads_tail() {
+        let mut dev = MemDev::with_bytes(b"0123456789" as &[u8]);
+        let mut rs = IoReadSeek::new(&mut dev);
+        rs.seek(SeekFrom::End(-3)).unwrap();
+        let mut buf = [0u8; 3];
+        rs.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"789");
+    }
+
+    #[test]
+    fn ioreadseek_seek_current_advances_relative() {
+        let mut dev = MemDev::with_bytes(b"ABCDE" as &[u8]);
+        let mut rs = IoReadSeek::new(&mut dev);
+        rs.seek(SeekFrom::Start(1)).unwrap();
+        rs.seek(SeekFrom::Current(2)).unwrap();
+        let mut buf = [0u8; 2];
+        rs.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"DE");
+    }
+
+    #[test]
+    fn ioreadseek_seek_before_start_returns_error() {
+        let mut dev = MemDev::with_bytes(b"ABC" as &[u8]);
+        let mut rs = IoReadSeek::new(&mut dev);
+        rs.seek(SeekFrom::Start(1)).unwrap();
+        let err = rs.seek(SeekFrom::Current(-5));
+        assert!(err.is_err(), "seek before start must fail");
+    }
+
+    #[test]
+    fn ioreadseek_seek_end_zero_is_at_size() {
+        let mut dev = MemDev::with_bytes(b"HELLO" as &[u8]);
+        let mut rs = IoReadSeek::new(&mut dev);
+        let pos = rs.seek(SeekFrom::End(0)).unwrap();
+        assert_eq!(pos, 5);
+    }
+
+    // -------------------------------------------------------------------------
+    // PathIo: file-backed read/write via temp files.
+    // -------------------------------------------------------------------------
+
+    fn temp_path(suffix: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("block_io_test_{suffix}_{}", std::process::id()));
+        p
+    }
+
+    #[test]
+    fn path_io_open_rw_size_matches_file_length() {
+        let path = temp_path("size");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let io = PathIo::open_rw(&path).unwrap();
+        assert_eq!(io.size(), 10);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn path_io_open_ro_size_matches_file_length() {
+        let path = temp_path("ro_size");
+        std::fs::write(&path, [0u8; 64]).unwrap();
+        let io = PathIo::open_ro(&path).unwrap();
+        assert_eq!(io.size(), 64);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn path_io_write_then_read_roundtrip() {
+        let path = temp_path("rw");
+        std::fs::write(&path, [0u8; 512]).unwrap();
+        let mut io = PathIo::open_rw(&path).unwrap();
+        io.write_all_at(16, b"MAGIC").unwrap();
+        let mut buf = [0u8; 5];
+        io.read_exact_at(16, &mut buf).unwrap();
+        assert_eq!(&buf, b"MAGIC");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn path_io_read_from_known_offset() {
+        let path = temp_path("read_offset");
+        let mut data = vec![0u8; 64];
+        data[32..36].copy_from_slice(b"TEST");
+        std::fs::write(&path, &data).unwrap();
+        let mut io = PathIo::open_ro(&path).unwrap();
+        let mut buf = [0u8; 4];
+        io.read_exact_at(32, &mut buf).unwrap();
+        assert_eq!(&buf, b"TEST");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn path_io_open_missing_file_returns_error() {
+        let path = temp_path("nonexistent_xyz");
+        assert!(PathIo::open_rw(&path).is_err());
+        assert!(PathIo::open_ro(&path).is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // BlockIo for &mut T blanket impl: passes through correctly.
+    // -------------------------------------------------------------------------
+
+    fn read_via_ref<T: BlockIo>(io: &mut T, offset: u64, len: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; len];
+        io.read_exact_at(offset, &mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn blockio_ref_mut_blanket_impl_delegates_correctly() {
+        let mut dev = MemDev::with_bytes(b"payload" as &[u8]);
+        // Pass &mut dev — exercises BlockIo for &mut T.
+        let out = read_via_ref(&mut dev, 0, 7);
+        assert_eq!(out, b"payload");
+    }
+
+    #[test]
+    fn blockio_ref_mut_size_delegates() {
+        let mut dev = MemDev::with_bytes(b"abc" as &[u8]);
+        let r: &mut dyn BlockIo = &mut dev;
+        assert_eq!(r.size(), 3);
+    }
+
+    // --- PathIo::sync --------------------------------------------------------
+
+    #[test]
+    fn path_io_sync_succeeds_on_open_file() {
+        let path = temp_path("sync_test");
+        std::fs::write(&path, b"data").unwrap();
+        let mut io = PathIo::open_rw(&path).unwrap();
+        assert!(io.sync().is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // --- CallbackBlockIo -----------------------------------------------------
+
+    // A MemDev-backed read callback: context is *mut Vec<u8>.
+    unsafe extern "C" fn mem_read(
+        ctx: *mut c_void,
+        buf: *mut c_void,
+        offset: u64,
+        len: u64,
+    ) -> c_int {
+        let storage = &*(ctx as *const Vec<u8>);
+        let off = offset as usize;
+        let n = len as usize;
+        if off + n > storage.len() {
+            return -1;
+        }
+        std::ptr::copy_nonoverlapping(storage.as_ptr().add(off), buf as *mut u8, n);
+        0
+    }
+
+    unsafe extern "C" fn mem_write(
+        ctx: *mut c_void,
+        buf: *const c_void,
+        offset: u64,
+        len: u64,
+    ) -> c_int {
+        let storage = &mut *(ctx as *mut Vec<u8>);
+        let off = offset as usize;
+        let n = len as usize;
+        if off + n > storage.len() {
+            return -1;
+        }
+        std::ptr::copy_nonoverlapping(buf as *const u8, storage.as_mut_ptr().add(off), n);
+        0
+    }
+
+    unsafe extern "C" fn always_fail_read(
+        _ctx: *mut c_void,
+        _buf: *mut c_void,
+        _offset: u64,
+        _len: u64,
+    ) -> c_int {
+        -1
+    }
+
+    unsafe extern "C" fn always_fail_write(
+        _ctx: *mut c_void,
+        _buf: *const c_void,
+        _offset: u64,
+        _len: u64,
+    ) -> c_int {
+        -1
+    }
+
+    #[test]
+    fn callback_block_io_read_returns_data() {
+        let mut storage = b"Hello, NTFS!".to_vec();
+        let mut cb = CallbackBlockIo {
+            read_fn: mem_read,
+            write_fn: Some(mem_write),
+            context: &mut storage as *mut Vec<u8> as *mut c_void,
+            size: storage.len() as u64,
+        };
+        let mut buf = [0u8; 5];
+        cb.read_exact_at(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"Hello");
+    }
+
+    #[test]
+    fn callback_block_io_read_at_offset() {
+        let mut storage = b"Hello, NTFS!".to_vec();
+        let mut cb = CallbackBlockIo {
+            read_fn: mem_read,
+            write_fn: Some(mem_write),
+            context: &mut storage as *mut Vec<u8> as *mut c_void,
+            size: storage.len() as u64,
+        };
+        let mut buf = [0u8; 4];
+        cb.read_exact_at(7, &mut buf).unwrap();
+        assert_eq!(&buf, b"NTFS");
+    }
+
+    #[test]
+    fn callback_block_io_write_then_read() {
+        let mut storage = vec![0u8; 16];
+        let mut cb = CallbackBlockIo {
+            read_fn: mem_read,
+            write_fn: Some(mem_write),
+            context: &mut storage as *mut Vec<u8> as *mut c_void,
+            size: storage.len() as u64,
+        };
+        cb.write_all_at(4, b"TEST").unwrap();
+        let mut buf = [0u8; 4];
+        cb.read_exact_at(4, &mut buf).unwrap();
+        assert_eq!(&buf, b"TEST");
+    }
+
+    #[test]
+    fn callback_block_io_write_on_readonly_fails() {
+        let mut storage = vec![0u8; 16];
+        let mut cb = CallbackBlockIo {
+            read_fn: mem_read,
+            write_fn: None, // read-only
+            context: &mut storage as *mut Vec<u8> as *mut c_void,
+            size: storage.len() as u64,
+        };
+        assert!(cb.write_all_at(0, b"x").is_err());
+    }
+
+    #[test]
+    fn callback_block_io_read_failure_propagates() {
+        let mut cb = CallbackBlockIo {
+            read_fn: always_fail_read,
+            write_fn: None,
+            context: std::ptr::null_mut(),
+            size: 64,
+        };
+        assert!(cb.read_exact_at(0, &mut [0u8; 4]).is_err());
+    }
+
+    #[test]
+    fn callback_block_io_write_failure_propagates() {
+        let mut cb = CallbackBlockIo {
+            read_fn: always_fail_read,
+            write_fn: Some(always_fail_write),
+            context: std::ptr::null_mut(),
+            size: 64,
+        };
+        let err = cb.write_all_at(0, b"data").unwrap_err();
+        assert!(err.contains("write callback failed"), "{err}");
+    }
+
+    #[test]
+    fn callback_block_io_size_returns_configured_size() {
+        let cb = CallbackBlockIo {
+            read_fn: always_fail_read,
+            write_fn: None,
+            context: std::ptr::null_mut(),
+            size: 1234567,
+        };
+        assert_eq!(cb.size(), 1234567);
+    }
+}

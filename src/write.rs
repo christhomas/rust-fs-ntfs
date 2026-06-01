@@ -3277,7 +3277,230 @@ fn navigate_to<'n, T: std::io::Read + std::io::Seek>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attr_io::attr_off;
+    use crate::block_io::BlockIo;
     use crate::data_runs::DataRun;
+    use crate::mkfs::format_filesystem;
+
+    // --- in-memory BlockIo harness for I/O tests ----------------------------
+
+    struct MemDev {
+        buf: Vec<u8>,
+    }
+
+    impl BlockIo for MemDev {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            let off = offset as usize;
+            buf.copy_from_slice(&self.buf[off..off + buf.len()]);
+            Ok(())
+        }
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            let off = offset as usize;
+            self.buf[off..off + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn size(&self) -> u64 {
+            self.buf.len() as u64
+        }
+    }
+
+    fn fresh_vol() -> MemDev {
+        // 16 MiB: mkfs places $MFTMirr at cluster_count/2 and requires the
+        // primary metadata region (boot + 64-cluster $MFT + ~3.78 MiB
+        // $LogFile + $UpCase + …) to end before that midpoint. With
+        // mft_record_size = 4096 the region ends near LCN 1049, so the
+        // midpoint must exceed it: 8 MiB (midpoint 1024) is too small and
+        // mkfs returns "volume too small for chosen layout"; 16 MiB
+        // (midpoint 2048) clears it with margin. Kept as small as
+        // correctness allows so parallel runs under llvm-cov don't
+        // exhaust memory.
+        const SIZE: u64 = 16 * 1024 * 1024;
+        let mut dev = MemDev {
+            buf: vec![0u8; SIZE as usize],
+        };
+        format_filesystem(
+            &mut dev as &mut dyn BlockIo,
+            SIZE,
+            4096,
+            4096,
+            Some("WRTEST"),
+            Some(0xAABB_CCDD),
+        )
+        .expect("format_filesystem");
+        dev
+    }
+
+    // --- create_file_io -------------------------------------------------------
+
+    #[test]
+    fn create_file_io_creates_findable_file() {
+        let mut dev = fresh_vol();
+        let rec_num = create_file_io(&mut dev, "/", "hello.txt").unwrap();
+        assert!(rec_num >= 24, "user files start at record 24+");
+        // Find it back in the root index.
+        let (_, root_rec) = crate::mft_io::read_mft_record_io(&mut dev, 5).unwrap();
+        let loc = crate::index_io::find_index_entry(&root_rec, "hello.txt").unwrap();
+        assert!(loc.is_some(), "file must appear in root $INDEX_ROOT");
+    }
+
+    #[test]
+    fn create_file_io_duplicate_fails() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "dup.txt").unwrap();
+        assert!(create_file_io(&mut dev, "/", "dup.txt").is_err());
+    }
+
+    #[test]
+    fn create_file_io_invalid_basename_fails() {
+        let mut dev = fresh_vol();
+        assert!(create_file_io(&mut dev, "/", "").is_err());
+        assert!(create_file_io(&mut dev, "/", ".").is_err());
+        assert!(create_file_io(&mut dev, "/", "a/b").is_err());
+    }
+
+    // --- mkdir_io -------------------------------------------------------------
+
+    #[test]
+    fn mkdir_io_creates_directory() {
+        let mut dev = fresh_vol();
+        let rec_num = mkdir_io(&mut dev, "/", "mydir").unwrap();
+        assert!(rec_num >= 24);
+        let (_, root_rec) = crate::mft_io::read_mft_record_io(&mut dev, 5).unwrap();
+        let loc = crate::index_io::find_index_entry(&root_rec, "mydir").unwrap();
+        assert!(loc.is_some());
+    }
+
+    #[test]
+    fn mkdir_io_duplicate_fails() {
+        let mut dev = fresh_vol();
+        mkdir_io(&mut dev, "/", "sub").unwrap();
+        assert!(mkdir_io(&mut dev, "/", "sub").is_err());
+    }
+
+    #[test]
+    fn mkdir_io_nested_directory() {
+        let mut dev = fresh_vol();
+        mkdir_io(&mut dev, "/", "parent").unwrap();
+        let rec_num = mkdir_io(&mut dev, "/parent", "child").unwrap();
+        assert!(rec_num >= 24);
+    }
+
+    // --- write_at_io: empty data is always a no-op ----------------------------
+
+    #[test]
+    fn write_at_io_empty_data_returns_zero() {
+        let mut dev = fresh_vol();
+        let n = write_at_io(&mut dev, "/", 0, &[]).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    // --- set_times_by_record_number_io ----------------------------------------
+
+    #[test]
+    fn set_times_updates_standard_information() {
+        let mut dev = fresh_vol();
+        let rec = create_file_io(&mut dev, "/", "times.txt").unwrap();
+        let ts: u64 = 132_000_000_000_000;
+        let times = FileTimes {
+            creation: Some(ts),
+            modification: Some(ts),
+            mft_record_modification: Some(ts),
+            access: Some(ts),
+        };
+        set_times_by_record_number_io(&mut dev, rec, times).unwrap();
+        let si = read_si_full_io(&mut dev, "/times.txt").unwrap();
+        assert_eq!(si.creation_time, ts);
+        assert_eq!(si.modification_time, ts);
+    }
+
+    // --- set_security_id_io / read_security_id_io -----------------------------
+
+    #[test]
+    fn set_and_read_security_id_roundtrip() {
+        let mut dev = fresh_vol();
+        let rec = create_file_io(&mut dev, "/", "sec.txt").unwrap();
+        set_security_id_io(&mut dev, "/sec.txt", 0x1234).unwrap();
+        let id = read_security_id_io(&mut dev, "/sec.txt").unwrap();
+        assert_eq!(id, Some(0x1234));
+        let _ = rec; // ensure rec is used
+    }
+
+    // --- set_file_attributes_by_record_number_io ------------------------------
+
+    #[test]
+    fn set_file_attributes_sets_hidden_bit() {
+        let mut dev = fresh_vol();
+        let rec = create_file_io(&mut dev, "/", "attr.txt").unwrap();
+        set_file_attributes_by_record_number_io(
+            &mut dev,
+            rec,
+            FileAttributesChange {
+                add: file_attr::HIDDEN,
+                remove: 0,
+            },
+        )
+        .unwrap();
+        let si = read_si_full_io(&mut dev, "/attr.txt").unwrap();
+        assert_eq!(si.file_attributes & file_attr::HIDDEN, file_attr::HIDDEN);
+    }
+
+    // --- write_ea_io / list_eas_io --------------------------------------------
+
+    #[test]
+    fn write_and_list_eas_roundtrip() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "ea.txt").unwrap();
+        write_ea_io(
+            &mut dev,
+            "/ea.txt",
+            b"TestKey",
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+            0,
+        )
+        .unwrap();
+        let eas = list_eas_io(&mut dev, "/ea.txt").unwrap();
+        assert_eq!(eas.len(), 1);
+        assert_eq!(eas[0].name, b"TestKey");
+        assert_eq!(eas[0].value, &[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn write_ea_multiple_keys() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "multiea.txt").unwrap();
+        write_ea_io(&mut dev, "/multiea.txt", b"Key1", b"val1", 0).unwrap();
+        write_ea_io(&mut dev, "/multiea.txt", b"Key2", b"val2", 0).unwrap();
+        let keys = list_ea_keys_io(&mut dev, "/multiea.txt").unwrap();
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn remove_ea_removes_entry() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "rmea.txt").unwrap();
+        write_ea_io(&mut dev, "/rmea.txt", b"Del", b"x", 0).unwrap();
+        write_ea_io(&mut dev, "/rmea.txt", b"Keep", b"y", 0).unwrap();
+        remove_ea_io(&mut dev, "/rmea.txt", b"Del").unwrap();
+        let eas = list_eas_io(&mut dev, "/rmea.txt").unwrap();
+        assert_eq!(eas.len(), 1);
+        assert_eq!(eas[0].name, b"Keep");
+    }
+
+    // --- rename_same_length_io ------------------------------------------------
+
+    #[test]
+    fn rename_same_length_renames_file() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "abc.txt").unwrap();
+        rename_same_length_io(&mut dev, "/abc.txt", "xyz.txt").unwrap();
+        let (_, root) = crate::mft_io::read_mft_record_io(&mut dev, 5).unwrap();
+        assert!(crate::index_io::find_index_entry(&root, "abc.txt")
+            .unwrap()
+            .is_none());
+        assert!(crate::index_io::find_index_entry(&root, "xyz.txt")
+            .unwrap()
+            .is_some());
+    }
 
     fn run(starting_vcn: u64, length: u64, lcn: u64) -> DataRun {
         DataRun {
@@ -3347,5 +3570,678 @@ mod tests {
         let (kept, freed) = split_runs_for_shrink(&runs, Some(3));
         assert_eq!(kept, vec![run(0, 4, 100)]);
         assert_eq!(freed, vec![(200, 4)]);
+    }
+
+    // --- write_u64_at --------------------------------------------------------
+
+    #[test]
+    fn write_u64_at_some_writes_le_bytes() {
+        let mut buf = vec![0u8; 16];
+        write_u64_at(&mut buf, 4, Some(0x0102_0304_0506_0708));
+        assert_eq!(
+            &buf[4..12],
+            &[0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
+        );
+    }
+
+    #[test]
+    fn write_u64_at_none_leaves_buffer_unchanged() {
+        let mut buf = vec![0xFFu8; 16];
+        write_u64_at(&mut buf, 0, None);
+        assert_eq!(&buf, &[0xFFu8; 16]);
+    }
+
+    #[test]
+    fn write_u64_at_zero_value() {
+        let mut buf = vec![0xFFu8; 8];
+        write_u64_at(&mut buf, 0, Some(0));
+        assert_eq!(&buf, &[0u8; 8]);
+    }
+
+    #[test]
+    fn write_u64_at_max_value() {
+        let mut buf = vec![0u8; 8];
+        write_u64_at(&mut buf, 0, Some(u64::MAX));
+        assert_eq!(&buf, &[0xFFu8; 8]);
+    }
+
+    // --- remove_attribute_at -------------------------------------------------
+
+    const ATTRS_OFF: usize = 0x38;
+    const BUF_SIZE: usize = 4096;
+
+    /// Build a buffer with bytes_used at [0x18..0x1C] and the given bytes
+    /// placed at `attr_offset`. Trailing data follows immediately after.
+    fn attr_buf(attr_offset: usize, attr_bytes: &[u8], trailing: &[u8]) -> Vec<u8> {
+        let bytes_used = attr_offset + attr_bytes.len() + trailing.len();
+        let mut buf = vec![0u8; BUF_SIZE];
+        buf[0x18..0x1C].copy_from_slice(&(bytes_used as u32).to_le_bytes());
+        buf[0x1C..0x20].copy_from_slice(&(BUF_SIZE as u32).to_le_bytes());
+        buf[attr_offset..attr_offset + attr_bytes.len()].copy_from_slice(attr_bytes);
+        let trailing_start = attr_offset + attr_bytes.len();
+        buf[trailing_start..trailing_start + trailing.len()].copy_from_slice(trailing);
+        buf
+    }
+
+    /// Build a minimal resident attribute blob (for use in attr_buf or as a real attr).
+    fn minimal_resident_attr(type_code: u32, value: &[u8]) -> Vec<u8> {
+        let header_size = 24usize;
+        let total = (header_size + value.len() + 7) & !7;
+        let mut attr = vec![0u8; total];
+        attr[0..4].copy_from_slice(&type_code.to_le_bytes());
+        attr[attr_off::LENGTH..attr_off::LENGTH + 4].copy_from_slice(&(total as u32).to_le_bytes());
+        attr[attr_off::NON_RESIDENT] = 0;
+        attr[attr_off::RESIDENT_VALUE_LENGTH..attr_off::RESIDENT_VALUE_LENGTH + 4]
+            .copy_from_slice(&(value.len() as u32).to_le_bytes());
+        attr[attr_off::RESIDENT_VALUE_OFFSET..attr_off::RESIDENT_VALUE_OFFSET + 2]
+            .copy_from_slice(&(header_size as u16).to_le_bytes());
+        attr[header_size..header_size + value.len()].copy_from_slice(value);
+        attr
+    }
+
+    /// Build a full MFT record with one named or unnamed resident attribute + end marker.
+    fn one_attr_record(type_code: u32, value: &[u8]) -> Vec<u8> {
+        let attr = minimal_resident_attr(type_code, value);
+        let attr_len = attr.len();
+        let end_pos = ATTRS_OFF + attr_len;
+        let bytes_used = end_pos + 4;
+
+        let mut rec = vec![0u8; BUF_SIZE];
+        rec[0x14..0x16].copy_from_slice(&(ATTRS_OFF as u16).to_le_bytes());
+        rec[0x18..0x1C].copy_from_slice(&(bytes_used as u32).to_le_bytes());
+        rec[0x1C..0x20].copy_from_slice(&(BUF_SIZE as u32).to_le_bytes());
+        rec[ATTRS_OFF..ATTRS_OFF + attr_len].copy_from_slice(&attr);
+        rec[end_pos..end_pos + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        rec
+    }
+
+    #[test]
+    fn remove_attribute_at_shifts_trailing_data_back() {
+        let attr_bytes = [0xAAu8; 8];
+        let trailing = b"ENDMARK_";
+        let mut buf = attr_buf(ATTRS_OFF, &attr_bytes, trailing);
+
+        remove_attribute_at(&mut buf, ATTRS_OFF, 8).unwrap();
+
+        assert_eq!(&buf[ATTRS_OFF..ATTRS_OFF + trailing.len()], trailing);
+        let new_bu = u32::from_le_bytes([buf[0x18], buf[0x19], buf[0x1A], buf[0x1B]]) as usize;
+        assert_eq!(new_bu, ATTRS_OFF + trailing.len());
+    }
+
+    #[test]
+    fn remove_attribute_at_zeroes_vacated_tail() {
+        let attr_bytes = [0xBBu8; 8];
+        let trailing = b"TAIL";
+        let mut buf = attr_buf(ATTRS_OFF, &attr_bytes, trailing);
+        let bytes_used_before =
+            u32::from_le_bytes([buf[0x18], buf[0x19], buf[0x1A], buf[0x1B]]) as usize;
+
+        remove_attribute_at(&mut buf, ATTRS_OFF, 8).unwrap();
+
+        let new_bu = u32::from_le_bytes([buf[0x18], buf[0x19], buf[0x1A], buf[0x1B]]) as usize;
+        // Bytes [new_bu .. bytes_used_before] must be zeroed
+        for &b in &buf[new_bu..bytes_used_before] {
+            assert_eq!(b, 0);
+        }
+    }
+
+    #[test]
+    fn remove_attribute_at_zero_length_fails() {
+        let mut buf = vec![0u8; 64];
+        buf[0x18..0x1C].copy_from_slice(&32u32.to_le_bytes());
+        assert!(remove_attribute_at(&mut buf, 0, 0).is_err());
+    }
+
+    #[test]
+    fn remove_attribute_at_out_of_range_fails() {
+        let mut buf = vec![0u8; 64];
+        buf[0x18..0x1C].copy_from_slice(&32u32.to_le_bytes()); // bytes_used = 32
+                                                               // attr_offset + attr_length = 0 + 40 = 40 > 32
+        assert!(remove_attribute_at(&mut buf, 0, 40).is_err());
+    }
+
+    // --- remove_unnamed_attr -------------------------------------------------
+
+    #[test]
+    fn remove_unnamed_attr_removes_present_attribute() {
+        let mut rec = one_attr_record(0x80 /* $DATA */, b"hello");
+        let bu_before = u32::from_le_bytes([rec[0x18], rec[0x19], rec[0x1A], rec[0x1B]]);
+        remove_unnamed_attr(&mut rec, AttrType::Data).unwrap();
+        let bu_after = u32::from_le_bytes([rec[0x18], rec[0x19], rec[0x1A], rec[0x1B]]);
+        assert!(bu_after < bu_before);
+        // Attribute should be gone
+        assert!(crate::attr_io::find_attribute(&rec, AttrType::Data, None).is_none());
+    }
+
+    #[test]
+    fn remove_unnamed_attr_absent_is_noop() {
+        let mut rec = one_attr_record(0x80 /* $DATA */, b"x");
+        let bu_before = u32::from_le_bytes([rec[0x18], rec[0x19], rec[0x1A], rec[0x1B]]);
+        remove_unnamed_attr(&mut rec, AttrType::ReparsePoint).unwrap();
+        let bu_after = u32::from_le_bytes([rec[0x18], rec[0x19], rec[0x1A], rec[0x1B]]);
+        assert_eq!(bu_before, bu_after);
+    }
+
+    // --- commit_eas ----------------------------------------------------------
+
+    fn empty_record() -> Vec<u8> {
+        // A record with no attributes — just the end marker.
+        let end_pos = ATTRS_OFF;
+        let bytes_used = end_pos + 4;
+        let mut rec = vec![0u8; BUF_SIZE];
+        rec[0x14..0x16].copy_from_slice(&(ATTRS_OFF as u16).to_le_bytes());
+        rec[0x18..0x1C].copy_from_slice(&(bytes_used as u32).to_le_bytes());
+        rec[0x1C..0x20].copy_from_slice(&(BUF_SIZE as u32).to_le_bytes());
+        rec[0x28..0x2A].copy_from_slice(&0u16.to_le_bytes()); // next_attr_id
+        rec[end_pos..end_pos + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        rec
+    }
+
+    fn make_ea(name: &[u8], value: &[u8]) -> crate::ea_io::Ea {
+        crate::ea_io::Ea {
+            flags: 0,
+            name: name.to_vec(),
+            value: value.to_vec(),
+        }
+    }
+
+    #[test]
+    fn commit_eas_empty_list_removes_ea_attrs() {
+        // Start with $EA + $EA_INFORMATION already present, commit empty → both removed.
+        let mut rec = empty_record();
+        let eas = vec![make_ea(b"FOO", b"bar")];
+        commit_eas(&mut rec, &eas).unwrap();
+        // Verify $EA exists.
+        assert!(crate::attr_io::find_attribute(&rec, AttrType::ExtendedAttribute, None).is_some());
+        // Now commit empty list.
+        commit_eas(&mut rec, &[]).unwrap();
+        assert!(
+            crate::attr_io::find_attribute(&rec, AttrType::ExtendedAttribute, None).is_none(),
+            "$EA must be removed when EA list is empty"
+        );
+        assert!(
+            crate::attr_io::find_attribute(&rec, AttrType::ExtendedAttributeInformation, None)
+                .is_none(),
+            "$EA_INFORMATION must be removed when EA list is empty"
+        );
+    }
+
+    #[test]
+    fn commit_eas_writes_ea_and_ea_information() {
+        let mut rec = empty_record();
+        let eas = vec![make_ea(b"MYATTR", b"hello")];
+        commit_eas(&mut rec, &eas).unwrap();
+
+        assert!(
+            crate::attr_io::find_attribute(&rec, AttrType::ExtendedAttribute, None).is_some(),
+            "$EA attribute must be present after commit"
+        );
+        assert!(
+            crate::attr_io::find_attribute(&rec, AttrType::ExtendedAttributeInformation, None)
+                .is_some(),
+            "$EA_INFORMATION must be present after commit"
+        );
+    }
+
+    #[test]
+    fn commit_eas_roundtrip_decode() {
+        let mut rec = empty_record();
+        let eas = vec![make_ea(b"KEY1", b"value1"), make_ea(b"KEY2", &[0xDE, 0xAD])];
+        commit_eas(&mut rec, &eas).unwrap();
+
+        // Decode back via ea_io::read_from_record.
+        let decoded = crate::ea_io::read_from_record(&rec).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].name, b"KEY1");
+        assert_eq!(decoded[0].value, b"value1");
+        assert_eq!(decoded[1].name, b"KEY2");
+        assert_eq!(decoded[1].value, &[0xDE, 0xAD]);
+    }
+
+    #[test]
+    fn commit_eas_update_replaces_existing() {
+        let mut rec = empty_record();
+        commit_eas(&mut rec, &[make_ea(b"K", b"old")]).unwrap();
+        commit_eas(&mut rec, &[make_ea(b"K", b"new_value")]).unwrap();
+
+        let decoded = crate::ea_io::read_from_record(&rec).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].value, b"new_value");
+    }
+
+    // --- upsert_unnamed_resident_attr ----------------------------------------
+
+    #[test]
+    fn upsert_unnamed_resident_attr_inserts_when_absent() {
+        let mut rec = empty_record();
+        // Use build_resident_ea_information_attribute as the builder.
+        upsert_unnamed_resident_attr(
+            &mut rec,
+            AttrType::ExtendedAttributeInformation,
+            &[0u8; 8],
+            &crate::record_build::build_resident_ea_information_attribute,
+        )
+        .unwrap();
+        assert!(
+            crate::attr_io::find_attribute(&rec, AttrType::ExtendedAttributeInformation, None)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn upsert_unnamed_resident_attr_replaces_when_present() {
+        let mut rec = empty_record();
+        let val1 = [1u8; 8];
+        let val2 = [2u8; 8];
+        upsert_unnamed_resident_attr(
+            &mut rec,
+            AttrType::ExtendedAttributeInformation,
+            &val1,
+            &crate::record_build::build_resident_ea_information_attribute,
+        )
+        .unwrap();
+        upsert_unnamed_resident_attr(
+            &mut rec,
+            AttrType::ExtendedAttributeInformation,
+            &val2,
+            &crate::record_build::build_resident_ea_information_attribute,
+        )
+        .unwrap();
+
+        let loc =
+            crate::attr_io::find_attribute(&rec, AttrType::ExtendedAttributeInformation, None)
+                .unwrap();
+        let val_off = loc.resident_value_offset.unwrap() as usize;
+        assert_eq!(
+            &rec[loc.attr_offset + val_off..loc.attr_offset + val_off + 8],
+            &val2
+        );
+    }
+
+    // --- write_reparse_point_io / read_reparse_point_io / remove_reparse_point_io ---
+
+    #[test]
+    fn write_and_read_reparse_point_roundtrip() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "rp.txt").unwrap();
+        let tag = 0xA000_000C_u32; // SYMLINK tag
+        let data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04];
+        write_reparse_point_io(&mut dev, "/rp.txt", tag, &data).unwrap();
+        let rp = read_reparse_point_io(&mut dev, "/rp.txt").unwrap().unwrap();
+        assert_eq!(rp.reparse_tag, tag);
+        assert_eq!(rp.data, data);
+    }
+
+    #[test]
+    fn read_reparse_point_absent_returns_none() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "norp.txt").unwrap();
+        let result = read_reparse_point_io(&mut dev, "/norp.txt").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn remove_reparse_point_clears_attribute() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "rmrp.txt").unwrap();
+        write_reparse_point_io(&mut dev, "/rmrp.txt", 0xA000_000C, &[1, 2, 3, 4]).unwrap();
+        remove_reparse_point_io(&mut dev, "/rmrp.txt").unwrap();
+        let result = read_reparse_point_io(&mut dev, "/rmrp.txt").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn write_reparse_point_twice_replaces() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "rp2.txt").unwrap();
+        write_reparse_point_io(&mut dev, "/rp2.txt", 0xA000_000C, &[1, 2, 3, 4]).unwrap();
+        write_reparse_point_io(&mut dev, "/rp2.txt", 0xA000_000C, &[0xAA, 0xBB]).unwrap();
+        let rp = read_reparse_point_io(&mut dev, "/rp2.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(rp.data, vec![0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn remove_reparse_point_on_absent_file_fails() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "norprm.txt").unwrap();
+        assert!(remove_reparse_point_io(&mut dev, "/norprm.txt").is_err());
+    }
+
+    // --- create_symlink_io ----------------------------------------------------
+
+    #[test]
+    fn create_symlink_io_creates_file_with_reparse_point() {
+        let mut dev = fresh_vol();
+        create_symlink_io(&mut dev, "/", "link.txt", "/target.txt", false).unwrap();
+        let rp = read_reparse_point_io(&mut dev, "/link.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(rp.reparse_tag, crate::record_build::reparse_tag::SYMLINK);
+    }
+
+    #[test]
+    fn create_symlink_io_relative() {
+        let mut dev = fresh_vol();
+        create_symlink_io(&mut dev, "/", "rellink", "target", true).unwrap();
+        let rp = read_reparse_point_io(&mut dev, "/rellink")
+            .unwrap()
+            .unwrap();
+        assert_eq!(rp.reparse_tag, crate::record_build::reparse_tag::SYMLINK);
+    }
+
+    #[test]
+    fn create_symlink_io_duplicate_fails() {
+        let mut dev = fresh_vol();
+        create_symlink_io(&mut dev, "/", "dup_link", "/t", false).unwrap();
+        assert!(create_symlink_io(&mut dev, "/", "dup_link", "/t", false).is_err());
+    }
+
+    // --- read_attributes_io ---------------------------------------------------
+
+    #[test]
+    fn read_attributes_io_fresh_file_has_standard_attrs() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "attrs.txt").unwrap();
+        let descs = read_attributes_io(&mut dev, "/attrs.txt").unwrap();
+        let type_names: Vec<&str> = descs.iter().map(|d| d.type_name.as_str()).collect();
+        assert!(
+            type_names.contains(&"$STANDARD_INFORMATION"),
+            "missing $STD_INFO"
+        );
+        assert!(type_names.contains(&"$FILE_NAME"), "missing $FILE_NAME");
+        assert!(type_names.contains(&"$DATA"), "missing $DATA");
+    }
+
+    #[test]
+    fn read_attributes_io_dir_has_index_root() {
+        let mut dev = fresh_vol();
+        mkdir_io(&mut dev, "/", "subdir").unwrap();
+        let descs = read_attributes_io(&mut dev, "/subdir").unwrap();
+        let type_names: Vec<&str> = descs.iter().map(|d| d.type_name.as_str()).collect();
+        assert!(
+            type_names.contains(&"$INDEX_ROOT"),
+            "dir must have $INDEX_ROOT"
+        );
+    }
+
+    #[test]
+    fn read_attributes_io_returns_count_and_attr_ids() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "idcheck.txt").unwrap();
+        let descs = read_attributes_io(&mut dev, "/idcheck.txt").unwrap();
+        // Attribute IDs must be unique within a record.
+        let ids: Vec<u16> = descs.iter().map(|d| d.attribute_id).collect();
+        let mut sorted = ids.clone();
+        sorted.dedup();
+        assert_eq!(ids.len(), sorted.len(), "attribute IDs must be unique");
+    }
+
+    // --- path-based public wrappers ------------------------------------------
+    //
+    // The `*_io` variants above run against an in-memory `MemDev`. The
+    // path-based public wrappers (`create_file`, `mkdir`, `write_at`, …) are
+    // thin delegations that open a `PathIo` over a real file and forward to
+    // the `_io` form. These tests exercise that delegation + `PathIo::open_rw`
+    // against a freshly formatted temp-file image, then clean it up.
+
+    /// A formatted NTFS image backed by a real temp file, deleted on drop.
+    struct TmpImage {
+        path: std::path::PathBuf,
+    }
+
+    impl TmpImage {
+        fn new() -> Self {
+            use std::io::Write as _;
+            use std::sync::atomic::{AtomicU64, Ordering};
+            // Unique name from pid + a monotonic counter (no rng/clock needed).
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let pid = std::process::id();
+            let path = std::env::temp_dir().join(format!("fs_ntfs_wrap_{pid}_{n}.img"));
+
+            const SIZE: u64 = 16 * 1024 * 1024;
+            // Create the backing file at the right size.
+            {
+                let mut f = std::fs::File::create(&path)
+                    .unwrap_or_else(|e| panic!("create temp image {}: {e}", path.display()));
+                f.set_len(SIZE).expect("set_len");
+                f.flush().expect("flush");
+            }
+            // Format it through the path-backed BlockIo.
+            {
+                let mut io = PathIo::open_rw(&path).expect("open_rw temp image");
+                format_filesystem(
+                    &mut io as &mut dyn BlockIo,
+                    SIZE,
+                    4096,
+                    4096,
+                    Some("PATHWR"),
+                    Some(0x1234_5678),
+                )
+                .expect("format_filesystem temp image");
+            }
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TmpImage {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn create_file_path_wrapper_creates_findable_file() {
+        let img = TmpImage::new();
+        let rec = create_file(img.path(), "/", "pathfile.txt").unwrap();
+        assert!(rec >= 24, "user files start at record 24+");
+        // Verify it landed in the root index.
+        let mut io = PathIo::open_ro(img.path()).unwrap();
+        let (_, root_rec) = crate::mft_io::read_mft_record_io(&mut io, 5).unwrap();
+        assert!(crate::index_io::find_index_entry(&root_rec, "pathfile.txt")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn mkdir_path_wrapper_creates_directory() {
+        let img = TmpImage::new();
+        let rec = mkdir(img.path(), "/", "pathdir").unwrap();
+        assert!(rec >= 24);
+        let mut io = PathIo::open_ro(img.path()).unwrap();
+        let (_, root_rec) = crate::mft_io::read_mft_record_io(&mut io, 5).unwrap();
+        assert!(crate::index_io::find_index_entry(&root_rec, "pathdir")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn create_file_path_wrapper_duplicate_fails() {
+        let img = TmpImage::new();
+        create_file(img.path(), "/", "dup.txt").unwrap();
+        assert!(create_file(img.path(), "/", "dup.txt").is_err());
+    }
+
+    #[test]
+    fn write_at_and_truncate_path_wrappers() {
+        let img = TmpImage::new();
+        create_file(img.path(), "/", "data.txt").unwrap();
+        // A fresh file's $DATA is resident; write_at/grow only operate on
+        // non-resident $DATA, so promote first (this also exercises the
+        // promote_resident_data_to_nonresident path wrapper).
+        promote_resident_data_to_nonresident(img.path(), "/data.txt", &[0u8; 8192]).unwrap();
+        let n = write_at(img.path(), "/data.txt", 0, b"hello").unwrap();
+        assert_eq!(n, 5);
+        let sz = truncate(img.path(), "/data.txt", 0).unwrap();
+        assert_eq!(sz, 0);
+    }
+
+    #[test]
+    fn rename_same_length_path_wrapper() {
+        let img = TmpImage::new();
+        // Create inside a subdir: rename patches the parent's resident
+        // $INDEX_ROOT, which holds for a small subdir (the root dir uses
+        // $INDEX_ALLOCATION and isn't supported by this MVP primitive).
+        mkdir(img.path(), "/", "d").unwrap();
+        create_file(img.path(), "/d", "aaa.txt").unwrap();
+        rename_same_length(img.path(), "/d/aaa.txt", "bbb.txt").unwrap();
+        // The renamed file must be resolvable; the old name must be gone.
+        assert!(
+            read_attributes(img.path(), "/d/bbb.txt").is_ok(),
+            "renamed file must be resolvable"
+        );
+        assert!(read_attributes(img.path(), "/d/aaa.txt").is_err());
+    }
+
+    #[test]
+    fn set_times_path_wrapper() {
+        let img = TmpImage::new();
+        create_file(img.path(), "/", "t.txt").unwrap();
+        let ts: u64 = 132_000_000_000_000;
+        let times = FileTimes {
+            creation: Some(ts),
+            modification: Some(ts),
+            mft_record_modification: Some(ts),
+            access: Some(ts),
+        };
+        set_times(img.path(), "/t.txt", times).unwrap();
+    }
+
+    #[test]
+    fn set_security_id_and_attributes_path_wrappers() {
+        let img = TmpImage::new();
+        create_file(img.path(), "/", "s.txt").unwrap();
+        set_security_id(img.path(), "/s.txt", 0x100).unwrap();
+        // Add HIDDEN (0x02), remove nothing.
+        let change = FileAttributesChange {
+            add: 0x02,
+            remove: 0,
+        };
+        set_file_attributes(img.path(), "/s.txt", change).unwrap();
+    }
+
+    #[test]
+    fn write_and_list_eas_path_wrappers() {
+        let img = TmpImage::new();
+        create_file(img.path(), "/", "ea.txt").unwrap();
+        write_ea(img.path(), "/ea.txt", b"USER.attr", b"value", 0).unwrap();
+        let eas = list_eas(img.path(), "/ea.txt").unwrap();
+        assert!(eas
+            .iter()
+            .any(|e| e.name.eq_ignore_ascii_case(b"USER.attr")));
+        remove_ea(img.path(), "/ea.txt", b"USER.attr").unwrap();
+        let after = list_eas(img.path(), "/ea.txt").unwrap();
+        assert!(!after
+            .iter()
+            .any(|e| e.name.eq_ignore_ascii_case(b"USER.attr")));
+    }
+
+    #[test]
+    fn read_attributes_path_wrapper() {
+        let img = TmpImage::new();
+        create_file(img.path(), "/", "ra.txt").unwrap();
+        let descs = read_attributes(img.path(), "/ra.txt").unwrap();
+        // A fresh file has at least $STANDARD_INFORMATION + $FILE_NAME + $DATA.
+        assert!(descs.len() >= 3);
+    }
+
+    // --- named streams (ADS) -------------------------------------------------
+
+    #[test]
+    fn write_named_stream_resident_io_then_list() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "ads.txt").unwrap();
+        write_named_stream_resident_io(&mut dev, "/ads.txt", "meta", b"hello").unwrap();
+        let names = list_named_streams_io(&mut dev, "/ads.txt").unwrap();
+        assert_eq!(names, vec!["meta".to_string()]);
+    }
+
+    #[test]
+    fn write_named_stream_resident_io_empty_name_fails() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "ads.txt").unwrap();
+        assert!(write_named_stream_resident_io(&mut dev, "/ads.txt", "", b"x").is_err());
+    }
+
+    #[test]
+    fn write_named_stream_resident_io_replaces_existing() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "ads.txt").unwrap();
+        write_named_stream_resident_io(&mut dev, "/ads.txt", "s", b"first").unwrap();
+        write_named_stream_resident_io(&mut dev, "/ads.txt", "s", b"second-longer").unwrap();
+        // Still exactly one stream named "s" (replaced, not duplicated).
+        let names = list_named_streams_io(&mut dev, "/ads.txt").unwrap();
+        assert_eq!(names.iter().filter(|n| *n == "s").count(), 1);
+    }
+
+    #[test]
+    fn write_named_stream_high_level_io_resident() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "ads.txt").unwrap();
+        // Small data stays resident via the high-level dispatcher.
+        write_named_stream_io(&mut dev, "/ads.txt", "small", b"tiny").unwrap();
+        let names = list_named_streams_io(&mut dev, "/ads.txt").unwrap();
+        assert!(names.contains(&"small".to_string()));
+    }
+
+    #[test]
+    fn list_named_streams_io_empty_when_no_ads() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "plain.txt").unwrap();
+        let names = list_named_streams_io(&mut dev, "/plain.txt").unwrap();
+        assert!(names.is_empty(), "fresh file has no ADS, got {names:?}");
+    }
+
+    #[test]
+    fn list_named_streams_io_multiple() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "multi.txt").unwrap();
+        write_named_stream_resident_io(&mut dev, "/multi.txt", "a", b"1").unwrap();
+        write_named_stream_resident_io(&mut dev, "/multi.txt", "b", b"2").unwrap();
+        let mut names = list_named_streams_io(&mut dev, "/multi.txt").unwrap();
+        names.sort();
+        assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn delete_named_stream_io_removes_stream() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "del.txt").unwrap();
+        write_named_stream_resident_io(&mut dev, "/del.txt", "gone", b"data").unwrap();
+        delete_named_stream_io(&mut dev, "/del.txt", "gone").unwrap();
+        let names = list_named_streams_io(&mut dev, "/del.txt").unwrap();
+        assert!(!names.contains(&"gone".to_string()));
+    }
+
+    #[test]
+    fn delete_named_stream_io_absent_fails() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "del.txt").unwrap();
+        assert!(delete_named_stream_io(&mut dev, "/del.txt", "nope").is_err());
+    }
+
+    #[test]
+    fn delete_named_stream_io_empty_name_fails() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "del.txt").unwrap();
+        assert!(delete_named_stream_io(&mut dev, "/del.txt", "").is_err());
+    }
+
+    #[test]
+    fn named_stream_path_wrappers_roundtrip() {
+        let img = TmpImage::new();
+        create_file(img.path(), "/", "ads.txt").unwrap();
+        write_named_stream(img.path(), "/ads.txt", "tag", b"value").unwrap();
+        let names = list_named_streams(img.path(), "/ads.txt").unwrap();
+        assert!(names.contains(&"tag".to_string()));
+        delete_named_stream(img.path(), "/ads.txt", "tag").unwrap();
+        let after = list_named_streams(img.path(), "/ads.txt").unwrap();
+        assert!(!after.contains(&"tag".to_string()));
     }
 }

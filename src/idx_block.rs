@@ -318,4 +318,175 @@ mod tests {
         let err = vcn_to_disk_offset(&ia, 99).unwrap_err();
         assert!(err.contains("not mapped"), "{err}");
     }
+
+    // --- additional edge cases -------------------------------------------
+
+    #[test]
+    fn allocated_block_vcns_block_size_double_cluster_size() {
+        // block_size = 8192, cluster_size = 4096 → VCN per block = 2.
+        // Bit 0 (block 0) → VCN 0; bit 1 (block 1) → VCN 2.
+        let ia = make_ia(8192, 4096, vec![], vec![0b0000_0011u8], 0);
+        let vcns = ia.allocated_block_vcns();
+        assert_eq!(vcns, vec![0, 2]);
+    }
+
+    #[test]
+    fn allocated_block_vcns_all_bits_set_in_one_byte() {
+        // 8 blocks all allocated; VCN-per-block = 1 (equal sizes).
+        let ia = make_ia(4096, 4096, vec![], vec![0xFF], 0);
+        let vcns = ia.allocated_block_vcns();
+        assert_eq!(vcns, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn allocated_block_vcns_high_bit_of_last_byte() {
+        // Bitmap = [0x00, 0x80]: bit 7 of byte 1 = block 15 → VCN 15.
+        let ia = make_ia(4096, 4096, vec![], vec![0x00u8, 0x80u8], 0);
+        let vcns = ia.allocated_block_vcns();
+        assert_eq!(vcns, vec![15]);
+    }
+
+    #[test]
+    fn vcn_to_disk_offset_small_cluster_size() {
+        // cluster_size=512: VCN 0 at LCN 100 → disk = 100*512.
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 8,
+            lcn: Some(100),
+        }];
+        let ia = make_ia(4096, 512, runs, vec![], 0);
+        assert_eq!(vcn_to_disk_offset(&ia, 0).unwrap(), 100 * 512);
+        assert_eq!(vcn_to_disk_offset(&ia, 1).unwrap(), 101 * 512);
+    }
+
+    #[test]
+    fn vcn_to_disk_offset_at_run_boundary_is_exact() {
+        // Run covers VCNs 0..4. VCN 3 (last) is inside; VCN 4 (first of next) errors.
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 4,
+            lcn: Some(10),
+        }];
+        let ia = make_ia(4096, 4096, runs, vec![], 0);
+        assert!(vcn_to_disk_offset(&ia, 3).is_ok());
+        assert!(vcn_to_disk_offset(&ia, 4).is_err());
+    }
+
+    // --- read_indx_block_io / update_indx_block_io -------------------------
+
+    struct MemDev(Vec<u8>);
+
+    impl BlockIo for MemDev {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            let off = offset as usize;
+            buf.copy_from_slice(&self.0[off..off + buf.len()]);
+            Ok(())
+        }
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            let off = offset as usize;
+            self.0[off..off + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn size(&self) -> u64 {
+            self.0.len() as u64
+        }
+    }
+
+    /// Build a 4096-byte INDX block with a valid USA that passes fixup.
+    /// bytes_per_sector=512 → 8 sectors → usa_count=9, usa_offset=0x28.
+    fn valid_indx_block() -> Vec<u8> {
+        const BLOCK: usize = 4096;
+        const BPS: usize = 512;
+        const SECTORS: usize = BLOCK / BPS;
+        const USA_OFFSET: usize = 0x28;
+        const USN: [u8; 2] = [0x01, 0x00];
+
+        let mut block = vec![0u8; BLOCK];
+        block[0..4].copy_from_slice(b"INDX");
+        block[0x04..0x06].copy_from_slice(&(USA_OFFSET as u16).to_le_bytes());
+        block[0x06..0x08].copy_from_slice(&((SECTORS + 1) as u16).to_le_bytes());
+        block[USA_OFFSET..USA_OFFSET + 2].copy_from_slice(&USN);
+        // Each sector's last 2 bytes must equal USN for fixup to accept.
+        for s in 0..SECTORS {
+            let tail = (s + 1) * BPS - 2;
+            block[tail..tail + 2].copy_from_slice(&USN);
+        }
+        block
+    }
+
+    fn ia_with_run(lcn: u64, cluster_size: u64) -> IndexAllocation {
+        make_ia(
+            4096,
+            cluster_size,
+            vec![DataRun {
+                starting_vcn: 0,
+                length: 1,
+                lcn: Some(lcn),
+            }],
+            vec![0x01],
+            4096,
+        )
+    }
+
+    #[test]
+    fn read_indx_block_io_returns_clean_block() {
+        let block = valid_indx_block();
+        // Place block at cluster 0 (disk offset 0).
+        let mut dev = MemDev(block.clone());
+        let ia = ia_with_run(0, 4096);
+        let result = read_indx_block_io(&mut dev, &ia, 0).unwrap();
+        assert_eq!(&result[0..4], b"INDX");
+        assert_eq!(result.len(), 4096);
+    }
+
+    #[test]
+    fn read_indx_block_io_bad_magic_fails() {
+        let mut block = valid_indx_block();
+        block[0] = 0xFF; // corrupt magic
+        let mut dev = MemDev(block);
+        let ia = ia_with_run(0, 4096);
+        assert!(read_indx_block_io(&mut dev, &ia, 0).is_err());
+    }
+
+    #[test]
+    fn read_indx_block_io_usn_mismatch_fails() {
+        let mut block = valid_indx_block();
+        // Corrupt the USN at the first sector tail.
+        block[510] = 0xFF;
+        block[511] = 0xFF;
+        let mut dev = MemDev(block);
+        let ia = ia_with_run(0, 4096);
+        assert!(read_indx_block_io(&mut dev, &ia, 0).is_err());
+    }
+
+    #[test]
+    fn update_indx_block_io_mutates_block() {
+        let block = valid_indx_block();
+        let mut dev = MemDev(block);
+        let ia = ia_with_run(0, 4096);
+        // Write a marker byte inside the INDX data area (past the header).
+        update_indx_block_io(&mut dev, &ia, 0, |blk| {
+            blk[0x40] = 0xAB;
+            Ok(())
+        })
+        .unwrap();
+        // Read back and verify the byte survived the write-fixup round-trip.
+        let readback = read_indx_block_io(&mut dev, &ia, 0).unwrap();
+        assert_eq!(readback[0x40], 0xAB);
+    }
+
+    #[test]
+    fn update_indx_block_io_block_at_nonzero_lcn() {
+        let cluster_size = 4096u64;
+        let lcn = 5u64;
+        let disk_offset = lcn * cluster_size;
+        let block = valid_indx_block();
+        // Allocate device large enough to hold the block at its disk position.
+        let mut storage = vec![0u8; (disk_offset as usize) + 4096];
+        storage[disk_offset as usize..disk_offset as usize + 4096].copy_from_slice(&block);
+        let mut dev = MemDev(storage);
+        let ia = ia_with_run(lcn, cluster_size);
+        let result = read_indx_block_io(&mut dev, &ia, 0).unwrap();
+        assert_eq!(&result[0..4], b"INDX");
+    }
 }

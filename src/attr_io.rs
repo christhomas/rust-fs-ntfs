@@ -626,4 +626,128 @@ mod tests {
         assert!(attr_name_equals(&rec, &loc, ""));
         assert!(!attr_name_equals(&rec, &loc, "anything"));
     }
+
+    #[test]
+    fn attr_name_equals_named_attribute() {
+        let name_utf16: Vec<u16> = "$I30".encode_utf16().collect();
+        let rec = RecordBuilder::new(1024, 0x38)
+            .push_resident(AttrType::IndexRoot as u32, 0, b"data", &name_utf16)
+            .finish();
+        let loc = iter_attributes(&rec).next().unwrap();
+        assert!(attr_name_equals(&rec, &loc, "$I30"));
+        assert!(!attr_name_equals(&rec, &loc, ""));
+        assert!(!attr_name_equals(&rec, &loc, "$I31"));
+    }
+
+    // --- read_u16/32/64_le -------------------------------------------------
+
+    #[test]
+    fn read_u16_le_basic() {
+        let buf = [0x34u8, 0x12, 0x00];
+        assert_eq!(read_u16_le(&buf, 0), Some(0x1234));
+        assert_eq!(read_u16_le(&buf, 1), Some(0x0012)); // bytes [0x12, 0x00] → 0x0012
+        assert_eq!(read_u16_le(&buf, 2), None); // only 1 byte left
+    }
+
+    #[test]
+    fn read_u16_le_bounds() {
+        let buf = [0xABu8, 0xCD];
+        assert_eq!(read_u16_le(&buf, 0), Some(0xCDAB));
+        assert_eq!(read_u16_le(&buf, 1), None); // only 1 byte left
+        assert_eq!(read_u16_le(&buf, 2), None);
+    }
+
+    #[test]
+    fn read_u32_le_basic() {
+        let buf = [0x78u8, 0x56, 0x34, 0x12];
+        assert_eq!(read_u32_le(&buf, 0), Some(0x1234_5678));
+    }
+
+    #[test]
+    fn read_u32_le_bounds() {
+        let buf = [0u8; 3];
+        assert_eq!(read_u32_le(&buf, 0), None);
+        let buf4 = [1u8, 0, 0, 0];
+        assert_eq!(read_u32_le(&buf4, 0), Some(1));
+        assert_eq!(read_u32_le(&buf4, 1), None);
+    }
+
+    #[test]
+    fn read_u64_le_basic() {
+        let buf: [u8; 8] = [0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+        assert_eq!(read_u64_le(&buf, 0), Some(0x0102_0304_0506_0708));
+    }
+
+    #[test]
+    fn read_u64_le_bounds() {
+        let buf = [0u8; 7];
+        assert_eq!(read_u64_le(&buf, 0), None);
+        let buf8 = [0xFFu8; 8];
+        assert_eq!(read_u64_le(&buf8, 0), Some(u64::MAX));
+        assert_eq!(read_u64_le(&buf8, 1), None);
+    }
+
+    // --- decode_attr_name ---------------------------------------------------
+
+    #[test]
+    fn decode_attr_name_unnamed_returns_empty() {
+        let rec = RecordBuilder::new(1024, 0x38)
+            .push_resident(AttrType::Data as u32, 0, b"x", &[])
+            .finish();
+        let loc = iter_attributes(&rec).next().unwrap();
+        assert_eq!(decode_attr_name(&rec, &loc), "");
+    }
+
+    #[test]
+    fn decode_attr_name_named_attribute() {
+        let name_utf16: Vec<u16> = "Zone.Identifier".encode_utf16().collect();
+        let rec = RecordBuilder::new(1024, 0x38)
+            .push_resident(AttrType::Data as u32, 0, b"x", &name_utf16)
+            .finish();
+        let loc = iter_attributes(&rec).next().unwrap();
+        assert_eq!(decode_attr_name(&rec, &loc), "Zone.Identifier");
+    }
+
+    // --- describe_attributes ------------------------------------------------
+
+    #[test]
+    fn describe_attributes_returns_one_per_attr() {
+        let rec = RecordBuilder::new(1024, 0x38)
+            .push_resident(AttrType::StandardInformation as u32, 0, &[0u8; 48], &[])
+            .push_resident(AttrType::FileName as u32, 1, &[0u8; 32], &[])
+            .finish();
+        let descs = describe_attributes(&rec);
+        assert_eq!(descs.len(), 2);
+        assert_eq!(descs[0].type_code, 0x10);
+        assert_eq!(descs[0].type_name, "$STANDARD_INFORMATION");
+        assert_eq!(descs[1].type_code, 0x30);
+        assert_eq!(descs[1].type_name, "$FILE_NAME");
+    }
+
+    #[test]
+    fn describe_attributes_empty_record_returns_empty() {
+        let rec = RecordBuilder::new(1024, 0x38).finish();
+        assert!(describe_attributes(&rec).is_empty());
+    }
+
+    #[test]
+    fn describe_attributes_resident_value_length() {
+        let rec = RecordBuilder::new(1024, 0x38)
+            .push_resident(AttrType::Data as u32, 0, b"hello", &[])
+            .finish();
+        let descs = describe_attributes(&rec);
+        assert_eq!(descs[0].value_length, 5);
+        assert!(descs[0].is_resident);
+    }
+
+    #[test]
+    fn describe_attributes_nonresident_value_length() {
+        let mp = [0x11u8, 0x04, 0x05, 0x00]; // one run, 4 clusters from lcn 5
+        let rec = RecordBuilder::new(1024, 0x38)
+            .push_nonresident(AttrType::Data as u32, 16384, &mp)
+            .finish();
+        let descs = describe_attributes(&rec);
+        assert_eq!(descs[0].value_length, 16384);
+        assert!(!descs[0].is_resident);
+    }
 }

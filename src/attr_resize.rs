@@ -315,3 +315,175 @@ pub fn set_resident_value(
     record[dst_start..dst_start + new_value.len()].copy_from_slice(new_value);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::attr_io::attr_off;
+
+    const ATTRS_OFF: usize = 0x38;
+    const ALLOC: usize = 4096;
+
+    /// Build a minimal MFT record with one resident attribute of the given value.
+    /// Returns (record, attr_offset).
+    fn one_attr_record(value: &[u8]) -> (Vec<u8>, usize) {
+        let header_size = 24usize; // resident attr header through value_offset fields
+        let value_offset: u16 = header_size as u16;
+        let attr_len = ((header_size + value.len()) + 7) & !7;
+        let end_marker_pos = ATTRS_OFF + attr_len;
+        let bytes_used = end_marker_pos + 4;
+
+        let mut rec = vec![0u8; ALLOC];
+        // Record header fields
+        rec[0x14..0x16].copy_from_slice(&(ATTRS_OFF as u16).to_le_bytes()); // attrs_offset
+        rec[0x18..0x1C].copy_from_slice(&(bytes_used as u32).to_le_bytes()); // bytes_used
+        rec[0x1C..0x20].copy_from_slice(&(ALLOC as u32).to_le_bytes()); // bytes_allocated
+
+        let a = ATTRS_OFF;
+        rec[a..a + 4].copy_from_slice(&0x80u32.to_le_bytes()); // type: $DATA
+        rec[a + attr_off::LENGTH..a + attr_off::LENGTH + 4]
+            .copy_from_slice(&(attr_len as u32).to_le_bytes());
+        rec[a + attr_off::NON_RESIDENT] = 0;
+        rec[a + attr_off::RESIDENT_VALUE_LENGTH..a + attr_off::RESIDENT_VALUE_LENGTH + 4]
+            .copy_from_slice(&(value.len() as u32).to_le_bytes());
+        rec[a + attr_off::RESIDENT_VALUE_OFFSET..a + attr_off::RESIDENT_VALUE_OFFSET + 2]
+            .copy_from_slice(&value_offset.to_le_bytes());
+        rec[a + header_size..a + header_size + value.len()].copy_from_slice(value);
+
+        // End marker
+        rec[end_marker_pos..end_marker_pos + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+
+        (rec, ATTRS_OFF)
+    }
+
+    // --- align_up_8 ---
+
+    #[test]
+    fn align_up_8_already_aligned() {
+        assert_eq!(align_up_8(0), 0);
+        assert_eq!(align_up_8(8), 8);
+        assert_eq!(align_up_8(16), 16);
+        assert_eq!(align_up_8(1024), 1024);
+    }
+
+    #[test]
+    fn align_up_8_rounds_up() {
+        assert_eq!(align_up_8(1), 8);
+        assert_eq!(align_up_8(7), 8);
+        assert_eq!(align_up_8(9), 16);
+        assert_eq!(align_up_8(15), 16);
+        assert_eq!(align_up_8(17), 24);
+    }
+
+    // --- allocate_attribute_id ---
+
+    #[test]
+    fn allocate_attribute_id_returns_current_and_increments() {
+        let mut rec = vec![0u8; 64];
+        rec[0x28..0x2A].copy_from_slice(&5u16.to_le_bytes());
+        let id = allocate_attribute_id(&mut rec);
+        assert_eq!(id, 5);
+        let next = u16::from_le_bytes([rec[0x28], rec[0x29]]);
+        assert_eq!(next, 6);
+    }
+
+    #[test]
+    fn allocate_attribute_id_starts_at_zero() {
+        let mut rec = vec![0u8; 64];
+        let id = allocate_attribute_id(&mut rec);
+        assert_eq!(id, 0);
+        assert_eq!(u16::from_le_bytes([rec[0x28], rec[0x29]]), 1);
+    }
+
+    #[test]
+    fn allocate_attribute_id_wraps_around() {
+        let mut rec = vec![0u8; 64];
+        rec[0x28..0x2A].copy_from_slice(&u16::MAX.to_le_bytes());
+        let id = allocate_attribute_id(&mut rec);
+        assert_eq!(id, u16::MAX);
+        assert_eq!(u16::from_le_bytes([rec[0x28], rec[0x29]]), 0);
+    }
+
+    // --- resize_resident_value ---
+
+    #[test]
+    fn resize_same_size_succeeds_without_shifting() {
+        let (mut rec, attr_off) = one_attr_record(b"hello");
+        let bytes_used_before = u32::from_le_bytes([rec[0x18], rec[0x19], rec[0x1A], rec[0x1B]]);
+        resize_resident_value(&mut rec, attr_off, 5).unwrap();
+        let bytes_used_after = u32::from_le_bytes([rec[0x18], rec[0x19], rec[0x1A], rec[0x1B]]);
+        assert_eq!(bytes_used_before, bytes_used_after);
+    }
+
+    #[test]
+    fn resize_grow_updates_bytes_used() {
+        let (mut rec, attr_off) = one_attr_record(b"hi");
+        let bu_before = u32::from_le_bytes([rec[0x18], rec[0x19], rec[0x1A], rec[0x1B]]);
+        resize_resident_value(&mut rec, attr_off, 10).unwrap();
+        let bu_after = u32::from_le_bytes([rec[0x18], rec[0x19], rec[0x1A], rec[0x1B]]);
+        assert!(bu_after > bu_before);
+    }
+
+    #[test]
+    fn resize_shrink_updates_bytes_used() {
+        let (mut rec, attr_off) = one_attr_record(&[0u8; 16]);
+        let bu_before = u32::from_le_bytes([rec[0x18], rec[0x19], rec[0x1A], rec[0x1B]]);
+        resize_resident_value(&mut rec, attr_off, 4).unwrap();
+        let bu_after = u32::from_le_bytes([rec[0x18], rec[0x19], rec[0x1A], rec[0x1B]]);
+        assert!(bu_after < bu_before);
+    }
+
+    #[test]
+    fn resize_nonresident_fails() {
+        let (mut rec, attr_off) = one_attr_record(b"x");
+        rec[attr_off + attr_off::NON_RESIDENT] = 1; // mark as non-resident
+        assert!(resize_resident_value(&mut rec, attr_off, 10).is_err());
+    }
+
+    #[test]
+    fn resize_exceeds_capacity_fails() {
+        let (mut rec, attr_off) = one_attr_record(b"x");
+        // Try to grow to more than bytes_allocated allows
+        assert!(resize_resident_value(&mut rec, attr_off, ALLOC as u32).is_err());
+    }
+
+    // --- set_resident_value ---
+
+    #[test]
+    fn set_resident_value_writes_bytes() {
+        let (mut rec, attr_off) = one_attr_record(&[0u8; 8]);
+        set_resident_value(&mut rec, attr_off, b"newdata!").unwrap();
+        let val_off = u16::from_le_bytes([
+            rec[attr_off + attr_off::RESIDENT_VALUE_OFFSET],
+            rec[attr_off + attr_off::RESIDENT_VALUE_OFFSET + 1],
+        ]) as usize;
+        assert_eq!(
+            &rec[attr_off + val_off..attr_off + val_off + 8],
+            b"newdata!"
+        );
+    }
+
+    // --- insert_attribute_before_end ---
+
+    #[test]
+    fn insert_attribute_before_end_adds_attribute() {
+        let (mut rec, _) = one_attr_record(b"first");
+        let bu_before = u32::from_le_bytes([rec[0x18], rec[0x19], rec[0x1A], rec[0x1B]]);
+
+        // Build a minimal new attribute (24-byte header + 8 bytes value = 32 bytes)
+        let mut new_attr = vec![0u8; 32];
+        new_attr[0..4].copy_from_slice(&0x10u32.to_le_bytes()); // type: $STANDARD_INFO
+        new_attr[4..8].copy_from_slice(&32u32.to_le_bytes()); // length = 32
+
+        insert_attribute_before_end(&mut rec, &new_attr).unwrap();
+        let bu_after = u32::from_le_bytes([rec[0x18], rec[0x19], rec[0x1A], rec[0x1B]]);
+        assert_eq!(bu_after, bu_before + 32);
+    }
+
+    #[test]
+    fn insert_attribute_bad_alignment_fails() {
+        let (mut rec, _) = one_attr_record(b"x");
+        let bad_attr = vec![0u8; 7]; // not 8-aligned
+        assert!(insert_attribute_before_end(&mut rec, &bad_attr).is_err());
+    }
+}

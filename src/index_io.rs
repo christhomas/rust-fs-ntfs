@@ -753,3 +753,730 @@ pub fn rename_filename_attribute_same_length(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::attr_io::attr_off;
+
+    fn utf16(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    // --- MFT record builder for $INDEX_ROOT tests ---
+
+    const ATTRS_START: usize = 0x38;
+    const REC_SIZE: usize = 4096;
+    const REC_OFF_ATTRS_OFFSET: usize = 0x14;
+    const REC_OFF_BYTES_USED: usize = 0x18;
+    const REC_OFF_BYTES_ALLOCATED: usize = 0x1C;
+
+    /// Build the INDEX_ROOT value bytes: INDEX_ROOT_HEADER(16) + INDEX_HEADER(16) + entries.
+    /// `entries` is already-serialized entry blobs. Appends the LAST sentinel automatically.
+    fn build_index_root_value(entries: &[Vec<u8>]) -> Vec<u8> {
+        // LAST sentinel: 16 bytes, flags = IE_FLAG_LAST = 0x02
+        let mut last = vec![0u8; 16];
+        last[IE_LENGTH] = 16;
+        last[IE_FLAGS] = IE_FLAG_LAST as u8;
+
+        let entries_bytes: Vec<u8> = entries.iter().flat_map(|e| e.iter().copied()).collect();
+        let total_entries_size = entries_bytes.len() + last.len();
+        // INDEX_HEADER (16 bytes): first_entry_offset=16, total_size, allocated_size, flags
+        let mut ih = vec![0u8; 16];
+        let first_entry_off = 16u32; // entries start 16 bytes into INDEX_HEADER
+        let total_size = (first_entry_off as usize + total_entries_size) as u32;
+        ih[0..4].copy_from_slice(&first_entry_off.to_le_bytes());
+        ih[4..8].copy_from_slice(&total_size.to_le_bytes());
+        ih[8..12].copy_from_slice(&total_size.to_le_bytes()); // allocated = total
+
+        let mut value = vec![0u8; 16]; // INDEX_ROOT_HEADER (16 zeros are fine for tests)
+        value.extend_from_slice(&ih);
+        value.extend_from_slice(&entries_bytes);
+        value.extend_from_slice(&last);
+        value
+    }
+
+    /// Build a minimal MFT record with a named resident $INDEX_ROOT:$I30 attribute.
+    fn index_root_record(entries: &[Vec<u8>]) -> Vec<u8> {
+        let value = build_index_root_value(entries);
+        let i30_utf16: Vec<u16> = "$I30".encode_utf16().collect();
+        let i30_bytes: Vec<u8> = i30_utf16.iter().flat_map(|c| c.to_le_bytes()).collect();
+
+        // Attribute header: type(4) + length(4) + non_res(1) + name_len(1) + name_off(2) + flags(2) + id(2)
+        //                   + val_length(4) + val_offset(2) + indexed(1) + reserved(1) = 24 bytes fixed
+        let header_fixed = 24usize;
+        let name_offset = header_fixed as u16;
+        let value_offset = (header_fixed + i30_bytes.len()) as u16;
+        let attr_len = ((value_offset as usize + value.len()) + 7) & !7;
+        let end_marker_pos = ATTRS_START + attr_len;
+        let bytes_used = end_marker_pos + 4;
+
+        let mut rec = vec![0u8; REC_SIZE];
+        rec[REC_OFF_ATTRS_OFFSET..REC_OFF_ATTRS_OFFSET + 2]
+            .copy_from_slice(&(ATTRS_START as u16).to_le_bytes());
+        rec[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4]
+            .copy_from_slice(&(bytes_used as u32).to_le_bytes());
+        rec[REC_OFF_BYTES_ALLOCATED..REC_OFF_BYTES_ALLOCATED + 4]
+            .copy_from_slice(&(REC_SIZE as u32).to_le_bytes());
+
+        let a = ATTRS_START;
+        rec[a..a + 4].copy_from_slice(&(AttrType::IndexRoot as u32).to_le_bytes());
+        rec[a + attr_off::LENGTH..a + attr_off::LENGTH + 4]
+            .copy_from_slice(&(attr_len as u32).to_le_bytes());
+        rec[a + attr_off::NON_RESIDENT] = 0;
+        rec[a + attr_off::NAME_LENGTH] = i30_utf16.len() as u8;
+        rec[a + attr_off::NAME_OFFSET..a + attr_off::NAME_OFFSET + 2]
+            .copy_from_slice(&name_offset.to_le_bytes());
+        rec[a + attr_off::RESIDENT_VALUE_LENGTH..a + attr_off::RESIDENT_VALUE_LENGTH + 4]
+            .copy_from_slice(&(value.len() as u32).to_le_bytes());
+        rec[a + attr_off::RESIDENT_VALUE_OFFSET..a + attr_off::RESIDENT_VALUE_OFFSET + 2]
+            .copy_from_slice(&value_offset.to_le_bytes());
+        rec[a + header_fixed..a + header_fixed + i30_bytes.len()].copy_from_slice(&i30_bytes);
+        let val_start = a + value_offset as usize;
+        rec[val_start..val_start + value.len()].copy_from_slice(&value);
+        rec[end_marker_pos..end_marker_pos + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+
+        rec
+    }
+
+    /// Build a single $FILE_NAME index entry (matching build_file_name_index_entry layout).
+    fn make_entry(file_ref: u64, parent_ref: u64, name: &str) -> Vec<u8> {
+        build_file_name_index_entry(file_ref, parent_ref, name, 0, false).unwrap()
+    }
+
+    // --- find_index_entry ---
+
+    #[test]
+    fn find_index_entry_empty_dir_returns_none() {
+        let rec = index_root_record(&[]);
+        let result = find_index_entry(&rec, "foo").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_index_entry_finds_present_entry() {
+        let entry = make_entry(42, 5, "hello");
+        let rec = index_root_record(&[entry]);
+        let loc = find_index_entry(&rec, "hello").unwrap().unwrap();
+        assert_eq!(loc.file_record_number, 42);
+        assert_eq!(loc.name_length, 5);
+    }
+
+    #[test]
+    fn find_index_entry_missing_returns_none() {
+        let entry = make_entry(42, 5, "hello");
+        let rec = index_root_record(&[entry]);
+        assert!(find_index_entry(&rec, "world").unwrap().is_none());
+    }
+
+    #[test]
+    fn find_index_entry_multiple_entries_finds_correct_one() {
+        let e1 = make_entry(10, 5, "alpha");
+        let e2 = make_entry(20, 5, "beta");
+        let e3 = make_entry(30, 5, "gamma");
+        let rec = index_root_record(&[e1, e2, e3]);
+        assert_eq!(
+            find_index_entry(&rec, "alpha")
+                .unwrap()
+                .unwrap()
+                .file_record_number,
+            10
+        );
+        assert_eq!(
+            find_index_entry(&rec, "beta")
+                .unwrap()
+                .unwrap()
+                .file_record_number,
+            20
+        );
+        assert_eq!(
+            find_index_entry(&rec, "gamma")
+                .unwrap()
+                .unwrap()
+                .file_record_number,
+            30
+        );
+    }
+
+    #[test]
+    fn find_index_entry_is_case_sensitive() {
+        let entry = make_entry(42, 5, "Hello");
+        let rec = index_root_record(&[entry]);
+        // find_index_entry uses exact UTF-16 code-unit match, so "HELLO" won't match "Hello"
+        assert!(find_index_entry(&rec, "HELLO").unwrap().is_none());
+        assert!(find_index_entry(&rec, "Hello").unwrap().is_some());
+    }
+
+    // --- index_root_has_real_entries ---
+
+    #[test]
+    fn index_root_has_real_entries_empty_is_false() {
+        let rec = index_root_record(&[]);
+        assert!(!index_root_has_real_entries(&rec).unwrap());
+    }
+
+    #[test]
+    fn index_root_has_real_entries_with_entry_is_true() {
+        let entry = make_entry(5, 5, "file");
+        let rec = index_root_record(&[entry]);
+        assert!(index_root_has_real_entries(&rec).unwrap());
+    }
+
+    // --- index_root_flags ---
+
+    #[test]
+    fn index_root_flags_returns_zero_for_small_dir() {
+        let rec = index_root_record(&[]);
+        let flags = index_root_flags(&rec).unwrap();
+        assert_eq!(flags & IH_FLAG_HAS_SUBNODES, 0);
+    }
+
+    // --- compare_names (case-insensitive, no upcase table) ---
+
+    #[test]
+    fn compare_names_equal_ascii() {
+        assert_eq!(
+            compare_names(&utf16("foo"), &utf16("foo"), None),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn compare_names_case_insensitive_ascii() {
+        assert_eq!(
+            compare_names(&utf16("FOO"), &utf16("foo"), None),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_names(&utf16("foo"), &utf16("FOO"), None),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_names(&utf16("Hello"), &utf16("HELLO"), None),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn compare_names_less_than() {
+        assert_eq!(
+            compare_names(&utf16("abc"), &utf16("abd"), None),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_names(&utf16("a"), &utf16("b"), None),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compare_names_greater_than() {
+        assert_eq!(
+            compare_names(&utf16("b"), &utf16("a"), None),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_names(&utf16("abd"), &utf16("abc"), None),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn compare_names_prefix_ordering() {
+        assert_eq!(
+            compare_names(&utf16("ab"), &utf16("abc"), None),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_names(&utf16("abc"), &utf16("ab"), None),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn compare_names_empty_slices() {
+        assert_eq!(compare_names(&[], &[], None), std::cmp::Ordering::Equal);
+        assert_eq!(
+            compare_names(&[], &utf16("a"), None),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_names(&utf16("a"), &[], None),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    // --- compare_names_ordinal (case-sensitive) ---
+
+    #[test]
+    fn compare_names_ordinal_equal() {
+        assert_eq!(
+            compare_names_ordinal(&utf16("foo"), &utf16("foo")),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(compare_names_ordinal(&[], &[]), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn compare_names_ordinal_case_sensitive() {
+        // 'A' = 0x0041, 'a' = 0x0061; uppercase sorts before lowercase
+        assert_eq!(
+            compare_names_ordinal(&utf16("FOO"), &utf16("foo")),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_names_ordinal(&utf16("foo"), &utf16("FOO")),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_names_ordinal(&utf16("Abc"), &utf16("abc")),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compare_names_ordinal_length_tiebreak() {
+        assert_eq!(
+            compare_names_ordinal(&utf16("ab"), &utf16("abc")),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_names_ordinal(&utf16("abc"), &utf16("ab")),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn compare_names_ordinal_empty_vs_nonempty() {
+        assert_eq!(
+            compare_names_ordinal(&[], &utf16("x")),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_names_ordinal(&utf16("x"), &[]),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    // --- build_file_name_index_entry ---
+
+    #[test]
+    fn build_entry_length_is_multiple_of_8() {
+        for name in &["a", "ab", "abc", "abcdefgh", "hello world"] {
+            let e = build_file_name_index_entry(1, 5, name, 0, false).unwrap();
+            assert_eq!(e.len() % 8, 0, "name={name}");
+        }
+    }
+
+    #[test]
+    fn build_entry_file_reference_field() {
+        let fref: u64 = 0x0001_0000_0000_0042;
+        let e = build_file_name_index_entry(fref, 5, "x", 0, false).unwrap();
+        let got = u64::from_le_bytes(
+            e[IE_FILE_REFERENCE..IE_FILE_REFERENCE + 8]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(got, fref);
+    }
+
+    #[test]
+    fn build_entry_entry_length_field_matches_vec_len() {
+        let e = build_file_name_index_entry(1, 5, "hi", 0, false).unwrap();
+        let entry_len = u16::from_le_bytes([e[IE_LENGTH], e[IE_LENGTH + 1]]) as usize;
+        assert_eq!(entry_len, e.len());
+    }
+
+    #[test]
+    fn build_entry_key_length_field() {
+        // key_len = 0x42 (fixed fields) + name.len() * 2
+        let e = build_file_name_index_entry(1, 5, "abc", 0, false).unwrap();
+        let key_len = u16::from_le_bytes([e[IE_KEY_LENGTH], e[IE_KEY_LENGTH + 1]]) as usize;
+        assert_eq!(key_len, 0x42 + 3 * 2);
+    }
+
+    #[test]
+    fn build_entry_name_embedded_correctly() {
+        let e = build_file_name_index_entry(1, 5, "Hi", 0, false).unwrap();
+        let name_len_byte = e[IE_KEY_START + FN_NAME_LENGTH_OFFSET] as usize;
+        assert_eq!(name_len_byte, 2);
+        let name_start = IE_KEY_START + FN_NAME_OFFSET;
+        let name_u16: Vec<u16> = e[name_start..name_start + 4]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(name_u16, utf16("Hi"));
+    }
+
+    #[test]
+    fn build_entry_file_attributes_for_file() {
+        let e = build_file_name_index_entry(1, 5, "f", 0, false).unwrap();
+        let fa = u32::from_le_bytes(e[IE_KEY_START + 56..IE_KEY_START + 60].try_into().unwrap());
+        assert_eq!(fa, 0x20); // ARCHIVE only
+    }
+
+    #[test]
+    fn build_entry_file_attributes_for_dir() {
+        let e = build_file_name_index_entry(1, 5, "d", 0, true).unwrap();
+        let fa = u32::from_le_bytes(e[IE_KEY_START + 56..IE_KEY_START + 60].try_into().unwrap());
+        assert_eq!(fa, 0x10000000 | 0x20);
+    }
+
+    #[test]
+    fn build_entry_empty_name_fails() {
+        assert!(build_file_name_index_entry(1, 5, "", 0, false).is_err());
+    }
+
+    #[test]
+    fn build_entry_too_long_name_fails() {
+        let name: String = "A".repeat(256);
+        assert!(build_file_name_index_entry(1, 5, &name, 0, false).is_err());
+    }
+
+    #[test]
+    fn build_entry_exactly_255_chars_succeeds() {
+        let name: String = "A".repeat(255);
+        assert!(build_file_name_index_entry(1, 5, &name, 0, false).is_ok());
+    }
+
+    // --- rename_index_entry_same_length ---
+
+    fn make_entry_buf(name: &str) -> (Vec<u8>, IndexEntryLocation) {
+        let utf16: Vec<u16> = name.encode_utf16().collect();
+        let key_len = 0x42 + utf16.len() * 2;
+        let entry_len = (IE_KEY_START + key_len + 7) & !7;
+        let mut buf = vec![0u8; entry_len];
+        buf[IE_LENGTH..IE_LENGTH + 2].copy_from_slice(&(entry_len as u16).to_le_bytes());
+        buf[IE_KEY_LENGTH..IE_KEY_LENGTH + 2].copy_from_slice(&(key_len as u16).to_le_bytes());
+        buf[IE_KEY_START + FN_NAME_LENGTH_OFFSET] = utf16.len() as u8;
+        let name_start = IE_KEY_START + FN_NAME_OFFSET;
+        for (i, &c) in utf16.iter().enumerate() {
+            buf[name_start + i * 2..name_start + i * 2 + 2].copy_from_slice(&c.to_le_bytes());
+        }
+        let loc = IndexEntryLocation {
+            record_offset: 0,
+            length: entry_len,
+            key_length: key_len,
+            file_record_number: 0,
+            name_length: utf16.len() as u8,
+        };
+        (buf, loc)
+    }
+
+    #[test]
+    fn rename_index_entry_same_length_updates_name() {
+        let (mut buf, loc) = make_entry_buf("foo");
+        rename_index_entry_same_length(&mut buf, &loc, "bar").unwrap();
+        let name_start = IE_KEY_START + FN_NAME_OFFSET;
+        let got: Vec<u16> = buf[name_start..name_start + 6]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(got, utf16("bar"));
+    }
+
+    #[test]
+    fn rename_index_entry_length_mismatch_fails() {
+        let (mut buf, loc) = make_entry_buf("foo");
+        assert!(rename_index_entry_same_length(&mut buf, &loc, "longer_name").is_err());
+        assert!(rename_index_entry_same_length(&mut buf, &loc, "ab").is_err());
+    }
+
+    // --- insert_entry_into_index_root -------------------------------------
+
+    #[test]
+    fn insert_entry_into_index_root_entry_is_findable_afterwards() {
+        let mut rec = index_root_record(&[]);
+        let entry = make_entry(42, 5, "hello");
+        insert_entry_into_index_root(&mut rec, &entry, "hello").unwrap();
+        let loc = find_index_entry(&rec, "hello").unwrap().unwrap();
+        assert_eq!(loc.file_record_number, 42);
+    }
+
+    #[test]
+    fn insert_entry_into_index_root_multiple_entries_sorted() {
+        let mut rec = index_root_record(&[]);
+        // Insert in reverse alphabetical order — should land sorted.
+        let e_zoo = make_entry(3, 5, "zoo");
+        let e_bar = make_entry(2, 5, "bar");
+        let e_apple = make_entry(1, 5, "apple");
+        insert_entry_into_index_root(&mut rec, &e_zoo, "zoo").unwrap();
+        insert_entry_into_index_root(&mut rec, &e_bar, "bar").unwrap();
+        insert_entry_into_index_root(&mut rec, &e_apple, "apple").unwrap();
+        // All three must be findable.
+        assert_eq!(
+            find_index_entry(&rec, "zoo")
+                .unwrap()
+                .unwrap()
+                .file_record_number,
+            3
+        );
+        assert_eq!(
+            find_index_entry(&rec, "bar")
+                .unwrap()
+                .unwrap()
+                .file_record_number,
+            2
+        );
+        assert_eq!(
+            find_index_entry(&rec, "apple")
+                .unwrap()
+                .unwrap()
+                .file_record_number,
+            1
+        );
+    }
+
+    #[test]
+    fn insert_entry_into_index_root_bumps_total_size() {
+        let mut rec = index_root_record(&[]);
+        // Grab INDEX_HEADER total_size before insert.
+        let ir_before =
+            attr_io::find_attribute(&rec, AttrType::IndexRoot, Some(stream::I30)).unwrap();
+        let val_off_before = ir_before.resident_value_offset.unwrap() as usize;
+        let ih_start_before = ir_before.attr_offset + val_off_before + IR_INDEX_HEADER_OFFSET;
+        let total_before = u32::from_le_bytes([
+            rec[ih_start_before + IH_TOTAL_SIZE_OF_ENTRIES],
+            rec[ih_start_before + IH_TOTAL_SIZE_OF_ENTRIES + 1],
+            rec[ih_start_before + IH_TOTAL_SIZE_OF_ENTRIES + 2],
+            rec[ih_start_before + IH_TOTAL_SIZE_OF_ENTRIES + 3],
+        ]);
+
+        let entry = make_entry(1, 5, "x");
+        let entry_len = entry.len() as u32;
+        insert_entry_into_index_root(&mut rec, &entry, "x").unwrap();
+
+        let ir_after =
+            attr_io::find_attribute(&rec, AttrType::IndexRoot, Some(stream::I30)).unwrap();
+        let val_off_after = ir_after.resident_value_offset.unwrap() as usize;
+        let ih_start_after = ir_after.attr_offset + val_off_after + IR_INDEX_HEADER_OFFSET;
+        let total_after = u32::from_le_bytes([
+            rec[ih_start_after + IH_TOTAL_SIZE_OF_ENTRIES],
+            rec[ih_start_after + IH_TOTAL_SIZE_OF_ENTRIES + 1],
+            rec[ih_start_after + IH_TOTAL_SIZE_OF_ENTRIES + 2],
+            rec[ih_start_after + IH_TOTAL_SIZE_OF_ENTRIES + 3],
+        ]);
+        assert_eq!(total_after, total_before + entry_len);
+    }
+
+    // --- remove_index_entry -----------------------------------------------
+
+    #[test]
+    fn remove_index_entry_makes_entry_unfindable() {
+        let entry = make_entry(10, 5, "target");
+        let mut rec = index_root_record(&[entry]);
+        let loc = find_index_entry(&rec, "target").unwrap().unwrap();
+        remove_index_entry(&mut rec, &loc, BlockKind::IndexRoot).unwrap();
+        assert!(find_index_entry(&rec, "target").unwrap().is_none());
+    }
+
+    #[test]
+    fn remove_index_entry_leaves_other_entries_intact() {
+        let e1 = make_entry(1, 5, "alpha");
+        let e2 = make_entry(2, 5, "beta");
+        let e3 = make_entry(3, 5, "gamma");
+        let mut rec = index_root_record(&[e1, e2, e3]);
+        let loc = find_index_entry(&rec, "beta").unwrap().unwrap();
+        remove_index_entry(&mut rec, &loc, BlockKind::IndexRoot).unwrap();
+        assert!(find_index_entry(&rec, "beta").unwrap().is_none());
+        assert!(find_index_entry(&rec, "alpha").unwrap().is_some());
+        assert!(find_index_entry(&rec, "gamma").unwrap().is_some());
+    }
+
+    #[test]
+    fn insert_then_remove_roundtrip_leaves_empty_dir() {
+        let mut rec = index_root_record(&[]);
+        let entry = make_entry(5, 5, "file");
+        insert_entry_into_index_root(&mut rec, &entry, "file").unwrap();
+        assert!(index_root_has_real_entries(&rec).unwrap());
+        let loc = find_index_entry(&rec, "file").unwrap().unwrap();
+        remove_index_entry(&mut rec, &loc, BlockKind::IndexRoot).unwrap();
+        assert!(!index_root_has_real_entries(&rec).unwrap());
+    }
+
+    // --- rename_filename_attribute_same_length ----------------------------
+
+    #[test]
+    fn rename_filename_attribute_same_length_updates_name() {
+        // Build a record with a $FILE_NAME attribute for "foo".
+        use crate::attr_io::attr_off;
+        let fn_name_utf16: Vec<u16> = "foo".encode_utf16().collect();
+        let fn_name_bytes: Vec<u8> = fn_name_utf16.iter().flat_map(|c| c.to_le_bytes()).collect();
+        // $FILE_NAME value: 66 fixed bytes + name bytes (FN_NAME_OFFSET=0x42, FN_NAME_LENGTH_OFFSET=0x40)
+        let mut fn_value = vec![0u8; 0x42 + fn_name_bytes.len()];
+        fn_value[FN_NAME_LENGTH_OFFSET] = fn_name_utf16.len() as u8;
+        fn_value[FN_NAME_OFFSET..FN_NAME_OFFSET + fn_name_bytes.len()]
+            .copy_from_slice(&fn_name_bytes);
+
+        // Build a minimal MFT record with this $FILE_NAME attribute.
+        const ATTRS_OFF: usize = 0x38;
+        const REC_SIZE: usize = 4096;
+        let header_size = 24usize;
+        let val_off = header_size as u16;
+        let attr_len = ((header_size + fn_value.len()) + 7) & !7;
+        let end_pos = ATTRS_OFF + attr_len;
+        let bytes_used = end_pos + 4;
+
+        let mut rec = vec![0u8; REC_SIZE];
+        rec[0x14..0x16].copy_from_slice(&(ATTRS_OFF as u16).to_le_bytes());
+        rec[0x18..0x1C].copy_from_slice(&(bytes_used as u32).to_le_bytes());
+        rec[0x1C..0x20].copy_from_slice(&(REC_SIZE as u32).to_le_bytes());
+        let a = ATTRS_OFF;
+        rec[a..a + 4].copy_from_slice(&(AttrType::FileName as u32).to_le_bytes());
+        rec[a + attr_off::LENGTH..a + attr_off::LENGTH + 4]
+            .copy_from_slice(&(attr_len as u32).to_le_bytes());
+        rec[a + attr_off::RESIDENT_VALUE_LENGTH..a + attr_off::RESIDENT_VALUE_LENGTH + 4]
+            .copy_from_slice(&(fn_value.len() as u32).to_le_bytes());
+        rec[a + attr_off::RESIDENT_VALUE_OFFSET..a + attr_off::RESIDENT_VALUE_OFFSET + 2]
+            .copy_from_slice(&val_off.to_le_bytes());
+        rec[a + header_size..a + header_size + fn_value.len()].copy_from_slice(&fn_value);
+        rec[end_pos..end_pos + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+
+        rename_filename_attribute_same_length(&mut rec, "foo", "bar").unwrap();
+
+        // Verify the name was updated.
+        let loc = attr_io::find_attribute(&rec, AttrType::FileName, None).unwrap();
+        let val_start = loc.attr_offset + loc.resident_value_offset.unwrap() as usize;
+        let name_start = val_start + FN_NAME_OFFSET;
+        let new_name: Vec<u16> = rec[name_start..name_start + 6]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(new_name, utf16("bar"));
+    }
+
+    #[test]
+    fn rename_filename_attribute_length_mismatch_fails() {
+        // No $FILE_NAME attribute at all — should error.
+        let rec_empty = index_root_record(&[]);
+        assert!(
+            rename_filename_attribute_same_length(&mut rec_empty.clone(), "foo", "longer").is_err()
+        );
+    }
+
+    // --- insert_entry_into_index_root ----------------------------------------
+
+    #[test]
+    fn insert_entry_adds_findable_entry() {
+        let mut rec = index_root_record(&[]);
+        assert!(find_index_entry(&rec, "newfile").unwrap().is_none());
+
+        let entry = make_entry(99, 5, "newfile");
+        insert_entry_into_index_root(&mut rec, &entry, "newfile").unwrap();
+
+        let loc = find_index_entry(&rec, "newfile").unwrap().unwrap();
+        assert_eq!(loc.file_record_number, 99);
+    }
+
+    #[test]
+    fn insert_entry_preserves_existing_entries() {
+        let e1 = make_entry(10, 5, "alpha");
+        let mut rec = index_root_record(&[e1]);
+
+        let e2 = make_entry(20, 5, "gamma");
+        insert_entry_into_index_root(&mut rec, &e2, "gamma").unwrap();
+
+        assert_eq!(
+            find_index_entry(&rec, "alpha")
+                .unwrap()
+                .unwrap()
+                .file_record_number,
+            10
+        );
+        assert_eq!(
+            find_index_entry(&rec, "gamma")
+                .unwrap()
+                .unwrap()
+                .file_record_number,
+            20
+        );
+    }
+
+    #[test]
+    fn insert_entry_maintains_sorted_order() {
+        // Insert in reverse order; find both after.
+        let mut rec = index_root_record(&[]);
+        let ez = make_entry(3, 5, "z_file");
+        let ea = make_entry(1, 5, "a_file");
+        insert_entry_into_index_root(&mut rec, &ez, "z_file").unwrap();
+        insert_entry_into_index_root(&mut rec, &ea, "a_file").unwrap();
+        assert!(find_index_entry(&rec, "a_file").unwrap().is_some());
+        assert!(find_index_entry(&rec, "z_file").unwrap().is_some());
+    }
+
+    #[test]
+    fn insert_multiple_entries_all_findable() {
+        let mut rec = index_root_record(&[]);
+        for (i, name) in ["bravo", "charlie", "alpha", "delta"].iter().enumerate() {
+            let entry = make_entry(i as u64 + 1, 5, name);
+            insert_entry_into_index_root(&mut rec, &entry, name).unwrap();
+        }
+        for name in &["alpha", "bravo", "charlie", "delta"] {
+            assert!(
+                find_index_entry(&rec, name).unwrap().is_some(),
+                "missing: {name}"
+            );
+        }
+    }
+
+    // --- remove_index_entry --------------------------------------------------
+
+    #[test]
+    fn remove_entry_makes_it_unfindable() {
+        let entry = make_entry(42, 5, "removeme");
+        let mut rec = index_root_record(&[entry]);
+        assert!(find_index_entry(&rec, "removeme").unwrap().is_some());
+
+        let loc = find_index_entry(&rec, "removeme").unwrap().unwrap();
+        remove_index_entry(&mut rec, &loc, BlockKind::IndexRoot).unwrap();
+
+        assert!(find_index_entry(&rec, "removeme").unwrap().is_none());
+    }
+
+    #[test]
+    fn remove_entry_leaves_other_entries_intact() {
+        let e1 = make_entry(10, 5, "keep");
+        let e2 = make_entry(20, 5, "drop");
+        let mut rec = index_root_record(&[e1, e2]);
+
+        let loc = find_index_entry(&rec, "drop").unwrap().unwrap();
+        remove_index_entry(&mut rec, &loc, BlockKind::IndexRoot).unwrap();
+
+        assert!(find_index_entry(&rec, "keep").unwrap().is_some());
+        assert!(find_index_entry(&rec, "drop").unwrap().is_none());
+    }
+
+    #[test]
+    fn remove_then_insert_roundtrip() {
+        let entry = make_entry(5, 5, "file");
+        let mut rec = index_root_record(&[entry]);
+
+        let loc = find_index_entry(&rec, "file").unwrap().unwrap();
+        remove_index_entry(&mut rec, &loc, BlockKind::IndexRoot).unwrap();
+        assert!(find_index_entry(&rec, "file").unwrap().is_none());
+
+        let new_entry = make_entry(99, 5, "file");
+        insert_entry_into_index_root(&mut rec, &new_entry, "file").unwrap();
+        assert_eq!(
+            find_index_entry(&rec, "file")
+                .unwrap()
+                .unwrap()
+                .file_record_number,
+            99
+        );
+    }
+
+    #[test]
+    fn empty_dir_after_removing_all_entries() {
+        let e1 = make_entry(1, 5, "one");
+        let e2 = make_entry(2, 5, "two");
+        let mut rec = index_root_record(&[e1, e2]);
+
+        let loc1 = find_index_entry(&rec, "one").unwrap().unwrap();
+        remove_index_entry(&mut rec, &loc1, BlockKind::IndexRoot).unwrap();
+        let loc2 = find_index_entry(&rec, "two").unwrap().unwrap();
+        remove_index_entry(&mut rec, &loc2, BlockKind::IndexRoot).unwrap();
+
+        assert!(!index_root_has_real_entries(&rec).unwrap());
+    }
+}

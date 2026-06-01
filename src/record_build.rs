@@ -57,8 +57,26 @@ const USA_OFFSET: usize = 0x30;
 
 const ATTR_STANDARD_INFORMATION: u32 = 0x10;
 const ATTR_FILE_NAME: u32 = 0x30;
+const ATTR_VOLUME_NAME: u32 = 0x60;
 const ATTR_DATA: u32 = 0x80;
+const ATTR_EA_INFORMATION: u32 = 0xD0;
+const ATTR_EA: u32 = 0xE0;
 const ATTR_END_MARKER: u32 = 0xFFFF_FFFF;
+
+/// Fixed-size portion of a $FILE_NAME attribute value (bytes before the
+/// variable-length UTF-16 filename). Covers parent ref + 4×time + 2×size +
+/// file_attributes + packed_ea_size + filename_length + namespace = 66 bytes.
+const FILE_NAME_FIXED_SIZE: usize = 66;
+
+/// FILE record header flags (REC_OFF_FLAGS, u16 LE).
+const FILE_FLAG_IN_USE: u16 = 0x0001;
+const FILE_FLAG_IS_DIRECTORY: u16 = 0x0002;
+
+/// Index entry flags field value for the LAST sentinel entry.
+const INDEX_ENTRY_FLAG_LAST: u16 = 0x0002;
+
+/// $INDEX_ROOT collation rule for $FILE_NAME ordering (MS-FSCC §2.4.3.1).
+const COLLATION_FILE_NAME: u32 = 1;
 
 /// File-attribute bits stored in `$STANDARD_INFORMATION` and `$FILE_NAME`
 /// (MS-FSCC §2.6). The first three are standard Win32 values; the last two
@@ -177,6 +195,44 @@ pub fn build_regular_file_record(
     )
 }
 
+/// Write the fixed-layout FILE_RECORD_SEGMENT_HEADER into a zeroed `rec`
+/// buffer. Returns `attrs_offset` — the cursor where attribute writing begins.
+///
+/// Both file and directory records share the same 26-field header layout;
+/// they differ only in the `flags` value and which attributes follow.
+fn write_file_record_header(
+    rec: &mut [u8],
+    record_size: usize,
+    record_number: u32,
+    sequence: u16,
+    bytes_per_sector: u16,
+    flags: u16,
+) -> usize {
+    rec[0..4].copy_from_slice(FILE_MAGIC);
+    rec[REC_OFF_USA_OFFSET..REC_OFF_USA_OFFSET + 2]
+        .copy_from_slice(&(USA_OFFSET as u16).to_le_bytes());
+    let sectors = record_size / bytes_per_sector as usize;
+    rec[REC_OFF_USA_COUNT..REC_OFF_USA_COUNT + 2]
+        .copy_from_slice(&((sectors + 1) as u16).to_le_bytes());
+    rec[REC_OFF_LSN..REC_OFF_LSN + 8].copy_from_slice(&0u64.to_le_bytes());
+    rec[REC_OFF_SEQ..REC_OFF_SEQ + 2].copy_from_slice(&sequence.to_le_bytes());
+    rec[REC_OFF_LINK_COUNT..REC_OFF_LINK_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
+    // attrs_offset = first 8-aligned byte past the USA (see note on USA_OFFSET).
+    let attrs_offset = align8(USA_OFFSET + 2 + sectors * 2);
+    rec[REC_OFF_ATTRS_OFFSET..REC_OFF_ATTRS_OFFSET + 2]
+        .copy_from_slice(&(attrs_offset as u16).to_le_bytes());
+    rec[REC_OFF_FLAGS..REC_OFF_FLAGS + 2].copy_from_slice(&flags.to_le_bytes());
+    rec[REC_OFF_BYTES_ALLOCATED..REC_OFF_BYTES_ALLOCATED + 4]
+        .copy_from_slice(&(record_size as u32).to_le_bytes());
+    rec[REC_OFF_BASE_FILE_REF..REC_OFF_BASE_FILE_REF + 8].copy_from_slice(&0u64.to_le_bytes());
+    // next_attr_id: we allocate IDs 0,1,2 for the first three attrs → next = 3.
+    rec[REC_OFF_NEXT_ATTR_ID..REC_OFF_NEXT_ATTR_ID + 2].copy_from_slice(&3u16.to_le_bytes());
+    rec[REC_OFF_MFT_REC_NUM..REC_OFF_MFT_REC_NUM + 4].copy_from_slice(&record_number.to_le_bytes());
+    // Initial USN = 1; saved words stay 0 (record is freshly zeroed).
+    rec[USA_OFFSET..USA_OFFSET + 2].copy_from_slice(&1u16.to_le_bytes());
+    attrs_offset
+}
+
 /// Build an MFT record for a directory (with empty
 /// `$INDEX_ROOT:$I30`). Directories have no `$DATA`.
 pub fn build_directory_record(
@@ -198,31 +254,14 @@ pub fn build_directory_record(
     }
 
     let mut rec = vec![0u8; record_size];
-    rec[0..4].copy_from_slice(FILE_MAGIC);
-    rec[REC_OFF_USA_OFFSET..REC_OFF_USA_OFFSET + 2]
-        .copy_from_slice(&(USA_OFFSET as u16).to_le_bytes());
-    let sectors = record_size / bytes_per_sector as usize;
-    rec[REC_OFF_USA_COUNT..REC_OFF_USA_COUNT + 2]
-        .copy_from_slice(&((sectors + 1) as u16).to_le_bytes());
-    rec[REC_OFF_LSN..REC_OFF_LSN + 8].copy_from_slice(&0u64.to_le_bytes());
-    rec[REC_OFF_SEQ..REC_OFF_SEQ + 2].copy_from_slice(&sequence.to_le_bytes());
-    rec[REC_OFF_LINK_COUNT..REC_OFF_LINK_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
-    // attrs_offset = first 8-aligned byte past the USA. USA is 1 USN
-    // plus one saved-word per sector, all u16. See note on USA_OFFSET.
-    let attrs_offset = align8(USA_OFFSET + 2 + sectors * 2);
-    rec[REC_OFF_ATTRS_OFFSET..REC_OFF_ATTRS_OFFSET + 2]
-        .copy_from_slice(&(attrs_offset as u16).to_le_bytes());
-    // IN_USE | DIRECTORY
-    rec[REC_OFF_FLAGS..REC_OFF_FLAGS + 2].copy_from_slice(&0x0003u16.to_le_bytes());
-    rec[REC_OFF_BYTES_ALLOCATED..REC_OFF_BYTES_ALLOCATED + 4]
-        .copy_from_slice(&(record_size as u32).to_le_bytes());
-    rec[REC_OFF_BASE_FILE_REF..REC_OFF_BASE_FILE_REF + 8].copy_from_slice(&0u64.to_le_bytes());
-    rec[REC_OFF_NEXT_ATTR_ID..REC_OFF_NEXT_ATTR_ID + 2].copy_from_slice(&3u16.to_le_bytes());
-    rec[REC_OFF_MFT_REC_NUM..REC_OFF_MFT_REC_NUM + 4].copy_from_slice(&record_number.to_le_bytes());
-    // Initial USN = 1.
-    rec[USA_OFFSET..USA_OFFSET + 2].copy_from_slice(&1u16.to_le_bytes());
-
-    let mut cursor = attrs_offset;
+    let mut cursor = write_file_record_header(
+        &mut rec,
+        record_size,
+        record_number,
+        sequence,
+        bytes_per_sector,
+        FILE_FLAG_IN_USE | FILE_FLAG_IS_DIRECTORY,
+    );
     cursor = write_standard_information(&mut rec, cursor, 0, nt_time, /* is_dir */ true);
     cursor = write_file_name(
         &mut rec,
@@ -259,6 +298,35 @@ const ATTR_INDEX_ROOT: u32 = 0x90;
 
 /// Emit an `$INDEX_ROOT:$I30` resident attribute containing just the
 /// LAST sentinel entry (empty directory).
+/// Returns the 48-byte value payload for an empty `$INDEX_ROOT:$I30` attribute.
+///
+/// Layout: IR_HEADER (16) + INDEX_HEADER (16) + LAST sentinel entry (16).
+/// This is a pure function — no record buffer needed — so it can be tested
+/// independently and reused wherever an empty index-root value is needed.
+pub(crate) fn build_empty_ir_value(index_block_size: u32) -> [u8; 48] {
+    let mut v = [0u8; 48];
+    // IR_HEADER (bytes 0..16):
+    v[0..4].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes()); // attribute_type = $FILE_NAME
+    v[4..8].copy_from_slice(&COLLATION_FILE_NAME.to_le_bytes()); // collation_rule
+    v[8..12].copy_from_slice(&index_block_size.to_le_bytes()); // index_block_size
+    v[12] = 1; // clusters_per_index_block (assumes block == cluster size)
+               // v[13..16] = padding, already zero.
+
+    // INDEX_HEADER (bytes 16..32):
+    v[16..20].copy_from_slice(&16u32.to_le_bytes()); // first_entry: immediately after INDEX_HEADER
+    v[20..24].copy_from_slice(&32u32.to_le_bytes()); // total_size: INDEX_HEADER + LAST entry
+    v[24..28].copy_from_slice(&32u32.to_le_bytes()); // allocated_size = total_size
+                                                     // v[28..32] = flags (0 = leaf node) + reserved, already zero.
+
+    // LAST sentinel entry (bytes 32..48):
+    // v[32..40] = file_reference, already zero.
+    v[40..42].copy_from_slice(&16u16.to_le_bytes()); // entry length = 16
+                                                     // v[42..44] = key_length, already zero.
+    v[44..46].copy_from_slice(&INDEX_ENTRY_FLAG_LAST.to_le_bytes());
+    // v[46..48] = reserved, already zero.
+    v
+}
+
 fn write_empty_index_root(
     rec: &mut [u8],
     at: usize,
@@ -266,17 +334,13 @@ fn write_empty_index_root(
     index_block_size: u32,
     bytes_per_sector: u16,
 ) -> Result<usize, String> {
-    // Name "$I30" in UTF-16 (4 chars × 2 bytes = 8 bytes).
     let name_u16: [u16; 4] = ['$' as u16, 'I' as u16, '3' as u16, '0' as u16];
-    let name_bytes = 8usize;
+    let name_bytes = name_u16.len() * 2; // 8 bytes
     let header_size = 24usize;
-    let name_offset = header_size; // name comes right after the resident header
+    let name_offset = header_size;
     let value_offset = align8(header_size + name_bytes);
-
-    // INDEX_ROOT value layout:
-    //   IR_HEADER (16) + INDEX_HEADER (16) + LAST sentinel entry (16)
-    let ir_value_size = 16 + 16 + 16;
-    let attr_length = align8(value_offset + ir_value_size);
+    let ir_value = build_empty_ir_value(index_block_size);
+    let attr_length = align8(value_offset + ir_value.len());
 
     if at + attr_length > rec.len() {
         return Err("$INDEX_ROOT doesn't fit in MFT record".to_string());
@@ -290,7 +354,7 @@ fn write_empty_index_root(
     rec[at + 10..at + 12].copy_from_slice(&(name_offset as u16).to_le_bytes());
     rec[at + 12..at + 14].copy_from_slice(&0u16.to_le_bytes());
     rec[at + 14..at + 16].copy_from_slice(&attr_id.to_le_bytes());
-    rec[at + 16..at + 20].copy_from_slice(&(ir_value_size as u32).to_le_bytes());
+    rec[at + 16..at + 20].copy_from_slice(&(ir_value.len() as u32).to_le_bytes());
     rec[at + 20..at + 22].copy_from_slice(&(value_offset as u16).to_le_bytes());
     rec[at + 22] = 0;
     rec[at + 23] = 0;
@@ -301,51 +365,10 @@ fn write_empty_index_root(
         rec[off..off + 2].copy_from_slice(&c.to_le_bytes());
     }
 
-    // INDEX_ROOT header (16 bytes) at attr_value_start.
-    let v = at + value_offset;
-    // attribute_type = $FILE_NAME (0x30)
-    rec[v..v + 4].copy_from_slice(&0x30u32.to_le_bytes());
-    // collation_rule = COLLATION_FILE_NAME (1)
-    rec[v + 4..v + 8].copy_from_slice(&1u32.to_le_bytes());
-    // index_block_size
-    rec[v + 8..v + 12].copy_from_slice(&index_block_size.to_le_bytes());
-    // clusters_per_index_block: if block_size >= cluster_size use clusters;
-    // if smaller use blocks_per_cluster negative encoding. For our MVP
-    // always set to 1 (assumes block_size == cluster_size).
-    rec[v + 12] = 1;
-    // 3 bytes padding
-    rec[v + 13] = 0;
-    rec[v + 14] = 0;
-    rec[v + 15] = 0;
+    // INDEX_ROOT value.
+    rec[at + value_offset..at + value_offset + ir_value.len()].copy_from_slice(&ir_value);
 
-    // INDEX_HEADER (16 bytes).
-    let ih = v + 16;
-    // first_entry = 16 (immediately after INDEX_HEADER)
-    rec[ih..ih + 4].copy_from_slice(&16u32.to_le_bytes());
-    // total_size = 16 (header) + 16 (LAST entry) = 32? No — total_size is
-    // measured from INDEX_HEADER start and covers the entries. That is,
-    // INDEX_HEADER + entries = 16 + 16 = 32.
-    rec[ih + 4..ih + 8].copy_from_slice(&32u32.to_le_bytes());
-    // allocated_size same as total_size for a fresh IR.
-    rec[ih + 8..ih + 12].copy_from_slice(&32u32.to_le_bytes());
-    // flags = 0 (no subnode)
-    rec[ih + 12] = 0;
-    rec[ih + 13] = 0;
-    rec[ih + 14] = 0;
-    rec[ih + 15] = 0;
-
-    // LAST sentinel entry (16 bytes).
-    let le = ih + 16;
-    rec[le..le + 8].copy_from_slice(&0u64.to_le_bytes()); // file_reference
-    rec[le + 8..le + 10].copy_from_slice(&16u16.to_le_bytes()); // length
-    rec[le + 10..le + 12].copy_from_slice(&0u16.to_le_bytes()); // key_length
-    rec[le + 12..le + 14].copy_from_slice(&0x0002u16.to_le_bytes()); // flags = LAST
-    rec[le + 14..le + 16].copy_from_slice(&0u16.to_le_bytes()); // reserved
-
-    // Bytes-per-sector is not used here but kept in sig for future
-    // INDX-block synthesis when mkdir wants $INDEX_ALLOCATION.
-    let _ = bytes_per_sector;
-
+    let _ = bytes_per_sector; // reserved for future INDX-block synthesis
     Ok(at + attr_length)
 }
 
@@ -368,39 +391,15 @@ fn build_record_inner(
     }
 
     let mut rec = vec![0u8; record_size];
-
-    // ----- FILE record header -----
-    rec[0..4].copy_from_slice(FILE_MAGIC);
-    rec[REC_OFF_USA_OFFSET..REC_OFF_USA_OFFSET + 2]
-        .copy_from_slice(&(USA_OFFSET as u16).to_le_bytes());
-    let sectors = record_size / bytes_per_sector as usize;
-    let usa_count = sectors + 1; // 1 USN + N saved words
-    rec[REC_OFF_USA_COUNT..REC_OFF_USA_COUNT + 2]
-        .copy_from_slice(&(usa_count as u16).to_le_bytes());
-    rec[REC_OFF_LSN..REC_OFF_LSN + 8].copy_from_slice(&0u64.to_le_bytes());
-    rec[REC_OFF_SEQ..REC_OFF_SEQ + 2].copy_from_slice(&sequence.to_le_bytes());
-    rec[REC_OFF_LINK_COUNT..REC_OFF_LINK_COUNT + 2].copy_from_slice(&1u16.to_le_bytes());
-    // attrs_offset = first 8-aligned byte past the USA (see USA_OFFSET).
-    let attrs_offset = align8(USA_OFFSET + 2 + sectors * 2);
-    rec[REC_OFF_ATTRS_OFFSET..REC_OFF_ATTRS_OFFSET + 2]
-        .copy_from_slice(&(attrs_offset as u16).to_le_bytes());
-    let flags = 0x0001u16 | if is_dir { 0x0002 } else { 0x0000 };
-    rec[REC_OFF_FLAGS..REC_OFF_FLAGS + 2].copy_from_slice(&flags.to_le_bytes());
-    // bytes_used + bytes_allocated: filled below.
-    rec[REC_OFF_BYTES_ALLOCATED..REC_OFF_BYTES_ALLOCATED + 4]
-        .copy_from_slice(&(record_size as u32).to_le_bytes());
-    rec[REC_OFF_BASE_FILE_REF..REC_OFF_BASE_FILE_REF + 8].copy_from_slice(&0u64.to_le_bytes());
-    // next_attr_id: highest attr_id + 1 (we use IDs 0,1,2 → next = 3)
-    rec[REC_OFF_NEXT_ATTR_ID..REC_OFF_NEXT_ATTR_ID + 2].copy_from_slice(&3u16.to_le_bytes());
-    rec[REC_OFF_MFT_REC_NUM..REC_OFF_MFT_REC_NUM + 4].copy_from_slice(&record_number.to_le_bytes());
-
-    // USA: initial USN = 1 (avoid 0).
-    rec[USA_OFFSET..USA_OFFSET + 2].copy_from_slice(&1u16.to_le_bytes());
-    // Saved words stay 0 (since the record is freshly zeroed, the
-    // sector-end slots ARE 0 — which is what the USA should reflect).
-
-    // ----- Attributes -----
-    let mut cursor = attrs_offset;
+    let flags = FILE_FLAG_IN_USE | if is_dir { FILE_FLAG_IS_DIRECTORY } else { 0 };
+    let mut cursor = write_file_record_header(
+        &mut rec,
+        record_size,
+        record_number,
+        sequence,
+        bytes_per_sector,
+        flags,
+    );
 
     cursor = write_standard_information(&mut rec, cursor, 0, nt_time, is_dir);
     cursor = write_file_name(
@@ -456,13 +455,13 @@ pub fn build_resident_ea_information_attribute(
             value.len()
         ));
     }
-    build_resident_unnamed_attribute(0xD0, attr_id, value)
+    build_resident_unnamed_attribute(ATTR_EA_INFORMATION, attr_id, value)
 }
 
 /// Build a resident `$EA` (type 0xE0) attribute blob wrapping a packed
 /// EA byte stream.
 pub fn build_resident_ea_attribute(attr_id: u16, packed: &[u8]) -> Result<Vec<u8>, String> {
-    build_resident_unnamed_attribute(0xE0, attr_id, packed)
+    build_resident_unnamed_attribute(ATTR_EA, attr_id, packed)
 }
 
 /// Shared builder for resident unnamed attributes: 24-byte header +
@@ -479,7 +478,7 @@ pub fn build_resident_volume_name_attribute(attr_id: u16, label_utf16: &[u8]) ->
     let header_size = 24usize;
     let attr_length = align8(header_size + label_utf16.len());
     let mut buf = vec![0u8; attr_length];
-    buf[0..4].copy_from_slice(&0x60u32.to_le_bytes());
+    buf[0..4].copy_from_slice(&ATTR_VOLUME_NAME.to_le_bytes());
     buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
     buf[8] = 0; // resident
     buf[9] = 0; // name_length (unnamed)
@@ -904,7 +903,7 @@ pub fn build_file_name_attribute(
         return Err(format!("invalid name length {}", utf16.len()));
     }
     let header_size = 24usize;
-    let key_fixed = 0x42usize;
+    let key_fixed = FILE_NAME_FIXED_SIZE;
     let value_size = key_fixed + utf16.len() * 2;
     let attr_length = align8(header_size + value_size);
     let mut buf = vec![0u8; attr_length];
@@ -963,49 +962,18 @@ fn write_file_name(
     is_dir: bool,
     namespace: u8,
 ) -> usize {
-    let header_size = 24usize;
-    let key_fixed = 0x42usize; // parent_ref(8) + 4 times(32) + alloc_size(8) + real_size(8) + attr(4) + reparse/ea(4) + name_len(1) + namespace(1)
-    let value_size = key_fixed + name_utf16.len() * 2;
-    let attr_length = align8(header_size + value_size);
-    // Header
-    rec[at..at + 4].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
-    rec[at + 4..at + 8].copy_from_slice(&(attr_length as u32).to_le_bytes());
-    rec[at + 8] = 0;
-    rec[at + 9] = 0;
-    rec[at + 10..at + 12].copy_from_slice(&(header_size as u16).to_le_bytes());
-    rec[at + 12..at + 14].copy_from_slice(&0u16.to_le_bytes());
-    rec[at + 14..at + 16].copy_from_slice(&attr_id.to_le_bytes());
-    rec[at + 16..at + 20].copy_from_slice(&(value_size as u32).to_le_bytes());
-    rec[at + 20..at + 22].copy_from_slice(&(header_size as u16).to_le_bytes());
-    // indexed_flag = 1: see comment on `build_file_name_attribute`
-    // above for the same fix — chkdsk reports `Attribute record (30,
-    // "") is corrupt` when it differs.
-    rec[at + 22] = 1;
-    rec[at + 23] = 0;
-    // Value
-    let v = at + header_size;
-    rec[v..v + 8].copy_from_slice(&parent_reference.to_le_bytes()); // parent_directory_reference
-    rec[v + 8..v + 16].copy_from_slice(&nt_time.to_le_bytes()); // creation
-    rec[v + 16..v + 24].copy_from_slice(&nt_time.to_le_bytes()); // modification
-    rec[v + 24..v + 32].copy_from_slice(&nt_time.to_le_bytes()); // mft_change
-    rec[v + 32..v + 40].copy_from_slice(&nt_time.to_le_bytes()); // access
-    rec[v + 40..v + 48].copy_from_slice(&0u64.to_le_bytes()); // allocated_size
-    rec[v + 48..v + 56].copy_from_slice(&0u64.to_le_bytes()); // real_size
-    let fa: u32 = if is_dir {
-        FA_NTFS_DIRECTORY | FA_ARCHIVE
-    } else {
-        FA_ARCHIVE
-    };
-    rec[v + 56..v + 60].copy_from_slice(&fa.to_le_bytes()); // file_attributes
-    rec[v + 60..v + 64].copy_from_slice(&0u32.to_le_bytes()); // ea/reparse
-    rec[v + 64] = name_utf16.len() as u8; // name_length
-    rec[v + 65] = namespace;
-    // name
-    for (i, c) in name_utf16.iter().enumerate() {
-        let off = v + 66 + i * 2;
-        rec[off..off + 2].copy_from_slice(&c.to_le_bytes());
-    }
-    at + attr_length
+    // Delegate to build_file_name_attribute to avoid duplicating byte-layout
+    // logic. The only difference is that callers pass an explicit namespace
+    // (e.g. POSIX for system metafiles), so we patch that byte after building.
+    let name = String::from_utf16_lossy(name_utf16);
+    let mut blob = build_file_name_attribute(attr_id, parent_reference, &name, nt_time, is_dir)
+        .expect("write_file_name: valid UTF-16 name must build cleanly");
+    // Namespace is at value_start(24) + fn_offset(65) = blob[89].
+    const NAMESPACE_BYTE: usize = 24 + 65;
+    blob[NAMESPACE_BYTE] = namespace;
+    let len = blob.len();
+    rec[at..at + len].copy_from_slice(&blob);
+    at + len
 }
 
 fn write_empty_data(rec: &mut [u8], at: usize, attr_id: u16) -> usize {
@@ -1270,5 +1238,410 @@ mod tests {
         let ao = u16::from_le_bytes(rec[0x14..0x16].try_into().unwrap()) as usize;
         assert!(bu > ao);
         assert!(bu < rec.len());
+    }
+
+    // --- write_file_record_header -------------------------------------------
+
+    #[test]
+    fn write_file_record_header_writes_file_magic() {
+        let mut rec = vec![0u8; 1024];
+        write_file_record_header(&mut rec, 1024, 42, 1, 512, FILE_FLAG_IN_USE);
+        assert_eq!(&rec[0..4], b"FILE");
+    }
+
+    #[test]
+    fn write_file_record_header_returns_attrs_offset_past_usa() {
+        let mut rec = vec![0u8; 1024];
+        // 1024-byte record, 512-byte sectors → 2 sectors → USA = 1 USN + 2 saved = 6 bytes
+        // USA starts at 0x30, occupies 6 bytes (0x30..0x36) → align8(0x36) = 0x38.
+        let ao = write_file_record_header(&mut rec, 1024, 0, 1, 512, FILE_FLAG_IN_USE);
+        assert_eq!(ao, 0x38);
+    }
+
+    #[test]
+    fn write_file_record_header_4096_byte_record_has_larger_attrs_offset() {
+        let mut rec = vec![0u8; 4096];
+        // 4096-byte record, 512-byte sectors → 8 sectors → USA = 1 + 8 = 9 u16 = 18 bytes
+        // attrs_offset = align8(0x30 + 2 + 16) = align8(0x42) = 0x48.
+        let ao = write_file_record_header(&mut rec, 4096, 0, 1, 512, FILE_FLAG_IN_USE);
+        assert_eq!(ao, 0x48);
+    }
+
+    #[test]
+    fn write_file_record_header_flags_stored_at_0x16() {
+        let mut rec = vec![0u8; 1024];
+        let flags = FILE_FLAG_IN_USE | FILE_FLAG_IS_DIRECTORY;
+        write_file_record_header(&mut rec, 1024, 0, 1, 512, flags);
+        let stored = u16::from_le_bytes([rec[0x16], rec[0x17]]);
+        assert_eq!(stored, flags);
+    }
+
+    #[test]
+    fn write_file_record_header_bytes_allocated_at_0x1c() {
+        let mut rec = vec![0u8; 2048];
+        write_file_record_header(&mut rec, 2048, 0, 1, 512, FILE_FLAG_IN_USE);
+        let alloc = u32::from_le_bytes([rec[0x1C], rec[0x1D], rec[0x1E], rec[0x1F]]);
+        assert_eq!(alloc, 2048);
+    }
+
+    #[test]
+    fn write_file_record_header_sequence_at_0x10() {
+        let mut rec = vec![0u8; 1024];
+        write_file_record_header(&mut rec, 1024, 7, 0xABCD, 512, FILE_FLAG_IN_USE);
+        let seq = u16::from_le_bytes([rec[0x10], rec[0x11]]);
+        assert_eq!(seq, 0xABCD);
+    }
+
+    #[test]
+    fn write_file_record_header_record_number_at_0x2c() {
+        let mut rec = vec![0u8; 1024];
+        write_file_record_header(&mut rec, 1024, 999, 1, 512, FILE_FLAG_IN_USE);
+        let rn = u32::from_le_bytes([rec[0x2C], rec[0x2D], rec[0x2E], rec[0x2F]]);
+        assert_eq!(rn, 999);
+    }
+
+    // --- build_empty_ir_value -----------------------------------------------
+
+    #[test]
+    fn build_empty_ir_value_is_48_bytes() {
+        let v = build_empty_ir_value(4096);
+        assert_eq!(v.len(), 48);
+    }
+
+    #[test]
+    fn build_empty_ir_value_ir_header_attribute_type_is_file_name() {
+        let v = build_empty_ir_value(4096);
+        let attr_type = u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
+        assert_eq!(attr_type, ATTR_FILE_NAME);
+    }
+
+    #[test]
+    fn build_empty_ir_value_ir_header_collation_is_file_name() {
+        let v = build_empty_ir_value(4096);
+        let collation = u32::from_le_bytes([v[4], v[5], v[6], v[7]]);
+        assert_eq!(collation, COLLATION_FILE_NAME);
+    }
+
+    #[test]
+    fn build_empty_ir_value_ir_header_stores_block_size() {
+        for block_size in [4096u32, 8192, 65536] {
+            let v = build_empty_ir_value(block_size);
+            let stored = u32::from_le_bytes([v[8], v[9], v[10], v[11]]);
+            assert_eq!(stored, block_size, "block_size={block_size}");
+        }
+    }
+
+    #[test]
+    fn build_empty_ir_value_index_header_first_entry_is_16() {
+        let v = build_empty_ir_value(4096);
+        let first_entry = u32::from_le_bytes([v[16], v[17], v[18], v[19]]);
+        assert_eq!(
+            first_entry, 16,
+            "first_entry must point immediately after INDEX_HEADER"
+        );
+    }
+
+    #[test]
+    fn build_empty_ir_value_index_header_sizes_are_32() {
+        let v = build_empty_ir_value(4096);
+        let total = u32::from_le_bytes([v[20], v[21], v[22], v[23]]);
+        let alloc = u32::from_le_bytes([v[24], v[25], v[26], v[27]]);
+        assert_eq!(total, 32, "total_size = INDEX_HEADER + LAST entry");
+        assert_eq!(alloc, 32, "allocated_size = total_size for a fresh root");
+    }
+
+    #[test]
+    fn build_empty_ir_value_last_entry_length_is_16() {
+        let v = build_empty_ir_value(4096);
+        let len = u16::from_le_bytes([v[40], v[41]]);
+        assert_eq!(len, 16, "LAST sentinel entry is 16 bytes");
+    }
+
+    #[test]
+    fn build_empty_ir_value_last_entry_flag_is_set() {
+        let v = build_empty_ir_value(4096);
+        let flags = u16::from_le_bytes([v[44], v[45]]);
+        assert_eq!(flags, INDEX_ENTRY_FLAG_LAST);
+    }
+
+    // --- is_dos83_char -------------------------------------------------------
+
+    #[test]
+    fn is_dos83_char_accepts_alphanumerics() {
+        for c in ('a'..='z').chain('A'..='Z').chain('0'..='9') {
+            assert!(is_dos83_char(c), "'{c}' should be a valid DOS 8.3 char");
+        }
+    }
+
+    #[test]
+    fn is_dos83_char_accepts_allowed_punctuation() {
+        for c in [
+            '$', '%', '\'', '-', '_', '@', '~', '`', '!', '(', ')', '{', '}', '^', '#', '&',
+        ] {
+            assert!(
+                is_dos83_char(c),
+                "'{c}' should be accepted in DOS 8.3 names"
+            );
+        }
+    }
+
+    #[test]
+    fn is_dos83_char_rejects_disallowed_ascii() {
+        for c in [
+            ' ', '.', '/', '\\', ':', '*', '?', '"', '<', '>', '|', ',', '+', '=',
+        ] {
+            assert!(
+                !is_dos83_char(c),
+                "'{c}' should NOT be valid in DOS 8.3 names"
+            );
+        }
+    }
+
+    #[test]
+    fn is_dos83_char_rejects_non_ascii() {
+        assert!(!is_dos83_char('ä'));
+        assert!(!is_dos83_char('文'));
+    }
+
+    // --- build_directory_record ----------------------------------------------
+
+    #[test]
+    fn build_directory_record_has_file_magic_and_directory_flag() {
+        let rec = build_directory_record(
+            1024,
+            5,
+            1,
+            encode_file_reference(5, 1),
+            "docs",
+            nt_time_now(),
+            512,
+            4096,
+        )
+        .unwrap();
+        assert_eq!(rec.len(), 1024);
+        assert_eq!(&rec[0..4], b"FILE");
+        let flags = u16::from_le_bytes([rec[0x16], rec[0x17]]);
+        assert_eq!(
+            flags & (FILE_FLAG_IN_USE | FILE_FLAG_IS_DIRECTORY),
+            FILE_FLAG_IN_USE | FILE_FLAG_IS_DIRECTORY
+        );
+    }
+
+    #[test]
+    fn build_directory_record_rejects_invalid_record_size() {
+        assert!(
+            build_directory_record(513, 5, 1, 0, "docs", 0, 512, 4096).is_err(),
+            "513 not a multiple of 512"
+        );
+        assert!(
+            build_directory_record(256, 5, 1, 0, "docs", 0, 512, 4096).is_err(),
+            "256 < 512 minimum"
+        );
+    }
+
+    #[test]
+    fn build_directory_record_rejects_empty_name() {
+        assert!(build_directory_record(1024, 5, 1, 0, "", 0, 512, 4096).is_err());
+    }
+
+    // --- build_resident_volume_name_attribute --------------------------------
+
+    #[test]
+    fn build_resident_volume_name_attribute_type_and_label() {
+        let label_utf16: Vec<u8> = "TESTVOL"
+            .encode_utf16()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        let buf = build_resident_volume_name_attribute(0, &label_utf16);
+        let attr_type = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        assert_eq!(
+            attr_type, ATTR_VOLUME_NAME,
+            "attr type must be $VOLUME_NAME"
+        );
+        assert_eq!(buf[8], 0, "must be resident");
+        let val_len = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        assert_eq!(val_len, label_utf16.len() as u32);
+        let val_off = u16::from_le_bytes([buf[20], buf[21]]) as usize;
+        assert_eq!(
+            &buf[val_off..val_off + label_utf16.len()],
+            label_utf16.as_slice()
+        );
+    }
+
+    #[test]
+    fn build_resident_volume_name_attribute_empty_label_is_valid() {
+        let buf = build_resident_volume_name_attribute(3, &[]);
+        let attr_type = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        assert_eq!(attr_type, ATTR_VOLUME_NAME);
+        let val_len = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        assert_eq!(val_len, 0);
+    }
+
+    // --- build_resident_object_id_attribute ----------------------------------
+
+    #[test]
+    fn build_resident_object_id_attribute_type_and_guid() {
+        let guid: [u8; 16] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+            0x0F, 0x10,
+        ];
+        let buf = build_resident_object_id_attribute(0, &guid);
+        let attr_type = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        assert_eq!(attr_type, ATTR_OBJECT_ID, "attr type must be $OBJECT_ID");
+        assert_eq!(buf[8], 0, "must be resident");
+        let val_len = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        assert_eq!(val_len, 16, "basic form carries 16-byte GUID only");
+        let val_off = u16::from_le_bytes([buf[20], buf[21]]) as usize;
+        assert_eq!(&buf[val_off..val_off + 16], &guid);
+    }
+
+    #[test]
+    fn build_resident_object_id_basic_equals_full_without_birth_guids() {
+        let guid: [u8; 16] = [0xAAu8; 16];
+        let basic = build_resident_object_id_attribute(0, &guid);
+        let full = build_resident_object_id_attribute_full(0, &guid, None);
+        assert_eq!(basic, full);
+    }
+
+    // --- build_nonresident_data_attribute ------------------------------------
+
+    #[test]
+    fn build_nonresident_data_attribute_is_nonresident_type_data() {
+        let mp = [0x11u8, 0x04, 0x0A, 0x00];
+        let buf =
+            build_nonresident_data_attribute(0, 4 * 4096, 4 * 4096, 4 * 4096, 3, &mp).unwrap();
+        let attr_type = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        assert_eq!(attr_type, 0x80, "type must be $DATA");
+        assert_eq!(buf[8], 1, "non_resident flag = 1");
+        assert_eq!(buf[9], 0, "name_length = 0 for unnamed");
+    }
+
+    #[test]
+    fn build_nonresident_data_attribute_data_length_field() {
+        let mp = [0x11u8, 0x04, 0x0A, 0x00];
+        let buf =
+            build_nonresident_data_attribute(0, 4 * 4096, 4 * 4096, 4 * 4096, 3, &mp).unwrap();
+        let data_len = u64::from_le_bytes(buf[48..56].try_into().unwrap());
+        assert_eq!(data_len, 4 * 4096);
+    }
+
+    #[test]
+    fn build_nonresident_data_attribute_embeds_mapping_pairs() {
+        let mp = [0x21u8, 0x08, 0x00, 0x05, 0x00];
+        let buf =
+            build_nonresident_data_attribute(0, 8 * 4096, 8 * 4096, 8 * 4096, 7, &mp).unwrap();
+        let mpo = u16::from_le_bytes([buf[32], buf[33]]) as usize;
+        assert_eq!(&buf[mpo..mpo + mp.len()], &mp);
+    }
+
+    // --- build_nonresident_attribute (named stream) --------------------------
+
+    #[test]
+    fn build_nonresident_attribute_named_encodes_stream_name() {
+        let mp = [0x11u8, 0x02, 0x01, 0x00];
+        let buf = build_nonresident_attribute(
+            0x80,
+            Some("Zone.Identifier"),
+            0,
+            2 * 4096,
+            2 * 4096,
+            2 * 4096,
+            1,
+            &mp,
+        )
+        .unwrap();
+        assert_eq!(buf[8], 1, "non_resident");
+        let name_len = buf[9] as usize;
+        assert_eq!(name_len, "Zone.Identifier".chars().count());
+        let name_off = u16::from_le_bytes([buf[10], buf[11]]) as usize;
+        let name_u16s: Vec<u16> = buf[name_off..name_off + name_len * 2]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(String::from_utf16(&name_u16s).unwrap(), "Zone.Identifier");
+    }
+
+    #[test]
+    fn build_nonresident_attribute_unnamed_name_length_is_zero() {
+        let mp = [0x11u8, 0x01, 0x00, 0x00];
+        let buf = build_nonresident_attribute(0x80, None, 0, 4096, 4096, 4096, 0, &mp).unwrap();
+        assert_eq!(buf[9], 0, "name_length = 0 for unnamed attr");
+    }
+
+    // --- fn_namespace_for edge cases (leading/trailing dot, non-ASCII) -----
+
+    #[test]
+    fn fn_namespace_for_leading_dot_is_posix() {
+        assert_eq!(fn_namespace_for(".env"), FILE_NAME_NAMESPACE_POSIX);
+        assert_eq!(fn_namespace_for(".gitignore"), FILE_NAME_NAMESPACE_POSIX);
+        assert_eq!(fn_namespace_for("."), FILE_NAME_NAMESPACE_POSIX);
+    }
+
+    #[test]
+    fn fn_namespace_for_trailing_dot_is_posix() {
+        assert_eq!(fn_namespace_for("foo."), FILE_NAME_NAMESPACE_POSIX);
+    }
+
+    #[test]
+    fn fn_namespace_for_non_ascii_stem_is_posix() {
+        assert_eq!(fn_namespace_for("café"), FILE_NAME_NAMESPACE_POSIX);
+        assert_eq!(fn_namespace_for("日本語"), FILE_NAME_NAMESPACE_POSIX);
+    }
+
+    #[test]
+    fn fn_namespace_for_space_in_name_is_posix() {
+        // Space is not in the is_dos83_char whitelist
+        assert_eq!(fn_namespace_for("my file"), FILE_NAME_NAMESPACE_POSIX);
+        assert_eq!(fn_namespace_for("my file.txt"), FILE_NAME_NAMESPACE_POSIX);
+    }
+
+    #[test]
+    fn fn_namespace_for_exact_8_3_boundary() {
+        // 8-char stem + 3-char ext is WIN32_AND_DOS
+        assert_eq!(
+            fn_namespace_for("ABCDEFGH.TXT"),
+            FILE_NAME_NAMESPACE_WIN32_AND_DOS
+        );
+        // 9-char stem is POSIX
+        assert_eq!(fn_namespace_for("ABCDEFGHI.T"), FILE_NAME_NAMESPACE_POSIX);
+        // 3-char ext is WIN32_AND_DOS, 4-char ext is POSIX
+        assert_eq!(
+            fn_namespace_for("AB.TXT"),
+            FILE_NAME_NAMESPACE_WIN32_AND_DOS
+        );
+        assert_eq!(fn_namespace_for("AB.TEXT"), FILE_NAME_NAMESPACE_POSIX);
+    }
+
+    #[test]
+    fn fn_namespace_for_no_extension_valid_8_chars() {
+        assert_eq!(
+            fn_namespace_for("MAKEFILE"),
+            FILE_NAME_NAMESPACE_WIN32_AND_DOS
+        ); // 8 chars — ok
+        assert_eq!(fn_namespace_for("TOOLONG99"), FILE_NAME_NAMESPACE_POSIX); // 9 chars — too long
+    }
+
+    // --- is_dos83_char edge cases ------------------------------------------
+
+    #[test]
+    fn is_dos83_char_space_is_rejected() {
+        assert!(!is_dos83_char(' '));
+    }
+
+    #[test]
+    fn is_dos83_char_dot_is_rejected() {
+        assert!(!is_dos83_char('.'));
+    }
+
+    #[test]
+    fn is_dos83_char_all_listed_punctuation_accepted() {
+        for c in [
+            '$', '%', '\'', '-', '_', '@', '~', '`', '!', '(', ')', '{', '}', '^', '#', '&',
+        ] {
+            assert!(
+                is_dos83_char(c),
+                "expected {c:?} to be a valid DOS 8.3 char"
+            );
+        }
     }
 }
