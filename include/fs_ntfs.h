@@ -171,6 +171,38 @@ typedef struct {
 /* ---- Lifecycle ---- */
 
 /*
+ * DEVICE EXCLUSIVITY CONTRACT (applies to every mount variant below)
+ * -----------------------------------------------------------------
+ * fs_ntfs assumes it has exclusive access to the backing device/image
+ * for the lifetime of the mount handle. It performs no device locking
+ * of its own, and deliberately so:
+ *
+ *   - In the callback and FsCoreDevice transports the library never
+ *     opens the device — the host hands it a read/write callback or an
+ *     FsCoreDevice. There is no file descriptor to lock, and the host
+ *     already owns the device's lifecycle (e.g. FSKit grants the mount
+ *     exclusive device access). A lock here would be redundant or would
+ *     fight the host.
+ *   - In the path transport (`fs_ntfs_mount`) the library does open the
+ *     file, but exclusivity is still the caller's responsibility.
+ *
+ * Guarantees and obligations:
+ *   - SAFE: a single process, single thread, mounting and mutating one
+ *     volume. fs_ntfs spawns no threads internally and serializes its
+ *     own work.
+ *   - UNDEFINED BEHAVIOUR: two writers against the same image at once —
+ *     a second fs_ntfs caller, the same image opened by another process
+ *     (e.g. two CLI invocations), or the volume mounted concurrently by
+ *     another NTFS driver. Mutations read-modify-write MFT records and
+ *     bitmaps; an interleaved external write tears the update and
+ *     silently corrupts the volume.
+ *
+ * The caller MUST quiesce the device (no other opener writing) for the
+ * duration of any mutation. fs_ntfs does not detect or prevent the
+ * violation.
+ */
+
+/*
  * Mount an NTFS filesystem from the given device/image path.
  * Returns NULL on failure. Read-only.
  *

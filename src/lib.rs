@@ -3,6 +3,24 @@
 // Exposes a Swift-friendly C API matching the pattern of ext4_bridge.
 //
 // MIT License — see LICENSE
+//
+// Device exclusivity contract
+// ---------------------------
+// fs_ntfs assumes exclusive access to the backing device/image for the
+// lifetime of a mount handle and performs no device locking itself.
+// A single process / single thread that mounts and mutates one volume
+// is safe. Two writers against the same image at once — a second
+// fs_ntfs caller, the same image opened by another process, or the
+// volume mounted concurrently by another NTFS driver — is UNDEFINED
+// BEHAVIOUR: mutations read-modify-write MFT records and an interleaved
+// external write tears the update and silently corrupts the volume.
+// Exclusivity is the caller's (or host's) responsibility:
+//   - callback / `fs_core` transports: the host owns the device; there
+//     is no fd here to lock and the host already serializes access.
+//   - path transport (`fs_ntfs_mount`): the caller must quiesce the
+//     image (e.g. avoid concurrent CLI invocations on the same file).
+// See `fs_ntfs.h` for the consumer-facing statement and `mft_io` for
+// the record-level rationale.
 
 // FFI entry points intentionally take *mut/*const pointers and
 // dereference them without marking the function `unsafe`. Marking
@@ -909,6 +927,12 @@ fn fill_attr(
 /// etc.). Returns an opaque handle on success, NULL on error; call
 /// [`fs_ntfs_last_error`] for the message.  The handle supports both read and
 /// write operations.  Release with [`fs_ntfs_umount`].
+///
+/// Device exclusivity: this is the one mount variant where fs_ntfs opens
+/// the file itself, but it takes no lock — the caller must guarantee no
+/// other writer touches the same image for the handle's lifetime (e.g.
+/// no concurrent CLI invocations on the same path). See the module-level
+/// "Device exclusivity contract" for the full rationale.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle {
     if device_path.is_null() {
