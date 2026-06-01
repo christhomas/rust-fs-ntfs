@@ -46,11 +46,10 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::path::PathBuf;
 use std::slice;
 
+use crate::attr_io::AttrType;
 use crate::block_io::{BlockIo as BlockIoTrait, CallbackBlockIo, PathIo as RwPathIo};
 
-use ntfs::indexes::NtfsFileNameIndex;
-use ntfs::structured_values::{NtfsFileName, NtfsFileNamespace, NtfsStandardInformation};
-use ntfs::{KnownNtfsFileRecordNumber, Ntfs, NtfsAttributeType, NtfsFile, NtfsReadSeek};
+use ntfs::Ntfs;
 
 pub mod attr_io;
 pub mod attr_resize;
@@ -395,11 +394,16 @@ impl Seek for ReaderKind {
 pub struct FsNtfsHandle {
     ntfs: Ntfs,
     reader: ReaderKind,
-    /// Source of the mount, used to build a [`BlockIoTrait`] on demand
-    /// for the handle-based mutator API. `None` for callers that built
-    /// the handle through some path that didn't record this (shouldn't
-    /// happen in practice — both mount entry points fill it in).
+    /// Source of the mount, used to build a [`BlockIoTrait`] on demand for
+    /// both the native read path and the handle-based mutator API. Populated
+    /// by every mount entry point (including read-only mounts — writes are
+    /// gated by `writable`, not by a missing source).
     source: Option<MountSource>,
+    /// Whether mutations are permitted. `false` for read-only mounts (RO
+    /// fs-core, or callbacks with a NULL write fn). The mutator API checks
+    /// this *before* building a writable `BlockIo`, so a read-only mount of
+    /// a physically-writable device still refuses writes.
+    writable: bool,
 }
 
 /// Tracks whether the handle was mounted from a filesystem path
@@ -547,197 +551,33 @@ pub struct FsNtfsBlockdevCfg {
     pub write: Option<WriteCallback>,
 }
 
-// ---------------------------------------------------------------------------
-// Directory iterator — lazy
-// ---------------------------------------------------------------------------
-
-/// Heap state for the lazy NTFS index traversal. All four raw pointers form
-/// a borrow chain: `entries` → `index` → `file` → `ntfs`. They are all kept
-/// alive for the lifetime of this struct and are manually dropped (via the
-/// `Drop` impl) in reverse-chain order.
-///
-/// # Safety
-///
-/// The NTFS upstream types carry lifetime parameters (`'n`, `'f`, `'i`) that
-/// we extend to `'static` via `mem::transmute`. This is sound because:
-///
-/// 1. **All referenced objects are heap-pinned** inside this struct.
-///    Moving `LazyDirState` (or `Box<LazyDirState>`) does not move the
-///    heap-allocated `Ntfs`/`NtfsFile`/`NtfsIndex` objects — only the raw
-///    pointers to them move.
-///
-/// 2. **Every reference in these types is non-owning** (`&T`, not `Box<T>`),
-///    so dropping a reference (which Rust does as a no-op) never tries to
-///    free the referent. The only owned allocations are the `Record` buffer
-///    inside `NtfsFile` and the `Vec`s inside `NtfsIndex`/`NtfsIndexEntries`,
-///    which are freed in correct order by the explicit `Drop` impl.
-///
-/// 3. **Drop order** is explicit in `Drop`: `entries` is dropped before
-///    `index`, `index` before `file`, `file` before `ntfs`, which is the
-///    correct order for the borrow chain.
-///
-/// 4. **`NtfsIndexEntries::next` accesses `ntfs` through the chain** for the
-///    upcase table. The `ntfs` Box is alive for the full lifetime of the
-///    struct, so every `next()` call is safe.
-struct LazyDirState {
-    // Raw pointers to heap-pinned NTFS objects; see safety comment above.
-    // Stored as raw pointers (not Boxes) so Rust's drop glue doesn't run
-    // automatically — we drop them manually in the correct order.
-    entries_ptr:
-        *mut ntfs::NtfsIndexEntries<'static, 'static, 'static, ntfs::indexes::NtfsFileNameIndex>,
-    index_ptr: *mut ntfs::NtfsIndex<'static, 'static, ntfs::indexes::NtfsFileNameIndex>,
-    file_ptr: *mut ntfs::NtfsFile<'static>,
-    ntfs_ptr: *mut ntfs::Ntfs,
-    reader: ReaderKind,
-}
-
-// Safety: `context: *mut c_void` inside a `CallbackReader` is treated as
-// a handle managed by the caller.  Same contract as `MountSource::Callbacks`.
-unsafe impl Send for LazyDirState {}
-
-impl Drop for LazyDirState {
-    fn drop(&mut self) {
-        unsafe {
-            // Must drop in borrow-chain order: entries → index → file → ntfs.
-            drop(Box::from_raw(self.entries_ptr));
-            drop(Box::from_raw(self.index_ptr));
-            drop(Box::from_raw(self.file_ptr));
-            drop(Box::from_raw(self.ntfs_ptr));
-        }
-    }
-}
-
-impl LazyDirState {
-    fn new(source: &MountSource, record_number: u64) -> Result<Self, String> {
-        // 1. Open an independent reader for this iterator so the mount handle
-        //    remains usable for concurrent stat/read calls.
-        let mut reader = open_reader_from_source(source)?;
-
-        // 2. Parse a fresh Ntfs header + upcase table from the new reader.
-        let ntfs_box = {
-            let mut ntfs = Ntfs::new(&mut reader).map_err(|e| format!("ntfs init: {e}"))?;
-            ntfs.read_upcase_table(&mut reader)
-                .map_err(|e| format!("upcase: {e}"))?;
-            Box::new(ntfs)
-        };
-        let ntfs_ptr = Box::into_raw(ntfs_box);
-
-        // 3. Navigate to the directory by record number.
-        let file = {
-            // Safety: ntfs_ptr was just allocated and is alive here.
-            let ntfs_ref: &ntfs::Ntfs = unsafe { &*ntfs_ptr };
-            ntfs_ref
-                .file(&mut reader, record_number)
-                .map_err(|e| format!("file record {record_number}: {e}"))?
-        };
-        // Transmute 'n lifetime to 'static; safe because ntfs_ptr outlives the Box.
-        let file_box: Box<ntfs::NtfsFile<'static>> = unsafe { std::mem::transmute(Box::new(file)) };
-        let file_ptr = Box::into_raw(file_box);
-
-        // 4. Build the directory index.
-        let index = {
-            let file_ref: &ntfs::NtfsFile<'static> = unsafe { &*file_ptr };
-            file_ref
-                .directory_index(&mut reader)
-                .map_err(|e| format!("directory_index: {e}"))?
-        };
-        let index_box: Box<ntfs::NtfsIndex<'static, 'static, ntfs::indexes::NtfsFileNameIndex>> =
-            unsafe { std::mem::transmute(Box::new(index)) };
-        let index_ptr = Box::into_raw(index_box);
-
-        // 5. Create the entry iterator.
-        let entries = {
-            let index_ref: &ntfs::NtfsIndex<'static, 'static, ntfs::indexes::NtfsFileNameIndex> =
-                unsafe { &*index_ptr };
-            index_ref.entries()
-        };
-        let entries_box: Box<
-            ntfs::NtfsIndexEntries<'static, 'static, 'static, ntfs::indexes::NtfsFileNameIndex>,
-        > = unsafe { std::mem::transmute(Box::new(entries)) };
-        let entries_ptr = Box::into_raw(entries_box);
-
-        Ok(LazyDirState {
-            entries_ptr,
-            index_ptr,
-            file_ptr,
-            ntfs_ptr,
-            reader,
-        })
-    }
-
-    fn next_entry(
-        &mut self,
-    ) -> Option<Result<ntfs::NtfsIndexEntry<'_, ntfs::indexes::NtfsFileNameIndex>, ntfs::NtfsError>>
-    {
-        let entries = unsafe { &mut *self.entries_ptr };
-        entries.next(&mut self.reader)
-    }
-}
-
-/// Open a fresh `ReaderKind` from a `MountSource` without touching the
-/// existing mount handle's reader.
-fn open_reader_from_source(source: &MountSource) -> Result<ReaderKind, String> {
-    match source {
-        MountSource::Path(path) => {
-            let f = File::open(path).map_err(|e| format!("open '{}': {e}", path.display()))?;
-            Ok(ReaderKind::File(BufReader::new(f)))
-        }
-        MountSource::Callbacks {
-            read_fn,
-            context,
-            size,
-            ..
-        } => Ok(ReaderKind::Callback(BufReader::new(CallbackReader {
-            read_fn: *read_fn,
-            context: *context,
-            size: *size,
-            position: 0,
-        }))),
-        MountSource::FsCore { device } => {
-            let size = fs_core::BlockRead::size_bytes(device.as_ref());
-            Ok(ReaderKind::FsCore(BufReader::new(FsCoreReader {
-                inner: device.clone(),
-                size,
-                position: 0,
-            })))
-        }
-    }
-}
-
-/// Directory iterator. Yields `.` and `..` first (synthesized), then real
-/// entries lazily from the on-disk index via [`LazyDirState`].
+/// Directory iterator. Yields `.` and `..` first (synthesized), then the real
+/// entries, all materialised up front via the native read layer
+/// ([`read::read_dir_entries`]). The entries are owned by the heap-boxed
+/// iterator, so the pointer [`fs_ntfs_dir_next`] returns stays valid until
+/// [`fs_ntfs_dir_close`].
 pub struct FsNtfsDirIter {
-    /// Synthesized `.` and `..` entries; yielded before `lazy`.
-    dot: FsNtfsDirent,
-    dotdot: FsNtfsDirent,
-    /// Scratch buffer for the most recently yielded real entry. The C caller
-    /// may hold a pointer into this between calls to `fs_ntfs_dir_next`.
-    current: FsNtfsDirent,
-    /// Phase: 0 = dot pending, 1 = dotdot pending, 2 = lazy entries, 3 = done.
-    phase: u8,
-    /// Number of real index entries silently skipped (e.g. DOS-only names,
-    /// malformed entries). Surfaced via `fs_ntfs_dir_skipped`.
+    /// All dirents to yield in order: `.`, `..`, then the real entries.
+    entries: Vec<FsNtfsDirent>,
+    /// Index of the next entry to return.
+    pos: usize,
+    /// Number of index rows skipped during materialisation. The native reader
+    /// fails loudly on a corrupt directory rather than skipping rows, so this
+    /// is always 0 today; retained for ABI compatibility with
+    /// `fs_ntfs_dir_skipped`.
     skipped_count: u64,
-    /// Lazy index state; `None` only while `phase < 2`.
-    lazy: Option<Box<LazyDirState>>,
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Convert an NTFS timestamp (100 ns intervals since 1601-01-01 UTC) to a
-/// `(seconds, nanoseconds)` UNIX pair. Seconds are signed so pre-1970
-/// timestamps are representable as negative values. The nsec component is
-/// always in `[0, 1_000_000_000)`.
-fn ntfs_time_to_unix(ntfs_time: ntfs::NtfsTime) -> (i64, u32) {
-    // NTFS epoch is 1601-01-01 UTC; UNIX epoch is 1970-01-01 UTC.
-    // Difference = 11 644 473 600 seconds.
-    const EPOCH_DIFF: i64 = 11_644_473_600;
-    let ts = ntfs_time.nt_timestamp();
-    let secs = (ts / 10_000_000) as i64 - EPOCH_DIFF;
-    let nsec = ((ts % 10_000_000) * 100) as u32;
-    (secs, nsec)
+/// Convert a raw NTFS FILETIME (100-ns intervals since 1601-01-01 UTC, as the
+/// native [`read::Stat`] reports) to a `(seconds, nanoseconds)` UNIX pair.
+/// Seconds are signed so pre-1970 timestamps are representable as negative
+/// values; the nsec component is always in `[0, 1_000_000_000)`.
+fn nt_parts(nt: u64) -> (i64, u32) {
+    (read::nt_to_unix(nt), ((nt % 10_000_000) * 100) as u32)
 }
 
 /// Build a synthesized dirent (used for "." / "..").
@@ -751,172 +591,6 @@ fn make_dirent(file_record_number: u64, file_type: u8, name: &[u8]) -> FsNtfsDir
     let n = out.name_len as usize;
     out.name[..n].copy_from_slice(&name[..n]);
     out
-}
-
-/// Read the parent-directory record number from a file's
-/// `$FILE_NAME` attribute. Used to walk `..` path components.
-fn parent_record_number_of(file: &NtfsFile, reader: &mut ReaderKind) -> Result<u64, String> {
-    let mut attrs = file.attributes();
-    while let Some(item) = attrs.next(reader) {
-        let item = item.map_err(|e| format!("attr iter: {e}"))?;
-        let attribute = item.to_attribute().map_err(|e| format!("to_attr: {e}"))?;
-        if attribute.ty().ok() != Some(NtfsAttributeType::FileName) {
-            continue;
-        }
-        if let Ok(file_name) = attribute.structured_value::<_, NtfsFileName>(reader) {
-            let parent_ref = file_name.parent_directory_reference();
-            return Ok(parent_ref.file_record_number());
-        }
-    }
-    Err("no $FILE_NAME attribute to find parent via".to_string())
-}
-
-/// Navigate to a file by path from the root directory.
-fn navigate_to_path<'n>(
-    ntfs: &'n Ntfs,
-    reader: &mut ReaderKind,
-    path: &str,
-) -> Result<NtfsFile<'n>, String> {
-    let path = path.trim_start_matches('/');
-    if path.is_empty() {
-        return ntfs
-            .root_directory(reader)
-            .map_err(|e| format!("root directory: {e}"));
-    }
-
-    let mut current = ntfs
-        .root_directory(reader)
-        .map_err(|e| format!("root directory: {e}"))?;
-
-    for component in path.split('/') {
-        if component.is_empty() || component == "." {
-            continue;
-        }
-        if component == ".." {
-            // Walk to parent via $FILE_NAME.parent_directory_reference.
-            // At the root, ".." stays at root (standard POSIX behavior).
-            if current.file_record_number() == KnownNtfsFileRecordNumber::RootDirectory as u64 {
-                continue;
-            }
-            let parent_rn = parent_record_number_of(&current, reader)
-                .map_err(|e| format!("parent of record {}: {e}", current.file_record_number()))?;
-            current = ntfs
-                .file(reader, parent_rn)
-                .map_err(|e| format!("open parent record {parent_rn}: {e}"))?;
-            continue;
-        }
-
-        let index = current
-            .directory_index(reader)
-            .map_err(|e| format!("directory index for '{}': {e}", component))?;
-
-        let mut finder = index.finder();
-        let entry = NtfsFileNameIndex::find(&mut finder, ntfs, reader, component)
-            .ok_or_else(|| format!("not found: '{component}'"))?
-            .map_err(|e| format!("find '{component}': {e}"))?;
-
-        current = entry
-            .to_file(ntfs, reader)
-            .map_err(|e| format!("to_file '{component}': {e}"))?;
-    }
-
-    Ok(current)
-}
-
-/// Fill an FsNtfsAttr from an NtfsFile.
-fn fill_attr(
-    file: &NtfsFile,
-    reader: &mut ReaderKind,
-    attr: &mut FsNtfsAttr,
-) -> Result<(), String> {
-    attr.file_record_number = file.file_record_number();
-    attr.link_count = file.hard_link_count();
-
-    if file.is_directory() {
-        attr.file_type = 2; // FS_NTFS_FT_DIR
-        attr.mode = 0o40755;
-    } else {
-        attr.file_type = 1; // FS_NTFS_FT_REG_FILE
-        attr.mode = 0o100644;
-    }
-
-    // Read StandardInformation for timestamps and NTFS attributes
-    let mut attributes = file.attributes();
-    while let Some(item) = attributes.next(reader) {
-        let item = match item {
-            Ok(i) => i,
-            Err(_) => continue,
-        };
-        let attribute = match item.to_attribute() {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
-
-        match attribute.ty() {
-            Ok(NtfsAttributeType::StandardInformation) => {
-                if let Ok(std_info) =
-                    attribute.resident_structured_value::<NtfsStandardInformation>()
-                {
-                    (attr.crtime_sec, attr.crtime_nsec) =
-                        ntfs_time_to_unix(std_info.creation_time());
-                    (attr.mtime_sec, attr.mtime_nsec) =
-                        ntfs_time_to_unix(std_info.modification_time());
-                    (attr.atime_sec, attr.atime_nsec) = ntfs_time_to_unix(std_info.access_time());
-                    (attr.ctime_sec, attr.ctime_nsec) =
-                        ntfs_time_to_unix(std_info.mft_record_modification_time());
-                    attr.attributes = std_info.file_attributes().bits();
-                }
-            }
-            Ok(NtfsAttributeType::Data)
-                if attribute.name().map(|n| n.is_empty()).unwrap_or(true) =>
-            {
-                attr.size = attribute.value_length();
-            }
-            Ok(NtfsAttributeType::ReparsePoint) => {
-                // Read the 32-bit reparse tag and dispatch. The
-                // REPARSE_POINT flag on $FILE_NAME is an "SOME reparse
-                // kind" marker; only the tag tells us *which*. See
-                // docs/NEXT_PLAN.md §1.2 / docs/status.md §cross-check.
-                if attr.file_type != 2 {
-                    // Not a directory — default regular. The actual
-                    // type depends on the tag below.
-                    attr.file_type = 1;
-                    attr.mode = 0o100644;
-                }
-                // Read up to 4 bytes of the attribute value for the tag.
-                if let Ok(mut value) = attribute.value(reader) {
-                    let mut tag_buf = [0u8; 4];
-                    if value.read(reader, &mut tag_buf).is_ok() {
-                        let tag = u32::from_le_bytes(tag_buf);
-                        match tag {
-                            0xA000_000C /* SYMLINK */ => {
-                                attr.file_type = 7;
-                                attr.mode = 0o120777;
-                            }
-                            0xA000_0003 /* MOUNT_POINT */ => {
-                                attr.file_type = 8; // FS_NTFS_FT_JUNCTION
-                            }
-                            // WOF / LX_SYMLINK / APPEXECLINK / dedup etc. —
-                            // leave file_type at whatever it was
-                            // (directory or regular) so POSIX callers
-                            // can access the underlying data.
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            Ok(NtfsAttributeType::FileName) => {
-                // Historically we used the REPARSE_POINT flag on
-                // $FILE_NAME as a symlink signal. That's wrong — it
-                // marks any reparse type. The real dispatch happens
-                // in the ReparsePoint case above when the actual
-                // attribute is present.
-            }
-            _ => {}
-        }
-    }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -991,6 +665,7 @@ pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle
         ntfs,
         reader,
         source: Some(MountSource::Path(PathBuf::from(path))),
+        writable: true,
     });
     log::info!(target: "fs_ntfs", "mount path={path}");
     Box::into_raw(bridge)
@@ -1066,6 +741,7 @@ pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) ->
             context: cfg.context,
             size: cfg.size_bytes,
         }),
+        writable: cfg.write.is_some(),
     });
     Box::into_raw(bridge)
 }
@@ -1104,7 +780,7 @@ pub extern "C" fn fs_ntfs_mount_with_fs_core_device(
     let size = fs_core::BlockRead::size_bytes(&inner);
 
     let fs_core_reader = FsCoreReader {
-        inner,
+        inner: inner.clone(),
         size,
         position: 0,
     };
@@ -1126,10 +802,14 @@ pub extern "C" fn fs_ntfs_mount_with_fs_core_device(
     let bridge = Box::new(FsNtfsHandle {
         ntfs,
         reader,
-        // No MountSource — mutator API returns EINVAL for fs-core RO
-        // mounts. Callers that need RW must use
+        // Record the device so the native read path can build a
+        // `BlockIo`; `writable: false` is what makes this a read-only
+        // mount — the mutator API refuses before ever building a
+        // writable `BlockIo`, even though the device may be physically
+        // writable. RW callers must use
         // `fs_ntfs_mount_rw_with_fs_core_device` instead.
-        source: None,
+        source: Some(MountSource::FsCore { device: inner }),
+        writable: false,
     });
     log::info!(target: "fs_ntfs", "mount via fs_core handle (size={size})");
     Box::into_raw(bridge)
@@ -1217,6 +897,7 @@ pub extern "C" fn fs_ntfs_mount_rw_with_fs_core_device(
         ntfs,
         reader,
         source: Some(MountSource::FsCore { device }),
+        writable: true,
     });
     log::info!(target: "fs_ntfs", "mount rw via fs_core handle (size={size})");
     Box::into_raw(bridge)
@@ -1352,6 +1033,9 @@ impl BlockIoTrait for HandleIo {
 /// Returns `Err(message)` if the handle was mounted read-only via
 /// callbacks (`cfg.write` was NULL) or has no recorded source.
 fn handle_to_rw_io(handle: &FsNtfsHandle) -> Result<HandleIo, String> {
+    if !handle.writable {
+        return Err("handle mounted read-only".to_string());
+    }
     match &handle.source {
         Some(MountSource::Path(p)) => RwPathIo::open_rw(p).map(HandleIo::Path),
         Some(MountSource::Callbacks {
@@ -1378,6 +1062,41 @@ fn handle_to_rw_io(handle: &FsNtfsHandle) -> Result<HandleIo, String> {
                     "handle mounted read-only via fs_core device (is_writable=false)".to_string(),
                 );
             }
+            let size = fs_core::BlockRead::size_bytes(device);
+            Ok(HandleIo::FsCore(FsCoreBlockIo {
+                device: device.clone(),
+                size,
+            }))
+        }
+        None => Err("handle has no recorded mount source".to_string()),
+    }
+}
+
+/// Build a read-only `HandleIo` from a `FsNtfsHandle` for the native
+/// read path. Unlike [`handle_to_rw_io`] this does not consult
+/// `handle.writable` or the device's `is_writable` — it only ever calls
+/// `read_exact_at`/`size`, so it works for every mount including
+/// read-only ones. The returned `HandleIo` must not be written to.
+///
+/// Path mounts open the file read-only (so a physically read-only file
+/// or device can still be read); callback mounts carry whatever
+/// `write_fn` the source recorded (possibly `None`) since reads never
+/// touch it; fs-core mounts clone the shared device.
+fn handle_to_ro_io(handle: &FsNtfsHandle) -> Result<HandleIo, String> {
+    match &handle.source {
+        Some(MountSource::Path(p)) => RwPathIo::open_ro(p).map(HandleIo::Path),
+        Some(MountSource::Callbacks {
+            read_fn,
+            write_fn,
+            context,
+            size,
+        }) => Ok(HandleIo::Callback(CallbackBlockIo {
+            read_fn: *read_fn,
+            write_fn: *write_fn,
+            context: *context,
+            size: *size,
+        })),
+        Some(MountSource::FsCore { device }) => {
             let size = fs_core::BlockRead::size_bytes(device);
             Ok(HandleIo::FsCore(FsCoreBlockIo {
                 device: device.clone(),
@@ -1578,7 +1297,7 @@ pub extern "C" fn fs_ntfs_stat(
         return -1;
     }
 
-    let bridge = unsafe { &mut *fs };
+    let bridge = unsafe { &*fs };
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return -1,
@@ -1603,13 +1322,62 @@ pub extern "C" fn fs_ntfs_stat(
         attributes: 0,
     };
 
-    let file = match navigate_to_path(&bridge.ntfs, &mut bridge.reader, path_str) {
-        Ok(f) => f,
+    // Native read layer: resolve + stat over a read-only `BlockIo`.
+    let mut io = match handle_to_ro_io(bridge) {
+        Ok(io) => io,
+        Err(e) => return err_int(e),
+    };
+    let rec = match read::resolve_path(&mut io, path_str) {
+        Ok(r) => r,
+        Err(e) => return err_int(e),
+    };
+    let st = match read::read_stat(&mut io, rec) {
+        Ok(s) => s,
         Err(e) => return err_int(e),
     };
 
-    if let Err(e) = fill_attr(&file, &mut bridge.reader, out) {
-        return err_int(e);
+    let (crtime_sec, crtime_nsec) = nt_parts(st.created_nt);
+    let (mtime_sec, mtime_nsec) = nt_parts(st.modified_nt);
+    let (atime_sec, atime_nsec) = nt_parts(st.accessed_nt);
+    let (ctime_sec, ctime_nsec) = nt_parts(st.mft_modified_nt);
+
+    out.file_record_number = rec;
+    out.size = st.size;
+    out.atime_sec = atime_sec;
+    out.mtime_sec = mtime_sec;
+    out.ctime_sec = ctime_sec;
+    out.crtime_sec = crtime_sec;
+    out.atime_nsec = atime_nsec;
+    out.mtime_nsec = mtime_nsec;
+    out.ctime_nsec = ctime_nsec;
+    out.crtime_nsec = crtime_nsec;
+    out.link_count = st.link_count;
+    out.attributes = st.file_attributes;
+    // file_type / mode per the C ABI (`fs_ntfs_file_type_t`): 1=REG_FILE,
+    // 2=DIR; a symlink/junction reparse tag overrides below.
+    if st.is_dir {
+        out.mode = 0o040755;
+        out.file_type = 2; // FS_NTFS_FT_DIR
+    } else {
+        out.mode = 0o100644;
+        out.file_type = 1; // FS_NTFS_FT_REG_FILE
+    }
+
+    // Reparse tag (symlink / junction) overrides the file_type, matching the
+    // old `fill_attr`: only the tag tells us which kind. WOF / LX_SYMLINK /
+    // dedup tags leave file_type alone so POSIX callers can read the data.
+    if let Ok(rp) = read::read_attribute_value(&mut io, rec, AttrType::ReparsePoint, None) {
+        if rp.len() >= 4 {
+            let tag = u32::from_le_bytes([rp[0], rp[1], rp[2], rp[3]]);
+            match tag {
+                0xA000_000C => {
+                    out.file_type = 7; // FS_NTFS_FT_SYMLINK
+                    out.mode = 0o120777;
+                }
+                0xA000_0003 => out.file_type = 8, // FS_NTFS_FT_JUNCTION
+                _ => {}
+            }
+        }
     }
 
     0
@@ -1633,52 +1401,51 @@ pub extern "C" fn fs_ntfs_dir_open(
         return std::ptr::null_mut();
     }
 
-    let bridge = unsafe { &mut *fs };
+    let bridge = unsafe { &*fs };
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return std::ptr::null_mut(),
     };
 
-    let dir_file = match navigate_to_path(&bridge.ntfs, &mut bridge.reader, path_str) {
-        Ok(f) => f,
+    // Native read layer: resolve, then materialise the whole listing.
+    let mut io = match handle_to_ro_io(bridge) {
+        Ok(io) => io,
+        Err(e) => return err_ptr(e),
+    };
+    let current_record_number = match read::resolve_path(&mut io, path_str) {
+        Ok(r) => r,
         Err(e) => return err_ptr(e),
     };
 
-    let current_record_number = dir_file.file_record_number();
     // Synthesize "." and ".." at the head of the listing. NTFS indexes
-    // don't store them; POSIX readdir callers expect them.
-    let parent_record_number =
-        if current_record_number == KnownNtfsFileRecordNumber::RootDirectory as u64 {
-            current_record_number
-        } else {
-            match parent_record_number_of(&dir_file, &mut bridge.reader) {
-                Ok(p) => p,
-                Err(_) => current_record_number, // fall back; better to show self-ref than error out
-            }
-        };
-
-    drop(dir_file);
-
-    let source = match bridge.source.as_ref() {
-        Some(s) => s,
-        None => {
-            set_error("no mount source for lazy dir iteration");
-            return std::ptr::null_mut();
-        }
+    // don't store them; POSIX readdir callers expect them. The root's parent
+    // is itself.
+    let parent_record_number = if current_record_number == read::ROOT_RECORD_NUMBER {
+        current_record_number
+    } else {
+        // Fall back to self-ref rather than erroring out the whole listing.
+        read::read_parent_record(&mut io, current_record_number).unwrap_or(current_record_number)
     };
 
-    let lazy = match LazyDirState::new(source, current_record_number) {
-        Ok(s) => s,
+    let real = match read::read_dir_entries(&mut io, current_record_number) {
+        Ok(v) => v,
         Err(e) => return err_ptr(e),
     };
+
+    let mut entries = Vec::with_capacity(real.len() + 2);
+    entries.push(make_dirent(current_record_number, 2, b"."));
+    entries.push(make_dirent(parent_record_number, 2, b".."));
+    for e in real {
+        // FS_NTFS_FT_DIR (2) / FS_NTFS_FT_REG_FILE (1). make_dirent truncates
+        // names longer than the dirent buffer.
+        let file_type = if e.is_dir { 2 } else { 1 };
+        entries.push(make_dirent(e.record_number, file_type, e.name.as_bytes()));
+    }
 
     let iter = Box::new(FsNtfsDirIter {
-        dot: make_dirent(current_record_number, 2, b"."),
-        dotdot: make_dirent(parent_record_number, 2, b".."),
-        current: make_dirent(0, 0, b""),
-        phase: 0,
+        entries,
+        pos: 0,
         skipped_count: 0,
-        lazy: Some(Box::new(lazy)),
     });
     Box::into_raw(iter)
 }
@@ -1706,68 +1473,14 @@ pub extern "C" fn fs_ntfs_dir_next(iter: *mut FsNtfsDirIter) -> *const FsNtfsDir
     }
 
     let it = unsafe { &mut *iter };
-    loop {
-        match it.phase {
-            0 => {
-                it.phase = 1;
-                return &it.dot as *const FsNtfsDirent;
-            }
-            1 => {
-                it.phase = 2;
-                return &it.dotdot as *const FsNtfsDirent;
-            }
-            2 => {
-                let lazy = match it.lazy.as_mut() {
-                    Some(l) => l,
-                    None => {
-                        it.phase = 3;
-                        return std::ptr::null();
-                    }
-                };
-                match lazy.next_entry() {
-                    None => {
-                        it.phase = 3;
-                        return std::ptr::null();
-                    }
-                    Some(Err(_)) => {
-                        it.skipped_count = it.skipped_count.saturating_add(1);
-                        continue;
-                    }
-                    Some(Ok(entry)) => {
-                        let file_name = match entry.key() {
-                            Some(Ok(name)) => name,
-                            _ => {
-                                it.skipped_count = it.skipped_count.saturating_add(1);
-                                continue;
-                            }
-                        };
-                        // Skip DOS-only names to avoid duplicates.
-                        if file_name.namespace() == NtfsFileNamespace::Dos {
-                            continue;
-                        }
-                        let name_str = file_name.name().to_string_lossy();
-                        let name_bytes = name_str.as_bytes();
-                        let name_len =
-                            std::cmp::min(name_bytes.len(), FS_NTFS_DIRENT_NAME_BYTES - 1) as u16;
-                        let mut dirent = FsNtfsDirent {
-                            file_record_number: entry.file_reference().file_record_number(),
-                            file_type: if file_name.is_directory() { 2 } else { 1 },
-                            name_len,
-                            name: [0u8; FS_NTFS_DIRENT_NAME_BYTES],
-                        };
-                        dirent.name[..name_len as usize]
-                            .copy_from_slice(&name_bytes[..name_len as usize]);
-                        // Store dirent in the lazy state so the pointer remains
-                        // valid until the next call.  We use a field on the
-                        // iterator itself via a small scratch buffer.
-                        it.current = dirent;
-                        return &it.current as *const FsNtfsDirent;
-                    }
-                }
-            }
-            _ => return std::ptr::null(),
-        }
+    if it.pos >= it.entries.len() {
+        return std::ptr::null();
     }
+    // The entries Vec is owned by the heap-boxed iterator, so this pointer
+    // stays valid until `fs_ntfs_dir_close`.
+    let p = &it.entries[it.pos] as *const FsNtfsDirent;
+    it.pos += 1;
+    p
 }
 
 /// Free a directory iterator returned by [`fs_ntfs_dir_open`]. Passing NULL
@@ -1802,117 +1515,60 @@ pub extern "C" fn fs_ntfs_read_file(
         return -1;
     }
 
-    let bridge = unsafe { &mut *fs };
+    let bridge = unsafe { &*fs };
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => return -1,
     };
 
-    let file = match navigate_to_path(&bridge.ntfs, &mut bridge.reader, path_str) {
-        Ok(f) => f,
+    // Native read layer: build a read-only `BlockIo` from the mount source
+    // (works for every mount, including read-only ones). The native reader
+    // decompresses LZNT1 `$DATA` transparently and refuses encrypted ($EFS)
+    // attributes, so the only special case left is WOF.
+    let mut io = match handle_to_ro_io(bridge) {
+        Ok(io) => io,
         Err(e) => return err_i64(e),
     };
 
-    // Find the unnamed $DATA attribute
-    let data_item = match file.data(&mut bridge.reader, "") {
-        Some(Ok(item)) => item,
-        Some(Err(e)) => {
-            set_error(&format!("data attribute: {e}"));
-            return -1;
-        }
-        None => {
-            set_error("no data attribute");
-            return -1;
-        }
+    let rec = match read::resolve_path(&mut io, path_str) {
+        Ok(r) => r,
+        Err(e) => return err_i64(e),
     };
 
-    let data_attr = match data_item.to_attribute() {
-        Ok(a) => a,
-        Err(e) => {
-            set_error(&format!("to_attribute: {e}"));
+    // §3.8 WOF (Windows Overlay Filter): a WOF-compressed file's unnamed
+    // `$DATA` is empty + sparse; the real bytes live in a `WofCompressedData`
+    // ADS, and the file carries an `IO_REPARSE_TAG_WOF` (0x80000017)
+    // `$REPARSE_POINT`. A plain `$DATA` read would silently return zeros, so
+    // detect the tag and fail loudly until XPRESS/LZX lands
+    // (docs/future-features.md §3.8).
+    if let Ok(rp) = read::read_attribute_value(&mut io, rec, AttrType::ReparsePoint, None) {
+        if rp.len() >= 4 && u32::from_le_bytes([rp[0], rp[1], rp[2], rp[3]]) == 0x8000_0017 {
+            set_error(
+                "file is WOF-compressed (IO_REPARSE_TAG_WOF); decompression not yet supported",
+            );
             return -1;
         }
+    }
+
+    // Ranged native read of the unnamed `$DATA` — reads only the clusters
+    // overlapping the window, so a small read of a huge file doesn't
+    // materialise the whole stream. Sparse holes read as zeros.
+    let data = match read::read_attribute_range(
+        &mut io,
+        rec,
+        AttrType::Data,
+        None,
+        offset,
+        length as usize,
+    ) {
+        Ok(d) => d,
+        Err(e) => return err_i64(e),
     };
 
-    // §3.2 NTFS LZNT1 compression: upstream `ntfs` 0.4 does not
-    // decompress LZNT1, so reading the bytes of a compressed `$DATA`
-    // would silently return the raw compressed stream — garbage to
-    // the caller. Fail loudly until we ship a real decompressor (see
-    // docs/future-features.md §3.2).
-    let attr_flags = data_attr.flags();
-    if attr_flags.contains(ntfs::NtfsAttributeFlags::COMPRESSED) {
-        set_error("file is compressed (LZNT1); decompression not yet supported");
-        return -1;
-    }
-    if attr_flags.contains(ntfs::NtfsAttributeFlags::ENCRYPTED) {
-        set_error("file is encrypted ($EFS); decryption not supported");
-        return -1;
-    }
-
-    // §3.8 WOF (Windows Overlay Filter): a WOF-compressed file's
-    // unnamed `$DATA` is empty + sparse and the real bytes live in a
-    // `WofCompressedData` ADS, with the file carrying an
-    // `IO_REPARSE_TAG_WOF` (0x80000017) `$REPARSE_POINT`. Reading the
-    // empty unnamed `$DATA` today would return 0 bytes — also silent
-    // data loss. Detect via the reparse tag and fail loudly until we
-    // ship XPRESS/LZX decompression (see docs/future-features.md §3.8).
-    for attr_res in file.attributes_raw() {
-        let a = match attr_res {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
-        if a.ty().ok() != Some(NtfsAttributeType::ReparsePoint) {
-            continue;
-        }
-        if let Ok(mut v) = a.value(&mut bridge.reader) {
-            let mut tag_buf = [0u8; 4];
-            if v.read(&mut bridge.reader, &mut tag_buf).is_ok() {
-                let tag = u32::from_le_bytes(tag_buf);
-                if tag == 0x8000_0017 {
-                    set_error(
-                        "file is WOF-compressed (IO_REPARSE_TAG_WOF); decompression not yet supported",
-                    );
-                    return -1;
-                }
-            }
-        }
-        break;
-    }
-
-    let mut data_value = match data_attr.value(&mut bridge.reader) {
-        Ok(v) => v,
-        Err(e) => {
-            set_error(&format!("attribute value: {e}"));
-            return -1;
-        }
-    };
-
-    // Seek to offset via upstream's NtfsReadSeek — O(data-runs), not
-    // O(offset). The previous read-and-discard loop was quadratic on
-    // large pread offsets; this replacement uses the real seek path.
-    if offset > 0 {
-        if let Err(e) = data_value.seek(&mut bridge.reader, SeekFrom::Start(offset)) {
-            set_error(&format!("seek: {e}"));
-            return -1;
-        }
-    }
-
-    // Read data
+    let n = data.len().min(length as usize);
     let out_buf = unsafe { slice::from_raw_parts_mut(buf as *mut u8, length as usize) };
-    let mut total_read = 0usize;
-
-    while total_read < length as usize {
-        match data_value.read(&mut bridge.reader, &mut out_buf[total_read..]) {
-            Ok(0) => break,
-            Ok(n) => total_read += n,
-            Err(e) => {
-                set_error(&format!("read: {e}"));
-                return -1;
-            }
-        }
-    }
-
-    total_read as i64
+    out_buf[..n].copy_from_slice(&data[..n]);
+    n as i64
 }
 
 // ---------------------------------------------------------------------------
@@ -1935,7 +1591,7 @@ pub extern "C" fn fs_ntfs_readlink(
         set_error("fs_ntfs_readlink: null argument");
         return -1;
     }
-    let bridge = unsafe { &mut *fs };
+    let bridge = unsafe { &*fs };
     let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(_) => {
@@ -1943,52 +1599,18 @@ pub extern "C" fn fs_ntfs_readlink(
             return -1;
         }
     };
-    let file = match navigate_to_path(&bridge.ntfs, &mut bridge.reader, path_str) {
-        Ok(f) => f,
+    // Native read layer: resolve + fetch the whole `$REPARSE_POINT` value.
+    let mut io = match handle_to_ro_io(bridge) {
+        Ok(io) => io,
         Err(e) => return err_int(e),
     };
-    // Find the $REPARSE_POINT attribute.
-    let mut reparse_bytes: Option<Vec<u8>> = None;
-    let mut attrs = file.attributes();
-    while let Some(item) = attrs.next(&mut bridge.reader) {
-        let item = match item {
-            Ok(i) => i,
-            Err(_) => continue,
-        };
-        let attribute = match item.to_attribute() {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
-        if attribute.ty().ok() != Some(NtfsAttributeType::ReparsePoint) {
-            continue;
-        }
-        let mut value = match attribute.value(&mut bridge.reader) {
-            Ok(v) => v,
-            Err(e) => {
-                set_error(&format!("$REPARSE_POINT value: {e}"));
-                return -1;
-            }
-        };
-        let total = attribute.value_length() as usize;
-        let mut out = vec![0u8; total];
-        let mut filled = 0;
-        while filled < total {
-            match value.read(&mut bridge.reader, &mut out[filled..]) {
-                Ok(0) => break,
-                Ok(n) => filled += n,
-                Err(e) => {
-                    set_error(&format!("$REPARSE_POINT read: {e}"));
-                    return -1;
-                }
-            }
-        }
-        out.truncate(filled);
-        reparse_bytes = Some(out);
-        break;
-    }
-    let reparse = match reparse_bytes {
-        Some(b) => b,
-        None => {
+    let rec = match read::resolve_path(&mut io, path_str) {
+        Ok(r) => r,
+        Err(e) => return err_int(e),
+    };
+    let reparse = match read::read_attribute_value(&mut io, rec, AttrType::ReparsePoint, None) {
+        Ok(b) => b,
+        Err(_) => {
             set_error("not a reparse point");
             return -1;
         }
@@ -4107,17 +3729,15 @@ mod pure_fn_tests {
 
 #[cfg(test)]
 mod timestamp_tests {
-    use super::ntfs_time_to_unix;
-
-    fn make_ts(hundred_ns: u64) -> ntfs::NtfsTime {
-        ntfs::NtfsTime::from(hundred_ns)
-    }
+    //! Exercise [`nt_parts`], the native-read-path FILETIME→UNIX converter.
+    //! Inputs are raw NTFS FILETIMEs (100-ns intervals since 1601-01-01 UTC),
+    //! exactly what [`read::Stat`] reports.
+    use super::nt_parts;
 
     #[test]
     fn unix_epoch_itself() {
         // 1970-01-01T00:00:00Z = 11644473600 seconds after 1601-01-01
-        let ts = make_ts(11_644_473_600u64 * 10_000_000);
-        let (sec, nsec) = ntfs_time_to_unix(ts);
+        let (sec, nsec) = nt_parts(11_644_473_600u64 * 10_000_000);
         assert_eq!(sec, 0);
         assert_eq!(nsec, 0);
     }
@@ -4126,7 +3746,7 @@ mod timestamp_tests {
     fn positive_timestamp_with_subseconds() {
         // 1 second + 250 ms after UNIX epoch
         let hundred_ns = (11_644_473_600u64 + 1) * 10_000_000 + 2_500_000; // +250ms
-        let (sec, nsec) = ntfs_time_to_unix(make_ts(hundred_ns));
+        let (sec, nsec) = nt_parts(hundred_ns);
         assert_eq!(sec, 1);
         assert_eq!(nsec, 250_000_000);
     }
@@ -4135,7 +3755,7 @@ mod timestamp_tests {
     fn pre_epoch_timestamp() {
         // 1 second before UNIX epoch → sec = -1, nsec = 0
         let hundred_ns = (11_644_473_600u64 - 1) * 10_000_000;
-        let (sec, nsec) = ntfs_time_to_unix(make_ts(hundred_ns));
+        let (sec, nsec) = nt_parts(hundred_ns);
         assert_eq!(sec, -1);
         assert_eq!(nsec, 0);
     }
@@ -4144,7 +3764,7 @@ mod timestamp_tests {
     fn nsec_max_value() {
         // 999_999_900 ns = 9_999_999 × 100 ns intervals (just under 1 second)
         let hundred_ns = 11_644_473_600u64 * 10_000_000 + 9_999_999;
-        let (sec, nsec) = ntfs_time_to_unix(make_ts(hundred_ns));
+        let (sec, nsec) = nt_parts(hundred_ns);
         assert_eq!(sec, 0);
         assert_eq!(nsec, 999_999_900);
     }
