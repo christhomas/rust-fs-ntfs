@@ -27,13 +27,13 @@
 //! are Microsoft's own output, captured via `fsutil file queryextents`
 //! + raw volume read on a clean format.com-formatted VHDX.
 
-use std::fs::File;
-use std::io::BufReader;
 use std::path::Path;
 
-use ntfs::{KnownNtfsFileRecordNumber, Ntfs, NtfsAttributeType, NtfsReadSeek};
+use crate::attr_io::AttrType;
+use crate::block_io::{BlockIo, PathIo};
 
-use crate::block_io::{BlockIo, IoReadSeek};
+/// MFT record number of `$UpCase` (fixed by the NTFS spec).
+const UPCASE_RECORD_NUMBER: u64 = 10;
 
 const UPCASE_LEN: usize = 65536;
 const UPCASE_BYTES: usize = UPCASE_LEN * 2; // 131072
@@ -57,74 +57,34 @@ pub struct UpcaseTable {
 }
 
 impl UpcaseTable {
-    /// Load `$UpCase` from the volume. Reads through upstream's
-    /// non-resident `$DATA` walker so we don't reinvent the run-list
-    /// traversal.
+    /// Load `$UpCase` from the volume (record 10's unnamed `$DATA`) using the
+    /// native read layer — no upstream `ntfs` crate.
     pub fn load(image: &Path) -> Result<Self, String> {
-        let f = File::open(image).map_err(|e| format!("open image: {e}"))?;
-        let mut reader = BufReader::new(f);
-        Self::load_from_reader(&mut reader)
+        let mut io = PathIo::open_ro(image)?;
+        Self::load_io(&mut io)
     }
 
-    /// Load `$UpCase` over a [`BlockIo`]. The mutator stack uses this
-    /// when building a sorted index entry over a callback-mounted volume.
+    /// Load `$UpCase` over a [`BlockIo`]. The mutator stack uses this when
+    /// building a sorted index entry over a callback-mounted volume.
+    ///
+    /// Reads `$UpCase`'s unnamed `$DATA` by its fixed record number, so this
+    /// needs no name collation (and thus no upcase table) — safe even though
+    /// collation itself depends on this table.
     pub fn load_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<Self, String> {
-        let mut reader = IoReadSeek::new(io);
-        Self::load_from_reader(&mut reader)
-    }
-
-    fn load_from_reader<R: std::io::Read + std::io::Seek>(reader: &mut R) -> Result<Self, String> {
-        let ntfs = Ntfs::new(reader).map_err(|e| format!("parse ntfs: {e}"))?;
-        let upcase_file = ntfs
-            .file(reader, KnownNtfsFileRecordNumber::UpCase as u64)
-            .map_err(|e| format!("open $UpCase: {e}"))?;
-
-        let mut attrs = upcase_file.attributes();
-        while let Some(item) = attrs.next(reader) {
-            let item = item.map_err(|e| format!("$UpCase attr iter: {e}"))?;
-            let attribute = item
-                .to_attribute()
-                .map_err(|e| format!("$UpCase to_attr: {e}"))?;
-            if attribute.ty().ok() != Some(NtfsAttributeType::Data) {
-                continue;
-            }
-            if !attribute.name().map(|n| n.is_empty()).unwrap_or(true) {
-                continue;
-            }
-            let mut value = attribute
-                .value(reader)
-                .map_err(|e| format!("$UpCase value: {e}"))?;
-            let total = attribute.value_length() as usize;
-            if total < UPCASE_LEN * 2 {
-                return Err(format!(
-                    "$UpCase value length {total} < expected {}",
-                    UPCASE_LEN * 2
-                ));
-            }
-            let mut bytes = vec![0u8; UPCASE_LEN * 2];
-            let mut filled = 0;
-            while filled < bytes.len() {
-                let n = value
-                    .read(reader, &mut bytes[filled..])
-                    .map_err(|e| format!("$UpCase read: {e}"))?;
-                if n == 0 {
-                    break;
-                }
-                filled += n;
-            }
-            if filled < bytes.len() {
-                return Err(format!(
-                    "$UpCase short read: got {filled}, expected {}",
-                    bytes.len()
-                ));
-            }
-            let mut table = Vec::with_capacity(UPCASE_LEN);
-            for chunk in bytes.chunks_exact(2) {
-                table.push(u16::from_le_bytes([chunk[0], chunk[1]]));
-            }
-            return Ok(Self { table });
+        let bytes =
+            crate::read::read_attribute_value(io, UPCASE_RECORD_NUMBER, AttrType::Data, None)
+                .map_err(|e| format!("read $UpCase: {e}"))?;
+        if bytes.len() < UPCASE_BYTES {
+            return Err(format!(
+                "$UpCase value length {} < expected {UPCASE_BYTES}",
+                bytes.len()
+            ));
         }
-        Err("$UpCase has no unnamed $DATA".to_string())
+        let table = bytes[..UPCASE_BYTES]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        Ok(Self { table })
     }
 
     /// Upcase a single UTF-16 code unit. Non-BMP units (surrogates)
