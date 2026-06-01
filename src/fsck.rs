@@ -40,21 +40,21 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use ntfs::structured_values::NtfsVolumeFlags;
-use ntfs::{KnownNtfsFileRecordNumber, Ntfs, NtfsAttributeType};
-
+use crate::attr_io::AttrType;
 use crate::block_io::BlockIo;
+
+/// `$Volume` / `$LogFile` MFT record numbers (fixed by the NTFS spec).
+const VOLUME_RECORD_NUMBER: u64 = 3;
+const LOGFILE_RECORD_NUMBER: u64 = 2;
 
 /// Offset of the 2-byte `flags` field within the `$VOLUME_INFORMATION` structure.
 /// Layout (MS-FSCC / Windows Internals 7th ed.): reserved(8) + major(1) + minor(1) + flags(2).
 const VOLUME_FLAGS_OFFSET: u64 = 10;
 
-/// Offset of the `value_offset` u16 field inside an NTFS resident attribute
-/// header (per Windows Internals 7th ed. ch. "NTFS On-Disk Structure").
-/// Layout: type(4) + length(4) + non_resident(1) + name_length(1) +
-/// name_offset(2) + flags(2) + attribute_id(2) + value_length(4) +
-/// value_offset(2) + resident_flags(1) + reserved(1).
-const RESIDENT_ATTR_VALUE_OFFSET_FIELD: u64 = 0x14;
+/// `$VOLUME_INFORMATION.flags` bits we act on (MS-FSCC). Replaces the upstream
+/// `NtfsVolumeFlags` enum so fsck doesn't depend on the `ntfs` crate.
+const VOLUME_IS_DIRTY: u16 = 0x0001;
+const VOLUME_UPGRADE_ON_MOUNT: u16 = 0x0004;
 
 /// NTFS format-level "empty log" sentinel byte. An all-`0xFF` `$LogFile`
 /// is the documented "no transactions pending" signal per Windows
@@ -132,22 +132,24 @@ impl BlockIo for PathIo {
     }
 }
 
-/// Adapter that lets an `FsckIo` be used where `Read + Seek` is required
-/// (specifically: upstream `ntfs::Ntfs::new` and `ntfs::Ntfs::file`).
-///
-/// Kept internal to this module because it only implements the subset of
-/// `Read + Seek` that the NTFS parse path exercises.
+/// Adapter that lets an `FsckIo` be used where `Read + Seek` is required by
+/// the upstream `ntfs` crate. Now **test-only**: production fsck reads/writes
+/// the `$Volume`/`$LogFile` offsets via the native read layer, so this exists
+/// solely for the oracle cross-check tests that still parse via `ntfs::Ntfs`.
+#[cfg(test)]
 struct IoReader<'a, T: FsckIo> {
     io: &'a mut T,
     position: u64,
 }
 
+#[cfg(test)]
 impl<'a, T: FsckIo> IoReader<'a, T> {
     fn new(io: &'a mut T) -> Self {
         Self { io, position: 0 }
     }
 }
 
+#[cfg(test)]
 impl<T: FsckIo> Read for IoReader<'_, T> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let size = self.io.size();
@@ -166,6 +168,7 @@ impl<T: FsckIo> Read for IoReader<'_, T> {
     }
 }
 
+#[cfg(test)]
 impl<T: FsckIo> Seek for IoReader<'_, T> {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
         let new_pos = match pos {
@@ -293,17 +296,16 @@ pub struct FsckReport {
 /// `is_dirty` over an arbitrary `FsckIo`.
 pub fn is_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
     let (_, current) = locate_volume_flags_io(io)?;
-    Ok(NtfsVolumeFlags::from_bits_truncate(current).contains(NtfsVolumeFlags::IS_DIRTY))
+    Ok(current & VOLUME_IS_DIRTY != 0)
 }
 
 /// `clear_dirty` over an arbitrary `FsckIo`.
 pub fn clear_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
     let (flag_disk_offset, current_flags) = locate_volume_flags_io(io)?;
-    let flags = NtfsVolumeFlags::from_bits_truncate(current_flags);
-    if !flags.contains(NtfsVolumeFlags::IS_DIRTY) {
+    if current_flags & VOLUME_IS_DIRTY == 0 {
         return Ok(false);
     }
-    let new_flags = current_flags & !NtfsVolumeFlags::IS_DIRTY.bits();
+    let new_flags = current_flags & !VOLUME_IS_DIRTY;
     io.write_all_at(flag_disk_offset, &new_flags.to_le_bytes())
         .map_err(|e| format!("write volume flags: {e}"))?;
     io.sync().map_err(|e| format!("fsync: {e}"))?;
@@ -313,11 +315,10 @@ pub fn clear_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
 /// `set_dirty` over an arbitrary `FsckIo`.
 pub fn set_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
     let (flag_disk_offset, current_flags) = locate_volume_flags_io(io)?;
-    let flags = NtfsVolumeFlags::from_bits_truncate(current_flags);
-    if flags.contains(NtfsVolumeFlags::IS_DIRTY) {
+    if current_flags & VOLUME_IS_DIRTY != 0 {
         return Ok(false);
     }
-    let new_flags = current_flags | NtfsVolumeFlags::IS_DIRTY.bits();
+    let new_flags = current_flags | VOLUME_IS_DIRTY;
     io.write_all_at(flag_disk_offset, &new_flags.to_le_bytes())
         .map_err(|e| format!("write volume flags: {e}"))?;
     io.sync().map_err(|e| format!("fsync: {e}"))?;
@@ -359,14 +360,12 @@ pub fn upgrade_volume_version_io<T: FsckIo>(io: &mut T) -> Result<bool, String> 
     let (major, minor) = (vf[0], vf[1]);
     let current_flags = u16::from_le_bytes([vf[2], vf[3]]);
 
-    let flags = NtfsVolumeFlags::from_bits_truncate(current_flags);
-    let needs_upgrade =
-        major == 1 && minor == 2 && flags.contains(NtfsVolumeFlags::UPGRADE_ON_MOUNT);
+    let needs_upgrade = major == 1 && minor == 2 && current_flags & VOLUME_UPGRADE_ON_MOUNT != 0;
     if !needs_upgrade {
         return Ok(false);
     }
 
-    let new_flags = current_flags & !NtfsVolumeFlags::UPGRADE_ON_MOUNT.bits();
+    let new_flags = current_flags & !VOLUME_UPGRADE_ON_MOUNT;
     let mut new_bytes = [0u8; 4];
     new_bytes[0] = 3; // major
     new_bytes[1] = 1; // minor
@@ -445,45 +444,15 @@ pub fn fsck_io<'cb, T: FsckIo>(
 /// and return (on-disk byte offset of the 2-byte flags field, current
 /// flags value).
 fn locate_volume_flags_io<T: FsckIo>(io: &mut T) -> Result<(u64, u16), String> {
-    // Phase 1: parse NTFS to find the attribute header position.
-    let attr_pos = {
-        let mut reader = IoReader::new(io);
-        let ntfs = Ntfs::new(&mut reader).map_err(|e| format!("parse ntfs: {e}"))?;
-        let volume_file = ntfs
-            .file(&mut reader, KnownNtfsFileRecordNumber::Volume as u64)
-            .map_err(|e| format!("open $Volume: {e}"))?;
-
-        let mut attrs = volume_file.attributes();
-        let mut found = None;
-        while let Some(item) = attrs.next(&mut reader) {
-            let item = item.map_err(|e| format!("attr iter: {e}"))?;
-            let attribute = item.to_attribute().map_err(|e| format!("to_attr: {e}"))?;
-            if attribute.ty().ok() != Some(NtfsAttributeType::VolumeInformation) {
-                continue;
-            }
-            // NOTE: upstream's `NtfsResidentAttributeValue::data_position()`
-            // returns the *attribute header* position, not the *data*
-            // position — the name is misleading. To find the actual disk
-            // offset of the resident data, read the attribute's
-            // `value_offset` field (u16 LE at header +0x14) and add it to
-            // the attribute start.
-            let pos = attribute
-                .position()
-                .value()
-                .ok_or_else(|| "$VOLUME_INFORMATION attribute has no position".to_string())?
-                .get();
-            found = Some(pos);
-            break;
-        }
-        found.ok_or_else(|| "$VOLUME_INFORMATION attribute not found on $Volume".to_string())?
-    };
-
-    // Phase 2: read value_offset + current flags directly through the IO.
-    let value_offset = read_u16_le_io(io, attr_pos + RESIDENT_ATTR_VALUE_OFFSET_FIELD)
-        .map_err(|e| format!("read value_offset: {e}"))?;
-    let data_start = attr_pos + value_offset as u64;
-    let flag_offset = data_start + VOLUME_FLAGS_OFFSET;
-
+    // Native: on-disk offset of `$VOLUME_INFORMATION`'s resident value on
+    // `$Volume`, plus the fixed flags-field offset within it.
+    let value_start = crate::read::resident_value_disk_offset(
+        io,
+        VOLUME_RECORD_NUMBER,
+        AttrType::VolumeInformation,
+        None,
+    )?;
+    let flag_offset = value_start + VOLUME_FLAGS_OFFSET;
     let current = read_u16_le_io(io, flag_offset).map_err(|e| format!("read volume flags: {e}"))?;
     Ok((flag_offset, current))
 }
@@ -491,39 +460,19 @@ fn locate_volume_flags_io<T: FsckIo>(io: &mut T) -> Result<(u64, u16), String> {
 /// Locate `$LogFile`'s `$DATA` on disk. Returns (on-disk byte offset of
 /// the first data byte, total byte length to overwrite).
 fn locate_logfile_data_io<T: FsckIo>(io: &mut T) -> Result<(u64, u64), String> {
-    let mut reader = IoReader::new(io);
-    let ntfs = Ntfs::new(&mut reader).map_err(|e| format!("parse ntfs: {e}"))?;
-    let logfile = ntfs
-        .file(&mut reader, KnownNtfsFileRecordNumber::LogFile as u64)
-        .map_err(|e| format!("open $LogFile: {e}"))?;
-
-    let mut attrs = logfile.attributes();
-    while let Some(item) = attrs.next(&mut reader) {
-        let item = item.map_err(|e| format!("attr iter: {e}"))?;
-        let attribute = item.to_attribute().map_err(|e| format!("to_attr: {e}"))?;
-        if attribute.ty().ok() != Some(NtfsAttributeType::Data) {
-            continue;
-        }
-        if !attribute.name().map(|n| n.is_empty()).unwrap_or(true) {
-            // Skip named streams; we want only the unnamed $DATA.
-            continue;
-        }
-        // $LogFile is large (typically 2 MiB+) and therefore always
-        // non-resident.
-        let value = attribute
-            .value(&mut reader)
-            .map_err(|e| format!("attr value: {e}"))?;
-        let data_pos = value
-            .data_position()
-            .value()
-            .ok_or_else(|| "$LogFile $DATA has no first-run position".to_string())?;
-        let length = attribute.value_length();
-        if length == 0 {
-            return Err("$LogFile $DATA has zero length".to_string());
-        }
-        return Ok((data_pos.get(), length));
+    // Native: `$LogFile`'s unnamed `$DATA` is non-resident and laid out
+    // contiguously, so its first run's on-disk offset + the logical length
+    // give the region to overwrite.
+    let (offset, length) = crate::read::nonresident_first_run_disk_offset(
+        io,
+        LOGFILE_RECORD_NUMBER,
+        AttrType::Data,
+        None,
+    )?;
+    if length == 0 {
+        return Err("$LogFile $DATA has zero length".to_string());
     }
-    Err("unnamed $DATA attribute not found on $LogFile".to_string())
+    Ok((offset, length))
 }
 
 fn read_u16_le_io<T: FsckIo>(io: &mut T, offset: u64) -> Result<u16, String> {
@@ -537,6 +486,10 @@ mod tests {
     use super::*;
     use crate::block_io::BlockIo;
     use crate::mkfs::format_filesystem;
+    // Upstream `ntfs` is used only here, as the oracle the native fsck reads
+    // are cross-checked against.
+    use ntfs::structured_values::NtfsVolumeFlags;
+    use ntfs::Ntfs;
 
     /// Vec-backed dev implementing `BlockIo` (so `mkfs` can format into it);
     /// the blanket impl in this module makes it an `FsckIo` too, so the

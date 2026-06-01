@@ -694,6 +694,74 @@ pub fn read_volume_info<T: BlockIo + ?Sized>(io: &mut T) -> Result<VolumeInfo, S
     })
 }
 
+/// On-disk byte offset of a *resident* attribute's value (its first data
+/// byte). For callers that patch a fixed field in place — e.g. fsck writing
+/// the `$VOLUME_INFORMATION` dirty flag — add the field's offset within the
+/// value to the result. Errors if the attribute is absent or non-resident.
+///
+/// Safe to write directly: a resident value sits inside the record body, away
+/// from the USA fixup bytes NTFS stores at each sector's tail.
+pub fn resident_value_disk_offset<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    attr_type: AttrType,
+    name: Option<&str>,
+) -> Result<u64, String> {
+    let (params, _record, loc) =
+        locate_attribute(io, record_number, attr_type, name)?.ok_or_else(|| {
+            format!("resident_value_disk_offset: {attr_type:?} not found in record {record_number}")
+        })?;
+    if !loc.is_resident {
+        return Err(format!(
+            "resident_value_disk_offset: {attr_type:?} in record {record_number} is non-resident"
+        ));
+    }
+    let value_offset = loc
+        .resident_value_offset
+        .ok_or("resident attribute has no value offset")? as u64;
+    Ok(crate::mft_io::mft_record_offset(&params, record_number)
+        + loc.attr_offset as u64
+        + value_offset)
+}
+
+/// On-disk byte offset and logical length of a *non-resident* attribute's
+/// first data run — e.g. `$LogFile`'s `$DATA`, which fsck overwrites with
+/// `0xFF`. Assumes the attribute starts at VCN 0 with an allocated
+/// (non-sparse) first run, which holds for `$LogFile` (laid out contiguously
+/// by mkfs / `format.com`). Errors if the attribute is absent, resident, or
+/// its first run is a sparse hole.
+pub fn nonresident_first_run_disk_offset<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    attr_type: AttrType,
+    name: Option<&str>,
+) -> Result<(u64, u64), String> {
+    let (params, record, loc) =
+        locate_attribute(io, record_number, attr_type, name)?.ok_or_else(|| {
+            format!(
+                "nonresident_first_run_disk_offset: {attr_type:?} not found in record {record_number}"
+            )
+        })?;
+    if loc.is_resident {
+        return Err(format!(
+            "nonresident_first_run_disk_offset: {attr_type:?} in record {record_number} is resident"
+        ));
+    }
+    let mpo = loc
+        .non_resident_mapping_pairs_offset
+        .ok_or("non-resident attribute has no mapping-pairs offset")? as usize;
+    let runs =
+        data_runs::decode_runs(&record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length])?;
+    let first = runs.first().ok_or("attribute has no data runs")?;
+    let lcn = first
+        .lcn
+        .ok_or("non-resident attribute's first data run is a sparse hole")?;
+    let length = loc
+        .non_resident_value_length
+        .ok_or("non-resident attribute has no data length")?;
+    Ok((lcn * params.cluster_size, length))
+}
+
 /// One entry in a directory listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
