@@ -2784,7 +2784,16 @@ pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
             return Err(e);
         }
     };
-    let mapping_pairs = data_runs::encode_runs(&runs)?;
+    // encode_runs can fail at runtime (length > i63, LCN delta overflow,
+    // VCN overflow); roll back the cluster allocations like every other
+    // error path here, so a failure never leaks $Bitmap clusters.
+    let mapping_pairs = match data_runs::encode_runs(&runs) {
+        Ok(mp) => mp,
+        Err(e) => {
+            free_all(io, &allocated);
+            return Err(e);
+        }
+    };
 
     // Sparse attributes carry two distinct size fields: `allocated_size`
     // (0x28) is the FULL VCN-span (holes included); `total_allocated`
