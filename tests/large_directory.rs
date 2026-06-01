@@ -258,7 +258,10 @@ fn root_dir_fills_gracefully_at_resident_ceiling() {
     );
     // Spot-check first / middle / last created entries remain findable in the
     // root after the ceiling rejection.
-    assert!(found_in_root(&img, "r_0000.txt"), "first root entry findable");
+    assert!(
+        found_in_root(&img, "r_0000.txt"),
+        "first root entry findable"
+    );
     let mid = created / 2;
     assert!(
         found_in_root(&img, &format!("r_{mid:04}.txt")),
