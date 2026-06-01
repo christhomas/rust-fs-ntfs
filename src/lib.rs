@@ -38,6 +38,7 @@ pub mod attr_io;
 pub mod attr_resize;
 pub mod bitmap;
 pub mod block_io;
+pub mod compression;
 pub mod data_runs;
 pub mod ea_io;
 pub mod facade;
