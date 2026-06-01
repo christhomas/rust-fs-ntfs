@@ -31,7 +31,7 @@ jobs:
         # lints on unchanged code).
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.94.1"
+          toolchain: "1.95.0"
           components: rustfmt, clippy
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -52,8 +52,8 @@ jobs:
       # Install on the runner (via taiki-e/install-action's prebuilt
       # binary) instead of EmbarkStudios/cargo-deny-action. The Embark
       # action runs in an Alpine docker image with rust 1.85-musl baked
-      # in, which fights rust-toolchain.toml's `1.94.1` pin — cargo
-      # inside the container tries to install `1.94.1-musl` and dies.
+      # in, which fights rust-toolchain.toml's `1.95.0` pin — cargo
+      # inside the container tries to install `1.95.0-musl` and dies.
       # Running on the runner reuses the toolchain installed above.
       - name: Install cargo-deny
         if: matrix.os == 'ubuntu-latest'
@@ -164,7 +164,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.94.1"
+          toolchain: "1.95.0"
       - name: Install vhd_tool from rust-img-vhd
         # Builds the in-house VHD writer (~30 s with no cache). Pinned
         # to v0.2.0 (7cddc43) so a future push to main cannot silently

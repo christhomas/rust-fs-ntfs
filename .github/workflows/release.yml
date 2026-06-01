@@ -62,7 +62,7 @@ jobs:
         with:
           # Per-target toolchain override (gnullvm for Win-ARM64); else
           # pin to rust-toolchain.toml's channel for reproducibility.
-          toolchain: ${{ matrix.toolchain || '1.94.1' }}
+          toolchain: ${{ matrix.toolchain || '1.95.0' }}
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry + target

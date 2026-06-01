@@ -7,6 +7,6 @@
 # `cargo test --release` + `cargo clippy --all-targets` + `cargo fmt --check`
 # pass, then update CI's `with: toolchain:` to match.
 [toolchain]
-channel = "1.94.1"
+channel = "1.95.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
