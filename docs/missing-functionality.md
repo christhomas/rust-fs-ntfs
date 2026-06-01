@@ -10,6 +10,23 @@ history.
 
 ---
 
+## Status (2026-06-01, verified against current code)
+
+**Resolved (implemented + tested):**
+- **B1** `unlink` decrements `hard_link_count` — `src/write.rs` `unlink_io` (4279e8a).
+- **B2** `rename` rejects an existing destination — `src/write.rs` (4279e8a).
+- **B3** resident-ceiling rejection — was a *test* bug, fixed; the capacity guard already lived in `resize_resident_value`.
+- **C6** POSIX-style `remove` that dispatches by type — `src/write.rs` `remove`/`remove_io` + `rust_ntfs remove` (4279e8a/f92e78b).
+- **C2** `truncate` grow (extend) — routed to the existing `grow_nonresident` allocation path; no new on-disk behavior.
+
+**Still open (genuinely unimplemented — confirmed present in code):** A1 sparse-write, A2 `$INDEX_ALLOCATION` *growth* (insertion into existing INDX blocks works, but no new-block allocation / B-tree split), A3 compressed-write, A4 new security-descriptor authoring, B4 `$FILE_NAME` duplicate fields (deferred pending chkdsk), C1 resident in-place write/grow, C3 non-resident `$EA`/`$REPARSE_POINT`/`$Bitmap:$I30`, C4 compressed-read, C5 case-sensitive collation wiring.
+
+**Why the rest can't be done in this sandbox:** each remaining item changes on-disk *write* structure (sparse runs, B-tree blocks, compression streams, `$SDS` hash trees, non-resident attribute conversion) and must be validated against Windows chkdsk via the 42-scenario matrix (`windows-test-matrix`) before it's safe to land — that VM/chkdsk loop isn't available here, and these are instance 2's active write-path development area. C5 is additionally blocked on the unpinned `FILE_ATTRIBUTE_CASE_SENSITIVE_DIR` bit (needs a byte-diff against a real WSL volume). C2 was the one exception: it reuses already-validated machinery, so it carried no new on-disk risk.
+
+Each resolved item is struck through (`~~…~~`) in place below; open items are unchanged.
+
+---
+
 ## A. Blocking gaps — no API exists, so the scenario can't be tested at all
 
 ### A1. Sparse-file write / punch-hole
@@ -59,18 +76,19 @@ history.
 These are in `src/write.rs`. Each has a live `#[ignore]`d test that flips to
 passing once the behavior is fixed.
 
-### B1. `unlink` does not decrement `hard_link_count`
-- **Symptom:** After `unlink` of one of N hard-linked names, the name becomes
+### ~~B1. `unlink` does not decrement `hard_link_count`~~ ✅ RESOLVED (4279e8a)
+~~- **Symptom:** After `unlink` of one of N hard-linked names, the name becomes
   unfindable (correct) but the FILE record header's `hard_link_count` stays N
-  (should be N-1). `link` *does* increment correctly.
-- **Risk:** count != number of `$FILE_NAME` attrs → chkdsk flags it.
-- **Test:** `tests/hardlink_scenarios.rs::unlink_decrements_hard_link_count`.
+  (should be N-1). `link` *does* increment correctly.~~
+- **Fix:** `unlink_io` now reads `hard_link_count` (rec +0x12) and, when > 1,
+  drops only the matching `$FILE_NAME` and decrements the count — record/clusters
+  freed only on the last link. `unlink_decrements_hard_link_count` passes.
 
-### B2. `rename` onto an existing name does not error
-- **Symptom:** `rename(src, existing_dst)` succeeds instead of failing.
-- **Risk:** two `$I30` entries with the same key (corruption) or silent
-  clobber. Should reject, or define+document overwrite semantics.
-- **Test:** `tests/error_paths.rs::rename_onto_existing_name_errors`.
+### ~~B2. `rename` onto an existing name does not error~~ ✅ RESOLVED (4279e8a)
+~~- **Symptom:** `rename(src, existing_dst)` succeeds instead of failing.~~
+- **Fix:** the rename path now checks the destination in both the resident
+  `$INDEX_ROOT` and any `$INDEX_ALLOCATION` INDX blocks and returns
+  `'<name>' already exists`. `rename_onto_existing_name_errors` passes.
 
 ### B3. `write_resident_contents` has no upper-bound check
 - **Symptom:** Does not reject a payload one byte over the resident ceiling
@@ -119,9 +137,13 @@ freshly-created (resident) file must be promoted first.
   promotion)`.
 - **Workaround for tests:** call `promote_resident_data_to_nonresident` first.
 
-#### C2. `truncate` grow (extend)
-`truncate` shrinks only. `src/write.rs:609` — `truncate: grow not yet
-implemented`. Blocks truncate-extends-file (sparse-tail) tests.
+#### ~~C2. `truncate` grow (extend)~~ ✅ RESOLVED
+~~`truncate` shrinks only — `truncate: grow not yet implemented`.~~
+**Fix:** `truncate_by_record_number_io` now routes the `new_size > current_len`
+case to `grow_nonresident_by_record_number_io` (existing, matrix-validated
+allocation) — same on-disk result, no new behavior. Tests
+`truncate_grow_extends_nonresident_file` + `truncate_grow_to_same_size_is_noop`.
+(Still resident-only-via-promote, same as C1.)
 
 #### C3. Non-resident forms of metadata attributes (resident-only MVP)
 - `$EA` — `src/ea_io.rs:128`: `$EA is non-resident (MVP only supports resident
@@ -144,7 +166,8 @@ insert paths (always case-insensitive); the
 `FILE_ATTRIBUTE_CASE_SENSITIVE_DIR` bit is unpinned. `src/index_io.rs:683,691`.
 Blocks WSL/Docker case-sensitive-dir scenarios.
 
-#### C6. `unlink` on directories
-`unlink` refuses directories (`src/write.rs:3100`); directory removal goes
-through `rmdir`. Minor API-shape gap — note for a POSIX-style `remove` that
-dispatches by type.
+#### ~~C6. `unlink` on directories~~ ✅ RESOLVED (4279e8a / f92e78b)
+~~`unlink` refuses directories; directory removal goes through `rmdir`.~~
+**Fix:** added `write::remove`/`remove_io` (and the `rust_ntfs remove` CLI
+subcommand) — a POSIX-style remove that dispatches to `unlink` for files and
+`rmdir` for directories. (`unlink` itself remains file-only by design.)
