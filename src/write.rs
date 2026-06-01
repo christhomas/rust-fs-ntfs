@@ -2680,6 +2680,169 @@ pub fn promote_resident_data_to_nonresident_io<T: BlockIo + ?Sized>(
     Ok(())
 }
 
+/// Write `data` as a **sparse** non-resident `$DATA` stream: cluster-aligned
+/// all-zero regions become holes (no clusters allocated, read back as zeros);
+/// only non-zero regions consume clusters. Sets the attribute SPARSE flag
+/// (`0x8000`) and `FILE_ATTRIBUTE_SPARSE_FILE` (`0x200`) on
+/// `$STANDARD_INFORMATION`.
+///
+/// MVP precondition: the file's current `$DATA` must be resident (same as
+/// [`promote_resident_data_to_nonresident`]). On any failure, every cluster
+/// allocation made here is rolled back.
+pub fn write_sparse_file(image: &Path, file_path: &str, data: &[u8]) -> Result<(), String> {
+    let mut io = PathIo::open_rw(image)?;
+    write_sparse_file_io(&mut io, file_path, data)
+}
+
+pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let (params, record) = read_mft_record_io(io, rec)?;
+    let cluster_size = params.cluster_size;
+
+    let loc = attr_io::find_attribute(&record, AttrType::Data, None)
+        .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+    if !loc.is_resident {
+        return Err("write_sparse_file: $DATA is already non-resident (MVP)".to_string());
+    }
+    let attr_id = loc.attribute_id;
+
+    let segments = crate::sparse::plan_sparse_segments(data, cluster_size);
+    let total_clusters = (data.len() as u64).div_ceil(cluster_size);
+
+    let bm = crate::bitmap::locate_bitmap_io(io)?;
+    // Free every run we've allocated so far — used on every error path so a
+    // partial failure never leaks clusters.
+    let free_all = |io: &mut T, allocated: &[(u64, u64)]| {
+        for &(lcn, n) in allocated {
+            let _ = crate::bitmap::free_io(io, &bm, lcn, n);
+        }
+    };
+
+    // Allocate one contiguous run per Data segment, write its bytes, and
+    // record (lcn, n) for rollback. Holes allocate nothing.
+    let mut data_lcns: Vec<u64> = Vec::new();
+    let mut allocated: Vec<(u64, u64)> = Vec::new();
+    let mut hint = params.mft_lcn;
+    for seg in &segments {
+        let crate::sparse::SparseSegment::Data {
+            clusters,
+            byte_start,
+            byte_len,
+            ..
+        } = seg
+        else {
+            continue; // holes: nothing to allocate or write
+        };
+        let n = *clusters;
+        let lcn = match crate::bitmap::find_free_run_io(io, &bm, n, hint) {
+            Ok(Some(l)) => l,
+            Ok(None) => {
+                free_all(io, &allocated);
+                return Err(format!("no contiguous free run of {n} clusters"));
+            }
+            Err(e) => {
+                free_all(io, &allocated);
+                return Err(e);
+            }
+        };
+        if let Err(e) = crate::bitmap::allocate_io(io, &bm, lcn, n) {
+            free_all(io, &allocated);
+            return Err(format!("allocate {n}@{lcn}: {e}"));
+        }
+        allocated.push((lcn, n));
+        data_lcns.push(lcn);
+        hint = lcn + n;
+
+        let disk = lcn * cluster_size;
+        if let Err(e) = io.write_all_at(disk, &data[*byte_start..*byte_start + *byte_len]) {
+            free_all(io, &allocated);
+            return Err(format!("write data segment: {e}"));
+        }
+        // Zero-pad the last (possibly partial) cluster of the run.
+        let pad = (n * cluster_size) as usize - *byte_len;
+        if pad > 0 {
+            let zeros = vec![0u8; pad];
+            if let Err(e) = io.write_all_at(disk + *byte_len as u64, &zeros) {
+                free_all(io, &allocated);
+                return Err(format!("write zero-pad: {e}"));
+            }
+        }
+    }
+    if let Err(e) = io.sync() {
+        free_all(io, &allocated);
+        return Err(format!("fsync data: {e}"));
+    }
+
+    let runs = match crate::sparse::build_runs(&segments, &data_lcns) {
+        Ok(r) => r,
+        Err(e) => {
+            free_all(io, &allocated);
+            return Err(e);
+        }
+    };
+    let mapping_pairs = data_runs::encode_runs(&runs)?;
+
+    let allocated_length = crate::sparse::allocated_clusters(&segments) * cluster_size;
+    let data_size = data.len() as u64;
+    let last_vcn = if total_clusters == 0 {
+        -1i64
+    } else {
+        (total_clusters - 1) as i64
+    };
+
+    let mut new_attr_bytes = match crate::record_build::build_nonresident_data_attribute(
+        attr_id,
+        data_size,
+        allocated_length,
+        data_size, // initialized_length: holes within it read as zeros
+        last_vcn,
+        &mapping_pairs,
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            free_all(io, &allocated);
+            return Err(e);
+        }
+    };
+    // Stamp the SPARSE flag (0x8000) into the attribute-header flags (+0x0C).
+    let fl = attr_io::attr_off::FLAGS;
+    let cur_flags = u16::from_le_bytes([new_attr_bytes[fl], new_attr_bytes[fl + 1]]);
+    new_attr_bytes[fl..fl + 2]
+        .copy_from_slice(&(cur_flags | crate::sparse::ATTR_FLAG_SPARSE).to_le_bytes());
+
+    // In one RMW: set FILE_ATTRIBUTE_SPARSE_FILE on $STANDARD_INFORMATION
+    // (in place, no shift) then replace the resident $DATA with the new
+    // non-resident sparse attribute.
+    let res = update_mft_record_io(io, rec, |record| {
+        let si = attr_io::find_attribute(record, AttrType::StandardInformation, None)
+            .ok_or("$STANDARD_INFORMATION not found")?;
+        let si_val =
+            attr_io::resident_value_start(&si).ok_or("$STANDARD_INFORMATION not resident")?;
+        let fa_off = si_val + SI_FILE_ATTRIBUTES;
+        let fa = u32::from_le_bytes([
+            record[fa_off],
+            record[fa_off + 1],
+            record[fa_off + 2],
+            record[fa_off + 3],
+        ]);
+        record[fa_off..fa_off + 4]
+            .copy_from_slice(&(fa | crate::sparse::FILE_ATTRIBUTE_SPARSE_FILE).to_le_bytes());
+
+        let loc = attr_io::find_attribute(record, AttrType::Data, None)
+            .ok_or("$DATA vanished during RMW")?;
+        crate::attr_resize::replace_attribute(record, loc.attr_offset, &new_attr_bytes)
+    });
+    if let Err(e) = res {
+        free_all(io, &allocated);
+        return Err(format!("replace $DATA: {e}"));
+    }
+    Ok(())
+}
+
 /// High-level: write `new_data` as the entire content of the file.
 /// Dispatches between resident rewrite and promotion-to-non-resident
 /// based on whether the data still fits inside the MFT record.
