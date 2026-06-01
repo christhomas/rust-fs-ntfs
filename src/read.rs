@@ -301,6 +301,75 @@ pub fn read_dir_entries<T: BlockIo + ?Sized>(
     Ok(out)
 }
 
+/// One decoded `$ATTRIBUTE_LIST` entry: which MFT record holds an instance of
+/// an attribute when a file's attributes overflow its base record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttrListEntry {
+    pub type_code: u32,
+    /// Attribute name (e.g. an ADS stream name), or `None` for unnamed.
+    pub name: Option<String>,
+    /// First VCN this instance covers (for an attribute split across records).
+    pub starting_vcn: u64,
+    /// MFT record number holding this attribute instance (low 48 bits of the
+    /// entry's base_file_reference).
+    pub record_number: u64,
+    pub attribute_id: u16,
+}
+
+/// Parse an `$ATTRIBUTE_LIST` attribute value into its entries. Each entry is:
+/// type(4) length(2) name_len(1) name_off(1) starting_vcn(8)
+/// base_file_reference(8) attribute_id(2) name(name_len × UTF-16). Entries are
+/// walked by their `length` field until the value is exhausted.
+pub fn parse_attribute_list(value: &[u8]) -> Result<Vec<AttrListEntry>, String> {
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    while cursor + 0x1A <= value.len() {
+        let type_code = u32::from_le_bytes(value[cursor..cursor + 4].try_into().unwrap());
+        let length = u16::from_le_bytes([value[cursor + 4], value[cursor + 5]]) as usize;
+        if length == 0 {
+            break;
+        }
+        if cursor + length > value.len() {
+            return Err(format!(
+                "$ATTRIBUTE_LIST entry at {cursor} (len {length}) overruns the value"
+            ));
+        }
+        let name_length = value[cursor + 6] as usize;
+        let name_offset = value[cursor + 7] as usize;
+        let starting_vcn = u64::from_le_bytes(value[cursor + 8..cursor + 16].try_into().unwrap());
+        let base_ref = u64::from_le_bytes(value[cursor + 16..cursor + 24].try_into().unwrap());
+        let attribute_id = u16::from_le_bytes([value[cursor + 24], value[cursor + 25]]);
+
+        let name = if name_length == 0 {
+            None
+        } else {
+            let ns = cursor + name_offset;
+            if ns + name_length * 2 > value.len() {
+                return Err(format!("$ATTRIBUTE_LIST entry at {cursor} name overruns the value"));
+            }
+            Some(
+                char::decode_utf16(
+                    value[ns..ns + name_length * 2]
+                        .chunks_exact(2)
+                        .map(|c| u16::from_le_bytes([c[0], c[1]])),
+                )
+                .map(|r| r.unwrap_or('\u{FFFD}'))
+                .collect(),
+            )
+        };
+
+        out.push(AttrListEntry {
+            type_code,
+            name,
+            starting_vcn,
+            record_number: base_ref & 0x0000_FFFF_FFFF_FFFF,
+            attribute_id,
+        });
+        cursor += length;
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,5 +699,58 @@ mod tests {
         write::create_file_io(&mut dev, "/", "f").expect("create");
         let rec = resolve_path(&mut dev, "/f").unwrap();
         assert!(read_dir_entries(&mut dev, rec).is_err());
+    }
+
+    /// Build one synthetic $ATTRIBUTE_LIST entry (name at the standard 0x1A
+    /// offset, 8-byte aligned length, sequence 1 in the base reference).
+    fn al_entry(type_code: u32, name: Option<&str>, vcn: u64, rec: u64, id: u16) -> Vec<u8> {
+        let name_u16: Vec<u16> = name.map(|n| n.encode_utf16().collect()).unwrap_or_default();
+        let name_offset = 0x1Ausize;
+        let raw = name_offset + name_u16.len() * 2;
+        let length = raw.div_ceil(8) * 8;
+        let mut e = vec![0u8; length];
+        e[0..4].copy_from_slice(&type_code.to_le_bytes());
+        e[4..6].copy_from_slice(&(length as u16).to_le_bytes());
+        e[6] = name_u16.len() as u8;
+        e[7] = name_offset as u8;
+        e[8..16].copy_from_slice(&vcn.to_le_bytes());
+        e[16..24].copy_from_slice(&(rec | (1u64 << 48)).to_le_bytes()); // base_file_reference
+        e[24..26].copy_from_slice(&id.to_le_bytes());
+        for (i, u) in name_u16.iter().enumerate() {
+            e[name_offset + i * 2..name_offset + i * 2 + 2].copy_from_slice(&u.to_le_bytes());
+        }
+        e
+    }
+
+    #[test]
+    fn parse_attribute_list_decodes_entries() {
+        let mut value = Vec::new();
+        value.extend(al_entry(0x10, None, 0, 5, 0)); // $STANDARD_INFORMATION in base rec 5
+        value.extend(al_entry(0x80, None, 0, 5, 1)); // unnamed $DATA in base rec 5
+        value.extend(al_entry(0x80, Some("s001"), 0, 42, 7)); // named $DATA in ext rec 42
+
+        let entries = parse_attribute_list(&value).expect("parse");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].type_code, 0x10);
+        assert_eq!(entries[0].name, None);
+        assert_eq!(entries[0].record_number, 5);
+        assert_eq!(entries[2].type_code, 0x80);
+        assert_eq!(entries[2].name.as_deref(), Some("s001"));
+        assert_eq!(entries[2].record_number, 42, "seq bits masked off");
+        assert_eq!(entries[2].attribute_id, 7);
+        assert_eq!(entries[2].starting_vcn, 0);
+    }
+
+    #[test]
+    fn parse_attribute_list_rejects_overrun_and_stops_on_zero() {
+        // Zero-length entry terminates the walk.
+        let mut v = al_entry(0x80, None, 0, 5, 0);
+        v.extend_from_slice(&[0u8; 8]); // zero header → stop
+        assert_eq!(parse_attribute_list(&v).unwrap().len(), 1);
+
+        // A length that runs past the buffer errors.
+        let mut bad = al_entry(0x80, None, 0, 5, 0);
+        bad[4..6].copy_from_slice(&0x0FFFu16.to_le_bytes()); // absurd length
+        assert!(parse_attribute_list(&bad).is_err());
     }
 }
