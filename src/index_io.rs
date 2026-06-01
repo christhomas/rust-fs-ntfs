@@ -316,15 +316,20 @@ fn collect_entries(buf: &[u8], ih_start: usize, out: &mut Vec<DirEntryRaw>) -> R
         if length == 0 || cursor + length > buf.len() {
             return Err(format!("malformed index entry at {cursor}"));
         }
-        if key_length >= FN_NAME_OFFSET {
-            let key_start = cursor + IE_KEY_START;
+        // Bound every read to THIS entry [cursor, entry_end), not the whole
+        // buffer: a corrupt key_length/name_length must not let us decode
+        // bytes from the next entry/trailer into a fabricated DirEntryRaw.
+        let entry_end = cursor + length; // already validated <= buf.len()
+        let key_start = cursor + IE_KEY_START;
+        if key_length >= FN_NAME_OFFSET && key_start + key_length <= entry_end {
             let name_length = buf[key_start + FN_NAME_LENGTH_OFFSET] as usize;
             let namespace = buf[key_start + FN_NAMESPACE_OFFSET];
             let name_start = key_start + FN_NAME_OFFSET;
             // $FILE_NAME.file_attributes: u32 at key+0x38 (after parent_ref(8)
             // + 4 timestamps(32) + alloc_size(8) + real_size(8)).
             let file_attributes = read_u32_le(buf, key_start + 0x38).unwrap_or(0);
-            if name_start + name_length * 2 <= buf.len() {
+            // The UTF-16 name must lie within the key (hence within the entry).
+            if name_start + name_length * 2 <= key_start + key_length {
                 let name: String = char::decode_utf16(
                     buf[name_start..name_start + name_length * 2]
                         .chunks_exact(2)
