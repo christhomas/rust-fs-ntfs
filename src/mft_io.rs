@@ -18,9 +18,15 @@
 //!     UB. The image must be quiesced (unmounted everywhere else)
 //!     before any mutation here.
 //!
-//! Advisory file locking is **deliberately not** added — it can't
-//! prevent external concurrency anyway, so it would only catch
-//! in-process races we don't produce.
+//! No locking is added at this layer. Device exclusivity is a contract
+//! owned by the caller / host, not this record-level primitive (see the
+//! crate-root "Device exclusivity contract"): in the callback and
+//! `fs_core` transports there is no fd here to lock and the host already
+//! serializes access; in the path transport the caller must quiesce the
+//! image. An advisory `flock` would only ever fit the path transport
+//! (CLI / tests) as a footgun-catcher among cooperating processes, and
+//! that belongs in the device-owning layer if/when it's needed — not in
+//! this primitive, which never sees the fd.
 //!
 //! References (no GPL code consulted): Multi-sector update sequence
 //! ("fixup"), boot sector / BPB layout, and FILE_RECORD_SEGMENT_HEADER
