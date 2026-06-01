@@ -104,11 +104,49 @@ pub fn read_attribute_value<T: BlockIo + ?Sized>(
     name: Option<&str>,
 ) -> Result<Vec<u8>, String> {
     let (params, record) = read_mft_record_io(io, record_number)?;
-    let loc = attr_io::find_attribute(&record, attr_type, name).ok_or_else(|| {
-        format!("read_attribute_value: attribute {attr_type:?} (name {name:?}) not found in record {record_number}")
-    })?;
 
-    // Resident: the value lives inside the MFT record.
+    // Common case: the attribute lives in the base record.
+    if let Some(loc) = attr_io::find_attribute(&record, attr_type, name) {
+        return read_value_from_record(io, &params, &record, &loc);
+    }
+
+    // Overflowed: follow $ATTRIBUTE_LIST to the extension record that holds it.
+    if let Some(al_loc) = attr_io::find_attribute(&record, AttrType::AttributeList, None) {
+        let al_value = read_value_from_record(io, &params, &record, &al_loc)?;
+        let entries = parse_attribute_list(&al_value)?;
+        // The instance starting at VCN 0 holds the attribute (or its head).
+        if let Some(entry) = entries.iter().find(|e| {
+            e.type_code == attr_type as u32 && e.name.as_deref() == name && e.starting_vcn == 0
+        }) {
+            if entry.record_number != record_number {
+                let (ext_params, ext) = read_mft_record_io(io, entry.record_number)?;
+                let loc = attr_io::find_attribute(&ext, attr_type, name).ok_or_else(|| {
+                    format!(
+                        "read_attribute_value: $ATTRIBUTE_LIST points {attr_type:?} (name {name:?}) \
+                         at record {} but it's not there",
+                        entry.record_number
+                    )
+                })?;
+                return read_value_from_record(io, &ext_params, &ext, &loc);
+            }
+        }
+    }
+
+    Err(format!(
+        "read_attribute_value: attribute {attr_type:?} (name {name:?}) not found in record {record_number}"
+    ))
+}
+
+/// Read one attribute's value from the record + location that holds it
+/// (resident copy, or non-resident runs with sparse-hole zero-fill honouring
+/// `initialized_size`). Refuses compressed/encrypted values (the bytes would
+/// be transformed, not raw). `record` must be the record containing `loc`.
+fn read_value_from_record<T: BlockIo + ?Sized>(
+    io: &mut T,
+    params: &crate::mft_io::BootParams,
+    record: &[u8],
+    loc: &attr_io::AttrLocation,
+) -> Result<Vec<u8>, String> {
     if loc.is_resident {
         let vo = loc.attr_offset
             + loc
@@ -120,8 +158,6 @@ pub fn read_attribute_value<T: BlockIo + ?Sized>(
         return Ok(record[vo..vo + vl].to_vec());
     }
 
-    // Non-resident: refuse transformed (compressed/encrypted) values — we'd
-    // otherwise hand back raw on-disk bytes that aren't the real content.
     let flags = u16::from_le_bytes([
         record[loc.attr_offset + attr_off::FLAGS],
         record[loc.attr_offset + attr_off::FLAGS + 1],
