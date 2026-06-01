@@ -182,7 +182,8 @@ fn read_value_from_record<T: BlockIo + ?Sized>(
     let mpo = loc
         .non_resident_mapping_pairs_offset
         .ok_or("non-resident attr has no mapping-pairs offset")? as usize;
-    let runs = data_runs::decode_runs(&record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length])?;
+    let runs =
+        data_runs::decode_runs(&record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length])?;
 
     let cluster_size = params.cluster_size as usize;
     // Zero-initialised: holes and the [initialized_size, data_size) tail are
@@ -333,7 +334,9 @@ pub fn read_stat<T: BlockIo + ?Sized>(io: &mut T, record_number: u64) -> Result<
     let si = attr_io::find_attribute(&record, AttrType::StandardInformation, None)
         .ok_or("read_stat: $STANDARD_INFORMATION not found")?;
     if !si.is_resident {
-        return Err("read_stat: $STANDARD_INFORMATION is non-resident (impossible per spec)".into());
+        return Err(
+            "read_stat: $STANDARD_INFORMATION is non-resident (impossible per spec)".into(),
+        );
     }
     let v = si.attr_offset
         + si.resident_value_offset
@@ -467,7 +470,9 @@ pub fn parse_attribute_list(value: &[u8]) -> Result<Vec<AttrListEntry>, String> 
         } else {
             let ns = cursor + name_offset;
             if ns + name_length * 2 > value.len() {
-                return Err(format!("$ATTRIBUTE_LIST entry at {cursor} name overruns the value"));
+                return Err(format!(
+                    "$ATTRIBUTE_LIST entry at {cursor} name overruns the value"
+                ));
             }
             Some(
                 char::decode_utf16(
@@ -660,7 +665,10 @@ mod tests {
 
         let native = native_read_data(&mut dev, "/sparse.bin");
         assert_eq!(native.len(), data.len(), "length matches data_size");
-        assert_eq!(native, data, "native read reconstructs data incl. hole=zeros");
+        assert_eq!(
+            native, data,
+            "native read reconstructs data incl. hole=zeros"
+        );
         assert_eq!(
             native,
             upstream_read_data(&mut dev, "/sparse.bin"),
@@ -730,10 +738,18 @@ mod tests {
 
             assert_eq!(st.is_dir, want_dir, "is_dir for {path}");
             assert_eq!(st.is_dir, u_is_dir, "is_dir vs upstream for {path}");
-            assert_eq!(st.file_attributes, u_attrs, "file_attributes vs upstream for {path}");
+            assert_eq!(
+                st.file_attributes, u_attrs,
+                "file_attributes vs upstream for {path}"
+            );
             assert_eq!(st.size, u_size, "size vs upstream for {path}");
             assert_eq!(
-                [st.created_nt, st.modified_nt, st.mft_modified_nt, st.accessed_nt],
+                [
+                    st.created_nt,
+                    st.modified_nt,
+                    st.mft_modified_nt,
+                    st.accessed_nt
+                ],
                 u_times,
                 "timestamps vs upstream for {path}"
             );
@@ -760,7 +776,9 @@ mod tests {
         let mut out = Vec::new();
         while let Some(entry) = iter.next(&mut reader) {
             let Ok(entry) = entry else { continue };
-            let Some(Ok(file_name)) = entry.key() else { continue };
+            let Some(Ok(file_name)) = entry.key() else {
+                continue;
+            };
             if file_name.namespace() == NtfsFileNamespace::Dos {
                 continue;
             }
@@ -796,11 +814,17 @@ mod tests {
 
         // Subdirectory listing.
         let native = native_list(&mut dev, "/d");
-        assert_eq!(native, upstream_list(&mut dev, "/d"), "subdir listing mismatch");
+        assert_eq!(
+            native,
+            upstream_list(&mut dev, "/d"),
+            "subdir listing mismatch"
+        );
         // Our own entries are all present + typed.
-        assert!(native.contains(&("child".to_string(), {
-            resolve_path(&mut dev, "/d/child").unwrap()
-        }, true)));
+        assert!(native.contains(&(
+            "child".to_string(),
+            { resolve_path(&mut dev, "/d/child").unwrap() },
+            true
+        )));
         assert!(native
             .iter()
             .any(|(n, _, is_dir)| n == "alpha.txt" && !is_dir));

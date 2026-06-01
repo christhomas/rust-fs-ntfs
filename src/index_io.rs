@@ -297,7 +297,8 @@ pub struct DirEntryRaw {
 /// place (mirrors [`scan_entries_for_name`] but collects instead of matching).
 fn collect_entries(buf: &[u8], ih_start: usize, out: &mut Vec<DirEntryRaw>) -> Result<(), String> {
     let first_entry_rel = read_u32_le(buf, ih_start + IH_FIRST_ENTRY_OFFSET)
-        .ok_or("index node too short to read first_entry_offset")? as usize;
+        .ok_or("index node too short to read first_entry_offset")?
+        as usize;
     let total_size = read_u32_le(buf, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
         .ok_or("index node too short to read total_size")? as usize;
     let mut cursor = ih_start + first_entry_rel;
