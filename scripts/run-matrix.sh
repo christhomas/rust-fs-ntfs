@@ -59,8 +59,19 @@ done
 # soon as that scenario's recipe finishes, so a full run never accumulates
 # every image at once (it used to hold them all until the end-of-run trap
 # below, and a killed run skipped the trap entirely, orphaning the lot).
-# Propagate --keep-images so the opt-out covers both the runner's
-# per-scenario deletion and the end-of-run trap.
+#
+# Keep the wrapper flag and the runner's env var in sync in BOTH directions
+# so the two cleanup layers never disagree:
+#   * `--keep-images`           -> set HARNESS_KEEP_IMAGES so the runner keeps too.
+#   * HARNESS_KEEP_IMAGES truthy -> set keep_images so the end-of-run trap keeps
+#     too (otherwise a caller with HARNESS_KEEP_IMAGES=1 in their environment but
+#     no --keep-images would have the runner preserve images and the trap delete
+#     them — the worst of both).
+# Truthiness mirrors the runner's `is_truthy`: 0/false/no/off/empty = falsy.
+case "$(printf '%s' "${HARNESS_KEEP_IMAGES:-}" | tr '[:upper:]' '[:lower:]')" in
+    '' | 0 | false | no | off) ;; # falsy / unset — leave keep_images as parsed
+    *) keep_images=1 ;;           # truthy env var — honour it in the trap too
+esac
 if [ "$keep_images" -eq 1 ]; then
     export HARNESS_KEEP_IMAGES=1
 fi
