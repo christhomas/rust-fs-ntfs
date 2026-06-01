@@ -32,8 +32,17 @@ pub const ROOT_RECORD_NUMBER: u64 = 5;
 ///
 /// Each component is looked up in its parent directory's index: first the
 /// resident `$INDEX_ROOT`, then — if the index has spilled — the allocated
-/// `$INDEX_ALLOCATION` (INDX) blocks. Lookup is collation-aware via the
-/// shared index scanners.
+/// `$INDEX_ALLOCATION` (INDX) blocks.
+///
+/// **Limitation — case-sensitive.** Lookups use the shared
+/// `index_io::find_index_entry` / `find_entry_in_indx_block`, which match the
+/// name with exact UTF-16 equality, so `/Foo` will not find an on-disk `foo`.
+/// Real NTFS is case-insensitive by default (upcase-table collation). This is
+/// the tracked C5 gap (`docs/missing-functionality.md`): the collation table
+/// exists (`compare_names_ordinal`) but is not yet wired into the index
+/// scanners. Wiring it is write-affecting (those scanners back create/rename
+/// dedup too) and matrix-gated, so it's deferred to a dedicated change rather
+/// than made case-insensitive only on the read side.
 pub fn resolve_path<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<u64, String> {
     let mut record_number = ROOT_RECORD_NUMBER;
 
@@ -104,38 +113,71 @@ pub fn read_attribute_value<T: BlockIo + ?Sized>(
     attr_type: AttrType,
     name: Option<&str>,
 ) -> Result<Vec<u8>, String> {
+    match locate_attribute(io, record_number, attr_type, name)? {
+        Some((params, record, loc)) => read_value_from_record(io, &params, &record, &loc),
+        None => Err(format!(
+            "read_attribute_value: attribute {attr_type:?} (name {name:?}) not found in record {record_number}"
+        )),
+    }
+}
+
+/// Locate where an attribute physically lives: the MFT record bytes (base or,
+/// following `$ATTRIBUTE_LIST`, an extension record) plus its `AttrLocation`.
+/// Returns `None` if the attribute is absent. Shared by `read_attribute_value`
+/// and `read_stat` so both handle overflowed (`$ATTRIBUTE_LIST`) files.
+///
+/// **Limitation (fails loud, never truncates):** a single non-resident
+/// attribute whose run list is split across *multiple* extension records
+/// (i.e. `$ATTRIBUTE_LIST` carries entries for the same type+name with
+/// `starting_vcn > 0`) is not yet stitched — this returns `Err` rather than
+/// silently reading only the VCN-0 segment.
+#[allow(clippy::type_complexity)]
+fn locate_attribute<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    attr_type: AttrType,
+    name: Option<&str>,
+) -> Result<Option<(crate::mft_io::BootParams, Vec<u8>, attr_io::AttrLocation)>, String> {
     let (params, record) = read_mft_record_io(io, record_number)?;
 
     // Common case: the attribute lives in the base record.
     if let Some(loc) = attr_io::find_attribute(&record, attr_type, name) {
-        return read_value_from_record(io, &params, &record, &loc);
+        return Ok(Some((params, record, loc)));
     }
 
     // Overflowed: follow $ATTRIBUTE_LIST to the extension record that holds it.
     if let Some(al_loc) = attr_io::find_attribute(&record, AttrType::AttributeList, None) {
         let al_value = read_value_from_record(io, &params, &record, &al_loc)?;
         let entries = parse_attribute_list(&al_value)?;
-        // The instance starting at VCN 0 holds the attribute (or its head).
-        if let Some(entry) = entries.iter().find(|e| {
-            e.type_code == attr_type as u32 && e.name.as_deref() == name && e.starting_vcn == 0
-        }) {
+        let mut matching = entries
+            .iter()
+            .filter(|e| e.type_code == attr_type as u32 && e.name.as_deref() == name);
+
+        if let Some(entry) = matching.clone().find(|e| e.starting_vcn == 0) {
+            // Refuse multi-extent attributes (run list split across records)
+            // rather than returning a truncated value (principle: fail fast).
+            if matching.any(|e| e.starting_vcn != 0) {
+                return Err(format!(
+                    "locate_attribute: {attr_type:?} (name {name:?}) in record {record_number} is \
+                     split across multiple extension records ($ATTRIBUTE_LIST multi-extent stitching \
+                     not yet supported)"
+                ));
+            }
             if entry.record_number != record_number {
                 let (ext_params, ext) = read_mft_record_io(io, entry.record_number)?;
                 let loc = attr_io::find_attribute(&ext, attr_type, name).ok_or_else(|| {
                     format!(
-                        "read_attribute_value: $ATTRIBUTE_LIST points {attr_type:?} (name {name:?}) \
+                        "locate_attribute: $ATTRIBUTE_LIST points {attr_type:?} (name {name:?}) \
                          at record {} but it's not there",
                         entry.record_number
                     )
                 })?;
-                return read_value_from_record(io, &ext_params, &ext, &loc);
+                return Ok(Some((ext_params, ext, loc)));
             }
         }
     }
 
-    Err(format!(
-        "read_attribute_value: attribute {attr_type:?} (name {name:?}) not found in record {record_number}"
-    ))
+    Ok(None)
 }
 
 /// Read one attribute's value from the record + location that holds it
@@ -156,7 +198,18 @@ fn read_value_from_record<T: BlockIo + ?Sized>(
         let vl = loc
             .resident_value_length
             .ok_or("resident attr has no value length")? as usize;
-        return Ok(record[vo..vo + vl].to_vec());
+        // Bounds-check before slicing: corrupt on-disk offset/length must
+        // produce an Err, not a panic.
+        let end = vo
+            .checked_add(vl)
+            .filter(|&e| e <= record.len())
+            .ok_or_else(|| {
+                format!(
+                    "resident value [{vo}..{vo}+{vl}] out of bounds (record {} bytes)",
+                    record.len()
+                )
+            })?;
+        return Ok(record[vo..end].to_vec());
     }
 
     let flags = u16::from_le_bytes([
@@ -359,9 +412,11 @@ pub fn read_stat<T: BlockIo + ?Sized>(io: &mut T, record_number: u64) -> Result<
             .unwrap(),
     );
 
-    let size = match attr_io::find_attribute(&record, AttrType::Data, None) {
-        Some(d) if d.is_resident => d.resident_value_length.unwrap_or(0) as u64,
-        Some(d) => d.non_resident_value_length.unwrap_or(0),
+    // Size of the unnamed $DATA. Follow $ATTRIBUTE_LIST so files whose $DATA
+    // overflowed into an extension record report the real size, not 0.
+    let size = match locate_attribute(io, record_number, AttrType::Data, None)? {
+        Some((_, _, d)) if d.is_resident => d.resident_value_length.unwrap_or(0) as u64,
+        Some((_, _, d)) => d.non_resident_value_length.unwrap_or(0),
         None => 0,
     };
 

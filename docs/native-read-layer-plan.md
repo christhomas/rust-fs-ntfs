@@ -76,7 +76,7 @@ We keep the verification benefit and shed the API ceiling.
 A cohesive model built directly on `BlockIo`, shared by read **and** write
 (one source of truth), with our own error type:
 
-```
+```text
 BlockIo  ──►  Volume (boot geometry, $UpCase, $MFT location)
                 │
                 ├─ Inode (one MFT record: flags, link count, attrs;
