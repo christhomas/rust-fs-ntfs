@@ -49,6 +49,7 @@ pub mod index_io;
 pub mod mft_bitmap;
 pub mod mft_io;
 pub mod mkfs;
+pub mod read;
 pub mod record_build;
 pub mod sds;
 pub mod sparse;
