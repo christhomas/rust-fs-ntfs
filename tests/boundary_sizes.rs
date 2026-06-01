@@ -277,7 +277,8 @@ fn multi_cluster_nonresident_spans_clusters() {
     // volume — this is what actually verifies cluster-boundary allocation,
     // distinct from the logical value_length above.
     assert_eq!(
-        d.allocated_length, 12_288,
+        d.allocated_length,
+        3 * CLUSTER as u64,
         "allocated size must be cluster-rounded (3 × 4096), not the logical 10 000"
     );
     assert_eq!(d.bytes, payload, "10KB multi-cluster content round-trips");
