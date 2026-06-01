@@ -524,4 +524,214 @@ mod tests {
         }];
         assert!(range_has_hole_or_past_end(&runs, 2, 5));
     }
+
+    // --- additional encode/decode edge cases (Phase 2.4) -------------------
+
+    #[test]
+    fn encode_negative_lcn_delta_round_trips() {
+        // run0 at LCN 100, run1 at LCN 90 (delta = -10, signed 1 byte).
+        let runs = vec![
+            DataRun {
+                starting_vcn: 0,
+                length: 2,
+                lcn: Some(100),
+            },
+            DataRun {
+                starting_vcn: 2,
+                length: 3,
+                lcn: Some(90),
+            },
+        ];
+        let encoded = encode_runs(&runs).unwrap();
+        let decoded = decode_runs(&encoded).unwrap();
+        assert_eq!(decoded, runs);
+    }
+
+    #[test]
+    fn decode_no_terminator_tolerates_buffer_end() {
+        // A single run with no 0x00 terminator — tolerated by spec since
+        // `attr_length` can bound the list. The decoder must not crash.
+        let bytes = [0x11u8, 0x01, 0x05]; // header + length=1 + lcn=5, no 0x00
+        let runs = decode_runs(&bytes).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].lcn, Some(5));
+    }
+
+    #[test]
+    fn encode_large_lcn_requires_five_byte_offset() {
+        // LCN = 2^32 + 1. The offset field must use 5 bytes to represent it.
+        let lcn: u64 = (1u64 << 32) + 1;
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 1,
+            lcn: Some(lcn),
+        }];
+        let encoded = encode_runs(&runs).unwrap();
+        // Decode the header byte to check lcn_bytes.
+        let lcn_bytes = (encoded[0] >> 4) as usize;
+        assert!(
+            lcn_bytes >= 5,
+            "LCN > 2^32 needs at least 5 bytes; got {lcn_bytes}"
+        );
+        let decoded = decode_runs(&encoded).unwrap();
+        assert_eq!(decoded[0].lcn, Some(lcn));
+    }
+
+    #[test]
+    fn encode_large_run_length_requires_five_bytes() {
+        // Run length = 2^32 + 1. Must not be truncated to 32 bits.
+        let big_len: u64 = (1u64 << 32) + 1;
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: big_len,
+            lcn: Some(0),
+        }];
+        let encoded = encode_runs(&runs).unwrap();
+        let length_bytes = (encoded[0] & 0x0F) as usize;
+        assert!(
+            length_bytes >= 5,
+            "length > 2^32 needs at least 5 bytes; got {length_bytes}"
+        );
+        let decoded = decode_runs(&encoded).unwrap();
+        assert_eq!(decoded[0].length, big_len);
+    }
+
+    #[test]
+    fn vcn_to_lcn_past_end_of_all_runs_returns_none() {
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 5,
+            lcn: Some(100),
+        }];
+        // VCN 5 is past the end (run covers [0..5)).
+        assert_eq!(vcn_to_lcn(&runs, 5), None);
+        assert_eq!(vcn_to_lcn(&runs, 100), None);
+    }
+
+    #[test]
+    fn vcn_to_lcn_exactly_at_run_end_is_none() {
+        // Run covers VCNs [2..7). VCN 7 is not covered.
+        let runs = vec![DataRun {
+            starting_vcn: 2,
+            length: 5,
+            lcn: Some(50),
+        }];
+        assert_eq!(vcn_to_lcn(&runs, 6), Some(54)); // last VCN in run
+        assert_eq!(vcn_to_lcn(&runs, 7), None); // one past end
+    }
+
+    #[test]
+    fn vcn_to_lcn_in_second_of_two_runs() {
+        let runs = vec![
+            DataRun {
+                starting_vcn: 0,
+                length: 4,
+                lcn: Some(10),
+            },
+            DataRun {
+                starting_vcn: 4,
+                length: 6,
+                lcn: Some(20),
+            },
+        ];
+        assert_eq!(vcn_to_lcn(&runs, 3), Some(13)); // last in first run
+        assert_eq!(vcn_to_lcn(&runs, 4), Some(20)); // first in second run
+        assert_eq!(vcn_to_lcn(&runs, 9), Some(25)); // last in second run
+    }
+
+    #[test]
+    fn range_has_hole_empty_run_list_is_always_hole() {
+        // No runs at all — every range is "past end".
+        assert!(range_has_hole_or_past_end(&[], 0, 1));
+        assert!(range_has_hole_or_past_end(&[], 0, 100));
+    }
+
+    #[test]
+    fn range_has_hole_exact_coverage_has_no_hole() {
+        // Range exactly matches one run — no hole.
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 8,
+            lcn: Some(50),
+        }];
+        assert!(!range_has_hole_or_past_end(&runs, 0, 8));
+    }
+
+    #[test]
+    fn encode_roundtrip_all_single_byte_lengths_1_to_7() {
+        // Run lengths 1..=7 each fit in 1 byte. Verify round-trip for all.
+        for length in 1u64..=7 {
+            let runs = vec![DataRun {
+                starting_vcn: 0,
+                length,
+                lcn: Some(1),
+            }];
+            let encoded = encode_runs(&runs).unwrap();
+            let decoded = decode_runs(&encoded).unwrap();
+            assert_eq!(decoded[0].length, length, "length={length}");
+        }
+    }
+
+    #[test]
+    fn encode_roundtrip_boundary_lengths() {
+        // Boundary values that force 2-byte vs 3-byte length encoding.
+        for length in [127u64, 128, 255, 256, 32767, 32768] {
+            let runs = vec![DataRun {
+                starting_vcn: 0,
+                length,
+                lcn: Some(1),
+            }];
+            let encoded = encode_runs(&runs).unwrap();
+            let decoded = decode_runs(&encoded).unwrap();
+            assert_eq!(decoded[0].length, length, "boundary length={length}");
+        }
+    }
+
+    #[test]
+    fn encode_five_contiguous_runs_roundtrip() {
+        let runs: Vec<DataRun> = (0..5)
+            .map(|i| DataRun {
+                starting_vcn: i * 10,
+                length: 10,
+                lcn: Some(100 + i * 15),
+            })
+            .collect();
+        let encoded = encode_runs(&runs).unwrap();
+        let decoded = decode_runs(&encoded).unwrap();
+        assert_eq!(decoded, runs);
+    }
+
+    #[test]
+    fn encode_alternating_sparse_and_real_runs() {
+        let runs = vec![
+            DataRun {
+                starting_vcn: 0,
+                length: 3,
+                lcn: Some(50),
+            },
+            DataRun {
+                starting_vcn: 3,
+                length: 2,
+                lcn: None,
+            }, // sparse
+            DataRun {
+                starting_vcn: 5,
+                length: 4,
+                lcn: Some(80),
+            },
+            DataRun {
+                starting_vcn: 9,
+                length: 1,
+                lcn: None,
+            }, // sparse
+            DataRun {
+                starting_vcn: 10,
+                length: 2,
+                lcn: Some(200),
+            },
+        ];
+        let encoded = encode_runs(&runs).unwrap();
+        let decoded = decode_runs(&encoded).unwrap();
+        assert_eq!(decoded, runs);
+    }
 }

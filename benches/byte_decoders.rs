@@ -16,7 +16,9 @@ use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion
 
 use fs_ntfs::attr_io;
 use fs_ntfs::data_runs;
+use fs_ntfs::data_runs::DataRun;
 use fs_ntfs::ea_io;
+use fs_ntfs::sds;
 
 fn bench_decode_runs(c: &mut Criterion) {
     let mut group = c.benchmark_group("decode_runs");
@@ -154,10 +156,83 @@ fn synth_minimal_record() -> Vec<u8> {
     buf
 }
 
+fn bench_encode_runs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("encode_runs");
+
+    // Minimal single-run: baseline encode cost.
+    let single = vec![DataRun {
+        starting_vcn: 0,
+        length: 24,
+        lcn: Some(0x34),
+    }];
+    group.bench_function("single_run", |b| {
+        b.iter(|| data_runs::encode_runs(black_box(&single)).unwrap())
+    });
+
+    // Eight-run alternating sparse/real — exercises both the lcn_bytes=0
+    // sparse path and the signed-delta calculation on every other entry.
+    let mixed: Vec<DataRun> = (0..8)
+        .map(|i| DataRun {
+            starting_vcn: i * 16,
+            length: 16,
+            lcn: if i % 2 == 0 {
+                Some(0x100 + i * 0x40)
+            } else {
+                None
+            },
+        })
+        .collect();
+    group.bench_function("eight_run_mixed_sparse", |b| {
+        b.iter(|| data_runs::encode_runs(black_box(&mixed)).unwrap())
+    });
+
+    // Round-trip: encode then immediately decode. Captures the combined
+    // cost of both passes — useful for spotting alloc hotspots when the
+    // encoder output is piped directly into the decoder.
+    group.bench_function("roundtrip_eight_runs", |b| {
+        b.iter_batched(
+            || mixed.clone(),
+            |runs| {
+                let encoded = data_runs::encode_runs(black_box(&runs)).unwrap();
+                data_runs::decode_runs(black_box(&encoded)).unwrap()
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
+fn bench_sdh_hash(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sdh_hash");
+
+    // Small SD matching the typical mkfs default (100 bytes).
+    let small_sd: Vec<u8> = (0..100u8).cycle().take(100).collect();
+    group.bench_function("100_bytes", |b| {
+        b.iter(|| sds::sdh_hash(black_box(&small_sd)))
+    });
+
+    // Larger SD (512 bytes) — exercises the loop over many 4-byte chunks.
+    let large_sd: Vec<u8> = (0..128u8).cycle().take(512).collect();
+    group.bench_function("512_bytes", |b| {
+        b.iter(|| sds::sdh_hash(black_box(&large_sd)))
+    });
+
+    // Remainder path: 3-byte SD forces the partial-word code path.
+    let three_bytes = vec![0x01u8, 0x02, 0x03];
+    group.bench_function("3_bytes_remainder", |b| {
+        b.iter(|| sds::sdh_hash(black_box(&three_bytes)))
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_decode_runs,
+    bench_encode_runs,
     bench_decode_eas,
-    bench_iter_attributes
+    bench_iter_attributes,
+    bench_sdh_hash,
 );
 criterion_main!(benches);

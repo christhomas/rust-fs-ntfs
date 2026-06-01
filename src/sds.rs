@@ -267,4 +267,140 @@ mod tests {
         let m = SDS_MIRROR_GAP as usize;
         assert_eq!(&bytes[m..m + 96], &bytes[0..96]);
     }
+
+    // --- sdh_hash: remainder byte paths -----------------------------------
+
+    #[test]
+    fn sdh_hash_empty_input_returns_zero() {
+        assert_eq!(sdh_hash(&[]), 0);
+    }
+
+    #[test]
+    fn sdh_hash_single_byte_remainder() {
+        // 1 byte, no full 4-byte chunk: buf=[0x42,0,0,0], w=0x42, h=0+0x42=0x42.
+        assert_eq!(sdh_hash(&[0x42]), 0x42);
+    }
+
+    #[test]
+    fn sdh_hash_two_byte_remainder() {
+        // [0x01, 0x02]: buf=[0x01,0x02,0,0], w=0x0201, h=0+0x0201=0x0201.
+        assert_eq!(sdh_hash(&[0x01, 0x02]), 0x0201);
+    }
+
+    #[test]
+    fn sdh_hash_three_byte_remainder() {
+        // [0x01, 0x02, 0x03]: buf=[0x01,0x02,0x03,0], w=0x00030201.
+        assert_eq!(sdh_hash(&[0x01, 0x02, 0x03]), 0x00030201);
+    }
+
+    #[test]
+    fn sdh_hash_five_bytes_full_chunk_plus_one_remainder() {
+        // Bytes 0-3: full chunk → h = rotl(0, 3) + w0 = w0.
+        // Byte 4: remainder buf=[b4, 0, 0, 0].
+        let bytes = [0x01u8, 0x02, 0x03, 0x04, 0x05];
+        let w0: u32 = u32::from_le_bytes([0x01, 0x02, 0x03, 0x04]);
+        let h1 = 0u32.rotate_left(3).wrapping_add(w0);
+        let w1 = u32::from_le_bytes([0x05, 0, 0, 0]);
+        let expected = h1.rotate_left(3).wrapping_add(w1);
+        assert_eq!(sdh_hash(&bytes), expected);
+    }
+
+    // --- sdh_hash: determinism and stability --------------------------------
+
+    #[test]
+    fn sdh_hash_deterministic_for_same_input() {
+        let bytes: Vec<u8> = (0..100u8).collect();
+        assert_eq!(sdh_hash(&bytes), sdh_hash(&bytes));
+    }
+
+    // --- build_sds: edge cases ---------------------------------------------
+
+    #[test]
+    fn build_sds_empty_entries_returns_empty_buffer() {
+        let bytes = build_sds(&[]);
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn build_sds_two_entries_sequential_primary_layout() {
+        let sd0: Vec<u8> = vec![0xAAu8; 12]; // entry0: 20+12=32 = aligned
+        let sd1: Vec<u8> = vec![0xBBu8; 8]; // entry1: 20+8=28 → 32
+        let entries = [
+            SdEntry {
+                security_id: 0x100,
+                sd: &sd0,
+            },
+            SdEntry {
+                security_id: 0x101,
+                sd: &sd1,
+            },
+        ];
+        let bytes = build_sds(&entries);
+
+        // Entry 0 at offset 0: 32 bytes.
+        let hash0 = sdh_hash(&sd0);
+        assert_eq!(&bytes[0..4], &hash0.to_le_bytes(), "entry0 hash");
+        assert_eq!(&bytes[4..8], &0x100u32.to_le_bytes(), "entry0 security_id");
+        assert_eq!(&bytes[8..16], &0u64.to_le_bytes(), "entry0 self-offset");
+        assert_eq!(&bytes[16..20], &32u32.to_le_bytes(), "entry0 unpadded size");
+
+        // Entry 1 at offset 32: 32 bytes.
+        let hash1 = sdh_hash(&sd1);
+        assert_eq!(&bytes[32..36], &hash1.to_le_bytes(), "entry1 hash");
+        assert_eq!(
+            &bytes[36..40],
+            &0x101u32.to_le_bytes(),
+            "entry1 security_id"
+        );
+        assert_eq!(&bytes[40..48], &32u64.to_le_bytes(), "entry1 self-offset");
+        assert_eq!(&bytes[48..52], &28u32.to_le_bytes(), "entry1 unpadded size");
+    }
+
+    #[test]
+    fn build_sds_two_entries_both_mirrors_present() {
+        let sd: Vec<u8> = vec![0xCCu8; 12]; // 32-byte padded entry
+        let entries = [
+            SdEntry {
+                security_id: 0x100,
+                sd: &sd,
+            },
+            SdEntry {
+                security_id: 0x101,
+                sd: &sd,
+            },
+        ];
+        let bytes = build_sds(&entries);
+        let m = SDS_MIRROR_GAP as usize;
+        // Mirror of entry 0 at +0x40000.
+        assert_eq!(&bytes[m..m + 32], &bytes[0..32], "entry0 mirror");
+        // Mirror of entry 1 at 32 + 0x40000.
+        assert_eq!(&bytes[m + 32..m + 64], &bytes[32..64], "entry1 mirror");
+    }
+
+    #[test]
+    fn build_sds_entry_offset_field_reflects_primary_position() {
+        // The mirror copy must report the same sds_offset as the primary.
+        let sd: Vec<u8> = vec![0x11u8; 12];
+        let entries = [
+            SdEntry {
+                security_id: 0x100,
+                sd: &sd,
+            },
+            SdEntry {
+                security_id: 0x101,
+                sd: &sd,
+            },
+        ];
+        let bytes = build_sds(&entries);
+        let m = SDS_MIRROR_GAP as usize;
+        // Primary entry1 sds_offset = 32.
+        let primary_off = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
+        // Mirror entry1 sds_offset must also = 32 (NOT 32 + 0x40000).
+        let mirror_off = u64::from_le_bytes(bytes[m + 40..m + 48].try_into().unwrap());
+        assert_eq!(primary_off, 32);
+        assert_eq!(
+            mirror_off, 32,
+            "mirror sds_offset must equal primary position"
+        );
+    }
 }

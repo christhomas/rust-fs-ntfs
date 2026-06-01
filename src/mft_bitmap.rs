@@ -271,3 +271,332 @@ fn disk_offset_for_byte(
     let disk = (lcn + (vcn - run.starting_vcn)) * bm.params.cluster_size + off_in_cluster;
     Ok((run, disk))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mft_io::BootParams;
+
+    fn params(cluster_size: u64) -> BootParams {
+        BootParams {
+            bytes_per_sector: 512,
+            sectors_per_cluster: cluster_size / 512,
+            cluster_size,
+            mft_lcn: 0,
+            file_record_size: 1024,
+        }
+    }
+
+    fn run(starting_vcn: u64, length: u64, lcn: u64) -> DataRun {
+        DataRun {
+            starting_vcn,
+            length,
+            lcn: Some(lcn),
+        }
+    }
+
+    fn sparse_run(starting_vcn: u64, length: u64) -> DataRun {
+        DataRun {
+            starting_vcn,
+            length,
+            lcn: None,
+        }
+    }
+
+    fn bm(cluster_size: u64) -> MftBitmap {
+        MftBitmap {
+            params: params(cluster_size),
+            layout: MftBitmapLayout::Resident {
+                data_offset_in_record: 0,
+                bytes: vec![],
+                total_bits: 0,
+            },
+        }
+    }
+
+    // --- disk_offset_for_byte ---
+
+    #[test]
+    fn disk_offset_first_byte_in_first_run() {
+        // cluster_size=512, byte 0 → VCN 0, lcn=10 → disk = 10*512 + 0 = 5120
+        let b = bm(512);
+        let runs = vec![run(0, 4, 10)];
+        let (_, disk) = disk_offset_for_byte(&b, &runs, 0).unwrap();
+        assert_eq!(disk, 10 * 512);
+    }
+
+    #[test]
+    fn disk_offset_byte_within_cluster() {
+        // cluster_size=512, byte 7 → VCN 0, off_in_cluster=7, disk = 10*512 + 7
+        let b = bm(512);
+        let runs = vec![run(0, 4, 10)];
+        let (_, disk) = disk_offset_for_byte(&b, &runs, 7).unwrap();
+        assert_eq!(disk, 10 * 512 + 7);
+    }
+
+    #[test]
+    fn disk_offset_second_cluster() {
+        // byte 512 → VCN 1 (cluster_size=512), lcn=10+1=11, disk = 11*512 + 0
+        let b = bm(512);
+        let runs = vec![run(0, 4, 10)];
+        let (_, disk) = disk_offset_for_byte(&b, &runs, 512).unwrap();
+        assert_eq!(disk, 11 * 512);
+    }
+
+    #[test]
+    fn disk_offset_second_run() {
+        // Two runs: VCN 0-3 → lcn 10, VCN 4-7 → lcn 20
+        // byte 4*512 → VCN 4, in second run, lcn=20, disk = 20*512
+        let b = bm(512);
+        let runs = vec![run(0, 4, 10), run(4, 4, 20)];
+        let (_, disk) = disk_offset_for_byte(&b, &runs, 4 * 512).unwrap();
+        assert_eq!(disk, 20 * 512);
+    }
+
+    #[test]
+    fn disk_offset_unmapped_byte_errors() {
+        let b = bm(512);
+        let runs = vec![run(0, 4, 10)]; // only covers VCNs 0-3
+        assert!(disk_offset_for_byte(&b, &runs, 4 * 512).is_err());
+    }
+
+    #[test]
+    fn disk_offset_sparse_run_errors() {
+        let b = bm(512);
+        let runs = vec![sparse_run(0, 4)];
+        assert!(disk_offset_for_byte(&b, &runs, 0).is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // In-memory BlockIo for public-API tests.
+    // -------------------------------------------------------------------------
+
+    use crate::block_io::BlockIo;
+    use crate::data_runs::DataRun;
+
+    struct MemDev {
+        buf: Vec<u8>,
+    }
+    impl MemDev {
+        fn new(size: usize) -> Self {
+            Self {
+                buf: vec![0u8; size],
+            }
+        }
+    }
+    impl BlockIo for MemDev {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            let off = offset as usize;
+            if off + buf.len() > self.buf.len() {
+                return Err(format!("read past end: off={off} len={}", buf.len()));
+            }
+            buf.copy_from_slice(&self.buf[off..off + buf.len()]);
+            Ok(())
+        }
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            let off = offset as usize;
+            if off + buf.len() > self.buf.len() {
+                return Err(format!("write past end: off={off} len={}", buf.len()));
+            }
+            self.buf[off..off + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn size(&self) -> u64 {
+            self.buf.len() as u64
+        }
+    }
+
+    /// Resident MftBitmap backed directly by `bytes` (reads never touch I/O).
+    fn resident_bm(bytes: Vec<u8>) -> MftBitmap {
+        let total_bits = bytes.len() as u64 * 8;
+        MftBitmap {
+            params: params(4096),
+            layout: MftBitmapLayout::Resident {
+                data_offset_in_record: 0,
+                bytes,
+                total_bits,
+            },
+        }
+    }
+
+    /// Non-resident MftBitmap whose bitmap data is at disk byte 0
+    /// (LCN 0, cluster_size = 512 for easy byte arithmetic).
+    fn nonresident_bm(n_bitmap_bytes: u64) -> (MemDev, MftBitmap) {
+        let cluster_size = 512u64;
+        let dev = MemDev::new((cluster_size * 4) as usize);
+        let bm_val = MftBitmap {
+            params: params(cluster_size),
+            layout: MftBitmapLayout::NonResident {
+                runs: vec![DataRun {
+                    starting_vcn: 0,
+                    length: 4,
+                    lcn: Some(0),
+                }],
+                total_bits: n_bitmap_bytes * 8,
+            },
+        };
+        (dev, bm_val)
+    }
+
+    // -------------------------------------------------------------------------
+    // is_allocated_io — Resident layout (no real I/O needed for reads).
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn is_allocated_resident_set_bit_returns_true() {
+        let mut dev = MemDev::new(0);
+        let bm_val = resident_bm(vec![0b0010_0000]); // bit 5 set = record 5 allocated
+        assert!(is_allocated_io(&mut dev, &bm_val, 5).unwrap());
+        assert!(!is_allocated_io(&mut dev, &bm_val, 4).unwrap());
+        assert!(!is_allocated_io(&mut dev, &bm_val, 6).unwrap());
+    }
+
+    #[test]
+    fn is_allocated_resident_all_bits_set() {
+        let mut dev = MemDev::new(0);
+        let bm_val = resident_bm(vec![0xFF]);
+        for n in 0..8u64 {
+            assert!(is_allocated_io(&mut dev, &bm_val, n).unwrap(), "record {n}");
+        }
+    }
+
+    #[test]
+    fn is_allocated_resident_bit_in_second_byte() {
+        let mut dev = MemDev::new(0);
+        // byte[1] bit 2 = record 10
+        let bm_val = resident_bm(vec![0x00, 0b0000_0100]);
+        assert!(!is_allocated_io(&mut dev, &bm_val, 8).unwrap());
+        assert!(!is_allocated_io(&mut dev, &bm_val, 9).unwrap());
+        assert!(is_allocated_io(&mut dev, &bm_val, 10).unwrap());
+        assert!(!is_allocated_io(&mut dev, &bm_val, 11).unwrap());
+    }
+
+    // -------------------------------------------------------------------------
+    // count_free_io — Resident layout (pure bit count, no I/O).
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn count_free_resident_all_free() {
+        let mut dev = MemDev::new(0);
+        let bm_val = resident_bm(vec![0x00, 0x00]); // 16 bits, all free
+        assert_eq!(count_free_io(&mut dev, &bm_val).unwrap(), 16);
+    }
+
+    #[test]
+    fn count_free_resident_all_allocated() {
+        let mut dev = MemDev::new(0);
+        let bm_val = resident_bm(vec![0xFF, 0xFF]);
+        assert_eq!(count_free_io(&mut dev, &bm_val).unwrap(), 0);
+    }
+
+    #[test]
+    fn count_free_resident_known_mixed_pattern() {
+        let mut dev = MemDev::new(0);
+        // 0b1100_1100 → 4 set; 0b1010_1010 → 4 set; 8 free of 16.
+        let bm_val = resident_bm(vec![0b1100_1100, 0b1010_1010]);
+        assert_eq!(count_free_io(&mut dev, &bm_val).unwrap(), 8);
+    }
+
+    // -------------------------------------------------------------------------
+    // find_free_record_io — Resident layout.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn find_free_resident_all_free_returns_hint() {
+        let mut dev = MemDev::new(0);
+        let bm_val = resident_bm(vec![0x00, 0x00]);
+        assert_eq!(find_free_record_io(&mut dev, &bm_val, 0).unwrap(), Some(0));
+        assert_eq!(find_free_record_io(&mut dev, &bm_val, 5).unwrap(), Some(5));
+    }
+
+    #[test]
+    fn find_free_resident_skips_allocated_bits() {
+        let mut dev = MemDev::new(0);
+        // bits 0..4 set (0b0000_1111), bit 4 free
+        let bm_val = resident_bm(vec![0b0000_1111]);
+        assert_eq!(find_free_record_io(&mut dev, &bm_val, 0).unwrap(), Some(4));
+    }
+
+    #[test]
+    fn find_free_resident_wraps_around() {
+        let mut dev = MemDev::new(0);
+        // bits 4..8 set, bits 0..4 free; hint=4 → wraps → returns 0
+        let bm_val = resident_bm(vec![0b1111_0000]);
+        assert_eq!(find_free_record_io(&mut dev, &bm_val, 4).unwrap(), Some(0));
+    }
+
+    #[test]
+    fn find_free_resident_all_allocated_returns_none() {
+        let mut dev = MemDev::new(0);
+        let bm_val = resident_bm(vec![0xFF, 0xFF]);
+        assert_eq!(find_free_record_io(&mut dev, &bm_val, 0).unwrap(), None);
+    }
+
+    #[test]
+    fn find_free_resident_single_free_bit() {
+        let mut dev = MemDev::new(0);
+        // Only bit 3 is free
+        let bm_val = resident_bm(vec![0b1111_0111]);
+        assert_eq!(find_free_record_io(&mut dev, &bm_val, 0).unwrap(), Some(3));
+    }
+
+    // -------------------------------------------------------------------------
+    // allocate_io / free_io — NonResident layout (real byte I/O through MemDev).
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn allocate_nonresident_sets_bit_readable_via_is_allocated() {
+        let (mut dev, bm_val) = nonresident_bm(4);
+        allocate_io(&mut dev, &bm_val, 5).unwrap();
+        assert!(is_allocated_io(&mut dev, &bm_val, 5).unwrap());
+        assert!(!is_allocated_io(&mut dev, &bm_val, 4).unwrap());
+        assert!(!is_allocated_io(&mut dev, &bm_val, 6).unwrap());
+    }
+
+    #[test]
+    fn free_nonresident_clears_previously_allocated_bit() {
+        let (mut dev, bm_val) = nonresident_bm(4);
+        allocate_io(&mut dev, &bm_val, 7).unwrap();
+        free_io(&mut dev, &bm_val, 7).unwrap();
+        assert!(!is_allocated_io(&mut dev, &bm_val, 7).unwrap());
+    }
+
+    #[test]
+    fn allocate_nonresident_rejects_already_allocated() {
+        let (mut dev, bm_val) = nonresident_bm(4);
+        allocate_io(&mut dev, &bm_val, 3).unwrap();
+        let err = allocate_io(&mut dev, &bm_val, 3).unwrap_err();
+        assert!(err.contains("already allocated"), "{err}");
+    }
+
+    #[test]
+    fn free_nonresident_rejects_already_free() {
+        let (mut dev, bm_val) = nonresident_bm(4);
+        let err = free_io(&mut dev, &bm_val, 3).unwrap_err();
+        assert!(err.contains("already free"), "{err}");
+    }
+
+    #[test]
+    fn count_free_nonresident_decreases_after_allocations() {
+        let (mut dev, bm_val) = nonresident_bm(4); // 32 bits total
+        allocate_io(&mut dev, &bm_val, 0).unwrap();
+        allocate_io(&mut dev, &bm_val, 1).unwrap();
+        allocate_io(&mut dev, &bm_val, 5).unwrap();
+        assert_eq!(count_free_io(&mut dev, &bm_val).unwrap(), 29);
+    }
+
+    #[test]
+    fn allocate_free_roundtrip_across_byte_boundary() {
+        let (mut dev, bm_val) = nonresident_bm(4);
+        // Allocate records spanning byte 0 (bits 0-7) and byte 1 (bits 8-15).
+        allocate_io(&mut dev, &bm_val, 7).unwrap(); // byte 0, bit 7
+        allocate_io(&mut dev, &bm_val, 8).unwrap(); // byte 1, bit 0
+        assert!(is_allocated_io(&mut dev, &bm_val, 7).unwrap());
+        assert!(is_allocated_io(&mut dev, &bm_val, 8).unwrap());
+        assert!(!is_allocated_io(&mut dev, &bm_val, 6).unwrap());
+        assert!(!is_allocated_io(&mut dev, &bm_val, 9).unwrap());
+        free_io(&mut dev, &bm_val, 7).unwrap();
+        assert!(!is_allocated_io(&mut dev, &bm_val, 7).unwrap());
+        assert!(is_allocated_io(&mut dev, &bm_val, 8).unwrap());
+    }
+}

@@ -579,4 +579,219 @@ mod tests {
         let lcn = find_free_run_io(&mut dev, &bm, 2, 25).unwrap();
         assert_eq!(lcn, Some(0));
     }
+
+    // --- additional edge cases -------------------------------------------
+
+    #[test]
+    fn allocate_io_crossing_byte_boundary() {
+        // Allocate a run that spans byte 0 and byte 1 of the bitmap.
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4); // 32 clusters
+        allocate_io(&mut dev, &bm, 6, 4).unwrap(); // clusters 6,7,8,9
+                                                   // Byte 0 should have bits 6 and 7 set (0b1100_0000).
+        let byte0 = dev.buf[4096];
+        let byte1 = dev.buf[4097];
+        assert_eq!(byte0, 0b1100_0000, "bits 6-7 of byte 0");
+        assert_eq!(byte1, 0b0000_0011, "bits 0-1 of byte 1 (clusters 8-9)");
+    }
+
+    #[test]
+    fn allocate_io_then_free_io_full_roundtrip() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4);
+        allocate_io(&mut dev, &bm, 0, 32).unwrap();
+        assert_eq!(count_free_io(&mut dev, &bm).unwrap(), 0);
+        free_io(&mut dev, &bm, 0, 32).unwrap();
+        assert_eq!(count_free_io(&mut dev, &bm).unwrap(), 32);
+    }
+
+    #[test]
+    fn find_free_run_zero_clusters_returns_error() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4);
+        let err = find_free_run_io(&mut dev, &bm, 0, 0).unwrap_err();
+        assert!(err.contains("0"), "zero-cluster request is invalid: {err}");
+    }
+
+    #[test]
+    fn find_free_run_hint_beyond_total_clamps_correctly() {
+        // hint_lcn > total_bits: the function should clamp and still find a run.
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4); // 32 clusters
+        let lcn = find_free_run_io(&mut dev, &bm, 1, 999).unwrap();
+        assert!(
+            lcn.is_some(),
+            "clamped hint should still find a free cluster"
+        );
+    }
+
+    #[test]
+    fn find_free_run_all_allocated_returns_none() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4); // 32 clusters
+        allocate_io(&mut dev, &bm, 0, 32).unwrap();
+        assert_eq!(find_free_run_io(&mut dev, &bm, 1, 0).unwrap(), None);
+    }
+
+    #[test]
+    fn find_free_run_exactly_one_cluster_free_at_end() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4); // 32 clusters
+                                   // Allocate all except the last cluster.
+        allocate_io(&mut dev, &bm, 0, 31).unwrap();
+        let lcn = find_free_run_io(&mut dev, &bm, 1, 0).unwrap();
+        assert_eq!(lcn, Some(31));
+    }
+
+    #[test]
+    fn allocate_io_out_of_range_returns_error() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4); // 32 clusters
+        let err = allocate_io(&mut dev, &bm, 30, 4).unwrap_err(); // 30+4=34 > 32
+        assert!(err.contains("exceeds"), "{err}");
+    }
+
+    #[test]
+    fn range_has_hole_returns_false_for_allocated_range() {
+        use crate::data_runs::DataRun;
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 10,
+            lcn: Some(100),
+        }];
+        assert!(!crate::data_runs::range_has_hole_or_past_end(&runs, 0, 10));
+        assert!(!crate::data_runs::range_has_hole_or_past_end(&runs, 3, 5));
+    }
+
+    #[test]
+    fn bit_helpers_roundtrip_all_bit_positions() {
+        for bit in 0..8u8 {
+            let mut bytes = [0u8; 1];
+            set_bit(&mut bytes, 0, bit);
+            assert!(bit_is_set(bytes[0], bit), "bit {bit} should be set");
+            clear_bit(&mut bytes, 0, bit);
+            assert!(!bit_is_set(bytes[0], bit), "bit {bit} should be clear");
+        }
+    }
+
+    // --- read_range_io --------------------------------------------------------
+
+    #[test]
+    fn read_range_io_returns_correct_byte_containing_queried_bits() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4);
+        // Allocate clusters 3 and 5 → bitmap byte 0 = 0b0010_1000.
+        allocate_io(&mut dev, &bm, 3, 1).unwrap();
+        allocate_io(&mut dev, &bm, 5, 1).unwrap();
+        // Read 8 bits from start.
+        let bytes = read_range_io(&mut dev, &bm, 0, 8).unwrap();
+        assert_eq!(bytes.len(), 1);
+        assert_eq!(bytes[0], 0b0010_1000);
+    }
+
+    #[test]
+    fn read_range_io_spanning_two_bytes() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4); // 32 clusters
+                                   // Set bit 7 (end of byte 0) and bit 8 (start of byte 1).
+        allocate_io(&mut dev, &bm, 7, 1).unwrap();
+        allocate_io(&mut dev, &bm, 8, 1).unwrap();
+        // Read bits 4..12 (spans byte 0 bits 4-7 + byte 1 bits 0-3).
+        let bytes = read_range_io(&mut dev, &bm, 4, 8).unwrap();
+        // start_byte = 4/8 = 0, end_byte = div_ceil(12, 8) = 2
+        // So reads bytes [0..2] = 2 bytes.
+        assert_eq!(bytes.len(), 2);
+        // Byte 0 bit 7 set → 0b1000_0000; byte 1 bit 0 set → 0b0000_0001.
+        assert_eq!(bytes[0], 0b1000_0000, "byte 0");
+        assert_eq!(bytes[1], 0b0000_0001, "byte 1");
+    }
+
+    #[test]
+    fn read_range_io_out_of_bounds_errors() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4); // 32 clusters total
+        let err = read_range_io(&mut dev, &bm, 30, 5).unwrap_err();
+        assert!(err.contains("exceeds total_bits"), "{err}");
+    }
+
+    #[test]
+    fn read_range_io_zero_bits_returns_empty() {
+        let mut dev = MemDev::new(8192);
+        let bm = make_bm(4096, 4);
+        let bytes = read_range_io(&mut dev, &bm, 0, 0).unwrap();
+        assert!(bytes.is_empty());
+    }
+
+    // --- locate_bitmap_io on a real formatted volume -------------------------
+
+    struct FmtDev(Vec<u8>);
+    impl BlockIo for FmtDev {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            let off = offset as usize;
+            buf.copy_from_slice(&self.0[off..off + buf.len()]);
+            Ok(())
+        }
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            let off = offset as usize;
+            self.0[off..off + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn size(&self) -> u64 {
+            self.0.len() as u64
+        }
+    }
+
+    fn formatted_dev() -> FmtDev {
+        const SIZE: u64 = 64 * 1024 * 1024;
+        let mut dev = FmtDev(vec![0u8; SIZE as usize]);
+        crate::mkfs::format_filesystem(
+            &mut dev as &mut dyn BlockIo,
+            SIZE,
+            4096,
+            4096,
+            Some("BITMAPTEST"),
+            Some(0xABCD),
+        )
+        .expect("format_filesystem");
+        dev
+    }
+
+    #[test]
+    fn locate_bitmap_io_on_formatted_volume_succeeds() {
+        let mut dev = formatted_dev();
+        let bm = locate_bitmap_io(&mut dev).unwrap();
+        assert!(bm.total_bits > 0);
+        assert!(!bm.runs.is_empty());
+    }
+
+    #[test]
+    fn locate_bitmap_io_cluster_size_matches_format_params() {
+        let mut dev = formatted_dev();
+        let bm = locate_bitmap_io(&mut dev).unwrap();
+        assert_eq!(bm.params.cluster_size, 4096);
+    }
+
+    #[test]
+    fn locate_bitmap_io_total_bits_covers_volume() {
+        let mut dev = formatted_dev();
+        let bm = locate_bitmap_io(&mut dev).unwrap();
+        // 64 MiB volume / 4 KiB clusters = 16384 clusters; bitmap has one bit per cluster
+        assert!(bm.total_bits >= 16384);
+    }
+
+    #[test]
+    fn count_free_io_on_formatted_volume_is_positive() {
+        let mut dev = formatted_dev();
+        let bm = locate_bitmap_io(&mut dev).unwrap();
+        let free = count_free_io(&mut dev, &bm).unwrap();
+        assert!(free > 0, "a fresh format must have free clusters");
+    }
+
+    #[test]
+    fn is_allocated_on_formatted_volume_cluster_zero_is_allocated() {
+        let mut dev = formatted_dev();
+        let bm = locate_bitmap_io(&mut dev).unwrap();
+        // Cluster 0 holds the boot sector — always allocated.
+        assert!(is_allocated_io(&mut dev, &bm, 0).unwrap());
+    }
 }

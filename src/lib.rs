@@ -3756,6 +3756,329 @@ pub extern "C" fn fs_ntfs_mkfs(cfg: *const FsNtfsBlockdevCfg) -> c_int {
 }
 
 #[cfg(test)]
+mod pure_fn_tests {
+    use super::{
+        cstr_to_path, decode_mount_point_print_name, decode_symlink_print_name, err_i64, err_int,
+        err_ptr, fs_ntfs_clear_last_error, fs_ntfs_last_errno, infer_errno_from_message,
+        make_dirent, set_error, utf16_le_bytes_to_string, FS_NTFS_DIRENT_NAME_BYTES,
+    };
+    use std::ffi::CString;
+
+    // --- infer_errno_from_message ---
+
+    #[test]
+    fn infer_errno_not_found_variants() {
+        assert_eq!(infer_errno_from_message("file not found"), 2);
+        assert_eq!(infer_errno_from_message("path is nonexistent"), 2);
+        assert_eq!(infer_errno_from_message("ENOENT: no such file"), 2);
+        assert_eq!(infer_errno_from_message("record not mapped"), 2);
+    }
+
+    #[test]
+    fn infer_errno_already_exists() {
+        assert_eq!(infer_errno_from_message("already exists"), 17);
+        assert_eq!(infer_errno_from_message("EEXIST in index"), 17);
+    }
+
+    #[test]
+    fn infer_errno_no_space() {
+        assert_eq!(infer_errno_from_message("no room in record"), 28);
+        assert_eq!(infer_errno_from_message("volume is full"), 28);
+        assert_eq!(infer_errno_from_message("out of space"), 28);
+        assert_eq!(infer_errno_from_message("exceeds record capacity"), 28);
+    }
+
+    #[test]
+    fn infer_errno_invalid() {
+        assert_eq!(infer_errno_from_message("invalid basename"), 22);
+        assert_eq!(infer_errno_from_message("null or non-UTF-8 path"), 22);
+        assert_eq!(infer_errno_from_message("null pointer"), 22);
+    }
+
+    #[test]
+    fn infer_errno_directory_errors() {
+        assert_eq!(infer_errno_from_message("not a directory"), 20);
+        assert_eq!(infer_errno_from_message("target is a directory"), 21);
+        assert_eq!(infer_errno_from_message("directory not empty"), 66);
+    }
+
+    #[test]
+    fn infer_errno_permission() {
+        assert_eq!(infer_errno_from_message("refuse to overwrite"), 1);
+        assert_eq!(infer_errno_from_message("permission denied"), 1);
+    }
+
+    #[test]
+    fn infer_errno_fallback_is_eio() {
+        assert_eq!(infer_errno_from_message("some weird I/O error"), 5);
+        assert_eq!(infer_errno_from_message(""), 5);
+    }
+
+    // --- utf16_le_bytes_to_string ---
+
+    #[test]
+    fn utf16_le_empty_returns_none() {
+        assert_eq!(utf16_le_bytes_to_string(&[]), None);
+    }
+
+    #[test]
+    fn utf16_le_odd_length_returns_none() {
+        assert_eq!(utf16_le_bytes_to_string(&[0x48]), None);
+        assert_eq!(utf16_le_bytes_to_string(&[0x48, 0x00, 0x00]), None);
+    }
+
+    #[test]
+    fn utf16_le_valid_ascii_string() {
+        // "Hi" in UTF-16 LE
+        let bytes = [0x48u8, 0x00, 0x69, 0x00];
+        assert_eq!(utf16_le_bytes_to_string(&bytes), Some("Hi".to_string()));
+    }
+
+    #[test]
+    fn utf16_le_valid_unicode() {
+        // U+00E9 (é) in UTF-16 LE
+        let bytes = [0xE9u8, 0x00];
+        assert_eq!(utf16_le_bytes_to_string(&bytes), Some("é".to_string()));
+    }
+
+    #[test]
+    fn utf16_le_invalid_surrogates_returns_none() {
+        // Lone high surrogate U+D800 — invalid UTF-16
+        let bytes = [0x00u8, 0xD8];
+        assert_eq!(utf16_le_bytes_to_string(&bytes), None);
+    }
+
+    // --- decode_symlink_print_name ---
+
+    fn symlink_buf(print_name_offset: u16, print_name: &str) -> Vec<u8> {
+        let pn_utf16: Vec<u16> = print_name.encode_utf16().collect();
+        let pn_bytes: Vec<u8> = pn_utf16.iter().flat_map(|c| c.to_le_bytes()).collect();
+        // substitute_name_offset=0, substitute_name_length=0, print_name_offset, print_name_length, Flags(4)
+        let mut buf = vec![0u8; 12 + print_name_offset as usize + pn_bytes.len()];
+        buf[4..6].copy_from_slice(&print_name_offset.to_le_bytes());
+        buf[6..8].copy_from_slice(&(pn_bytes.len() as u16).to_le_bytes());
+        // Flags at [8..12] = 0
+        let start = 12 + print_name_offset as usize;
+        buf[start..start + pn_bytes.len()].copy_from_slice(&pn_bytes);
+        buf
+    }
+
+    #[test]
+    fn decode_symlink_basic() {
+        let buf = symlink_buf(0, "C:\\target");
+        assert_eq!(
+            decode_symlink_print_name(&buf),
+            Some("C:\\target".to_string())
+        );
+    }
+
+    #[test]
+    fn decode_symlink_with_offset() {
+        // Print name starts after 4 bytes (e.g. substitute name occupies first 4 bytes)
+        let buf = symlink_buf(4, "C:\\link");
+        assert_eq!(
+            decode_symlink_print_name(&buf),
+            Some("C:\\link".to_string())
+        );
+    }
+
+    #[test]
+    fn decode_symlink_too_short_returns_none() {
+        assert_eq!(decode_symlink_print_name(&[0u8; 11]), None);
+        assert_eq!(decode_symlink_print_name(&[]), None);
+    }
+
+    #[test]
+    fn decode_symlink_out_of_bounds_returns_none() {
+        // print_name_offset says data starts at offset 100 but buffer is tiny
+        let mut buf = vec![0u8; 12];
+        buf[4..6].copy_from_slice(&100u16.to_le_bytes()); // offset=100
+        buf[6..8].copy_from_slice(&2u16.to_le_bytes()); // length=2
+        assert_eq!(decode_symlink_print_name(&buf), None);
+    }
+
+    // --- decode_mount_point_print_name ---
+
+    fn mount_point_buf(print_name_offset: u16, print_name: &str) -> Vec<u8> {
+        let pn_utf16: Vec<u16> = print_name.encode_utf16().collect();
+        let pn_bytes: Vec<u8> = pn_utf16.iter().flat_map(|c| c.to_le_bytes()).collect();
+        // substitute_name_offset=0, substitute_name_length=0, print_name_offset, print_name_length
+        // PathBuffer starts at offset 8 (no Flags field unlike symlink)
+        let mut buf = vec![0u8; 8 + print_name_offset as usize + pn_bytes.len()];
+        buf[4..6].copy_from_slice(&print_name_offset.to_le_bytes());
+        buf[6..8].copy_from_slice(&(pn_bytes.len() as u16).to_le_bytes());
+        let start = 8 + print_name_offset as usize;
+        buf[start..start + pn_bytes.len()].copy_from_slice(&pn_bytes);
+        buf
+    }
+
+    #[test]
+    fn decode_mount_point_basic() {
+        let buf = mount_point_buf(0, "\\??\\Volume{abc}\\");
+        assert_eq!(
+            decode_mount_point_print_name(&buf),
+            Some("\\??\\Volume{abc}\\".to_string())
+        );
+    }
+
+    #[test]
+    fn decode_mount_point_too_short_returns_none() {
+        assert_eq!(decode_mount_point_print_name(&[0u8; 7]), None);
+        assert_eq!(decode_mount_point_print_name(&[]), None);
+    }
+
+    #[test]
+    fn decode_mount_point_out_of_bounds_returns_none() {
+        let mut buf = vec![0u8; 8];
+        buf[4..6].copy_from_slice(&200u16.to_le_bytes()); // offset=200, far out
+        buf[6..8].copy_from_slice(&2u16.to_le_bytes());
+        assert_eq!(decode_mount_point_print_name(&buf), None);
+    }
+
+    // --- thread-local error state ---
+
+    #[test]
+    fn set_error_records_errno() {
+        set_error("file not found");
+        assert_eq!(fs_ntfs_last_errno(), 2); // ENOENT
+    }
+
+    #[test]
+    fn set_error_records_eexist() {
+        set_error("already exists in directory");
+        assert_eq!(fs_ntfs_last_errno(), 17); // EEXIST
+    }
+
+    #[test]
+    fn set_error_records_enospc() {
+        set_error("no room for new attribute");
+        assert_eq!(fs_ntfs_last_errno(), 28); // ENOSPC
+    }
+
+    #[test]
+    fn set_error_records_einval() {
+        set_error("invalid basename provided");
+        assert_eq!(fs_ntfs_last_errno(), 22); // EINVAL
+    }
+
+    #[test]
+    fn set_error_records_enotdir() {
+        set_error("path component is not a directory");
+        assert_eq!(fs_ntfs_last_errno(), 20); // ENOTDIR
+    }
+
+    #[test]
+    fn set_error_records_eisdir() {
+        set_error("target is a directory, not a file");
+        assert_eq!(fs_ntfs_last_errno(), 21); // EISDIR
+    }
+
+    #[test]
+    fn set_error_records_enotempty() {
+        set_error("directory is not empty");
+        assert_eq!(fs_ntfs_last_errno(), 66); // ENOTEMPTY
+    }
+
+    #[test]
+    fn set_error_records_eperm() {
+        set_error("refuse to overwrite special file");
+        assert_eq!(fs_ntfs_last_errno(), 1); // EPERM
+    }
+
+    #[test]
+    fn set_error_fallback_is_eio() {
+        set_error("some unrecognised error");
+        assert_eq!(fs_ntfs_last_errno(), 5); // EIO
+    }
+
+    #[test]
+    fn clear_last_error_resets_errno_to_zero() {
+        set_error("not found");
+        fs_ntfs_clear_last_error();
+        assert_eq!(fs_ntfs_last_errno(), 0);
+    }
+
+    // --- err_int / err_i64 / err_ptr ---
+
+    #[test]
+    fn err_int_returns_negative_one() {
+        let ret = err_int("file not found in err_int test");
+        assert_eq!(ret, -1);
+        assert_eq!(fs_ntfs_last_errno(), 2); // ENOENT
+    }
+
+    #[test]
+    fn err_i64_returns_negative_one() {
+        let ret = err_i64("already exists in err_i64 test");
+        assert_eq!(ret, -1i64);
+        assert_eq!(fs_ntfs_last_errno(), 17);
+    }
+
+    #[test]
+    fn err_ptr_returns_null() {
+        let ret: *mut u8 = err_ptr("no room in err_ptr test");
+        assert!(ret.is_null());
+        assert_eq!(fs_ntfs_last_errno(), 28);
+    }
+
+    // --- make_dirent ---
+
+    #[test]
+    fn make_dirent_sets_fields() {
+        let d = make_dirent(42, 2, b"hello");
+        assert_eq!(d.file_record_number, 42);
+        assert_eq!(d.file_type, 2);
+        assert_eq!(d.name_len, 5);
+        assert_eq!(&d.name[..5], b"hello");
+    }
+
+    #[test]
+    fn make_dirent_zero_fills_trailing_name() {
+        let d = make_dirent(1, 0, b"hi");
+        assert_eq!(d.name_len, 2);
+        assert_eq!(d.name[2], 0);
+        assert_eq!(d.name[FS_NTFS_DIRENT_NAME_BYTES - 1], 0);
+    }
+
+    #[test]
+    fn make_dirent_truncates_long_name() {
+        let long_name = vec![b'X'; FS_NTFS_DIRENT_NAME_BYTES + 10];
+        let d = make_dirent(1, 0, &long_name);
+        // name_len capped at FS_NTFS_DIRENT_NAME_BYTES - 1
+        assert_eq!(d.name_len as usize, FS_NTFS_DIRENT_NAME_BYTES - 1);
+    }
+
+    #[test]
+    fn make_dirent_empty_name() {
+        let d = make_dirent(99, 1, b"");
+        assert_eq!(d.name_len, 0);
+        assert_eq!(d.file_record_number, 99);
+    }
+
+    // --- cstr_to_path ---
+
+    #[test]
+    fn cstr_to_path_null_returns_none() {
+        let result = cstr_to_path(std::ptr::null());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn cstr_to_path_valid_string() {
+        let s = CString::new("/mnt/ntfs.img").unwrap();
+        let result = cstr_to_path(s.as_ptr());
+        assert_eq!(result, Some("/mnt/ntfs.img"));
+    }
+
+    #[test]
+    fn cstr_to_path_empty_string() {
+        let s = CString::new("").unwrap();
+        let result = cstr_to_path(s.as_ptr());
+        assert_eq!(result, Some(""));
+    }
+}
+
+#[cfg(test)]
 mod timestamp_tests {
     use super::ntfs_time_to_unix;
 

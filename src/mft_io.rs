@@ -354,6 +354,7 @@ where
 mod tests {
     use super::*;
     use crate::block_io::BlockIo;
+    use crate::mkfs::format_filesystem;
 
     /// In-memory `BlockIo` for tests. Tracks size so size()/read past-end
     /// behave like a real file.
@@ -625,5 +626,182 @@ mod tests {
         assert!(!is_power_of_two(0));
         assert!(!is_power_of_two(513));
         assert!(!is_power_of_two(3000));
+    }
+
+    // --- read_usa_header ---------------------------------------------------
+
+    #[test]
+    fn read_usa_header_parses_valid_record() {
+        let mut rec = vec![0u8; 64];
+        // usa_offset at OFF_USA_OFFSET, usa_count at OFF_USA_COUNT
+        rec[OFF_USA_OFFSET..OFF_USA_OFFSET + 2].copy_from_slice(&0x002Au16.to_le_bytes());
+        rec[OFF_USA_COUNT..OFF_USA_COUNT + 2].copy_from_slice(&3u16.to_le_bytes());
+        let (off, cnt) = read_usa_header(&rec).unwrap();
+        assert_eq!(off, 0x2A);
+        assert_eq!(cnt, 3);
+    }
+
+    #[test]
+    fn read_usa_header_rejects_zero_count() {
+        let mut rec = vec![0u8; 64];
+        rec[OFF_USA_OFFSET..OFF_USA_OFFSET + 2].copy_from_slice(&0x002Au16.to_le_bytes());
+        rec[OFF_USA_COUNT..OFF_USA_COUNT + 2].copy_from_slice(&0u16.to_le_bytes());
+        assert!(read_usa_header(&rec).is_err());
+    }
+
+    #[test]
+    fn read_usa_header_rejects_too_small_record() {
+        let rec = vec![0u8; 4]; // < 8 bytes
+        assert!(read_usa_header(&rec).is_err());
+    }
+
+    // --- validate_usa_geometry --------------------------------------------
+
+    #[test]
+    fn validate_usa_geometry_valid_1024_record_512_bps() {
+        // 1024-byte record, 512 bps → 2 sectors → usa_count = 3 (USN + 2 slots)
+        validate_usa_geometry(1024, 512, 0x2A, 3).unwrap();
+    }
+
+    #[test]
+    fn validate_usa_geometry_rejects_usa_past_end() {
+        // usa_offset + usa_count*2 = 0x2A + 6 = 0x30; record_len = 10 → fails
+        let err = validate_usa_geometry(10, 512, 0x2A, 3).unwrap_err();
+        assert!(err.contains("extends past record end"), "{err}");
+    }
+
+    #[test]
+    fn validate_usa_geometry_rejects_wrong_sector_count() {
+        // 1024-byte record, 512 bps → 2 sectors → expected count = 3; give 4 → fail
+        let err = validate_usa_geometry(1024, 512, 0x2A, 4).unwrap_err();
+        assert!(err.contains("inconsistent"), "{err}");
+    }
+
+    // --- helpers for formatted-volume tests ----------------------------------
+
+    fn formatted_dev() -> MemDev {
+        const SIZE: u64 = 64 * 1024 * 1024;
+        let mut dev = MemDev::new(SIZE as usize);
+        format_filesystem(&mut dev as &mut dyn BlockIo, SIZE, 4096, 4096, None, None)
+            .expect("format_filesystem");
+        dev
+    }
+
+    // --- read_boot_params_io -------------------------------------------------
+
+    #[test]
+    fn read_boot_params_io_on_formatted_volume() {
+        let mut dev = formatted_dev();
+        let bp = read_boot_params_io(&mut dev).unwrap();
+        assert_eq!(bp.cluster_size, 4096);
+        assert_eq!(bp.bytes_per_sector, 512);
+        assert!(bp.mft_lcn > 0, "MFT must not start at cluster 0");
+        assert!(bp.file_record_size > 0);
+    }
+
+    // --- mft_record_offset ---------------------------------------------------
+
+    #[test]
+    fn mft_record_offset_record_zero_is_at_mft_lcn() {
+        let mut dev = formatted_dev();
+        let bp = read_boot_params_io(&mut dev).unwrap();
+        let offset = mft_record_offset(&bp, 0);
+        assert_eq!(offset, bp.mft_lcn * bp.cluster_size);
+    }
+
+    #[test]
+    fn mft_record_offset_record_n_is_sequential() {
+        let mut dev = formatted_dev();
+        let bp = read_boot_params_io(&mut dev).unwrap();
+        let off0 = mft_record_offset(&bp, 0);
+        let off1 = mft_record_offset(&bp, 1);
+        assert_eq!(off1 - off0, bp.file_record_size);
+    }
+
+    // --- record_flags --------------------------------------------------------
+
+    #[test]
+    fn record_flags_in_use_bit_set_on_mft_record_zero() {
+        let mut dev = formatted_dev();
+        let (_, rec) = read_mft_record_io(&mut dev, 0).unwrap();
+        let flags = record_flags(&rec);
+        assert!(
+            flags & MFT_FLAG_IN_USE != 0,
+            "record 0 ($MFT) must be in-use"
+        );
+    }
+
+    #[test]
+    fn record_flags_directory_bit_set_on_root_dir() {
+        let mut dev = formatted_dev();
+        // Record 5 is the root directory.
+        let (_, rec) = read_mft_record_io(&mut dev, 5).unwrap();
+        let flags = record_flags(&rec);
+        assert!(flags & MFT_FLAG_IN_USE != 0, "root dir must be in-use");
+        assert!(
+            flags & MFT_FLAG_DIRECTORY != 0,
+            "root dir must have DIRECTORY flag"
+        );
+    }
+
+    // --- read_mft_record_io --------------------------------------------------
+
+    #[test]
+    fn read_mft_record_io_returns_file_magic() {
+        let mut dev = formatted_dev();
+        let (_, rec) = read_mft_record_io(&mut dev, 0).unwrap();
+        assert_eq!(&rec[0..4], b"FILE", "MFT record must start with FILE magic");
+    }
+
+    #[test]
+    fn read_mft_record_io_returns_params_matching_volume() {
+        let mut dev = formatted_dev();
+        let (params, _) = read_mft_record_io(&mut dev, 0).unwrap();
+        assert_eq!(params.cluster_size, 4096);
+    }
+
+    #[test]
+    fn read_mft_record_io_multiple_records_each_valid() {
+        let mut dev = formatted_dev();
+        // System records 0–10 are all written by mkfs; each must have FILE magic.
+        for rec_num in 0..=10u64 {
+            let (_, rec) = read_mft_record_io(&mut dev, rec_num)
+                .unwrap_or_else(|e| panic!("record {rec_num}: {e}"));
+            assert_eq!(&rec[0..4], b"FILE", "record {rec_num} must have FILE magic");
+        }
+    }
+
+    // --- update_mft_record_io ------------------------------------------------
+
+    #[test]
+    fn update_mft_record_io_mutator_changes_are_persisted() {
+        let mut dev = formatted_dev();
+        // Write a sentinel into the unused region of record 2 ($MFTMirr),
+        // then read it back to confirm the write went through.
+        const SENTINEL: u8 = 0xA5;
+        const PROBE_OFFSET: usize = 0x28; // within record, past the fixed header
+        update_mft_record_io(&mut dev, 2, |rec: &mut [u8]| {
+            rec[PROBE_OFFSET] = SENTINEL;
+            Ok(())
+        })
+        .unwrap();
+        let (_, rec_after) = read_mft_record_io(&mut dev, 2).unwrap();
+        assert_eq!(
+            rec_after[PROBE_OFFSET], SENTINEL,
+            "mutated byte must survive round-trip"
+        );
+    }
+
+    #[test]
+    fn update_mft_record_io_mutator_error_leaves_record_unchanged() {
+        let mut dev = formatted_dev();
+        let (_, rec_before) = read_mft_record_io(&mut dev, 3).unwrap();
+        let result = update_mft_record_io(&mut dev, 3, |_rec: &mut [u8]| {
+            Err("intentional failure".to_string())
+        });
+        assert!(result.is_err());
+        // Record must be unchanged.
+        let (_, rec_after) = read_mft_record_io(&mut dev, 3).unwrap();
+        assert_eq!(rec_before, rec_after);
     }
 }

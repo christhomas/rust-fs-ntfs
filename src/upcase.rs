@@ -152,3 +152,205 @@ impl UpcaseTable {
         a.len().cmp(&b.len())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn utf16(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    fn canonical_table() -> UpcaseTable {
+        let table: Vec<u16> = CANONICAL_UPCASE
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        UpcaseTable { table }
+    }
+
+    // --- generate_upcase_table ---
+
+    #[test]
+    fn generate_upcase_table_is_128_kib() {
+        assert_eq!(generate_upcase_table().len(), 65536 * 2);
+    }
+
+    #[test]
+    fn generate_upcase_table_is_deterministic() {
+        assert_eq!(generate_upcase_table(), generate_upcase_table());
+    }
+
+    #[test]
+    fn generate_upcase_table_uppercase_ascii_identity() {
+        let t = generate_upcase_table();
+        // 'A' at index 0x41 → upcase[0x41] should be 'A' (0x41)
+        let entry = u16::from_le_bytes([t[0x41 * 2], t[0x41 * 2 + 1]]);
+        assert_eq!(entry, 0x41);
+    }
+
+    #[test]
+    fn generate_upcase_table_lowercase_maps_to_uppercase() {
+        let t = generate_upcase_table();
+        // 'a' (0x61) → 'A' (0x41)
+        let a = u16::from_le_bytes([t[0x61 * 2], t[0x61 * 2 + 1]]);
+        assert_eq!(a, 0x41);
+        // 'z' (0x7a) → 'Z' (0x5a)
+        let z = u16::from_le_bytes([t[0x7a * 2], t[0x7a * 2 + 1]]);
+        assert_eq!(z, 0x5a);
+    }
+
+    // --- UpcaseTable::upcase ---
+
+    #[test]
+    fn upcase_uppercase_ascii_unchanged() {
+        let t = canonical_table();
+        assert_eq!(t.upcase(b'A' as u16), b'A' as u16);
+        assert_eq!(t.upcase(b'Z' as u16), b'Z' as u16);
+    }
+
+    #[test]
+    fn upcase_lowercase_ascii_converts() {
+        let t = canonical_table();
+        assert_eq!(t.upcase(b'a' as u16), b'A' as u16);
+        assert_eq!(t.upcase(b'z' as u16), b'Z' as u16);
+        assert_eq!(t.upcase(b'm' as u16), b'M' as u16);
+    }
+
+    #[test]
+    fn upcase_digits_and_punctuation_unchanged() {
+        let t = canonical_table();
+        assert_eq!(t.upcase(b'0' as u16), b'0' as u16);
+        assert_eq!(t.upcase(b'.' as u16), b'.' as u16);
+        assert_eq!(t.upcase(b'_' as u16), b'_' as u16);
+    }
+
+    // --- UpcaseTable::cmp_names ---
+
+    #[test]
+    fn cmp_names_equal_ascii() {
+        let t = canonical_table();
+        assert_eq!(
+            t.cmp_names(&utf16("foo"), &utf16("foo")),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn cmp_names_case_insensitive() {
+        let t = canonical_table();
+        assert_eq!(
+            t.cmp_names(&utf16("FOO"), &utf16("foo")),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            t.cmp_names(&utf16("Hello"), &utf16("HELLO")),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn cmp_names_ordering() {
+        let t = canonical_table();
+        assert_eq!(
+            t.cmp_names(&utf16("abc"), &utf16("abd")),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            t.cmp_names(&utf16("b"), &utf16("a")),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn cmp_names_prefix_shorter_is_less() {
+        let t = canonical_table();
+        assert_eq!(
+            t.cmp_names(&utf16("ab"), &utf16("abc")),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            t.cmp_names(&utf16("abc"), &utf16("ab")),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn cmp_names_empty_slices() {
+        let t = canonical_table();
+        assert_eq!(t.cmp_names(&[], &[]), std::cmp::Ordering::Equal);
+        assert_eq!(t.cmp_names(&[], &utf16("a")), std::cmp::Ordering::Less);
+        assert_eq!(t.cmp_names(&utf16("a"), &[]), std::cmp::Ordering::Greater);
+    }
+
+    // --- load_io (via in-memory formatted filesystem) ----------------------
+
+    struct MemDev {
+        buf: Vec<u8>,
+    }
+
+    impl crate::block_io::BlockIo for MemDev {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            let off = offset as usize;
+            buf.copy_from_slice(&self.buf[off..off + buf.len()]);
+            Ok(())
+        }
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            let off = offset as usize;
+            self.buf[off..off + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn size(&self) -> u64 {
+            self.buf.len() as u64
+        }
+    }
+
+    fn formatted_dev() -> MemDev {
+        const SIZE: u64 = 64 * 1024 * 1024;
+        let mut dev = MemDev {
+            buf: vec![0u8; SIZE as usize],
+        };
+        crate::mkfs::format_filesystem(
+            &mut dev as &mut dyn crate::block_io::BlockIo,
+            SIZE,
+            4096,
+            4096,
+            None,
+            None,
+        )
+        .expect("format_filesystem");
+        dev
+    }
+
+    #[test]
+    fn load_io_succeeds_on_formatted_volume() {
+        let mut dev = formatted_dev();
+        let table = UpcaseTable::load_io(&mut dev).unwrap();
+        // Spot-check: 'a' → 'A' and 'Z' → 'Z'.
+        assert_eq!(table.upcase(b'a' as u16), b'A' as u16);
+        assert_eq!(table.upcase(b'Z' as u16), b'Z' as u16);
+    }
+
+    #[test]
+    fn load_io_table_matches_embedded_canonical_spot_check() {
+        let mut dev = formatted_dev();
+        let table = UpcaseTable::load_io(&mut dev).unwrap();
+        let expected = generate_upcase_table();
+        // Spot-check a spread of code points rather than all 65536
+        // (full loop is slow under coverage instrumentation).
+        for &i in &[0u16, 0x61, 0x7a, 0xE9, 0x100, 0x3B1, 0x4000, 0x7FFF, 0xFFFF] {
+            let exp = u16::from_le_bytes([expected[i as usize * 2], expected[i as usize * 2 + 1]]);
+            assert_eq!(table.upcase(i), exp, "mismatch at code point {i:#06x}");
+        }
+    }
+
+    #[test]
+    fn load_io_cmp_names_case_insensitive_roundtrip() {
+        let mut dev = formatted_dev();
+        let table = UpcaseTable::load_io(&mut dev).unwrap();
+        assert_eq!(
+            table.cmp_names(&utf16("Hello"), &utf16("HELLO")),
+            std::cmp::Ordering::Equal
+        );
+    }
+}

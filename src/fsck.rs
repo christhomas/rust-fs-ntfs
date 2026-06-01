@@ -723,4 +723,244 @@ mod tests {
             "upgrade helper must be a no-op on a fresh 3.1 volume without UPGRADE_ON_MOUNT"
         );
     }
+
+    fn fresh_dev() -> MemDev {
+        const SIZE: u64 = 64 * 1024 * 1024;
+        let mut dev = MemDev {
+            buf: vec![0u8; SIZE as usize],
+        };
+        format_filesystem(
+            &mut dev as &mut dyn BlockIo,
+            SIZE,
+            4096,
+            4096,
+            Some("TESTFS"),
+            Some(0xDEAD_BEEF),
+        )
+        .expect("format_filesystem");
+        dev
+    }
+
+    // --- is_dirty_io -------------------------------------------------------
+
+    #[test]
+    fn fresh_volume_is_not_dirty() {
+        let mut dev = fresh_dev();
+        assert!(!is_dirty_io(&mut dev).unwrap());
+    }
+
+    // --- set_dirty_io / clear_dirty_io -------------------------------------
+
+    #[test]
+    fn set_dirty_marks_volume_dirty() {
+        let mut dev = fresh_dev();
+        let changed = set_dirty_io(&mut dev).unwrap();
+        assert!(
+            changed,
+            "first set_dirty on clean volume should return true"
+        );
+        assert!(is_dirty_io(&mut dev).unwrap());
+    }
+
+    #[test]
+    fn set_dirty_is_idempotent() {
+        let mut dev = fresh_dev();
+        set_dirty_io(&mut dev).unwrap();
+        let again = set_dirty_io(&mut dev).unwrap();
+        assert!(!again, "second set_dirty should be a no-op (returns false)");
+    }
+
+    #[test]
+    fn clear_dirty_clears_dirty_flag() {
+        let mut dev = fresh_dev();
+        set_dirty_io(&mut dev).unwrap();
+        assert!(is_dirty_io(&mut dev).unwrap());
+        let changed = clear_dirty_io(&mut dev).unwrap();
+        assert!(changed, "clear_dirty on a dirty volume should return true");
+        assert!(!is_dirty_io(&mut dev).unwrap());
+    }
+
+    #[test]
+    fn clear_dirty_is_idempotent_on_clean_volume() {
+        let mut dev = fresh_dev();
+        // Fresh volume is already clean.
+        let changed = clear_dirty_io(&mut dev).unwrap();
+        assert!(
+            !changed,
+            "clear_dirty on already-clean volume should be a no-op"
+        );
+    }
+
+    #[test]
+    fn set_then_clear_dirty_roundtrip() {
+        let mut dev = fresh_dev();
+        set_dirty_io(&mut dev).unwrap();
+        clear_dirty_io(&mut dev).unwrap();
+        set_dirty_io(&mut dev).unwrap();
+        assert!(is_dirty_io(&mut dev).unwrap());
+        clear_dirty_io(&mut dev).unwrap();
+        assert!(!is_dirty_io(&mut dev).unwrap());
+    }
+
+    // --- reset_logfile_io --------------------------------------------------
+
+    #[test]
+    fn reset_logfile_returns_nonzero_length() {
+        let mut dev = fresh_dev();
+        let n = reset_logfile_io(&mut dev, None::<&mut dyn FnMut(&str, u64, u64)>).unwrap();
+        assert!(n > 0, "reset_logfile should return the bytes zeroed");
+    }
+
+    #[test]
+    fn reset_logfile_fills_logfile_with_0xff() {
+        let mut dev = fresh_dev();
+        let (offset, _len) = locate_logfile_data_io(&mut dev).unwrap();
+        // Write a zero sentinel, then verify reset fills with 0xFF.
+        FsckIo::write_all_at(&mut dev, offset, &[0x00u8; 8]).unwrap();
+        reset_logfile_io(&mut dev, None::<&mut dyn FnMut(&str, u64, u64)>).unwrap();
+        let mut check = [0x00u8; 8];
+        FsckIo::read_exact_at(&mut dev, offset, &mut check).unwrap();
+        assert_eq!(
+            check, [0xFFu8; 8],
+            "reset_logfile must fill $LogFile with 0xFF"
+        );
+    }
+
+    // --- read_u16_le_io ----------------------------------------------------
+
+    #[test]
+    fn read_u16_le_io_reads_correct_bytes() {
+        let mut dev = fresh_dev();
+        // Write a known u16 at some offset and read it back.
+        let offset = 512u64;
+        FsckIo::write_all_at(&mut dev, offset, &[0x34u8, 0x12]).unwrap();
+        let val = read_u16_le_io(&mut dev, offset).unwrap();
+        assert_eq!(val, 0x1234);
+    }
+
+    // --- locate_logfile_data_io --------------------------------------------
+
+    #[test]
+    fn locate_logfile_data_returns_nonzero_offset_and_length() {
+        let mut dev = fresh_dev();
+        let (offset, length) = locate_logfile_data_io(&mut dev).unwrap();
+        assert!(offset > 0);
+        assert!(length > 0);
+    }
+
+    // --- IoReader (Read + Seek adapter) ------------------------------------
+
+    #[test]
+    fn ioreader_read_returns_bytes_and_advances_position() {
+        let mut dev = MemDev {
+            buf: vec![1u8, 2, 3, 4, 5],
+        };
+        let mut r = IoReader::new(&mut dev);
+        let mut buf = [0u8; 3];
+        let n = std::io::Read::read(&mut r, &mut buf).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(&buf, &[1, 2, 3]);
+        assert_eq!(r.position, 3);
+    }
+
+    #[test]
+    fn ioreader_read_at_eof_returns_zero() {
+        let mut dev = MemDev { buf: vec![0u8; 4] };
+        let mut r = IoReader::new(&mut dev);
+        r.position = 4; // at end
+        let mut buf = [0u8; 4];
+        let n = std::io::Read::read(&mut r, &mut buf).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn ioreader_read_clamps_to_end_of_device() {
+        let mut dev = MemDev {
+            buf: vec![0xAAu8; 3],
+        };
+        let mut r = IoReader::new(&mut dev);
+        r.position = 2; // 1 byte left
+        let mut buf = [0u8; 4];
+        let n = std::io::Read::read(&mut r, &mut buf).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(buf[0], 0xAA);
+    }
+
+    #[test]
+    fn ioreader_seek_from_start() {
+        let mut dev = MemDev { buf: vec![0u8; 64] };
+        let mut r = IoReader::new(&mut dev);
+        let pos = std::io::Seek::seek(&mut r, std::io::SeekFrom::Start(32)).unwrap();
+        assert_eq!(pos, 32);
+        assert_eq!(r.position, 32);
+    }
+
+    #[test]
+    fn ioreader_seek_from_end() {
+        let mut dev = MemDev { buf: vec![0u8; 64] };
+        let mut r = IoReader::new(&mut dev);
+        let pos = std::io::Seek::seek(&mut r, std::io::SeekFrom::End(-8)).unwrap();
+        assert_eq!(pos, 56);
+    }
+
+    #[test]
+    fn ioreader_seek_from_current() {
+        let mut dev = MemDev { buf: vec![0u8; 64] };
+        let mut r = IoReader::new(&mut dev);
+        r.position = 10;
+        let pos = std::io::Seek::seek(&mut r, std::io::SeekFrom::Current(5)).unwrap();
+        assert_eq!(pos, 15);
+    }
+
+    #[test]
+    fn ioreader_seek_before_start_errors() {
+        let mut dev = MemDev { buf: vec![0u8; 64] };
+        let mut r = IoReader::new(&mut dev);
+        assert!(std::io::Seek::seek(&mut r, std::io::SeekFrom::Current(-1)).is_err());
+    }
+
+    // --- fsck_io -----------------------------------------------------------
+
+    #[test]
+    fn fsck_io_on_fresh_volume_returns_report() {
+        let mut dev = fresh_dev();
+        let report = fsck_io(&mut dev, None::<&mut dyn FnMut(&str, u64, u64)>).unwrap();
+        // Fresh volume is clean so dirty_cleared = false.
+        assert!(!report.dirty_cleared);
+        // $LogFile is present and non-empty.
+        assert!(report.logfile_bytes > 0);
+    }
+
+    #[test]
+    fn fsck_io_clears_dirty_flag_when_set() {
+        let mut dev = fresh_dev();
+        set_dirty_io(&mut dev).unwrap();
+        let report = fsck_io(&mut dev, None::<&mut dyn FnMut(&str, u64, u64)>).unwrap();
+        assert!(report.dirty_cleared, "fsck should clear the dirty flag");
+        assert!(
+            !is_dirty_io(&mut dev).unwrap(),
+            "volume should be clean after fsck"
+        );
+    }
+
+    #[test]
+    fn fsck_io_with_progress_callback_fires() {
+        let mut dev = fresh_dev();
+        let mut events: Vec<String> = Vec::new();
+        fsck_io(
+            &mut dev,
+            Some(&mut |label: &str, _done: u64, _total: u64| {
+                events.push(label.to_string());
+            }),
+        )
+        .unwrap();
+        assert!(
+            events.iter().any(|e| e == "reset_logfile"),
+            "reset_logfile event expected"
+        );
+        assert!(
+            events.iter().any(|e| e == "clear_dirty"),
+            "clear_dirty event expected"
+        );
+    }
 }

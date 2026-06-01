@@ -2655,4 +2655,203 @@ mod tests {
             assert_eq!(*runs, back, "case {i}");
         }
     }
+
+    // --- ascii_upcase16 ---------------------------------------------------
+
+    #[test]
+    fn ascii_upcase16_lowercases_a_to_z() {
+        // Only ASCII a-z (0x61..=0x7A) are affected.
+        assert_eq!(ascii_upcase16(b'a' as u16), b'A' as u16);
+        assert_eq!(ascii_upcase16(b'z' as u16), b'Z' as u16);
+        assert_eq!(ascii_upcase16(b'm' as u16), b'M' as u16);
+    }
+
+    #[test]
+    fn ascii_upcase16_uppercase_unchanged() {
+        assert_eq!(ascii_upcase16(b'A' as u16), b'A' as u16);
+        assert_eq!(ascii_upcase16(b'Z' as u16), b'Z' as u16);
+    }
+
+    #[test]
+    fn ascii_upcase16_non_alpha_unchanged() {
+        assert_eq!(ascii_upcase16(b'0' as u16), b'0' as u16);
+        assert_eq!(ascii_upcase16(b'!' as u16), b'!' as u16);
+        assert_eq!(ascii_upcase16(0x0400), 0x0400); // Cyrillic — unchanged
+    }
+
+    #[test]
+    fn ascii_upcase16_boundary_chars() {
+        // 0x60 = backtick, just below 'a' — not upcased.
+        assert_eq!(ascii_upcase16(0x60), 0x60);
+        // 0x7B = '{', just above 'z' — not upcased.
+        assert_eq!(ascii_upcase16(0x7B), 0x7B);
+    }
+
+    // --- collate_file_name ------------------------------------------------
+
+    #[test]
+    fn collate_file_name_equal_strings_are_equal() {
+        assert_eq!(collate_file_name("foo", "foo"), std::cmp::Ordering::Equal);
+        assert_eq!(
+            collate_file_name("README.md", "README.md"),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn collate_file_name_is_case_insensitive_ascii() {
+        assert_eq!(
+            collate_file_name("Foo", "foo"),
+            std::cmp::Ordering::Equal,
+            "'Foo' and 'foo' collate equal"
+        );
+        assert_eq!(
+            collate_file_name("FOO.TXT", "foo.txt"),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn collate_file_name_lexicographic_order() {
+        assert_eq!(
+            collate_file_name("apple", "banana"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            collate_file_name("zebra", "ant"),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn collate_file_name_prefix_shorter_is_less() {
+        assert_eq!(collate_file_name("abc", "abcd"), std::cmp::Ordering::Less);
+        assert_eq!(
+            collate_file_name("abcd", "abc"),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn collate_file_name_non_ascii_unchanged_by_upcase() {
+        // Non-ASCII chars pass through unchanged — ordering is code-point based.
+        assert_eq!(
+            collate_file_name("ä", "z"),
+            std::cmp::Ordering::Greater // U+00E4 > U+007A
+        );
+    }
+
+    // --- make_mft_internal_bitmap -----------------------------------------
+
+    #[test]
+    fn make_mft_internal_bitmap_minimum_size_is_8_bytes() {
+        let b = make_mft_internal_bitmap(0, &[]);
+        assert_eq!(b.len(), 8, "minimum size = 8 bytes");
+        assert!(b.iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn make_mft_internal_bitmap_marks_used_records() {
+        // Records 0, 1, 7, 8.
+        let b = make_mft_internal_bitmap(8, &[0, 1, 7, 8]);
+        // byte 0: bits 0,1,7 → 0b1000_0011 = 0x83
+        assert_eq!(b[0], 0b1000_0011, "byte 0");
+        // byte 1: bit 0 → 0b0000_0001 = 0x01
+        assert_eq!(b[1], 0b0000_0001, "byte 1");
+        // Remaining bytes: 0
+        for i in 2..8 {
+            assert_eq!(b[i], 0, "byte {i}");
+        }
+    }
+
+    #[test]
+    fn make_mft_internal_bitmap_respects_requested_size() {
+        let b = make_mft_internal_bitmap(16, &[0]);
+        assert_eq!(b.len(), 16);
+        assert_eq!(b[0], 0x01);
+        for i in 1..16 {
+            assert_eq!(b[i], 0, "byte {i}");
+        }
+    }
+
+    #[test]
+    fn make_mft_internal_bitmap_out_of_range_records_are_ignored() {
+        // Record 100 falls outside a 4-byte (32-bit) bitmap. Must not panic.
+        let b = make_mft_internal_bitmap(4, &[0, 100]);
+        assert_eq!(b.len(), 8); // padded to minimum
+        assert_eq!(b[0], 0x01); // only record 0 set
+    }
+
+    // --- build_attrdef_table ---------------------------------------------
+
+    #[test]
+    fn build_attrdef_table_is_2560_bytes() {
+        // 15 active entries + 1 zero-terminator, each 160 bytes.
+        let t = build_attrdef_table();
+        assert_eq!(t.len(), 2560, "table must be exactly 2560 bytes");
+    }
+
+    #[test]
+    fn build_attrdef_table_last_entry_is_zero() {
+        let t = build_attrdef_table();
+        let last_entry = &t[t.len() - 160..];
+        assert!(
+            last_entry.iter().all(|&b| b == 0),
+            "terminator entry must be all zeros"
+        );
+    }
+
+    #[test]
+    fn build_attrdef_table_first_entry_is_standard_information() {
+        let t = build_attrdef_table();
+        // Each entry is 160 bytes: 128-byte UTF-16 name + 32 bytes of fields.
+        // "$STANDARD_INFORMATION" = 21 chars = 42 bytes in UTF-16 LE.
+        let name_bytes = &t[0..42];
+        let u16s: Vec<u16> = name_bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let name: String = String::from_utf16(&u16s).unwrap();
+        assert_eq!(name, "$STANDARD_INFORMATION");
+    }
+
+    #[test]
+    fn build_attrdef_table_standard_information_type_code() {
+        let t = build_attrdef_table();
+        // type_code field at offset 128 within each 160-byte entry (after 128-byte name).
+        let type_code = u32::from_le_bytes([t[128], t[129], t[130], t[131]]);
+        assert_eq!(type_code, 0x10, "first entry type = $STANDARD_INFORMATION");
+    }
+
+    // --- encode_file_reference --------------------------------------------
+
+    #[test]
+    fn encode_file_reference_record_number_in_low_48_bits() {
+        let fr = encode_file_reference(42, 1);
+        let record_num = fr & 0x0000_FFFF_FFFF_FFFF;
+        assert_eq!(record_num, 42);
+    }
+
+    #[test]
+    fn encode_file_reference_sequence_in_high_16_bits() {
+        let fr = encode_file_reference(0, 0xBEEF);
+        let seq = (fr >> 48) as u16;
+        assert_eq!(seq, 0xBEEF);
+    }
+
+    #[test]
+    fn encode_file_reference_combined() {
+        let fr = encode_file_reference(5, 3);
+        assert_eq!(fr & 0x0000_FFFF_FFFF_FFFF, 5, "record number");
+        assert_eq!((fr >> 48) as u16, 3, "sequence");
+    }
+
+    #[test]
+    fn encode_file_reference_truncates_record_num_to_48_bits() {
+        // Record numbers > 2^48 have the high bits masked off.
+        let big = 0x0001_0000_0000_0000u64; // bit 48 set
+        let fr = encode_file_reference(big, 0);
+        let record_num = fr & 0x0000_FFFF_FFFF_FFFF;
+        assert_eq!(record_num, 0, "bit 48 masked off");
+    }
 }

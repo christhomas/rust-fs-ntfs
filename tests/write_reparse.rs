@@ -212,3 +212,27 @@ fn read_reparse_point_handles_empty_data() {
     assert_eq!(rp.reparse_tag, 0xA000_0099);
     assert!(rp.data.is_empty());
 }
+
+#[test]
+fn reparse_tag_and_data_persist_after_remount() {
+    // Write a reparse point, re-open the image, read back and verify.
+    // Catches cases where write_reparse_point flushes the in-memory
+    // record but doesn't reach disk before the handle is dropped.
+    let img = working_copy("remount");
+    let tag = 0xA000_0042u32;
+    let data = b"remount-payload-bytes";
+    write::write_reparse_point(
+        std::path::Path::new(&img),
+        "/Documents/readme.txt",
+        tag,
+        data,
+    )
+    .expect("write_reparse_point");
+
+    // Re-open via our read path.
+    let rp = write::read_reparse_point(std::path::Path::new(&img), "/Documents/readme.txt")
+        .expect("read_reparse_point")
+        .expect("rp must be present after write");
+    assert_eq!(rp.reparse_tag, tag);
+    assert_eq!(rp.data.as_slice(), data.as_ref());
+}
