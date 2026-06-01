@@ -50,6 +50,7 @@ pub mod mft_io;
 pub mod mkfs;
 pub mod record_build;
 pub mod sds;
+pub mod sparse;
 pub mod upcase;
 pub mod write;
 
