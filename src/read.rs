@@ -170,6 +170,87 @@ pub fn read_attribute_value<T: BlockIo + ?Sized>(
     Ok(out)
 }
 
+/// `$STANDARD_INFORMATION` value-field offsets (NTFS 1.x and 3.x agree on
+/// the first 0x24 bytes that we read here).
+const SI_CREATION: usize = 0x00;
+const SI_MODIFICATION: usize = 0x08;
+const SI_MFT_MODIFICATION: usize = 0x10;
+const SI_ACCESS: usize = 0x18;
+const SI_FILE_ATTRIBUTES: usize = 0x20;
+
+/// Seconds between the NTFS epoch (1601-01-01) and the Unix epoch (1970-01-01).
+const NT_UNIX_EPOCH_DIFF_SECS: i64 = 11_644_473_600;
+
+/// Convert an NTFS FILETIME (100-ns intervals since 1601-01-01 UTC) to whole
+/// Unix seconds. Pure function.
+pub fn nt_to_unix(nt: u64) -> i64 {
+    (nt / 10_000_000) as i64 - NT_UNIX_EPOCH_DIFF_SECS
+}
+
+/// File metadata read natively from one MFT record (no upstream `ntfs`
+/// crate). Timestamps are raw NTFS FILETIMEs; use [`nt_to_unix`] to convert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stat {
+    /// Logical size of the unnamed `$DATA` (0 if the file has none, e.g. a dir).
+    pub size: u64,
+    pub is_dir: bool,
+    /// `$STANDARD_INFORMATION.file_attributes`.
+    pub file_attributes: u32,
+    pub created_nt: u64,
+    pub modified_nt: u64,
+    pub mft_modified_nt: u64,
+    pub accessed_nt: u64,
+}
+
+/// Read a record's metadata: directory flag, `$STANDARD_INFORMATION`
+/// timestamps + attributes, and the unnamed `$DATA` size.
+pub fn read_stat<T: BlockIo + ?Sized>(io: &mut T, record_number: u64) -> Result<Stat, String> {
+    let (_, record) = read_mft_record_io(io, record_number)?;
+    let is_dir = record_flags(&record) & MFT_FLAG_DIRECTORY != 0;
+
+    let si = attr_io::find_attribute(&record, AttrType::StandardInformation, None)
+        .ok_or("read_stat: $STANDARD_INFORMATION not found")?;
+    if !si.is_resident {
+        return Err("read_stat: $STANDARD_INFORMATION is non-resident (impossible per spec)".into());
+    }
+    let v = si.attr_offset
+        + si.resident_value_offset
+            .ok_or("read_stat: $STANDARD_INFORMATION has no value offset")? as usize;
+    let u64_at = |off: usize| -> Result<u64, String> {
+        record
+            .get(off..off + 8)
+            .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
+            .ok_or_else(|| "read_stat: $STANDARD_INFORMATION truncated".to_string())
+    };
+    let created_nt = u64_at(v + SI_CREATION)?;
+    let modified_nt = u64_at(v + SI_MODIFICATION)?;
+    let mft_modified_nt = u64_at(v + SI_MFT_MODIFICATION)?;
+    let accessed_nt = u64_at(v + SI_ACCESS)?;
+    let file_attributes = u32::from_le_bytes(
+        record
+            .get(v + SI_FILE_ATTRIBUTES..v + SI_FILE_ATTRIBUTES + 4)
+            .ok_or("read_stat: file_attributes truncated")?
+            .try_into()
+            .unwrap(),
+    );
+
+    let size = match attr_io::find_attribute(&record, AttrType::Data, None) {
+        Some(d) if d.is_resident => d.resident_value_length.unwrap_or(0) as u64,
+        Some(d) => d.non_resident_value_length.unwrap_or(0),
+        None => 0,
+    };
+
+    Ok(Stat {
+        size,
+        is_dir,
+        file_attributes,
+        created_nt,
+        modified_nt,
+        mft_modified_nt,
+        accessed_nt,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +258,7 @@ mod tests {
     use crate::mkfs::format_filesystem;
     use crate::write;
     use ntfs::indexes::NtfsFileNameIndex;
+    use ntfs::structured_values::NtfsStandardInformation;
     use ntfs::{Ntfs, NtfsReadSeek};
 
     /// In-memory volume so the cross-check has no fixture dependency.
@@ -352,5 +434,68 @@ mod tests {
         let rec = resolve_path(&mut dev, "/x").unwrap();
         // No $INDEX_ROOT on a regular file.
         assert!(read_attribute_value(&mut dev, rec, AttrType::IndexRoot, None).is_err());
+    }
+
+    #[test]
+    fn nt_to_unix_known_values() {
+        // NTFS epoch (1601-01-01) maps to -11_644_473_600 Unix seconds.
+        assert_eq!(nt_to_unix(0), -11_644_473_600);
+        // Unix epoch (1970-01-01) is 116_444_736_000_000_000 in NTFS 100ns.
+        assert_eq!(nt_to_unix(116_444_736_000_000_000), 0);
+        // One second past the Unix epoch.
+        assert_eq!(nt_to_unix(116_444_736_010_000_000), 1);
+    }
+
+    /// Oracle: read a record's SI timestamps/attributes + size via upstream.
+    fn upstream_stat(dev: &mut MemDev, path: &str) -> (u32, [u64; 4], u64, bool) {
+        let mut reader = IoReadSeek::new(dev);
+        let mut ntfs = Ntfs::new(&mut reader).expect("Ntfs::new");
+        ntfs.read_upcase_table(&mut reader).expect("upcase");
+        let mut cur = ntfs.root_directory(&mut reader).expect("root");
+        for comp in path.split('/').filter(|c| !c.is_empty()) {
+            let index = cur.directory_index(&mut reader).expect("dir index");
+            let mut finder = index.finder();
+            let entry = NtfsFileNameIndex::find(&mut finder, &ntfs, &mut reader, comp)
+                .expect("entry present")
+                .expect("entry ok");
+            cur = entry.to_file(&ntfs, &mut reader).expect("to_file");
+        }
+        let is_dir = cur.is_directory();
+        let size = match cur.data(&mut reader, "") {
+            Some(Ok(item)) => item.to_attribute().map(|a| a.value_length()).unwrap_or(0),
+            _ => 0,
+        };
+        let si: NtfsStandardInformation = cur.info().expect("$STANDARD_INFORMATION");
+        let times = [
+            si.creation_time().nt_timestamp(),
+            si.modification_time().nt_timestamp(),
+            si.mft_record_modification_time().nt_timestamp(),
+            si.access_time().nt_timestamp(),
+        ];
+        (si.file_attributes().bits(), times, size, is_dir)
+    }
+
+    #[test]
+    fn stat_matches_upstream_file_and_dir() {
+        let mut dev = fresh_vol();
+        write::create_file_io(&mut dev, "/", "f.txt").expect("create file");
+        write::write_file_contents_io(&mut dev, "/f.txt", b"twelve bytes").expect("write");
+        write::mkdir_io(&mut dev, "/", "d").expect("mkdir");
+
+        for (path, want_dir) in [("/f.txt", false), ("/d", true)] {
+            let rec = resolve_path(&mut dev, path).expect("resolve");
+            let st = read_stat(&mut dev, rec).expect("stat");
+            let (u_attrs, u_times, u_size, u_is_dir) = upstream_stat(&mut dev, path);
+
+            assert_eq!(st.is_dir, want_dir, "is_dir for {path}");
+            assert_eq!(st.is_dir, u_is_dir, "is_dir vs upstream for {path}");
+            assert_eq!(st.file_attributes, u_attrs, "file_attributes vs upstream for {path}");
+            assert_eq!(st.size, u_size, "size vs upstream for {path}");
+            assert_eq!(
+                [st.created_nt, st.modified_nt, st.mft_modified_nt, st.accessed_nt],
+                u_times,
+                "timestamps vs upstream for {path}"
+            );
+        }
     }
 }
