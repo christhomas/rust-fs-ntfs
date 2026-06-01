@@ -605,9 +605,11 @@ pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
 
     let current_len = loc.non_resident_value_length.ok_or("no value_length")?;
     if new_size > current_len {
-        return Err(format!(
-            "truncate: grow not yet implemented ({new_size} > {current_len})"
-        ));
+        // Growing a non-resident file is exactly what grow_nonresident does
+        // (allocate clusters, extend data_size, leave initialized_length so
+        // the new tail reads back as zeros). Route to it rather than
+        // duplicating the allocation logic — same on-disk result.
+        return grow_nonresident_by_record_number_io(io, record_number, new_size);
     }
     if new_size == current_len {
         return Ok(new_size);
@@ -3392,6 +3394,39 @@ mod tests {
         let mut dev = fresh_vol();
         let n = write_at_io(&mut dev, "/", 0, &[]).unwrap();
         assert_eq!(n, 0);
+    }
+
+    // --- truncate grow (extend) — C2 ------------------------------------------
+
+    #[test]
+    fn truncate_grow_extends_nonresident_file() {
+        // C2: truncate to a larger size now routes to the grow path.
+        let mut dev = fresh_vol();
+        let rec = create_file_io(&mut dev, "/", "grow.bin").unwrap();
+        // Promote to non-resident with an initial 4096 bytes.
+        promote_resident_data_to_nonresident_io(&mut dev, "/grow.bin", &[0xABu8; 4096]).unwrap();
+        // Extend to 12288 via truncate (was "grow not yet implemented").
+        let new_size = truncate_by_record_number_io(&mut dev, rec, 12_288).unwrap();
+        assert_eq!(new_size, 12_288);
+        // Re-read the $DATA attribute: still non-resident, logical size grew.
+        let descs = read_attributes_io(&mut dev, "/grow.bin").unwrap();
+        let data = descs
+            .iter()
+            .find(|d| d.type_code == AttrType::Data as u32 && d.name.is_empty())
+            .expect("unnamed $DATA");
+        assert!(!data.is_resident);
+        assert_eq!(data.value_length, 12_288);
+    }
+
+    #[test]
+    fn truncate_grow_to_same_size_is_noop() {
+        let mut dev = fresh_vol();
+        let rec = create_file_io(&mut dev, "/", "same.bin").unwrap();
+        promote_resident_data_to_nonresident_io(&mut dev, "/same.bin", &[0u8; 4096]).unwrap();
+        assert_eq!(
+            truncate_by_record_number_io(&mut dev, rec, 4096).unwrap(),
+            4096
+        );
     }
 
     // --- set_times_by_record_number_io ----------------------------------------
