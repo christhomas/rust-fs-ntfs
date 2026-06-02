@@ -3583,15 +3583,35 @@ mod capi_read_tests {
     use std::ffi::{c_void, CString};
     use std::path::Path;
 
+    /// Owns a scratch image path and removes the file on drop — so even a
+    /// panicking test cleans up (the crate builds `panic = "unwind"`, so Drop
+    /// runs during unwind, unlike the trailing `remove_file` it replaces which
+    /// was skipped on a failed assert). Together with the PID in the name this
+    /// keeps concurrent test processes isolated *and* self-cleaning, so a
+    /// killed/failed run no longer orphans a PID-tagged image.
+    /// Derefs to `&str` so it can be passed straight to `mount`.
+    struct ImageGuard(String);
+    impl std::ops::Deref for ImageGuard {
+        type Target = str;
+        fn deref(&self) -> &str {
+            &self.0
+        }
+    }
+    impl Drop for ImageGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
     /// Format a fresh image and populate it: /hello.txt (content), /sub/, and
-    /// /sub/inner.bin. Returns the image path.
+    /// /sub/inner.bin. Returns an [`ImageGuard`] that deletes the file on drop.
     ///
     /// The path includes the PID so two concurrent `cargo test` processes in
     /// the same worktree (e.g. a manual run overlapping a hook-triggered one)
     /// don't clobber each other's image mid-format/read — the fixed path used
     /// to cause a rare cross-process flake (one process re-formatting the file
     /// while the other was populating or listing it).
-    fn fresh_image(tag: &str) -> String {
+    fn fresh_image(tag: &str) -> ImageGuard {
         let path = format!("test-disks/_capi_read_{tag}_{}.img", std::process::id());
         let f = std::fs::File::create(&path).expect("create");
         f.set_len(32 * 1024 * 1024).expect("set_len");
@@ -3612,7 +3632,7 @@ mod capi_read_tests {
         crate::write::mkdir_io(&mut io, "/", "sub").expect("mkdir sub");
         crate::write::create_file_io(&mut io, "/sub", "inner.bin").expect("create inner");
         drop(io);
-        path
+        ImageGuard(path)
     }
 
     fn mount(path: &str) -> *mut super::FsNtfsHandle {
@@ -3643,7 +3663,7 @@ mod capi_read_tests {
         assert_eq!(n2, 5);
         assert_eq!(&buf2, b"capi ");
         fs_ntfs_umount(h);
-        let _ = std::fs::remove_file(&img);
+        // `img` (ImageGuard) removes the file when it drops at end of scope.
     }
 
     #[test]
@@ -3662,7 +3682,7 @@ mod capi_read_tests {
         assert_eq!(fs_ntfs_stat(h, pd.as_ptr(), &mut dattr), 0);
         assert_eq!(dattr.file_type, 2, "directory (FS_NTFS_FT_DIR)");
         fs_ntfs_umount(h);
-        let _ = std::fs::remove_file(&img);
+        // `img` (ImageGuard) removes the file when it drops at end of scope.
     }
 
     #[test]
@@ -3686,6 +3706,6 @@ mod capi_read_tests {
         assert!(names.iter().any(|n| n == "hello.txt"), "names: {names:?}");
         assert!(names.iter().any(|n| n == "sub"), "names: {names:?}");
         fs_ntfs_umount(h);
-        let _ = std::fs::remove_file(&img);
+        // `img` (ImageGuard) removes the file when it drops at end of scope.
     }
 }
