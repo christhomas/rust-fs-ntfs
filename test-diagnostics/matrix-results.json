@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "tested_at_sha": "09288fedf321ae2269732bdc310167814815769c",
-  "tested_at_branch": "feat/native-fsck",
-  "tested_at_utc": "2026-06-02T00:19:23Z",
-  "binary_sha256": "121923ad28d2c7a790a1a1fca1ef648a115684f174f90b68a334429bcaf3b584",
+  "tested_at_sha": "de1a62cec189eaef82753d3cd191b0c2741aef7c",
+  "tested_at_branch": "feat/atomic-rename-replace",
+  "tested_at_utc": "2026-06-02T06:48:59Z",
+  "binary_sha256": "af3201c14886356f8c2e998ea90d5c9f785c6763e4dd8b34de1aa40a3906ffa7",
   "test_matrix_json_sha256": "42c8bec041fc15bf654ae89bdc58826080707ac3e05bc82e72cf6199a0cc1f7b",
   "harness_submodule_sha": "730a7613523eed990dc3482b44f71377c7ed463e",
   "host": {
@@ -307,6 +307,6 @@
     "failed": 0,
     "unknown": 1,
     "total": 47,
-    "total_duration_s": 1289.35
+    "total_duration_s": 1490.73
   }
 }
