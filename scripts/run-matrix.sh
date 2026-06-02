@@ -101,16 +101,26 @@ mkdir -p "$host_image_dir"
 # run — even a slow one — constantly touches its dir (the runner creates and
 # deletes a scenario image every few minutes), so its dir stays fresh; only a
 # dead run's leftovers go stale. This never touches a concurrent in-flight run.
-reclaimed=0
-while IFS= read -r stale; do
-    [ -z "$stale" ] && continue
-    n=$(find "$stale" -name 'nfs-*.img' -type f 2>/dev/null | wc -l | tr -d ' ')
-    find "$stale" -name 'nfs-*.img' -type f -delete 2>/dev/null
-    rmdir "$stale" 2>/dev/null || true
-    reclaimed=$((reclaimed + n))
-done < <(find "$host_image_dir" -mindepth 1 -maxdepth 1 -type d -mmin +120 2>/dev/null)
-if [ "$reclaimed" -gt 0 ]; then
-    echo "[run-matrix] reclaimed $reclaimed orphaned image(s) from prior killed run(s)" >&2
+#
+# Skipped under --keep-images / HARNESS_KEEP_IMAGES (keep_images is already
+# reconciled with the env var above): a developer who deliberately preserved
+# images for byte-diff inspection mustn't have them swept on the next run.
+if [ "$keep_images" -eq 0 ]; then
+    reclaimed=0
+    while IFS= read -r stale; do
+        [ -z "$stale" ] && continue
+        n=$(find "$stale" -name 'nfs-*.img' -type f 2>/dev/null | wc -l | tr -d ' ')
+        find "$stale" -name 'nfs-*.img' -type f -delete 2>/dev/null
+        # `rmdir` only removes an empty dir; fall back to `rm -rf` so a stale
+        # orphan that also holds non-image junk (lock files, partial artefacts
+        # from the killed run) is still reclaimed rather than lingering forever.
+        # Safe: the 2-hour mtime guard means this is never a live run's dir.
+        rmdir "$stale" 2>/dev/null || rm -rf "$stale" 2>/dev/null || true
+        reclaimed=$((reclaimed + n))
+    done < <(find "$host_image_dir" -mindepth 1 -maxdepth 1 -type d -mmin +120 2>/dev/null)
+    if [ "$reclaimed" -gt 0 ]; then
+        echo "[run-matrix] reclaimed $reclaimed orphaned image(s) from prior killed run(s)" >&2
+    fi
 fi
 
 # ── Per-scenario-filter lock ────────────────────────────────────────────────
