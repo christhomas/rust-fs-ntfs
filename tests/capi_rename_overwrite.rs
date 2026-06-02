@@ -49,7 +49,7 @@ const ENOTEMPTY: c_int = 66;
 
 // --- image generation -----------------------------------------------------
 
-fn fresh_volume(tag: &str) -> String {
+fn fresh_volume(tag: &str) -> ImgGuard {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dst = format!("test-disks/_capi_rename_overwrite_{tag}_{n}.img");
@@ -68,7 +68,7 @@ fn fresh_volume(tag: &str) -> String {
     .expect("mkfs");
     io.sync().expect("sync");
     drop(io);
-    dst
+    ImgGuard(dst)
 }
 
 // --- callback block device (read/write over a host File) ------------------
@@ -229,8 +229,23 @@ fn record_in_use(img: &str, rec: u64) -> bool {
     fs_ntfs::mft_bitmap::is_allocated(Path::new(img), &bm, rec).expect("is_allocated")
 }
 
-fn cleanup(img: &str) {
-    let _ = std::fs::remove_file(img);
+/// Panic-safe cleanup: removes the backing image file when the test
+/// scope unwinds, so a failed `assert!` doesn't litter `test-disks/`.
+/// Derefs to `str` so it drops in anywhere an `&str` image path is
+/// expected.
+struct ImgGuard(String);
+
+impl Drop for ImgGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+impl std::ops::Deref for ImgGuard {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
 }
 
 // ===========================================================================
@@ -271,8 +286,6 @@ fn file_replaces_file_case(tag: &str, src: &str, dst: &str) {
         !record_in_use(&img, victim_rec),
         "old destination record {victim_rec} must be freed"
     );
-
-    cleanup(&img);
 }
 
 #[test]
@@ -317,7 +330,6 @@ fn replace_false_on_existing_dest_still_errors() {
     assert!(exists(&img, "/src_a.txt"));
     assert!(exists(&img, "/dst_b.txt"));
     assert_eq!(read_all(&img, "/dst_b.txt"), b"old");
-    cleanup(&img);
 }
 
 // ===========================================================================
@@ -345,7 +357,6 @@ fn empty_dir_replaces_empty_dir_case(tag: &str, src: &str, dst: &str) {
         !record_in_use(&img, dst_rec),
         "old destination dir record {dst_rec} must be freed"
     );
-    cleanup(&img);
 }
 
 #[test]
@@ -380,7 +391,6 @@ fn non_empty_dir_target_errors() {
     assert!(exists(&img, "/src_dir"));
     assert!(exists(&img, "/dst_dir"));
     assert!(exists(&img, "/dst_dir/inner.txt"));
-    cleanup(&img);
 }
 
 // ===========================================================================
@@ -401,7 +411,6 @@ fn file_replace_dir_errors_eisdir() {
     });
     assert!(exists(&img, "/a_file.txt"));
     assert!(exists(&img, "/a_dir"));
-    cleanup(&img);
 }
 
 #[test]
@@ -418,7 +427,6 @@ fn dir_replace_file_errors_enotdir() {
     });
     assert!(exists(&img, "/a_dir"));
     assert!(exists(&img, "/a_file.txt"));
-    cleanup(&img);
 }
 
 // ===========================================================================
@@ -442,7 +450,6 @@ fn unknown_flag_bits_rejected_einval() {
     assert!(exists(&img, "/src.txt"));
     assert!(exists(&img, "/dst.txt"));
     assert_eq!(read_all(&img, "/dst.txt"), b"b");
-    cleanup(&img);
 }
 
 // ===========================================================================
@@ -472,5 +479,43 @@ fn replace_persists_across_remount() {
         read_all(&img, "/destination_target.bin"),
         b"final-payload-XYZ"
     );
-    cleanup(&img);
+}
+
+// ===========================================================================
+// renaming a file onto one of its own hard links is a POSIX no-op
+// (regression: with replace=true the same-record case must NOT trip the
+// duplicate-name check, and must NOT free the shared record)
+// ===========================================================================
+
+#[test]
+fn replace_onto_own_hard_link_is_noop() {
+    use fs_ntfs::write::{link_io, rename_replace_io};
+
+    let img = fresh_volume("hardlink_noop");
+
+    // /orig.txt and /alias.txt become two names for the same MFT record.
+    rw_session(&img, |fs| {
+        create_file_with(fs, "/", "orig.txt", b"shared");
+    });
+    {
+        let mut io = PathIo::open_rw(Path::new(&*img)).expect("open_rw");
+        link_io(&mut io, "/orig.txt", "/", "alias.txt").expect("link");
+        io.sync().expect("sync");
+    }
+    let rec = record_of(&img, "/orig.txt").expect("orig record");
+    assert_eq!(record_of(&img, "/alias.txt"), Some(rec), "shared record");
+
+    // rename(orig -> alias, replace) where the destination is just
+    // another link to the source must succeed as a terminal no-op —
+    // NOT error "already exists", NOT free the shared record.
+    {
+        let mut io = PathIo::open_rw(Path::new(&*img)).expect("open_rw");
+        rename_replace_io(&mut io, "/orig.txt", "alias.txt", true).expect("same-record no-op");
+        io.sync().expect("sync");
+    }
+
+    // Both names still resolve to the shared record; nothing was freed.
+    assert_eq!(record_of(&img, "/orig.txt"), Some(rec));
+    assert_eq!(record_of(&img, "/alias.txt"), Some(rec));
+    assert!(record_in_use(&img, rec), "shared record must remain in use");
 }

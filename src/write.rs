@@ -3204,9 +3204,15 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     // Replace mode: atomically clear any existing destination first, so
     // the collision checks on both rename paths below see a clean slot.
     // POSIX type rules + the variable-length overflow constraint are
-    // enforced here before anything is removed.
-    if replace {
-        replace_existing_dest_io(io, parent_rec, file_rec, new_basename, same_length)?;
+    // enforced here before anything is removed. A destination that is
+    // just another hard link to the source is a terminal no-op.
+    if replace
+        && matches!(
+            replace_existing_dest_io(io, parent_rec, file_rec, new_basename, same_length)?,
+            ReplaceDisposition::NoopSameRecord
+        )
+    {
+        return Ok(());
     }
 
     if same_length {
@@ -3298,11 +3304,28 @@ fn find_existing_entry_record_io<T: BlockIo + ?Sized>(
     Ok(None)
 }
 
+/// Outcome of [`replace_existing_dest_io`], telling the caller how to
+/// proceed with the actual rename.
+enum ReplaceDisposition {
+    /// `new_basename` was free — the rename creates it as a new entry.
+    NoDestination,
+    /// An existing destination was removed — the rename can now proceed
+    /// into the cleared slot.
+    RemovedDestination,
+    /// `new_basename` is another hard link to the *source* record, so
+    /// POSIX `rename(2)` is a terminal no-op. The caller must return
+    /// success immediately without touching the index — otherwise the
+    /// rename's duplicate-name check would (wrongly) report
+    /// `"already exists"`.
+    NoopSameRecord,
+}
+
 /// The replace half of [`rename_replace_io`]: if `new_basename` already
 /// exists in `parent_rec`, validate POSIX type compatibility against the
 /// source (`src_rec`) and then remove the existing destination — freeing
 /// its record + clusters for a file, or dropping it like `rmdir` for an
-/// empty directory. A no-op when the destination doesn't exist.
+/// empty directory. Returns [`ReplaceDisposition::NoDestination`] when
+/// the destination doesn't exist.
 ///
 /// All read-only validation (type rules; the variable-length
 /// `$INDEX_ALLOCATION`-overflow constraint) happens before the
@@ -3314,16 +3337,16 @@ fn replace_existing_dest_io<T: BlockIo + ?Sized>(
     src_rec: u64,
     new_basename: &str,
     same_length: bool,
-) -> Result<(), String> {
+) -> Result<ReplaceDisposition, String> {
     let Some(dest_rec) = find_existing_entry_record_io(io, parent_rec, new_basename)? else {
-        return Ok(());
+        return Ok(ReplaceDisposition::NoDestination);
     };
 
     // Renaming a name onto one of its own hard links is a POSIX no-op;
-    // dropping the shared record here would be wrong. The source name is
-    // still renamed by the caller afterwards.
+    // dropping the shared record here would be wrong, and the rename must
+    // not proceed (its duplicate-name check would reject `new_basename`).
     if dest_rec == src_rec {
-        return Ok(());
+        return Ok(ReplaceDisposition::NoopSameRecord);
     }
 
     let (_, src_bytes) = read_mft_record_io(io, src_rec)?;
@@ -3362,10 +3385,11 @@ fn replace_existing_dest_io<T: BlockIo + ?Sized>(
     }
 
     if dest_is_dir {
-        remove_dir_record_io(io, parent_rec, dest_rec, new_basename, new_basename)
+        remove_dir_record_io(io, parent_rec, dest_rec, new_basename, new_basename)?;
     } else {
-        remove_file_record_io(io, parent_rec, dest_rec, new_basename)
+        remove_file_record_io(io, parent_rec, dest_rec, new_basename)?;
     }
+    Ok(ReplaceDisposition::RemovedDestination)
 }
 
 fn replace_file_name_with_new_name(
