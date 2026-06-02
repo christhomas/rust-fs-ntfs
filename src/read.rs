@@ -157,7 +157,7 @@ pub fn read_attribute_value<T: BlockIo + ?Sized>(
     name: Option<&str>,
 ) -> Result<Vec<u8>, String> {
     match locate_attribute(io, record_number, attr_type, name)? {
-        Some((params, record, loc)) => read_value_from_record(io, &params, &record, &loc),
+        Some((params, _holder, record, loc)) => read_value_from_record(io, &params, &record, &loc),
         None => Err(format!(
             "read_attribute_value: attribute {attr_type:?} (name {name:?}) not found in record {record_number}"
         )),
@@ -180,12 +180,20 @@ fn locate_attribute<T: BlockIo + ?Sized>(
     record_number: u64,
     attr_type: AttrType,
     name: Option<&str>,
-) -> Result<Option<(crate::mft_io::BootParams, Vec<u8>, attr_io::AttrLocation)>, String> {
+) -> Result<
+    Option<(
+        crate::mft_io::BootParams,
+        u64,
+        Vec<u8>,
+        attr_io::AttrLocation,
+    )>,
+    String,
+> {
     let (params, record) = read_mft_record_io(io, record_number)?;
 
     // Common case: the attribute lives in the base record.
     if let Some(loc) = attr_io::find_attribute(&record, attr_type, name) {
-        return Ok(Some((params, record, loc)));
+        return Ok(Some((params, record_number, record, loc)));
     }
 
     // Overflowed: follow $ATTRIBUTE_LIST to the extension record that holds it.
@@ -215,7 +223,7 @@ fn locate_attribute<T: BlockIo + ?Sized>(
                         entry.record_number
                     )
                 })?;
-                return Ok(Some((ext_params, ext, loc)));
+                return Ok(Some((ext_params, entry.record_number, ext, loc)));
             }
         }
     }
@@ -319,7 +327,7 @@ pub fn read_attribute_range<T: BlockIo + ?Sized>(
     offset: u64,
     len: usize,
 ) -> Result<Vec<u8>, String> {
-    let (params, record, loc) = locate_attribute(io, record_number, attr_type, name)?
+    let (params, _holder, record, loc) = locate_attribute(io, record_number, attr_type, name)?
         .ok_or_else(|| {
             format!("read_attribute_range: attribute {attr_type:?} (name {name:?}) not found in record {record_number}")
         })?;
@@ -555,8 +563,8 @@ pub fn read_stat<T: BlockIo + ?Sized>(io: &mut T, record_number: u64) -> Result<
     // Size of the unnamed $DATA. Follow $ATTRIBUTE_LIST so files whose $DATA
     // overflowed into an extension record report the real size, not 0.
     let size = match locate_attribute(io, record_number, AttrType::Data, None)? {
-        Some((_, _, d)) if d.is_resident => d.resident_value_length.unwrap_or(0) as u64,
-        Some((_, _, d)) => d.non_resident_value_length.unwrap_or(0),
+        Some((_, _, _, d)) if d.is_resident => d.resident_value_length.unwrap_or(0) as u64,
+        Some((_, _, _, d)) => d.non_resident_value_length.unwrap_or(0),
         None => 0,
     };
 
@@ -669,7 +677,7 @@ pub fn read_volume_info<T: BlockIo + ?Sized>(io: &mut T) -> Result<VolumeInfo, S
     // I/O error (bad read / fixup mismatch on a corrupt $Volume extension) is
     // surfaced rather than masked as "no label".
     let label = match locate_attribute(io, VOLUME_RECORD_NUMBER, AttrType::VolumeName, None)? {
-        Some((p, record, loc)) => {
+        Some((p, _holder, record, loc)) => {
             let bytes = read_value_from_record(io, &p, &record, &loc)?;
             let units: Vec<u16> = bytes
                 .chunks_exact(2)
@@ -701,14 +709,20 @@ pub fn read_volume_info<T: BlockIo + ?Sized>(io: &mut T) -> Result<VolumeInfo, S
 ///
 /// Safe to write directly: a resident value sits inside the record body, away
 /// from the USA fixup bytes NTFS stores at each sector's tail.
+/// `min_value_len` guards a corrupt/truncated value: the returned offset is
+/// only valid when the attribute's resident value is at least that many bytes,
+/// so a caller patching a field at a fixed offset can't run past the value
+/// into adjacent record bytes. Errors if the attribute is absent,
+/// non-resident, or shorter than `min_value_len`.
 pub fn resident_value_disk_offset<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
     attr_type: AttrType,
     name: Option<&str>,
+    min_value_len: usize,
 ) -> Result<u64, String> {
-    let (params, _record, loc) =
-        locate_attribute(io, record_number, attr_type, name)?.ok_or_else(|| {
+    let (params, holder, _record, loc) = locate_attribute(io, record_number, attr_type, name)?
+        .ok_or_else(|| {
             format!("resident_value_disk_offset: {attr_type:?} not found in record {record_number}")
         })?;
     if !loc.is_resident {
@@ -716,49 +730,74 @@ pub fn resident_value_disk_offset<T: BlockIo + ?Sized>(
             "resident_value_disk_offset: {attr_type:?} in record {record_number} is non-resident"
         ));
     }
+    let value_len = loc.resident_value_length.unwrap_or(0) as usize;
+    if value_len < min_value_len {
+        return Err(format!(
+            "resident_value_disk_offset: {attr_type:?} value is {value_len} bytes, need >= {min_value_len}"
+        ));
+    }
     let value_offset = loc
         .resident_value_offset
         .ok_or("resident attribute has no value offset")? as u64;
-    Ok(crate::mft_io::mft_record_offset(&params, record_number)
-        + loc.attr_offset as u64
-        + value_offset)
+    // Use `holder` (the record actually containing the attribute, which may be
+    // an `$ATTRIBUTE_LIST` extension record), not the base `record_number`.
+    Ok(crate::mft_io::mft_record_offset(&params, holder) + loc.attr_offset as u64 + value_offset)
 }
 
-/// On-disk byte offset and logical length of a *non-resident* attribute's
-/// first data run — e.g. `$LogFile`'s `$DATA`, which fsck overwrites with
-/// `0xFF`. Assumes the attribute starts at VCN 0 with an allocated
-/// (non-sparse) first run, which holds for `$LogFile` (laid out contiguously
-/// by mkfs / `format.com`). Errors if the attribute is absent, resident, or
-/// its first run is a sparse hole.
-pub fn nonresident_first_run_disk_offset<T: BlockIo + ?Sized>(
+/// On-disk byte offset and logical length of a *non-resident* attribute that
+/// occupies a **single contiguous allocated extent** — e.g. `$LogFile`'s
+/// `$DATA`, which fsck overwrites with `0xFF` as one flat `[offset, offset +
+/// length)` range. Refuses anything that isn't exactly one allocated run long
+/// enough to cover the logical length (a fragmented or sparse layout would
+/// make the flat-range write clobber unrelated clusters between runs), as well
+/// as absent / resident attributes.
+pub fn nonresident_contiguous_disk_range<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
     attr_type: AttrType,
     name: Option<&str>,
 ) -> Result<(u64, u64), String> {
-    let (params, record, loc) =
+    let (params, _holder, record, loc) =
         locate_attribute(io, record_number, attr_type, name)?.ok_or_else(|| {
             format!(
-                "nonresident_first_run_disk_offset: {attr_type:?} not found in record {record_number}"
+                "nonresident_contiguous_disk_range: {attr_type:?} not found in record {record_number}"
             )
         })?;
     if loc.is_resident {
         return Err(format!(
-            "nonresident_first_run_disk_offset: {attr_type:?} in record {record_number} is resident"
+            "nonresident_contiguous_disk_range: {attr_type:?} in record {record_number} is resident"
         ));
     }
+    let length = loc
+        .non_resident_value_length
+        .ok_or("non-resident attribute has no data length")?;
     let mpo = loc
         .non_resident_mapping_pairs_offset
         .ok_or("non-resident attribute has no mapping-pairs offset")? as usize;
     let runs =
         data_runs::decode_runs(&record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length])?;
-    let first = runs.first().ok_or("attribute has no data runs")?;
-    let lcn = first
+
+    // Exactly one allocated run, covering the whole logical length. Callers
+    // treat the result as a single flat range, so refuse fragmented / sparse
+    // layouts rather than risk writing into clusters between runs.
+    if runs.len() != 1 {
+        return Err(format!(
+            "nonresident_contiguous_disk_range: {attr_type:?} in record {record_number} is not a \
+             single extent ({} runs); refusing flat-range access",
+            runs.len()
+        ));
+    }
+    let run = &runs[0];
+    let lcn = run
         .lcn
-        .ok_or("non-resident attribute's first data run is a sparse hole")?;
-    let length = loc
-        .non_resident_value_length
-        .ok_or("non-resident attribute has no data length")?;
+        .ok_or("non-resident attribute's only run is a sparse hole")?;
+    let extent_bytes = run.length * params.cluster_size;
+    if extent_bytes < length {
+        return Err(format!(
+            "nonresident_contiguous_disk_range: {attr_type:?} extent ({extent_bytes} bytes) shorter \
+             than value length ({length})"
+        ));
+    }
     Ok((lcn * params.cluster_size, length))
 }
 
