@@ -3501,6 +3501,59 @@ pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(),
     remove_file_record_io(io, parent_rec, file_rec, &basename)
 }
 
+/// Free the `$Bitmap` clusters backing **every** non-resident attribute in
+/// `record` — the unnamed `$DATA`, any named `$DATA` streams, and any
+/// attribute promoted to non-resident. Resident attributes own no clusters
+/// (their value lives inside the MFT record). Sparse holes (`lcn == None`)
+/// hold no allocation and are skipped.
+///
+/// Used by the file-delete path: freeing only the unnamed `$DATA` (as it
+/// historically did) leaked the runs of named streams / promoted
+/// attributes on every last-link delete.
+///
+/// MVP limitation: attributes that live in `$ATTRIBUTE_LIST` extension
+/// records (not the base record) are not visited here; reclaiming those is
+/// tracked separately. The common cases — named streams and promoted
+/// attributes in the base record — are covered.
+fn free_all_nonresident_runs_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record: &[u8],
+) -> Result<(), String> {
+    // Decode every non-resident attribute's runs first, so the cluster
+    // bitmap is only touched after the whole record parses cleanly (no
+    // half-freed state if a later attribute's mapping is malformed).
+    let mut to_free: Vec<(u64, u64)> = Vec::new();
+    for loc in attr_io::iter_attributes(record) {
+        if loc.is_resident {
+            continue;
+        }
+        let Some(mapping_offset) = loc.non_resident_mapping_pairs_offset else {
+            continue;
+        };
+        let mapping_start = loc.attr_offset + mapping_offset as usize;
+        let mapping_end = loc.attr_offset + loc.attr_length;
+        if mapping_start >= mapping_end || mapping_end > record.len() {
+            continue;
+        }
+        for run in data_runs::decode_runs(&record[mapping_start..mapping_end])? {
+            if let (Some(lcn), len) = (run.lcn, run.length) {
+                if len > 0 {
+                    to_free.push((lcn, len));
+                }
+            }
+        }
+    }
+    if to_free.is_empty() {
+        return Ok(());
+    }
+    let bm = bitmap::locate_bitmap_io(io)?;
+    for (lcn, n) in to_free {
+        bitmap::free_io(io, &bm, lcn, n)
+            .map_err(|e| format!("free clusters [{lcn}..{}]: {e}", lcn + n))?;
+    }
+    Ok(())
+}
+
 /// Free a regular-file MFT record and detach `basename` (which must
 /// reference `file_rec`) from `parent_rec`. Shared by [`unlink_io`] and
 /// the rename-with-replace path. Honors hard links: when more than one
@@ -3568,15 +3621,13 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
         return Ok(());
     }
 
-    // 2) Free data clusters. Only if non-resident — resident $DATA lives
-    //    inside the MFT record and is freed as part of the record itself.
-    //    truncate to 0 is a no-op for resident data anyway.
-    let data_loc = attr_io::find_attribute(&file_record_bytes, AttrType::Data, None);
-    if let Some(loc) = data_loc {
-        if !loc.is_resident && loc.non_resident_value_length.unwrap_or(0) > 0 {
-            truncate_by_record_number_io(io, file_rec, 0)?;
-        }
-    }
+    // 2) Free the clusters of EVERY non-resident attribute, not just the
+    //    unnamed $DATA: named non-resident $DATA streams and any attribute
+    //    promoted to non-resident own clusters in $Bitmap too. Freeing only
+    //    the unnamed $DATA (as this path used to) leaked theirs on every
+    //    last-link delete. Resident attributes live inside the MFT record
+    //    and are reclaimed when its bit is freed below.
+    free_all_nonresident_runs_io(io, &file_record_bytes)?;
 
     // 3) Clear IN_USE flag in the file's MFT record.
     update_mft_record_io(io, file_rec, |record| {
@@ -3861,6 +3912,38 @@ mod tests {
         assert_eq!(
             truncate_by_record_number_io(&mut dev, rec, 4096).unwrap(),
             4096
+        );
+    }
+
+    // --- delete frees ALL non-resident attribute clusters ---------------------
+
+    #[test]
+    fn delete_frees_named_nonresident_stream_clusters() {
+        // Regression: unlink/rename-replace used to free only the unnamed
+        // $DATA, leaking the clusters of named non-resident streams (and any
+        // promoted non-resident attribute) on every last-link delete.
+        let mut dev = fresh_vol();
+        let bm = bitmap::locate_bitmap_io(&mut dev).unwrap();
+        let free_before = bitmap::count_free_io(&mut dev, &bm).unwrap();
+
+        create_file_io(&mut dev, "/", "f.bin").unwrap();
+        // 16 KiB forces the named stream non-resident → real cluster runs.
+        write_named_stream_io(&mut dev, "/f.bin", "big", &[0xCDu8; 16_384]).unwrap();
+
+        let free_after_create = bitmap::count_free_io(&mut dev, &bm).unwrap();
+        assert!(
+            free_after_create < free_before,
+            "named non-resident stream should have allocated clusters \
+             (before={free_before}, after={free_after_create})"
+        );
+
+        unlink_io(&mut dev, "/f.bin").unwrap();
+
+        let free_after_delete = bitmap::count_free_io(&mut dev, &bm).unwrap();
+        assert_eq!(
+            free_after_delete, free_before,
+            "delete must reclaim ALL clusters incl. the named non-resident \
+             stream's (before={free_before}, after_delete={free_after_delete})"
         );
     }
 
