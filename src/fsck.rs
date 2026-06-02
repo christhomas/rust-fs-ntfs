@@ -446,11 +446,16 @@ pub fn fsck_io<'cb, T: FsckIo>(
 fn locate_volume_flags_io<T: FsckIo>(io: &mut T) -> Result<(u64, u16), String> {
     // Native: on-disk offset of `$VOLUME_INFORMATION`'s resident value on
     // `$Volume`, plus the fixed flags-field offset within it.
+    // Require the value to be long enough to hold the full version+flags
+    // region (reserved 8 + major 1 + minor 1 + flags 2 = 12), so neither the
+    // dirty-flag write (+10) nor the upgrade write (major at +8) can run past
+    // a truncated value into adjacent record bytes.
     let value_start = crate::read::resident_value_disk_offset(
         io,
         VOLUME_RECORD_NUMBER,
         AttrType::VolumeInformation,
         None,
+        VOLUME_FLAGS_OFFSET as usize + 2,
     )?;
     let flag_offset = value_start + VOLUME_FLAGS_OFFSET;
     let current = read_u16_le_io(io, flag_offset).map_err(|e| format!("read volume flags: {e}"))?;
@@ -460,10 +465,10 @@ fn locate_volume_flags_io<T: FsckIo>(io: &mut T) -> Result<(u64, u16), String> {
 /// Locate `$LogFile`'s `$DATA` on disk. Returns (on-disk byte offset of
 /// the first data byte, total byte length to overwrite).
 fn locate_logfile_data_io<T: FsckIo>(io: &mut T) -> Result<(u64, u64), String> {
-    // Native: `$LogFile`'s unnamed `$DATA` is non-resident and laid out
-    // contiguously, so its first run's on-disk offset + the logical length
-    // give the region to overwrite.
-    let (offset, length) = crate::read::nonresident_first_run_disk_offset(
+    // Native: `$LogFile`'s unnamed `$DATA` is non-resident and laid out as a
+    // single contiguous extent; the helper returns its on-disk offset + the
+    // logical length to overwrite, and fails closed if it's ever fragmented.
+    let (offset, length) = crate::read::nonresident_contiguous_disk_range(
         io,
         LOGFILE_RECORD_NUMBER,
         AttrType::Data,
