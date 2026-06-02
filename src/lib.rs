@@ -2710,6 +2710,48 @@ pub extern "C" fn fs_ntfs_rename_h(
     }
 }
 
+/// `fs_ntfs_rename2_h` flag bits. `FS_NTFS_RENAME_REPLACE` enables
+/// atomic overwrite of an existing destination — POSIX `rename(2)`
+/// semantics — so in-place editors that write a temp file then rename it
+/// over the original succeed instead of failing with the destination
+/// already present. Unknown flag bits are rejected with `EINVAL` so
+/// future flag additions stay forward-compatible.
+pub const FS_NTFS_RENAME_REPLACE: c_int = 0x01;
+
+/// Handle-based rename with explicit flags. With `FS_NTFS_RENAME_REPLACE`
+/// an existing destination basename is atomically replaced: file→file
+/// frees the old file's record + clusters, empty-dir→empty-dir drops the
+/// old directory, crossing the file/directory boundary returns
+/// `EISDIR` / `ENOTDIR`, and a non-empty destination directory returns
+/// `ENOTEMPTY`. Without the flag, identical to [`fs_ntfs_rename_h`]
+/// (an existing destination is rejected). Returns 0 on success, -1 on
+/// failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_rename2_h(
+    fs: *mut FsNtfsHandle,
+    old_path: *const c_char,
+    new_basename: *const c_char,
+    flags: c_int,
+) -> c_int {
+    cstr_or_return!(old_path, "fs_ntfs_rename2_h", "old_path", -1);
+    cstr_or_return!(new_basename, "fs_ntfs_rename2_h", "new_basename", -1);
+    // Reject any flag bits we don't define so future additions can be
+    // detected by callers via EINVAL probing.
+    let known = FS_NTFS_RENAME_REPLACE;
+    if flags & !known != 0 {
+        set_error("fs_ntfs_rename2_h: invalid (unknown) flag bits");
+        return -1;
+    }
+    let replace = flags & FS_NTFS_RENAME_REPLACE != 0;
+    let Ok(mut io) = handle_io_from_ptr(fs) else {
+        return -1;
+    };
+    match write::rename_replace_io(&mut io, old_path, new_basename, replace) {
+        Ok(()) => 0,
+        Err(e) => err_int(e),
+    }
+}
+
 /// Handle-based [`fs_ntfs_mkdir`].
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mkdir_h(
