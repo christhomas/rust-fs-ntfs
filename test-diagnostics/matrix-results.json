@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "tested_at_sha": "162e9ab98e13ef467b9a5eed102e44b778e99d24",
-  "tested_at_branch": "fix/free-all-nonresident-attrs-on-delete",
-  "tested_at_utc": "2026-06-02T13:29:48Z",
-  "binary_sha256": "6af54efa52c20fe53e3aba9f9ee80b89fbf00564ce249917361e140da065c2eb",
+  "tested_at_sha": "8fe30c3d7fb15d5448ef6e2c551971365f242130",
+  "tested_at_branch": "release/v0.3.0",
+  "tested_at_utc": "2026-06-02T13:57:49Z",
+  "binary_sha256": "949837cd36ce8c5c2f7251418d96529b51196416bf6e2f51eaae65a8cff1ee6d",
   "test_matrix_json_sha256": "42c8bec041fc15bf654ae89bdc58826080707ac3e05bc82e72cf6199a0cc1f7b",
   "harness_submodule_sha": "b83f8e5ed1f5c43a5c29a001a3785c85f778b75a",
   "host": {
@@ -307,6 +307,6 @@
     "failed": 0,
     "unknown": 1,
     "total": 47,
-    "total_duration_s": 1721.95
+    "total_duration_s": 1403.48
   }
 }

@@ -2,7 +2,33 @@
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-02
+
+### Fixed
+
+- **Delete now frees the clusters of *every* non-resident attribute**,
+  not just the unnamed `$DATA`. A file owning named non-resident
+  `$DATA` streams — or any attribute promoted to non-resident —
+  previously leaked their runs in `$Bitmap` on last-link `unlink` and
+  on rename-replace over such a file. `remove_file_record_io` now walks
+  the base record and reclaims all of them. (Attributes living in
+  `$ATTRIBUTE_LIST` extension records remain a tracked follow-up.)
+
 ### Changed
+
+- **`ntfs` crate demoted to a `dev-dependency`.** The native read layer
+  now backs every production path (`resolve_path`, attribute reads,
+  `read_stat`, directory enumeration, volume info, the fsck
+  `$Volume`/`$LogFile` locators); the upstream crate survives **only**
+  as the test oracle those decoders are cross-checked against.
+  `cargo tree -e no-dev -i ntfs` is empty — no production code links it.
+
+- **Test-matrix disk hygiene (tooling).** The harness runner
+  (fs-test-harness ≥ v3.11.0) stamps an `owner.pid` into each staged
+  image dir and reaps dirs whose owner pid is no longer alive, and
+  `scripts/run-matrix.sh` self-heals a stale per-filter lock left by a
+  killed run. Cancelled matrix runs no longer pile up tens of GiB of
+  staged images.
 
 - `$VOLUME_INFORMATION` upgrade-on-mount now fires across **every**
   RW entry point, not just `fs_ntfs_mount_rw_with_fs_core_device`.
@@ -20,6 +46,17 @@
   `warn` and never fails the mount.
 
 ### Added
+
+- **Atomic rename-with-replace.** `fs_ntfs_rename2_h(fs, old_path,
+  new_basename, flags)` plus the `FS_NTFS_RENAME_REPLACE` (`0x01`) flag
+  atomically overwrite an existing destination (POSIX `rename(2)`
+  semantics): file→file frees the old record + clusters,
+  empty-dir→empty-dir overwrites, and crossing the file/directory
+  boundary or targeting a non-empty directory fails with
+  EISDIR / ENOTDIR / ENOTEMPTY. Unknown flag bits are rejected with
+  EINVAL; plain `fs_ntfs_rename_h` keeps reject-existing semantics.
+  Core: `write::rename_replace_io`. Lets in-place editors (write-temp,
+  rename-over-original) succeed without a non-atomic unlink-first.
 
 #### Diagnostic-helper read APIs (2026-05-23 / 2026-05-24)
 
