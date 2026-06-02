@@ -3585,8 +3585,14 @@ mod capi_read_tests {
 
     /// Format a fresh image and populate it: /hello.txt (content), /sub/, and
     /// /sub/inner.bin. Returns the image path.
+    ///
+    /// The path includes the PID so two concurrent `cargo test` processes in
+    /// the same worktree (e.g. a manual run overlapping a hook-triggered one)
+    /// don't clobber each other's image mid-format/read — the fixed path used
+    /// to cause a rare cross-process flake (one process re-formatting the file
+    /// while the other was populating or listing it).
     fn fresh_image(tag: &str) -> String {
-        let path = format!("test-disks/_capi_read_{tag}.img");
+        let path = format!("test-disks/_capi_read_{tag}_{}.img", std::process::id());
         let f = std::fs::File::create(&path).expect("create");
         f.set_len(32 * 1024 * 1024).expect("set_len");
         drop(f);
