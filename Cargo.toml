@@ -26,7 +26,6 @@ name = "rust-ntfs"
 path = "src/bin/rust_ntfs/main.rs"
 
 [dependencies]
-ntfs = { version = "0.4", default-features = false, features = ["std"] }
 # `log` is the de-facto standard logging facade. Consumers (FSKit
 # extension, CLI, integration tests) install whichever subscriber
 # they want — `log` itself is a no-op until one is set, so the crate
@@ -43,6 +42,11 @@ log = "0.4"
 am-fs-core = { path = "vendor/rust-fs-core" }
 
 [dev-dependencies]
+# Upstream read-only NTFS parser, kept ONLY as a test oracle: the native
+# read/write/fsck layers cross-check their decoded values against it. No
+# production code path links it anymore (Phase 6 demotion) — `#[cfg(test)]`
+# modules in read.rs / write.rs / fsck.rs are the sole users.
+ntfs = { version = "0.4", default-features = false, features = ["std"] }
 libtest-mimic = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
