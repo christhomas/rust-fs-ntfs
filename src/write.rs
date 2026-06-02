@@ -2996,53 +2996,49 @@ pub fn rmdir_io<T: BlockIo + ?Sized>(io: &mut T, dir_path: &str) -> Result<(), S
     if flags & MFT_FLAG_DIRECTORY == 0 {
         return Err(format!("rmdir: '{dir_path}' is not a directory"));
     }
+    remove_dir_record_io(io, parent_rec, dir_rec, &basename, dir_path)
+}
 
-    // Emptiness check: walk $INDEX_ROOT entries, require only the LAST
-    // sentinel is present. Also reject $INDEX_ALLOCATION spillover — a
-    // non-empty overflowed dir is definitely non-empty; a claimed-empty
-    // but overflowed dir is suspicious anyway, refuse for MVP.
-    let ir_flags = index_io::index_root_flags(&dir_record_bytes).ok_or("dir has no $INDEX_ROOT")?;
-    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
-        return Err(format!(
-            "rmdir: '{dir_path}' has $INDEX_ALLOCATION overflow (probably not empty)"
-        ));
-    }
-    if index_io::index_root_has_real_entries(&dir_record_bytes)? {
-        return Err(format!("rmdir: '{dir_path}' is not empty"));
-    }
-
-    // Remove from parent's index. Parent's index may or may not be
-    // overflowed — dispatch like unlink.
+/// Detach `basename` (which must reference `child_rec`) from
+/// `parent_rec`'s directory index, dispatching between the resident
+/// `$INDEX_ROOT` and any `$INDEX_ALLOCATION` overflow. Shared by the
+/// file/dir removal helpers and the rename-with-replace path.
+fn remove_parent_index_entry_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    child_rec: u64,
+    basename: &str,
+) -> Result<(), String> {
     let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
-    let parent_ir_flags =
-        index_io::index_root_flags(&parent_record_bytes).ok_or("parent has no $INDEX_ROOT")?;
-    let in_root = index_io::find_index_entry(&parent_record_bytes, &basename)?;
+    let ir_flags = index_io::index_root_flags(&parent_record_bytes)
+        .ok_or_else(|| "no $INDEX_ROOT on parent".to_string())?;
+    let in_root = index_io::find_index_entry(&parent_record_bytes, basename)?;
     if let Some(entry) = in_root {
-        if entry.file_record_number != dir_rec {
+        if entry.file_record_number != child_rec {
             return Err(format!(
-                "parent index entry for '{basename}' points at {} but resolved {dir_rec}",
+                "parent's $INDEX_ROOT entry for '{basename}' points at {} but resolved {child_rec}",
                 entry.file_record_number
             ));
         }
         update_mft_record_io(io, parent_rec, |record| {
-            let e = index_io::find_index_entry(record, &basename)?
-                .ok_or_else(|| "race: IR entry vanished".to_string())?;
+            let e = index_io::find_index_entry(record, basename)?
+                .ok_or_else(|| "race: $INDEX_ROOT entry vanished".to_string())?;
             index_io::remove_index_entry(record, &e, index_io::BlockKind::IndexRoot)
         })?;
-    } else if parent_ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
+    } else if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
         let ia = idx_block::load_for_directory_io(io, parent_rec)?;
         let mut removed = false;
         for vcn in ia.allocated_block_vcns() {
             let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
-            if let Some(entry) = index_io::find_entry_in_indx_block(&block, &basename)? {
-                if entry.file_record_number != dir_rec {
+            if let Some(entry) = index_io::find_entry_in_indx_block(&block, basename)? {
+                if entry.file_record_number != child_rec {
                     return Err(format!(
-                        "INDX entry at VCN {vcn} points at {} but resolved {dir_rec}",
+                        "INDX entry at VCN {vcn} points at {} but resolved {child_rec}",
                         entry.file_record_number
                     ));
                 }
                 idx_block::update_indx_block_io(io, &ia, vcn, |block| {
-                    let e = index_io::find_entry_in_indx_block(block, &basename)?
+                    let e = index_io::find_entry_in_indx_block(block, basename)?
                         .ok_or_else(|| "race: INDX entry vanished".to_string())?;
                     index_io::remove_index_entry(block, &e, index_io::BlockKind::IndexAllocation)
                 })?;
@@ -3058,6 +3054,41 @@ pub fn rmdir_io<T: BlockIo + ?Sized>(io: &mut T, dir_path: &str) -> Result<(), S
     } else {
         return Err(format!("no entry for '{basename}' in parent's $INDEX_ROOT"));
     }
+    Ok(())
+}
+
+/// Free an empty-directory MFT record and detach its name from
+/// `parent_rec`. Shared by [`rmdir_io`] and the rename-with-replace
+/// path. Emptiness (and a rejection of `$INDEX_ALLOCATION` overflow) is
+/// enforced before any mutation, so a non-empty target leaves the
+/// volume untouched. `display` is the name used in error messages; the
+/// caller must already have verified `dir_rec` is a directory.
+fn remove_dir_record_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    dir_rec: u64,
+    basename: &str,
+    display: &str,
+) -> Result<(), String> {
+    let (_, dir_record_bytes) = read_mft_record_io(io, dir_rec)?;
+
+    // Emptiness check: walk $INDEX_ROOT entries, require only the LAST
+    // sentinel is present. Also reject $INDEX_ALLOCATION spillover — a
+    // non-empty overflowed dir is definitely non-empty; a claimed-empty
+    // but overflowed dir is suspicious anyway, refuse for MVP.
+    let ir_flags = index_io::index_root_flags(&dir_record_bytes).ok_or("dir has no $INDEX_ROOT")?;
+    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
+        return Err(format!(
+            "rmdir: '{display}' has $INDEX_ALLOCATION overflow (probably not empty)"
+        ));
+    }
+    if index_io::index_root_has_real_entries(&dir_record_bytes)? {
+        return Err(format!("rmdir: '{display}' is not empty"));
+    }
+
+    // Remove from parent's index. Parent's index may or may not be
+    // overflowed — dispatch like unlink.
+    remove_parent_index_entry_io(io, parent_rec, dir_rec, basename)?;
 
     // Clear IN_USE flag + free MFT bit.
     update_mft_record_io(io, dir_rec, |record| {
@@ -3131,6 +3162,29 @@ pub fn rename_io<T: BlockIo + ?Sized>(
     old_path: &str,
     new_basename: &str,
 ) -> Result<(), String> {
+    rename_replace_io(io, old_path, new_basename, false)
+}
+
+/// Like [`rename_io`], but when `replace` is true an existing
+/// destination basename is atomically replaced (POSIX `rename(2)`
+/// semantics): file→file frees the old file's record + clusters,
+/// empty-dir→empty-dir drops the old directory, crossing the
+/// file/directory boundary fails (`EISDIR`/`ENOTDIR` equivalents) and a
+/// non-empty destination directory fails (`ENOTEMPTY` equivalent). With
+/// `replace` false this is identical to the historical [`rename_io`]:
+/// an existing destination is rejected with `"already exists"`.
+///
+/// The same MVP limitation as [`rename_io`] applies to the
+/// variable-length path: a parent with `$INDEX_ALLOCATION` overflow is
+/// not supported. For replace that constraint is checked *before* the
+/// destructive removal, so the destination is never lost on an
+/// unsupported parent.
+pub fn rename_replace_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    old_path: &str,
+    new_basename: &str,
+    replace: bool,
+) -> Result<(), String> {
     if new_basename.is_empty()
         || new_basename == "."
         || new_basename == ".."
@@ -3145,7 +3199,17 @@ pub fn rename_io<T: BlockIo + ?Sized>(
 
     let old_u16_len = old_basename.encode_utf16().count();
     let new_u16_len = new_basename.encode_utf16().count();
-    if old_u16_len == new_u16_len {
+    let same_length = old_u16_len == new_u16_len;
+
+    // Replace mode: atomically clear any existing destination first, so
+    // the collision checks on both rename paths below see a clean slot.
+    // POSIX type rules + the variable-length overflow constraint are
+    // enforced here before anything is removed.
+    if replace {
+        replace_existing_dest_io(io, parent_rec, file_rec, new_basename, same_length)?;
+    }
+
+    if same_length {
         return rename_same_length_io(io, old_path, new_basename);
     }
 
@@ -3206,6 +3270,102 @@ pub fn rename_io<T: BlockIo + ?Sized>(
     })?;
 
     Ok(())
+}
+
+/// Look up `name` in `parent_rec`'s directory index (resident
+/// `$INDEX_ROOT` first, then any `$INDEX_ALLOCATION` overflow) and
+/// return the referenced MFT record number, or `None` if absent.
+fn find_existing_entry_record_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    name: &str,
+) -> Result<Option<u64>, String> {
+    let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
+    if let Some(e) = index_io::find_index_entry(&parent_record_bytes, name)? {
+        return Ok(Some(e.file_record_number));
+    }
+    let ir_flags = index_io::index_root_flags(&parent_record_bytes)
+        .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
+    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
+        let ia = idx_block::load_for_directory_io(io, parent_rec)?;
+        for vcn in ia.allocated_block_vcns() {
+            let blk = idx_block::read_indx_block_io(io, &ia, vcn)?;
+            if let Some(e) = index_io::find_entry_in_indx_block(&blk, name)? {
+                return Ok(Some(e.file_record_number));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The replace half of [`rename_replace_io`]: if `new_basename` already
+/// exists in `parent_rec`, validate POSIX type compatibility against the
+/// source (`src_rec`) and then remove the existing destination — freeing
+/// its record + clusters for a file, or dropping it like `rmdir` for an
+/// empty directory. A no-op when the destination doesn't exist.
+///
+/// All read-only validation (type rules; the variable-length
+/// `$INDEX_ALLOCATION`-overflow constraint) happens before the
+/// destructive removal, so a rejected replace leaves the volume
+/// untouched.
+fn replace_existing_dest_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    src_rec: u64,
+    new_basename: &str,
+    same_length: bool,
+) -> Result<(), String> {
+    let Some(dest_rec) = find_existing_entry_record_io(io, parent_rec, new_basename)? else {
+        return Ok(());
+    };
+
+    // Renaming a name onto one of its own hard links is a POSIX no-op;
+    // dropping the shared record here would be wrong. The source name is
+    // still renamed by the caller afterwards.
+    if dest_rec == src_rec {
+        return Ok(());
+    }
+
+    let (_, src_bytes) = read_mft_record_io(io, src_rec)?;
+    let src_is_dir = crate::mft_io::record_flags(&src_bytes) & MFT_FLAG_DIRECTORY != 0;
+    let (_, dest_bytes) = read_mft_record_io(io, dest_rec)?;
+    let dest_is_dir = crate::mft_io::record_flags(&dest_bytes) & MFT_FLAG_DIRECTORY != 0;
+
+    // POSIX rename(2) forbids crossing the file/directory boundary. The
+    // wording below is chosen so `infer_errno_from_message` maps these to
+    // EISDIR / ENOTDIR respectively.
+    if !src_is_dir && dest_is_dir {
+        return Err(format!(
+            "rename: cannot replace '{new_basename}': destination is a directory"
+        ));
+    }
+    if src_is_dir && !dest_is_dir {
+        return Err(format!(
+            "rename: cannot replace '{new_basename}' with a directory: \
+             destination is not a directory"
+        ));
+    }
+
+    // The variable-length rename that follows requires a resident-only
+    // parent index. Reject an overflowed parent here, BEFORE removing the
+    // destination, so an unsupported parent never loses the dest.
+    if !same_length {
+        let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
+        let pir = index_io::index_root_flags(&parent_record_bytes)
+            .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
+        if pir & index_io::IH_FLAG_HAS_SUBNODES != 0 {
+            return Err(
+                "variable-length rename MVP: parent has $INDEX_ALLOCATION overflow — not yet supported"
+                    .to_string(),
+            );
+        }
+    }
+
+    if dest_is_dir {
+        remove_dir_record_io(io, parent_rec, dest_rec, new_basename, new_basename)
+    } else {
+        remove_file_record_io(io, parent_rec, dest_rec, new_basename)
+    }
 }
 
 fn replace_file_name_with_new_name(
@@ -3314,10 +3474,25 @@ pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(),
         ));
     }
 
+    remove_file_record_io(io, parent_rec, file_rec, &basename)
+}
+
+/// Free a regular-file MFT record and detach `basename` (which must
+/// reference `file_rec`) from `parent_rec`. Shared by [`unlink_io`] and
+/// the rename-with-replace path. Honors hard links: when more than one
+/// name remains only the named link is dropped and storage is preserved;
+/// the record + clusters are freed only when the last link goes away.
+/// The caller must already have verified `file_rec` is NOT a directory.
+fn remove_file_record_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    file_rec: u64,
+    basename: &str,
+) -> Result<(), String> {
+    let (_, file_record_bytes) = read_mft_record_io(io, file_rec)?;
+
     // 1) Remove the parent's index entry. Dispatch on IR flags.
     let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
-    let ir_flags = index_io::index_root_flags(&parent_record_bytes)
-        .ok_or_else(|| "no $INDEX_ROOT on parent".to_string())?;
 
     // Pre-flight for the multi-link path (step 1b below): the file-record
     // mutation there must be able to locate the matching $FILE_NAME. Verify
@@ -3330,57 +3505,14 @@ pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(),
     let parent_seq = u16::from_le_bytes([parent_record_bytes[0x10], parent_record_bytes[0x11]]);
     let parent_reference = crate::record_build::encode_file_reference(parent_rec, parent_seq);
     if hard_link_count > 1
-        && find_file_name_attr(&file_record_bytes, parent_reference, &basename).is_none()
+        && find_file_name_attr(&file_record_bytes, parent_reference, basename).is_none()
     {
         return Err(format!(
             "unlink: no $FILE_NAME for '{basename}' under parent {parent_rec}"
         ));
     }
 
-    let in_root = index_io::find_index_entry(&parent_record_bytes, &basename)?;
-    if let Some(entry) = in_root {
-        if entry.file_record_number != file_rec {
-            return Err(format!(
-                "parent's $INDEX_ROOT entry for '{basename}' points at {} but resolved {file_rec}",
-                entry.file_record_number
-            ));
-        }
-        update_mft_record_io(io, parent_rec, |record| {
-            let e = index_io::find_index_entry(record, &basename)?
-                .ok_or_else(|| "race: $INDEX_ROOT entry vanished".to_string())?;
-            index_io::remove_index_entry(record, &e, index_io::BlockKind::IndexRoot)
-        })?;
-    } else if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
-        let ia = idx_block::load_for_directory_io(io, parent_rec)?;
-        let mut removed = false;
-        for vcn in ia.allocated_block_vcns() {
-            let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
-            if let Some(entry) = index_io::find_entry_in_indx_block(&block, &basename)? {
-                if entry.file_record_number != file_rec {
-                    return Err(format!(
-                        "INDX entry at VCN {vcn} points at {} but resolved {file_rec}",
-                        entry.file_record_number
-                    ));
-                }
-                idx_block::update_indx_block_io(io, &ia, vcn, |block| {
-                    let e = index_io::find_entry_in_indx_block(block, &basename)?
-                        .ok_or_else(|| "race: INDX entry vanished".to_string())?;
-                    index_io::remove_index_entry(block, &e, index_io::BlockKind::IndexAllocation)
-                })?;
-                removed = true;
-                break;
-            }
-        }
-        if !removed {
-            return Err(format!(
-                "no index entry for '{basename}' in parent record {parent_rec}"
-            ));
-        }
-    } else {
-        return Err(format!(
-            "no entry for '{basename}' in parent's $INDEX_ROOT (no spillover)"
-        ));
-    }
+    remove_parent_index_entry_io(io, parent_rec, file_rec, basename)?;
 
     // 1b) If the file has multiple hard links, removing one name must NOT
     //     free the record or its clusters — only drop the matching
@@ -3390,10 +3522,9 @@ pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(),
     //     $FILE_NAME presence verified) in the pre-flight above.
     if hard_link_count > 1 {
         update_mft_record_io(io, file_rec, |record| {
-            let loc =
-                find_file_name_attr(record, parent_reference, &basename).ok_or_else(|| {
-                    format!("unlink: no $FILE_NAME for '{basename}' under parent {parent_rec}")
-                })?;
+            let loc = find_file_name_attr(record, parent_reference, basename).ok_or_else(|| {
+                format!("unlink: no $FILE_NAME for '{basename}' under parent {parent_rec}")
+            })?;
             let bytes_used =
                 u32::from_le_bytes([record[0x18], record[0x19], record[0x1A], record[0x1B]])
                     as usize;

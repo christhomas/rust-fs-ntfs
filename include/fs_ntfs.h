@@ -983,6 +983,27 @@ int fs_ntfs_rename_h(fs_ntfs_fs_t *fs,
                      const char *old_path,
                      const char *new_basename);
 
+/* Flag bits accepted by `fs_ntfs_rename2_h`. `FS_NTFS_RENAME_REPLACE`
+ * enables atomic overwrite of an existing destination, matching POSIX
+ * `rename(2)` semantics — required so in-place editors that write a
+ * temp file then rename it over the original succeed instead of failing
+ * with the destination already present. Unknown flag bits are rejected
+ * with EINVAL so future flag additions stay forward-compatible. */
+#define FS_NTFS_RENAME_REPLACE 0x01
+
+/* Handle-based rename with explicit flags. With `FS_NTFS_RENAME_REPLACE`
+ * an existing destination is atomically replaced: file->file overwrites
+ * and frees the old file's record + clusters, empty-dir -> empty-dir
+ * drops the old directory, crossing the file/directory boundary returns
+ * EISDIR / ENOTDIR, and a non-empty destination directory returns
+ * ENOTEMPTY. Without the flag, identical to `fs_ntfs_rename_h` (an
+ * existing destination is rejected). Returns 0 on success, -1 on
+ * failure. */
+int fs_ntfs_rename2_h(fs_ntfs_fs_t *fs,
+                      const char *old_path,
+                      const char *new_basename,
+                      int flags);
+
 int64_t fs_ntfs_mkdir_h(fs_ntfs_fs_t *fs,
                         const char *parent_path,
                         const char *basename);
