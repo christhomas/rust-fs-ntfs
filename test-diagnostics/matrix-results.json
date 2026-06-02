@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "tested_at_sha": "de1a62cec189eaef82753d3cd191b0c2741aef7c",
-  "tested_at_branch": "feat/atomic-rename-replace",
-  "tested_at_utc": "2026-06-02T06:48:59Z",
-  "binary_sha256": "af3201c14886356f8c2e998ea90d5c9f785c6763e4dd8b34de1aa40a3906ffa7",
+  "tested_at_sha": "fd977744b355145a506608c7d0f45fe17d524d9d",
+  "tested_at_branch": "feat/demote-ntfs-dev-dep",
+  "tested_at_utc": "2026-06-02T12:57:43Z",
+  "binary_sha256": "eb18c881a2a615e5dddcb5efb8739d588987e89491b7ed4fba32b7dabd6d530e",
   "test_matrix_json_sha256": "42c8bec041fc15bf654ae89bdc58826080707ac3e05bc82e72cf6199a0cc1f7b",
-  "harness_submodule_sha": "730a7613523eed990dc3482b44f71377c7ed463e",
+  "harness_submodule_sha": "b83f8e5ed1f5c43a5c29a001a3785c85f778b75a",
   "host": {
     "os": "Darwin",
     "version": "25.4.0",
@@ -307,6 +307,6 @@
     "failed": 0,
     "unknown": 1,
     "total": 47,
-    "total_duration_s": 1490.73
+    "total_duration_s": 1536.59
   }
 }
