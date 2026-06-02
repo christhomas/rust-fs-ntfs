@@ -90,6 +90,29 @@ if [[ "$host_image_dir" != /* ]]; then
 fi
 mkdir -p "$host_image_dir"
 
+# ── Reclaim orphaned staging dirs from prior KILLED runs ─────────────────────
+# A run removes its own `{run_id}` staging dir via the EXIT trap below, and the
+# runner deletes each scenario's image as it finishes. But a hard-killed run
+# (SIGKILL / OOM / a parent killing the process group — none of which run the
+# trap) orphans whatever images were in flight, and nothing else ever reclaims
+# them, so they accumulate across runs until the disk fills.
+#
+# Sweep staging subdirs whose mtime hasn't changed in over 2 hours. A live
+# run — even a slow one — constantly touches its dir (the runner creates and
+# deletes a scenario image every few minutes), so its dir stays fresh; only a
+# dead run's leftovers go stale. This never touches a concurrent in-flight run.
+reclaimed=0
+while IFS= read -r stale; do
+    [ -z "$stale" ] && continue
+    n=$(find "$stale" -name 'nfs-*.img' -type f 2>/dev/null | wc -l | tr -d ' ')
+    find "$stale" -name 'nfs-*.img' -type f -delete 2>/dev/null
+    rmdir "$stale" 2>/dev/null || true
+    reclaimed=$((reclaimed + n))
+done < <(find "$host_image_dir" -mindepth 1 -maxdepth 1 -type d -mmin +120 2>/dev/null)
+if [ "$reclaimed" -gt 0 ]; then
+    echo "[run-matrix] reclaimed $reclaimed orphaned image(s) from prior killed run(s)" >&2
+fi
+
 # ── Per-scenario-filter lock ────────────────────────────────────────────────
 # Prevent two invocations with the same scenario filter from racing.
 # Uses mkdir atomicity. The lock key is the normalised filter string
