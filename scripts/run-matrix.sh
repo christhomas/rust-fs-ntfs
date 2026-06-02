@@ -90,51 +90,42 @@ if [[ "$host_image_dir" != /* ]]; then
 fi
 mkdir -p "$host_image_dir"
 
-# ── Reclaim orphaned staging dirs from prior KILLED runs ─────────────────────
-# A run removes its own `{run_id}` staging dir via the EXIT trap below, and the
-# runner deletes each scenario's image as it finishes. But a hard-killed run
-# (SIGKILL / OOM / a parent killing the process group — none of which run the
-# trap) orphans whatever images were in flight, and nothing else ever reclaims
-# them, so they accumulate across runs until the disk fills.
-#
-# Sweep staging subdirs whose mtime hasn't changed in over 2 hours. A live
-# run — even a slow one — constantly touches its dir (the runner creates and
-# deletes a scenario image every few minutes), so its dir stays fresh; only a
-# dead run's leftovers go stale. This never touches a concurrent in-flight run.
-#
-# Skipped under --keep-images / HARNESS_KEEP_IMAGES (keep_images is already
-# reconciled with the env var above): a developer who deliberately preserved
-# images for byte-diff inspection mustn't have them swept on the next run.
-if [ "$keep_images" -eq 0 ]; then
-    reclaimed=0
-    while IFS= read -r stale; do
-        [ -z "$stale" ] && continue
-        n=$(find "$stale" -name 'nfs-*.img' -type f 2>/dev/null | wc -l | tr -d ' ')
-        find "$stale" -name 'nfs-*.img' -type f -delete 2>/dev/null
-        # `rmdir` only removes an empty dir; fall back to `rm -rf` so a stale
-        # orphan that also holds non-image junk (lock files, partial artefacts
-        # from the killed run) is still reclaimed rather than lingering forever.
-        # Safe: the 2-hour mtime guard means this is never a live run's dir.
-        rmdir "$stale" 2>/dev/null || rm -rf "$stale" 2>/dev/null || true
-        reclaimed=$((reclaimed + n))
-    done < <(find "$host_image_dir" -mindepth 1 -maxdepth 1 -type d -mmin +120 2>/dev/null)
-    if [ "$reclaimed" -gt 0 ]; then
-        echo "[run-matrix] reclaimed $reclaimed orphaned image(s) from prior killed run(s)" >&2
-    fi
-fi
+# ── Orphaned staging dirs from prior KILLED runs ─────────────────────────────
+# The harness runner (fs-test-harness >= v3.11.0) reaps these mechanically at
+# startup: every run stamps `{image_dir}/{run_id}/owner.pid` with its pid and,
+# before staging, removes any run dir whose owner pid is provably no longer
+# alive. That supersedes the old 2-hour-mtime sweep this wrapper used to do —
+# a killed run is reclaimed by the *next* run immediately, by pid liveness,
+# instead of waiting two hours for the dir to go stale. Nothing to do here.
 
 # ── Per-scenario-filter lock ────────────────────────────────────────────────
 # Prevent two invocations with the same scenario filter from racing.
 # Uses mkdir atomicity. The lock key is the normalised filter string
-# (or "full" for no filter). Stale locks: rm -rf /tmp/ntfs-matrix-lock-*
+# (or "full" for no filter).
+#
+# Self-healing: a run killed before its EXIT trap fires leaves the lock dir
+# behind, which would otherwise block every future run with the same filter
+# until a human removes it (a real foot-gun — it silently turns a cancelled
+# run into a wedged matrix). The lock records its owner pid, so a lock whose
+# owner is no longer alive is provably stale and is reclaimed automatically —
+# the same pid-liveness reasoning the runner uses to reap orphaned image dirs.
 lock_key="${forwarded_args[*]:-full}"
 lock_key="${lock_key//[^a-zA-Z0-9_-]/_}"
 scenario_lock="/tmp/ntfs-matrix-lock-${lock_key}"
 if ! mkdir "$scenario_lock" 2>/dev/null; then
-    existing_pid=$(cat "$scenario_lock/pid" 2>/dev/null || echo "?")
-    echo "[run-matrix] scenario filter '${lock_key}' is already running (pid ${existing_pid})" >&2
-    echo "[run-matrix] if stale: rm -rf ${scenario_lock}" >&2
-    exit 1
+    existing_pid=$(cat "$scenario_lock/pid" 2>/dev/null || echo "")
+    if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
+        echo "[run-matrix] scenario filter '${lock_key}' is already running (pid ${existing_pid})" >&2
+        exit 1
+    fi
+    # Owner pid dead or absent → stale lock from a killed run. Reclaim + retry
+    # once; mkdir atomicity still arbitrates if two runs race the reclaim.
+    echo "[run-matrix] reclaiming stale lock ${scenario_lock} (owner pid ${existing_pid:-unknown} not alive)" >&2
+    rm -rf "$scenario_lock"
+    if ! mkdir "$scenario_lock" 2>/dev/null; then
+        echo "[run-matrix] could not acquire lock ${scenario_lock} after reclaiming stale lock" >&2
+        exit 1
+    fi
 fi
 echo "$$" > "$scenario_lock/pid"
 
@@ -237,11 +228,12 @@ cleanup() {
             echo "$pre_run_subdirs" | grep -qxF "$dir" && continue
             local n
             n=$(find "$dir" -name 'nfs-*.img' -type f 2>/dev/null | wc -l | tr -d ' ')
-            if [ "$n" -gt 0 ]; then
-                find "$dir" -name 'nfs-*.img' -type f -delete
-                count=$((count + n))
-            fi
-            rmdir "$dir" 2>/dev/null || true
+            # Remove the run dir WHOLE, not just its *.img files: the
+            # v3.11.0 runner drops an `owner.pid` marker in here, so a bare
+            # `rmdir` would fail (dir non-empty) and leak the marker dir until
+            # the next run's reaper swept it. rm -rf reclaims it on clean exit.
+            rm -rf "$dir" 2>/dev/null || true
+            count=$((count + n))
         done < <(find "$host_image_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
         if [ "$count" -gt 0 ]; then
             echo "[run-matrix] cleanup: removed $count image(s) from this run's dir(s)" >&2
