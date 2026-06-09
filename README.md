@@ -14,11 +14,12 @@ The crate is in **active development**, not yet 1.0.
 
 What's solid today:
 
-- **Read** — every NTFS read path that upstream `ntfs = "0.4"`
-  (Colin Finck's read-only parser, MIT/Apache-2.0) supports works
-  here unchanged: stat, readdir, file content, ADS, reparse points,
+- **Read** — a complete in-house reader (the crate originally built
+  on Colin Finck's `ntfs` read-only parser but has since superseded
+  it; that crate now lives only as a dev-dependency test oracle, see
+  Credits): stat, readdir, file content, ADS, reparse points,
   symlinks, junctions, Unicode names.
-- **Write** — original work layered on top of the upstream reader:
+- **Write** — original work over that in-house reader:
   resident + non-resident `$DATA` writes, resident → non-resident
   promotion, grow / truncate, create / unlink / mkdir / rmdir,
   rename (same- and variable-length), hard links, ADS write/delete,
@@ -170,11 +171,10 @@ are documented there.
 
 ## Test contract
 
-- **Unit tests:** 2 (in-tree, `cargo test --lib`).
-- **Integration tests:** 396 passing across 66 binaries (one
-  failing as of HEAD, in `mkfs_roundtrip::format_and_parse_back`,
-  tracked in the test matrix). 42 ignored (mostly `cluster_size_matrix`
-  long-running and the matrix harness on non-Windows hosts).
+- **Lib unit tests:** 500+ (`cargo test --lib`).
+- **Integration tests:** 600+ across ~90 binaries. Some are marked
+  ignored (long-running `cluster_size_matrix`, and the matrix
+  harness on non-Windows hosts).
 - **Coverage areas (one or more dedicated test files each):**
   reads, every C-ABI entry point, round-trip writes, corruption
   fuzz under concurrent read-back, Unicode names, large files,
@@ -536,29 +536,26 @@ Full ABI surface: `include/fs_ntfs.h`. Implementation entry point:
 
 ## Using from Rust
 
-The C ABI is the primary surface. If you're writing pure Rust and
-only need read support, depend on upstream directly:
-
-```toml
-[dependencies]
-ntfs = "0.4"
-```
-
-If you want fs-ntfs's write API from Rust, pull the crate in as a
-path or git dependency and use the modules under `facade::` and
-`write::`. Note that the Rust facade re-parses the boot sector and
-MFT per call (it's stateless by design); for hot paths, go through
-the C ABI which keeps the parsed volume in memory.
+The C ABI is the primary surface. To use fs-ntfs from Rust — read
+*or* write — pull the crate in as a path or git dependency and use
+the modules under `facade::` and `write::` (read and write both run
+through the crate's own in-house implementation; there's no need to
+reach for a separate parser). Note that the Rust facade re-parses
+the boot sector and MFT per call (it's stateless by design); for hot
+paths, go through the C ABI which keeps the parsed volume in memory.
 
 ## Credits
 
-Read parsing is the work of [Colin Finck](https://github.com/ColinFinck)
-and his [`ntfs`](https://github.com/ColinFinck/ntfs) crate — this
-crate depends on it unchanged for every MFT, attribute, and index
-read. The write, recovery, mkfs, and FFI code in this crate is
-original work, layered on top of that reader. Citations throughout
-are Microsoft MS-FSCC and Windows Internals 7th ed. only; no GPL'd
-NTFS reimplementation was consulted at any point.
+This crate originally built on [Colin Finck](https://github.com/ColinFinck)'s
+read-only [`ntfs`](https://github.com/ColinFinck/ntfs) parser
+(MIT/Apache-2.0). The read path has since been reimplemented
+in-house and supersedes it; the read, write, recovery, mkfs, and FFI
+code here is all original work. Colin Finck's crate remains as a
+**dev-dependency oracle** — tests cross-check that what this crate
+parses and generates matches what the upstream parser sees — but it
+is not part of the shipping library. Citations throughout are
+Microsoft MS-FSCC and Windows Internals 7th ed. only; no GPL'd NTFS
+reimplementation was consulted at any point.
 
 ## Disclaimer — use at your own risk
 
