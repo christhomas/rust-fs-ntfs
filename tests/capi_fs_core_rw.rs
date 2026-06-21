@@ -166,8 +166,9 @@ fn fs_core_rw_rejects_null_handle() {
 #[test]
 fn fs_core_ro_handle_mutator_returns_einval_with_helpful_message() {
     // Open RO via the read-only mount entry; mutator must report the
-    // documented "no recorded mount source" error so consumers can
-    // distinguish this case from generic write failures.
+    // documented "handle mounted read-only" error so consumers can
+    // distinguish a read-only mount from a missing mount source
+    // ("handle has no recorded mount source") or a generic write failure.
     let img = copy_fixture("ro_einval");
     let img_c = CString::new(img.as_str()).unwrap();
 
@@ -189,8 +190,8 @@ fn fs_core_ro_handle_mutator_returns_einval_with_helpful_message() {
     };
     assert_eq!(rn, -1, "RO mount mutator should fail, got rn={rn}");
     assert!(
-        last_error().contains("no recorded mount source"),
-        "expected 'no recorded mount source' error, got: {}",
+        last_error().contains("handle mounted read-only"),
+        "expected 'handle mounted read-only' error, got: {}",
         last_error()
     );
 
