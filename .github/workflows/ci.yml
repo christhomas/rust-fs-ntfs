@@ -71,7 +71,7 @@ jobs:
       # on ubuntu — same rationale as cargo-deny above.
       - name: cargo clippy
         if: matrix.os == 'ubuntu-latest'
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       # Test scope is intentionally narrow: only tests that DON'T need
       # the out-of-tree `test-disks/*.img` fixtures. The fixture-driven
@@ -87,8 +87,13 @@ jobs:
       # integration-test files that generate their own data instead
       # of reading fixtures. Anything else is a fixture-test and
       # stays out of CI.
-      - run: cargo test --release --lib
-      - run: cargo test --release --test mkfs_roundtrip --test mkfs_bin_smoke
+      # --locked everywhere: cargo must NOT silently regenerate a stale
+      # Cargo.lock. If the lock drifts from Cargo.toml / the rust-fs-core
+      # submodule, these fail loudly here at PR time ("lock file needs to
+      # be updated but --locked was passed") instead of surfacing as a
+      # dirty-tree abort at `cargo publish`. Keeps the committed lock honest.
+      - run: cargo test --release --locked --lib
+      - run: cargo test --release --locked --test mkfs_roundtrip --test mkfs_bin_smoke
 
   # Full integration suite — every unit AND integration test, with the
   # read-path .img fixtures generated on the runner via ntfs-3g/mkntfs.
@@ -136,7 +141,7 @@ jobs:
       # so the release gate never sees a failure CI didn't. --no-fail-fast
       # reports every failure in one run instead of aborting at the first
       # failing binary (which masks the rest).
-      - run: cargo test --release --no-fail-fast
+      - run: cargo test --release --locked --no-fail-fast
 
   # NTFS validation runs ONLY on the Windows side via Microsoft's
   # chkdsk. That is the only authoritative validator for NTFS, full
@@ -177,7 +182,7 @@ jobs:
           RUSTFLAGS: "-Zsanitizer=address"
           RUSTDOCFLAGS: "-Zsanitizer=address"
         run: |
-          cargo +nightly test --release --lib \
+          cargo +nightly test --release --locked --lib \
             --target x86_64-unknown-linux-gnu
 
   # Windows-side validation: chkdsk is the canonical "is this a valid
@@ -227,7 +232,7 @@ jobs:
           git clone --depth 1 --branch v0.2.2 https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
           cargo install --path $env:RUNNER_TEMP/rust-img-vhd --bin vhd_tool
       - name: Build rust-ntfs (Windows)
-        run: cargo build --release --bin rust-ntfs
+        run: cargo build --release --locked --bin rust-ntfs
       - name: Generate raw image and wrap in GPT-partitioned VHD
         shell: pwsh
         run: |
