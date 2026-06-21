@@ -1,4 +1,4 @@
-# fs-ntfs — pure-Rust NTFS driver
+# am-fs-ntfs — pure-Rust NTFS driver
 
 A pure-Rust read/write NTFS driver, dual-licensed Apache-2.0 / MIT,
 with no kernel dependencies and no FFI to a C-language NTFS library.

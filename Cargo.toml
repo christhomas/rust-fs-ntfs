@@ -1,6 +1,6 @@
 [package]
-name = "fs-ntfs"
-version = "0.3.1"
+name = "am-fs-ntfs"
+version = "0.3.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Pure-Rust NTFS filesystem driver. Exposes a C ABI (fs_ntfs_*) suitable for FFI from C/C++/Go/etc."
@@ -39,7 +39,7 @@ log = "0.4"
 # Strictly additive — ntfs's existing BlockIo trait is unchanged; this
 # adds a bridge module so external `fs_core::BlockDevice` implementors
 # (a `Qcow2Reader`, a `SliceReader`, etc.) can be driven by ntfs.
-am-fs-core = { path = "vendor/rust-fs-core" }
+am-fs-core = { path = "vendor/rust-fs-core", version = "0.2" }
 
 [dev-dependencies]
 # Upstream read-only NTFS parser, kept ONLY as a test oracle: the native
