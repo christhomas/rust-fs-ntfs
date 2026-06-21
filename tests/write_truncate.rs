@@ -150,10 +150,15 @@ fn shrink_frees_clusters_in_bitmap() {
 }
 
 #[test]
-fn shrink_rejects_growth() {
-    let img = working_copy("reject_grow");
-    let err = write::truncate(Path::new(&img), "/big.bin", 9 * 1024 * 1024).unwrap_err();
-    assert!(err.contains("grow"), "{err:?}");
+fn truncate_up_grows_nonresident() {
+    // POSIX truncate semantics: truncating UP extends the file. big.bin is
+    // 8 MiB; truncate to 9 MiB routes through grow_nonresident (write.rs),
+    // allocating the extra clusters and leaving the new tail readable as
+    // zeros. (Earlier MVP rejected growth; the driver now supports it.)
+    let img = working_copy("grow");
+    let n = write::truncate(Path::new(&img), "/big.bin", 9 * 1024 * 1024).expect("truncate grow");
+    assert_eq!(n, 9 * 1024 * 1024);
+    assert_eq!(value_length(&img, "/big.bin"), 9 * 1024 * 1024);
 }
 
 #[test]

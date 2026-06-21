@@ -133,8 +133,10 @@ jobs:
       - name: Generate NTFS read-path fixtures
         run: bash test-disks/build-ntfs-feature-images.sh
       # FULL suite — every unit AND integration test. Mirrors release.yml
-      # so the release gate never sees a failure CI didn't.
-      - run: cargo test --release
+      # so the release gate never sees a failure CI didn't. --no-fail-fast
+      # reports every failure in one run instead of aborting at the first
+      # failing binary (which masks the rest).
+      - run: cargo test --release --no-fail-fast
 
   # NTFS validation runs ONLY on the Windows side via Microsoft's
   # chkdsk. That is the only authoritative validator for NTFS, full

@@ -82,7 +82,10 @@ jobs:
       # FULL suite — every unit test AND every integration test (the fixtures
       # above make the read-path tests live). Deliberately NOT trimmed to
       # --lib: the release gate must exercise the real read paths.
-      - run: cargo test --release
+      # --no-fail-fast: report EVERY failing test in one run. Without it
+      # cargo aborts at the first failing binary and silently skips the
+      # rest, so a tag can fail repeatedly one test at a time.
+      - run: cargo test --release --no-fail-fast
       - run: cargo clippy --all-targets -- -D warnings
 
   # ---------------------------------------------------------------------------
