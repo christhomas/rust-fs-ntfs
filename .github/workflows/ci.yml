@@ -90,6 +90,52 @@ jobs:
       - run: cargo test --release --lib
       - run: cargo test --release --test mkfs_roundtrip --test mkfs_bin_smoke
 
+  # Full integration suite — every unit AND integration test, with the
+  # read-path .img fixtures generated on the runner via ntfs-3g/mkntfs.
+  # This is the SAME gate as release.yml's `crates-test`, run here on
+  # every push/PR so fixture-driven regressions (e.g. a capi error
+  # contract drifting) are caught before a release tag, not at publish
+  # time. Ubuntu-only: mkntfs/ntfs-3g author the fixtures and don't
+  # exist on macOS. Authoritative format validation is still chkdsk
+  # (validate-mkfs-windows); this proves the crate's own read paths
+  # against real ntfs-3g-authored images.
+  integration:
+    name: full test suite (fixtures + integration)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive  # am-fs-core path dep at vendor/rust-fs-core
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+      # Fixture toolchain: ntfs-3g ships both mkntfs (format) and ntfs-3g
+      # (loop-mount), the only tools the fixture builder needs. ntfs-3g is
+      # used ONLY to author the fixtures — the test binary reads the images
+      # raw through the crate's own reader.
+      - name: Install fixture toolchain (mkntfs + ntfs-3g)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ntfs-3g
+      # Generate the read-path .img fixtures. With these present the
+      # fixture-driven integration tests (tests/ads.rs, tests/unicode.rs,
+      # …) run instead of self-skipping. The two Windows-authored fixtures
+      # (ntfs-attrlist / ntfs-compressed) self-skip when absent.
+      - name: Generate NTFS read-path fixtures
+        run: bash test-disks/build-ntfs-feature-images.sh
+      # FULL suite — every unit AND integration test. Mirrors release.yml
+      # so the release gate never sees a failure CI didn't.
+      - run: cargo test --release
+
   # NTFS validation runs ONLY on the Windows side via Microsoft's
   # chkdsk. That is the only authoritative validator for NTFS, full
   # stop. Our own crate's read-path round-trip runs on every PR via
