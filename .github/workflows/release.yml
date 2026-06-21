@@ -1,19 +1,25 @@
 name: Release
 
-# Cuts a GitHub Release on `v*` tag pushes. Each platform-target builds
-# `rust-ntfs` from source on a runner of that OS/arch, packages it, and
-# uploads the archive + a SHA-256 manifest to the Release.
+# Publishes the crate to crates.io on `v*` tag pushes. Publish is gated on
+# BOTH:
 #
-# Targets:
-#   - aarch64-apple-darwin       (macOS Apple Silicon)
-#   - x86_64-apple-darwin        (macOS Intel)
-#   - x86_64-unknown-linux-gnu   (Linux x64)
-#   - aarch64-unknown-linux-gnu  (Linux ARM64; native runner — no QEMU)
-#   - x86_64-pc-windows-msvc     (Windows x64)
-#   - aarch64-pc-windows-gnullvm (Windows ARM64; matches dev VM toolchain)
+#   1. validate-windows — the canonical NTFS functional oracle. Builds
+#      rust-ntfs, wraps its mkfs output in a GPT-partitioned VHD, mounts it
+#      on Windows, and runs Microsoft `chkdsk`. chkdsk is the only
+#      authoritative "is this a valid NTFS volume?" check, full stop, and it
+#      only runs on Windows — so it MUST gate publish here, not just on PR CI.
 #
-# Trigger only on tag pushes — keeps `main` builds light and avoids
-# accidental releases.
+#   2. crates-test — the FULL Rust test suite on Linux, with the read-path
+#      `.img` fixtures generated first (via test-disks/build-ntfs-feature-
+#      images.sh) so the fixture-driven integration tests (ads, unicode,
+#      deep, …) actually run rather than being skipped or trimmed.
+#
+# Trusted publishing (OIDC) via crates-io-auth-action; no stored token.
+#
+# Note: this workflow does NOT ship prebuilt binaries / GitHub Releases. The
+# crate is consumed as a library (the gold-standard sister crate am-fs-ext4
+# ships none either); the per-platform binary matrix was distribution, not
+# testing, and was flaky. The focus here is: full tests + chkdsk -> publish.
 
 on:
   push:
@@ -21,169 +27,20 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build (e.g. v0.1.3)"
+        description: "Tag to build (e.g. v0.3.3)"
         required: true
 
 permissions:
-  contents: write  # Required to create / update GitHub Releases.
+  contents: read
 
 jobs:
-  build:
-    name: build (${{ matrix.target }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            runner: macos-14
-            archive: tar.gz
-          - target: x86_64-apple-darwin
-            runner: macos-13
-            archive: tar.gz
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-            archive: tar.gz
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-            archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            runner: windows-latest
-            archive: zip
-          - target: aarch64-pc-windows-gnullvm
-            runner: windows-11-arm
-            archive: zip
-            toolchain: stable-aarch64-pc-windows-gnullvm
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # am-fs-core is a nested submodule at vendor/rust-fs-core (path
-          # dep); without it `cargo build` fails to resolve the dependency.
-          submodules: recursive
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          # Per-target toolchain override (gnullvm for Win-ARM64); else
-          # pin to rust-toolchain.toml's channel for reproducibility.
-          toolchain: ${{ matrix.toolchain || '1.95.0' }}
-          targets: ${{ matrix.target }}
-
-      - name: Cache cargo registry + target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build rust-ntfs
-        run: cargo build --release --bin rust-ntfs --target ${{ matrix.target }}
-
-      - name: Resolve binary path / version
-        id: meta
-        shell: bash
-        run: |
-          if [[ "${{ matrix.target }}" == *windows* ]]; then
-              bin="target/${{ matrix.target }}/release/rust-ntfs.exe"
-          else
-              bin="target/${{ matrix.target }}/release/rust-ntfs"
-          fi
-          echo "bin=${bin}" >> "$GITHUB_OUTPUT"
-
-          # Tag-name resolution: workflow_dispatch picks from input,
-          # tag-push picks from refs/tags/<name>.
-          if [[ -n "${{ inputs.tag }}" ]]; then
-              tag="${{ inputs.tag }}"
-          else
-              tag="${GITHUB_REF##*/}"
-          fi
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-
-      - name: Package archive
-        id: pkg
-        shell: bash
-        run: |
-          stage="rust-ntfs-${{ steps.meta.outputs.tag }}-${{ matrix.target }}"
-          mkdir -p "$stage"
-          cp "${{ steps.meta.outputs.bin }}" "$stage/"
-          cp README.md LICENSE-MIT LICENSE-APACHE "$stage/" 2>/dev/null || true
-
-          if [[ "${{ matrix.archive }}" == "zip" ]]; then
-              archive="${stage}.zip"
-              # PowerShell's Compress-Archive available on all Windows
-              # runners; preserves directory structure.
-              7z a -r "$archive" "$stage" >/dev/null
-          else
-              archive="${stage}.tar.gz"
-              tar -czf "$archive" "$stage"
-          fi
-
-          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
-
-      - name: Compute SHA-256
-        id: hash
-        shell: bash
-        run: |
-          if command -v sha256sum >/dev/null; then
-              sha=$(sha256sum "${{ steps.pkg.outputs.archive }}" | awk '{print $1}')
-          else
-              sha=$(shasum -a 256 "${{ steps.pkg.outputs.archive }}" | awk '{print $1}')
-          fi
-          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
-          echo "${sha}  ${{ steps.pkg.outputs.archive }}" > "${{ steps.pkg.outputs.archive }}.sha256"
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: rust-ntfs-${{ matrix.target }}
-          path: |
-            ${{ steps.pkg.outputs.archive }}
-            ${{ steps.pkg.outputs.archive }}.sha256
-
-  release:
-    name: publish GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Resolve tag
-        id: meta
-        run: |
-          if [[ -n "${{ inputs.tag }}" ]]; then
-              echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-              echo "tag=${GITHUB_REF##*/}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create / update Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          name: rust-ntfs ${{ steps.meta.outputs.tag }}
-          generate_release_notes: true
-          files: |
-            dist/*.tar.gz
-            dist/*.zip
-            dist/*.sha256
-
   # ---------------------------------------------------------------------------
-  # crates.io publish — mirrors the sister crates (am-fs-core, am-img-*, …).
-  # Trusted publishing (OIDC) via crates-io-auth-action; no stored token.
-  # Runs only on version-tag pushes. Split test/publish so the `release`
-  # environment's protection gates only the actual publish step.
+  # Full Rust test gate (Linux). Generates the read-path fixtures first so the
+  # fixture-driven integration tests run for real — NOT trimmed to --lib.
   # ---------------------------------------------------------------------------
   crates-test:
-    name: crates.io gate (test)
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: full test suite (fixtures + integration)
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -195,6 +52,7 @@ jobs:
           toolchain: "1.95.0"
           components: clippy
       - name: verify tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           tag="${GITHUB_REF_NAME#v}"
           crate_ver=$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"(.*)"/\1/')
@@ -202,12 +60,608 @@ jobs:
             echo "tag $tag does not match Cargo.toml version $crate_ver" >&2
             exit 1
           fi
+
+      # Fixture toolchain: ntfs-3g ships both mkntfs (format) and ntfs-3g
+      # (loop-mount), the only tools the fixture builder needs. ntfs-3g is
+      # used ONLY to author the fixtures — the test binary reads the images
+      # raw through the crate's own reader.
+      - name: Install fixture toolchain (mkntfs + ntfs-3g)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ntfs-3g
+
+      # Generate the read-path .img fixtures. With these present the fixture-
+      # driven integration tests (tests/ads.rs, tests/unicode.rs, …) run
+      # instead of panicking at tests/common/mod.rs. The two Windows-authored
+      # fixtures (ntfs-attrlist / ntfs-compressed — LZNT1 compression and
+      # $ATTRIBUTE_LIST overflow, which mkntfs cannot produce) are self-
+      # skipped by tests/native_read_fixtures.rs when absent.
+      - name: Generate NTFS read-path fixtures
+        run: bash test-disks/build-ntfs-feature-images.sh
+
+      # FULL suite — every unit test AND every integration test (the fixtures
+      # above make the read-path tests live). Deliberately NOT trimmed to
+      # --lib: the release gate must exercise the real read paths.
       - run: cargo test --release
       - run: cargo clippy --all-targets -- -D warnings
 
+  # ---------------------------------------------------------------------------
+  # Windows chkdsk validation — the canonical NTFS functional oracle.
+  # Mirrors ci.yml's `validate-mkfs-windows`. Microsoft's chkdsk is the only
+  # authoritative validator for NTFS, and it only runs on Windows; gating
+  # publish on it is non-negotiable.
+  # ---------------------------------------------------------------------------
+  validate-windows:
+    name: validate rust-ntfs format (Windows chkdsk)
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - name: Install vhd_tool from rust-img-vhd
+        # Builds the in-house VHD writer (~30 s with no cache). Pinned to
+        # v0.2.0 (7cddc43) so a future push to main cannot silently break
+        # CI. The binary lands in ~/.cargo/bin which is on PATH after
+        # dtolnay/rust-toolchain.
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch v0.2.0 https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
+          # am-img-vhd v0.2.0 path-deps am-fs-core (`../rust-fs-core`), so the
+          # sibling must sit next to it; v0.2.2 satisfies its `version = "0.2"`.
+          # No --locked: v0.2.0 ships no Cargo.lock, so locking is unsatisfiable.
+          git clone --depth 1 --branch v0.2.2 https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
+          cargo install --path $env:RUNNER_TEMP/rust-img-vhd --bin vhd_tool
+      - name: Build rust-ntfs (Windows)
+        run: cargo build --release --bin rust-ntfs
+      - name: Generate raw image and wrap in GPT-partitioned VHD
+        shell: pwsh
+        run: |
+          # Generate the raw NTFS volume bytes via our binary.
+          # 256 MiB: chkdsk's `/scan` mode requires shadow-copy storage
+          # space on the volume. On a 64 MiB volume it bails with
+          # "Insufficient storage available to create either the shadow
+          # copy storage file." 256 MiB is the smallest size that gives
+          # /scan headroom and still runs in seconds.
+          $rawSize = 256MB
+          fsutil file createnew nfs.img $rawSize
+          ./target/release/rust-ntfs.exe format -L CITEST --serial deadbeefcafe1234 nfs.img
+
+          # Dump the first 64 bytes of nfs.img BEFORE we wrap/write to the
+          # VHD. This is the ground-truth view of what rust-ntfs format produced.
+          # If this is correct but the post-remount read is wrong, the bug
+          # is in the VHD/PhysicalDrive layer, not mkfs_ntfs. If it's
+          # already wrong here, mkfs_ntfs itself produced a bad boot sector.
+          New-Item -ItemType Directory -Path diag -Force | Out-Null
+          $imgBytes = [System.IO.File]::ReadAllBytes("$pwd\nfs.img")
+          $hex = ($imgBytes[0..63] | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+          $magic = [System.Text.Encoding]::ASCII.GetString($imgBytes[3..10])
+          "nfs.img boot sector magic at offset 3: '$magic'" | Tee-Object diag/nfs-img-magic.txt
+          "first 64 bytes of nfs.img:`n$hex" | Out-File diag/nfs-img-hex.txt
+          # Decode the critical fields by hand so the artifact is self-explanatory.
+          $bps = [System.BitConverter]::ToUInt16($imgBytes, 0x0B)
+          $spc = $imgBytes[0x0D]
+          $totalSectors = [System.BitConverter]::ToUInt64($imgBytes, 0x28)
+          $mftLcn = [System.BitConverter]::ToUInt64($imgBytes, 0x30)
+          $bpbReport = "nfs.img BPB decode:`n  bytes_per_sector (0x0B): $bps`n  sectors_per_cluster (0x0D): $spc`n  total_sectors (0x28): $totalSectors`n  mft_lcn (0x30): $mftLcn"
+          $bpbReport | Tee-Object diag/nfs-img-bpb.txt
+
+          # Why we DON'T just convert nfs.img directly to a VHD wrapper
+          # without a partition table: Windows' Mount-DiskImage path
+          # REQUIRES a partition table on the wrapper. A raw NTFS volume
+          # at offset 0 (superfloppy layout) gets picked up correctly on
+          # physical media but disk-image mounts don't go through the
+          # superfloppy auto-detection.
+          # Confirmed by run #25230496866's Get-Disk output:
+          #   NumberOfPartitions: 0   PartitionStyle: MBR
+          # Windows saw the wrapped image as "MBR disk with zero
+          # partitions", not "NTFS volume". No drive letter, no chkdsk
+          # possible.
+          #
+          # So we build a GPT-partitioned wrapper VHD, mount it,
+          # initialise + add one partition aligned to 1 MiB, then
+          # dd our NTFS bytes into the partition's offset within
+          # the disk. Windows on remount sees a real partitioned
+          # disk with NTFS at the partition offset and mounts cleanly.
+          # Same layout `diskutil eraseDisk` produces — closer to the
+          # real shipping scenario too.
+
+          # Create an empty fixed VHD with comfortable headroom over
+          # the data partition. iter4 hit "specified offset is not valid"
+          # when the wrapper was sized too tight against the partition's
+          # request — Windows GPT reserves 33 LBA at each end. 384 MiB
+          # gives 256 MiB partition + slack with headroom to spare.
+          # vhd_tool create-fixed takes raw bytes (no MB suffix).
+          $wrapperBytes = [int64](384MB)
+          vhd_tool create-fixed wrapper.vhd $wrapperBytes
+          # Strip the NTFS host-FS sparse flag in case the host carrier
+          # set it (harmless on the fixed VHD, kept for parity with
+          # the per-scenario matrix scripts).
+          fsutil sparse setflag wrapper.vhd 0
+
+          # Echo file metrics for the log.
+          Get-Item nfs.img,wrapper.vhd | Format-List Name,Length
+
+          # Mount the empty wrapper, partition it, write our NTFS
+          # bytes into the partition area, dismount.
+          $vhd = Mount-DiskImage -ImagePath "$pwd\wrapper.vhd" -PassThru
+          Start-Sleep -Seconds 2
+          Initialize-Disk -Number $vhd.Number -PartitionStyle GPT
+          # Initialize-Disk completes async-ish: the LargestFreeExtent
+          # property doesn't refresh until we re-fetch the Disk object.
+          # iter5 hit "specified offset is not valid" because we used
+          # the stale $disk handle whose LargestFreeExtent was still 0.
+          Start-Sleep -Seconds 2
+          $disk = Get-Disk -Number $vhd.Number
+          Write-Host "Disk size: $($disk.Size), AllocatedSize: $($disk.AllocatedSize), LargestFreeExtent: $($disk.LargestFreeExtent)"
+
+          # Use -UseMaximumSize so we don't have to predict GPT slack
+          # arithmetic. Windows picks an aligned offset and the largest
+          # contiguous size. We'll write our nfs.img at $part.Offset
+          # into the disk's raw device path, which is what the prior
+          # write logic does anyway.
+          $part = New-Partition -DiskNumber $vhd.Number `
+              -UseMaximumSize `
+              -AssignDriveLetter:$false
+          Write-Host "Created partition at offset $($part.Offset), size $($part.Size)"
+          if ($part.Size -lt $rawSize) {
+              throw "partition is smaller ($($part.Size)) than raw NTFS image ($rawSize) — bump wrapper"
+          }
+
+          # Open the disk's raw device path and write our NTFS bytes
+          # at the partition's offset. \\.\PhysicalDriveN is the
+          # canonical raw access path — bypasses the FS layer.
+          # FileAccess.ReadWrite (not just Write) so we can verify the
+          # write took effect by reading bytes back immediately.
+          $rawPath = "\\.\PhysicalDrive$($disk.Number)"
+          $bytes = [System.IO.File]::ReadAllBytes("$pwd\nfs.img")
+          $fs = [System.IO.File]::Open($rawPath,
+              [System.IO.FileMode]::Open,
+              [System.IO.FileAccess]::ReadWrite,
+              [System.IO.FileShare]::ReadWrite)
+          try {
+              $fs.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $fs.Write($bytes, 0, $bytes.Length)
+              $fs.Flush($true)  # flush to OS + force disk write-through
+
+              # Read first 512 bytes back at the partition offset to
+              # confirm the write actually landed. NTFS boot sector
+              # magic ("NTFS    " ASCII at offset 3) is unmissable.
+              New-Item -ItemType Directory -Path diag -Force | Out-Null
+              $fs.Seek($part.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $verify = New-Object byte[] 512
+              $null = $fs.Read($verify, 0, 512)
+              $magic = [System.Text.Encoding]::ASCII.GetString($verify, 3, 8)
+              "NTFS magic at partition offset (expected 'NTFS    '): '$magic'" |
+                  Tee-Object diag/post-write-magic.txt
+              if ($magic -ne "NTFS    ") {
+                  Write-Host "::warning::NTFS magic missing at partition offset — raw write may have silently failed"
+                  $hex = ($verify[0..63] | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+                  "first 64 bytes at partition offset:`n$hex" | Out-File diag/post-write-hex.txt
+              }
+          } finally {
+              $fs.Close()
+          }
+          Write-Host "Wrote $($bytes.Length) bytes of NTFS at partition offset"
+
+          # Dismount so the next step's mount goes through a fresh
+          # probe — Windows caches the "no partition recognized"
+          # state from the empty mount, and only a remount makes it
+          # re-scan the partition contents.
+          Dismount-DiskImage -ImagePath "$pwd\wrapper.vhd" | Out-Null
+      - name: Mount VHD and capture pre-chkdsk diagnostics
+        id: mount
+        shell: pwsh
+        # Don't fail the step on individual cmdlet errors — fsutil reports
+        # "disk corrupt" via a non-zero exit, which causes pwsh to throw
+        # under "Stop" mode. We want to gather every diagnostic regardless.
+        continue-on-error: true
+        run: |
+          # Same drive-letter discovery pattern as before (snapshot,
+          # mount, diff). The wrapper VHD is GPT-partitioned with
+          # one NTFS partition now, so Windows SHOULD assign a letter
+          # promptly — but the snapshot-diff approach is robust to
+          # both the partitioned and superfloppy layouts, so keep it.
+          $lettersBefore = @((Get-Volume |
+              Where-Object { $_.DriveLetter }).DriveLetter)
+
+          $vhd = Mount-DiskImage -ImagePath "$pwd\wrapper.vhd" -PassThru
+
+          $letter = $null
+          for ($i = 0; $i -lt 10; $i++) {
+            Start-Sleep -Seconds 1
+            $lettersAfter = @((Get-Volume |
+                Where-Object { $_.DriveLetter }).DriveLetter)
+            $new = $lettersAfter | Where-Object { $_ -notin $lettersBefore }
+            if ($new) { $letter = $new | Select-Object -First 1; break }
+          }
+
+          # Always capture state — useful in success runs too for
+          # cross-commit baselining.
+          New-Item -ItemType Directory -Path diag -Force | Out-Null
+          Get-Disk | Format-List | Out-File diag/get-disk-on-mount.txt
+          Get-Volume | Format-List | Out-File diag/get-volume-on-mount.txt
+          Get-Partition -ErrorAction SilentlyContinue | Format-List |
+              Out-File diag/get-partition-on-mount.txt
+
+          # Re-read the first 512 bytes at the partition offset post-remount
+          # to verify the bytes actually persisted across dismount/remount.
+          # If this magic differs from pre-dismount, VHD or Windows ate them.
+          $disk = Get-Disk -Number $vhd.Number
+          $partition = Get-Partition -DiskNumber $disk.Number |
+              Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
+          if ($partition) {
+              $rawPath = "\\.\PhysicalDrive$($disk.Number)"
+              try {
+                  $fs = [System.IO.File]::Open($rawPath,
+                      [System.IO.FileMode]::Open,
+                      [System.IO.FileAccess]::Read,
+                      [System.IO.FileShare]::ReadWrite)
+                  $fs.Seek($partition.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+                  $verify = New-Object byte[] 512
+                  $null = $fs.Read($verify, 0, 512)
+                  $fs.Close()
+                  $magic = [System.Text.Encoding]::ASCII.GetString($verify, 3, 8)
+                  "Post-remount NTFS magic at partition offset $($partition.Offset): '$magic'" |
+                      Tee-Object diag/post-remount-magic.txt
+                  $hex = ($verify[0..63] | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+                  "first 64 bytes of partition post-remount:`n$hex" | Out-File diag/post-remount-hex.txt
+              } catch {
+                  "Failed to read raw partition bytes post-remount: $_" |
+                      Out-File diag/post-remount-magic.txt
+              }
+          }
+
+          if (-not $letter) {
+            # No auto-assignment — try forcing one before giving up.
+            # Windows will sometimes leave a recognised volume unmapped
+            # when the disk is non-removable VHD-backed.
+            $partition = Get-Partition -DiskNumber $disk.Number |
+                Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
+            if ($partition) {
+                # Find an unused letter D..Z.
+                $used = (Get-Volume | ForEach-Object { $_.DriveLetter }) +
+                        (Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Name })
+                foreach ($c in [char[]](68..90)) {
+                    if ($c -notin $used) {
+                        try {
+                            Set-Partition -DiskNumber $disk.Number `
+                                -PartitionNumber $partition.PartitionNumber `
+                                -NewDriveLetter $c -ErrorAction Stop
+                            $letter = "$c"
+                            Write-Host "Forced drive letter $letter via Set-Partition"
+                            break
+                        } catch {
+                            "Set-Partition with letter $c failed: $_" |
+                                Out-File diag/set-partition-attempts.txt -Append
+                        }
+                    }
+                }
+            }
+          }
+
+          if (-not $letter) {
+            # Still no letter — capture state and fall back to volume-guid path.
+            Get-Disk | Format-List | Out-File diag/get-disk-on-failure.txt
+            Get-Volume | Format-List | Out-File diag/get-volume-on-failure.txt
+            Get-Partition -ErrorAction SilentlyContinue | Format-List |
+                Out-File diag/get-partition-on-failure.txt
+            throw "wrapper VHD mounted but no drive letter was assigned and Set-Partition fallback failed — Windows did not recognise the NTFS partition we wrote. See diag/ for storage state dumps."
+          }
+
+          Write-Host "Mounted at ${letter}:"
+          # Stash the drive letter for later steps.
+          "letter=$letter" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+          # Stash the volume guid path too, so chkdsk can fall back to
+          # \\?\Volume{guid}\ if the drive-letter path can't be parsed.
+          $volPath = "\\?\Volume$($partition.Guid)\"
+          "vol_path=$volPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+          # Capture as much "what does Windows think this volume is?"
+          # metadata as we can BEFORE chkdsk runs. None of these are
+          # allowed to fail the step — the chkdsk step is the gate.
+          New-Item -ItemType Directory -Path diag -Force | Out-Null
+          Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue |
+              Format-List * | Out-File diag/get-volume.txt
+          # 2>&1 + |out captures stderr from external tools (fsutil writes
+          # 'Error 1393' to stderr on disk-corrupt) into the file.
+          (& fsutil fsinfo volumeinfo "${letter}:" 2>&1) | Out-File diag/fsutil-volumeinfo.txt
+          (& fsutil fsinfo statistics "${letter}:" 2>&1) | Out-File diag/fsutil-statistics.txt
+          (Get-ChildItem "${letter}:\" -Force -ErrorAction SilentlyContinue) |
+              Out-File diag/root-listing.txt
+
+          # Dump the boot signature (0x55AA at 0x1FE-0x1FF) and full
+          # 512-byte boot sector — narrows down whether mkfs_ntfs missed
+          # a Windows-specific field beyond what we already inspected.
+          $img = [System.IO.File]::ReadAllBytes("$pwd\nfs.img")
+          $sig = '{0:X2} {1:X2}' -f $img[0x1FE], $img[0x1FF]
+          "boot signature at 0x1FE-0x1FF (expected '55 AA'): $sig" |
+              Tee-Object diag/boot-signature.txt
+          $allHex = ($img[0..511] | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+          "full boot sector (512 bytes):`n$allHex" | Out-File diag/boot-sector-full.txt
+          # Compare backup-boot location: NTFS backup at last sector of
+          # volume (volume_size - 512). Read the backup sector via the
+          # raw partition path on the wrapper.
+          $rawPath = "\\.\PhysicalDrive$($disk.Number)"
+          try {
+              $fs = [System.IO.File]::Open($rawPath,
+                  [System.IO.FileMode]::Open,
+                  [System.IO.FileAccess]::Read,
+                  [System.IO.FileShare]::ReadWrite)
+              # Last sector of the partition.
+              $backupOff = $partition.Offset + $partition.Size - 512
+              $fs.Seek($backupOff, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $backup = New-Object byte[] 512
+              $null = $fs.Read($backup, 0, 512)
+              $fs.Close()
+              $bMagic = [System.Text.Encoding]::ASCII.GetString($backup, 3, 8)
+              "Backup boot magic at last sector (offset $backupOff): '$bMagic'" |
+                  Tee-Object diag/backup-boot-magic.txt
+              $bHex = ($backup[0..63] | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+              "first 64 bytes of last sector:`n$bHex" | Out-File diag/backup-boot-hex.txt
+          } catch {
+              "Failed to read backup boot: $_" | Out-File diag/backup-boot-magic.txt
+          }
+
+          # Read the Windows Event Log for filesystem events while this
+          # volume was being probed. Captures the kernel's reason for
+          # rejecting the volume (e.g. NTFS event 55 'corrupt MFT').
+          try {
+              Get-WinEvent -LogName 'System' -MaxEvents 100 -ErrorAction SilentlyContinue |
+                  Where-Object {
+                      $_.ProviderName -in 'Ntfs','Microsoft-Windows-Ntfs','Disk','Volsnap','partmgr'
+                  } |
+                  Select-Object TimeCreated, ProviderName, Id, LevelDisplayName, Message |
+                  Format-List | Out-File diag/eventlog-fs.txt
+          } catch {
+              "Failed to query event log: $_" | Out-File diag/eventlog-fs.txt
+          }
+      - name: Build a reference Microsoft-formatted NTFS volume + diff against ours
+        # The whole point of this step is to PROVE which bytes are
+        # wrong in our mkfs_ntfs output, not guess. We format an
+        # identically-sized volume with Microsoft's own format.exe,
+        # then dump the same byte ranges from both. Any difference
+        # in the boot sector or first few MFT records is by-definition
+        # what mkfs_ntfs got wrong vs. the canonical reference.
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          New-Item -ItemType Directory -Path diag -Force | Out-Null
+          $rawSize = 256MB
+          # Create a second VHD, partition it identically (GPT + 1 MiB
+          # offset), but format with Microsoft's format.exe. Dismount it
+          # while still mounted to capture pristine post-format bytes.
+          $refWrapperBytes = [int64](384MB)
+          vhd_tool create-fixed reference.vhd $refWrapperBytes
+          fsutil sparse setflag reference.vhd 0
+          $refVhd = Mount-DiskImage -ImagePath "$pwd\reference.vhd" -PassThru
+          Start-Sleep -Seconds 2
+          Initialize-Disk -Number $refVhd.Number -PartitionStyle GPT
+          Start-Sleep -Seconds 2
+          $refDisk = Get-Disk -Number $refVhd.Number
+          $refPart = New-Partition -DiskNumber $refVhd.Number `
+              -UseMaximumSize -AssignDriveLetter:$true
+          # Wait for drive letter assignment.
+          Start-Sleep -Seconds 3
+          $refPart = Get-Partition -DiskNumber $refVhd.Number |
+              Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
+          if (-not $refPart.DriveLetter) {
+              "Reference partition got no drive letter — using GUID path" |
+                  Tee-Object diag/reference-state.txt
+          }
+          # Format with Microsoft's NTFS — quick (no zero), label CITESTREF.
+          # /Q skips zero-fill; /A:4096 matches our 4 KiB cluster size.
+          $fmtArgs = @("$($refPart.DriveLetter):", "/FS:NTFS", "/Q",
+                       "/A:4096", "/L", "/V:CITESTREF", "/Y")
+          $proc = Start-Process -FilePath "format.com" -ArgumentList $fmtArgs `
+              -NoNewWindow -PassThru -Wait `
+              -RedirectStandardOutput diag/reference-format.txt `
+              -RedirectStandardError diag/reference-format-stderr.txt
+          "format.com exit: $($proc.ExitCode)" | Tee-Object diag/reference-format-exit.txt
+
+          # Dump first 64 KiB of reference partition (boot + first 16
+          # MFT records at 4 KiB each) AND of our partition. Both via
+          # the raw \\.\PhysicalDriveN path so no FS-layer interpretation.
+          $rawRefPath = "\\.\PhysicalDrive$($refDisk.Number)"
+          try {
+              $fs = [System.IO.File]::Open($rawRefPath,
+                  [System.IO.FileMode]::Open,
+                  [System.IO.FileAccess]::Read,
+                  [System.IO.FileShare]::ReadWrite)
+              # Read boot sector first to learn where MFT is.
+              $fs.Seek($refPart.Offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $refBoot = New-Object byte[] 512
+              $null = $fs.Read($refBoot, 0, 512)
+              # Parse BPB to locate MFT.
+              $refBps = [System.BitConverter]::ToUInt16($refBoot, 0x0B)
+              $refSpc = $refBoot[0x0D]
+              $refClusterSize = [int]$refBps * [int]$refSpc
+              $refMftLcn = [System.BitConverter]::ToUInt64($refBoot, 0x30)
+              $refMftFileOff = [int64]$refMftLcn * [int64]$refClusterSize
+              # Dump 16 MFT records (16 * 4 KiB = 64 KiB) starting at $MFT.
+              $fs.Seek($refPart.Offset + $refMftFileOff, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $refMft = New-Object byte[] (64KB)
+              $null = $fs.Read($refMft, 0, 64KB)
+              $fs.Close()
+              [System.IO.File]::WriteAllBytes("$pwd\diag\reference-boot.bin", $refBoot)
+              [System.IO.File]::WriteAllBytes("$pwd\diag\reference-mft-16recs.bin", $refMft)
+          } catch {
+              "Failed to read reference bytes: $_" | Out-File diag/reference-state.txt
+          }
+          Dismount-DiskImage -ImagePath "$pwd\reference.vhd" -ErrorAction SilentlyContinue | Out-Null
+
+          # Dump same ranges from our nfs.img (already on disk).
+          $ourBytes = [System.IO.File]::ReadAllBytes("$pwd\nfs.img")
+          $ourBoot = $ourBytes[0..511]
+          [System.IO.File]::WriteAllBytes("$pwd\diag\ours-boot.bin", $ourBoot)
+          # Our MFT lives at LCN 4 = byte offset 16384.
+          $ourMft = $ourBytes[16384..(16384+65535)]
+          [System.IO.File]::WriteAllBytes("$pwd\diag\ours-mft-16recs.bin", $ourMft)
+
+          # Side-by-side hex dump of boot sectors + MFT records.
+          if ($refBoot -and $refBoot.Length -ge 512) {
+              "Reference NTFS BPB:`n  bytes_per_sector: $refBps`n  sectors_per_cluster: $refSpc`n  cluster_size: $refClusterSize`n  mft_lcn: $refMftLcn`n  mft_file_offset: $refMftFileOff" |
+                  Tee-Object diag/reference-bpb.txt
+
+              $refBootHex = ($refBoot | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+              $ourBootHex = ($ourBoot | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+              "REFERENCE boot sector (512 bytes):`n$refBootHex`n`nOURS boot sector (512 bytes):`n$ourBootHex" |
+                  Out-File diag/boot-sector-diff.txt
+
+              # Dump each MFT record individually so the diff is per-record.
+              # Records 0..F: $MFT, $MFTMirr, $LogFile, $Volume, $AttrDef,
+              # root, $Bitmap, $Boot, $BadClus, $Secure, $UpCase, $Extend.
+              $names = @('MFT','MFTMirr','LogFile','Volume','AttrDef',
+                         'root','Bitmap','Boot','BadClus','Secure',
+                         'UpCase','Extend','rec12','rec13','rec14','rec15')
+              for ($i = 0; $i -lt 12; $i++) {
+                  $base = $i * 4096
+                  if ($refMft.Length -ge ($base + 4096) -and $ourMft.Length -ge ($base + 4096)) {
+                      $refRec = $refMft[$base..($base+4095)]
+                      $ourRec = $ourMft[$base..($base+4095)]
+                      $refHex = ($refRec | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+                      $ourHex = ($ourRec | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+                      $name = $names[$i]
+                      "REFERENCE MFT record ${i} (`$$name):`n$refHex`n`nOURS MFT record ${i} (`$$name):`n$ourHex" |
+                          Out-File "diag/mft-rec${i}-${name}-diff.txt"
+                  }
+              }
+          }
+      - name: chkdsk passes
+        id: chkdsk
+        shell: pwsh
+        # Always run, capture each result separately. NTFS Event 55 in
+        # iter3 confirmed the kernel detects corruption on access — we
+        # need chkdsk to actually surface what's wrong. /scan failed on
+        # 64 MiB due to shadow-copy storage; with the volume bumped to
+        # 256 MiB it should run.
+        continue-on-error: true
+        run: |
+          $letter = "${{ steps.mount.outputs.letter }}"
+          New-Item -ItemType Directory -Path diag -Force | Out-Null
+          if (-not $letter) {
+              "no drive letter from mount step — skipping chkdsk" |
+                  Tee-Object diag/chkdsk-skipped.txt
+              "scan_exit=99" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+              exit 0
+          }
+
+          # Pass 1: plain `chkdsk DRIVE:` — read-only, no /scan, no /F.
+          # On a volume already flagged corrupt, this surfaces detailed
+          # MFT/index/attribute errors without needing shadow copy.
+          $proc1 = Start-Process -FilePath chkdsk.exe `
+            -ArgumentList "${letter}:" `
+            -NoNewWindow -PassThru -Wait `
+            -RedirectStandardOutput diag/chkdsk-readonly.txt `
+            -RedirectStandardError diag/chkdsk-readonly-stderr.txt
+          "chkdsk ${letter}: (read-only) exit: $($proc1.ExitCode)" |
+              Tee-Object diag/chkdsk-readonly-exit.txt
+          Get-Content diag/chkdsk-readonly.txt
+
+          # Pass 2: `chkdsk /scan` — needs shadow-copy space which now
+          # fits in our 256 MiB volume. Different code path than
+          # read-only and surfaces additional issues.
+          $proc2 = Start-Process -FilePath chkdsk.exe `
+            -ArgumentList "${letter}:","/scan" `
+            -NoNewWindow -PassThru -Wait `
+            -RedirectStandardOutput diag/chkdsk-scan.txt `
+            -RedirectStandardError diag/chkdsk-scan-stderr.txt
+          "chkdsk ${letter}: /scan exit: $($proc2.ExitCode)" |
+              Tee-Object diag/chkdsk-scan-exit.txt
+          Get-Content diag/chkdsk-scan.txt
+
+          # The job verdict is the /scan exit code (chkdsk's standard).
+          # Read-only + /scan agreement = good signal; disagreement = bug.
+          $exit = $proc2.ExitCode
+          if ($exit -ne 0) {
+            Write-Host "::error::chkdsk /scan reported issues (exit $exit)"
+            "chkdsk /scan failed (exit $exit) — see diag/chkdsk-*.txt" `
+              | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }
+          "scan_exit=$exit" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+      - name: Round-trip stress (create + read + delete)
+        # Even if chkdsk /scan was clean, exercise the volume with real
+        # I/O — a malformed $Bitmap or attribute table can pass /scan
+        # but blow up on the first write. If this step fails, our mkfs
+        # produced a "looks valid but isn't usable" volume.
+        if: steps.chkdsk.outputs.scan_exit == '0'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $letter = "${{ steps.mount.outputs.letter }}"
+          $root = "${letter}:\"
+          $tiny = Join-Path $root "tiny.txt"
+          $medium = Join-Path $root "medium.bin"
+          $big = Join-Path $root "big.bin"
+          # Create a few files of varying sizes — covers resident
+          # ($DATA in MFT record), small non-resident, and one big
+          # enough to allocate multiple clusters. Use raw byte
+          # writes (no Out-File encoding nuances) for determinism.
+          [System.IO.File]::WriteAllText($tiny, "hello")
+          [System.IO.File]::WriteAllBytes($medium, (New-Object byte[] 4096))
+          [System.IO.File]::WriteAllBytes($big, (New-Object byte[] (1MB)))
+          Get-ChildItem $root | Format-List | Out-File diag/post-write-listing.txt
+          # Read back. If $Bitmap allocation lied about which clusters
+          # we got, this returns wrong bytes.
+          $readback = [System.IO.File]::ReadAllText($tiny)
+          if ($readback -ne "hello") { throw "round-trip read mismatch on tiny.txt" }
+          # Delete + verify they're gone.
+          Remove-Item $tiny, $medium, $big
+          $remaining = Get-ChildItem $root -Force | Where-Object { -not $_.PSIsContainer }
+          if ($remaining) { throw "files still present after delete" }
+          "round-trip OK" | Out-File diag/round-trip.txt
+      - name: chkdsk /scan (post round-trip)
+        if: steps.chkdsk.outputs.scan_exit == '0'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $letter = "${{ steps.mount.outputs.letter }}"
+          $log = "diag/chkdsk-scan-after-roundtrip.txt"
+          $proc = Start-Process -FilePath chkdsk.exe `
+            -ArgumentList "${letter}:","/scan" `
+            -NoNewWindow -PassThru -Wait `
+            -RedirectStandardOutput $log
+          Get-Content $log
+          "chkdsk-after-roundtrip exit: $($proc.ExitCode)" | Out-File diag/chkdsk-exit-after.txt
+      - name: Dismount
+        if: always()
+        shell: pwsh
+        run: |
+          Dismount-DiskImage -ImagePath "$pwd\wrapper.vhd" -ErrorAction SilentlyContinue | Out-Null
+      - name: Upload diagnostics
+        # Always upload — successful runs also benefit from having the
+        # baseline metadata captured for cross-commit comparison.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-windows-diag-${{ github.run_id }}
+          path: diag/
+          if-no-files-found: warn
+      - name: Fail the job if chkdsk found issues
+        # We deferred failure earlier (continue-on-error) so the
+        # artifact upload always fires. Fail the job here once
+        # everything is captured.
+        if: steps.chkdsk.outputs.scan_exit != '0'
+        shell: pwsh
+        run: |
+          throw "chkdsk /scan exit code was $($env:scan_exit) — see uploaded diag/ artifact"
+        env:
+          scan_exit: ${{ steps.chkdsk.outputs.scan_exit }}
+
+  # ---------------------------------------------------------------------------
+  # crates.io publish — gated on BOTH the full Linux test suite AND the
+  # Windows chkdsk validation. Trusted publishing (OIDC); no stored token.
+  # Runs only on version-tag pushes; the `release` environment's protection
+  # gates the actual publish step.
+  # ---------------------------------------------------------------------------
   crates-publish:
     name: publish to crates.io
-    needs: crates-test
+    needs: [crates-test, validate-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: release
