@@ -137,11 +137,16 @@ jobs:
       # (ntfs-attrlist / ntfs-compressed) self-skip when absent.
       - name: Generate NTFS read-path fixtures
         run: bash test-disks/build-ntfs-feature-images.sh
-      # FULL suite — every unit AND integration test. Mirrors release.yml
-      # so the release gate never sees a failure CI didn't. --no-fail-fast
-      # reports every failure in one run instead of aborting at the first
-      # failing binary (which masks the rest).
+      # FULL suite — every unit AND integration test, then clippy: a true
+      # mirror of release.yml's crates-test, so the release gate never sees
+      # a failure CI didn't — including a clippy lint that only a fixture-
+      # backed integration test file would trip. (The matrix `test` job also
+      # clippies on ubuntu; running it here keeps this gate self-contained
+      # and identical to crates-test even if that job is restructured.)
+      # --no-fail-fast reports every failing test in one run instead of
+      # aborting at the first failing binary (which masks the rest).
       - run: cargo test --release --locked --no-fail-fast
+      - run: cargo clippy --locked --all-targets -- -D warnings
 
   # NTFS validation runs ONLY on the Windows side via Microsoft's
   # chkdsk. That is the only authoritative validator for NTFS, full
