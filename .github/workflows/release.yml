@@ -85,8 +85,12 @@ jobs:
       # --no-fail-fast: report EVERY failing test in one run. Without it
       # cargo aborts at the first failing binary and silently skips the
       # rest, so a tag can fail repeatedly one test at a time.
-      - run: cargo test --release --no-fail-fast
-      - run: cargo clippy --all-targets -- -D warnings
+      # --locked: if Cargo.lock drifted from Cargo.toml / the rust-fs-core
+      # submodule, fail HERE (the gate runs before publish) with a clear
+      # "lock needs updating" error, rather than letting `cargo publish`
+      # regenerate the lock and abort on a dirty tree after the gates pass.
+      - run: cargo test --release --locked --no-fail-fast
+      - run: cargo clippy --locked --all-targets -- -D warnings
 
   # ---------------------------------------------------------------------------
   # Windows chkdsk validation — the canonical NTFS functional oracle.
@@ -120,7 +124,7 @@ jobs:
           git clone --depth 1 --branch v0.2.2 https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
           cargo install --path $env:RUNNER_TEMP/rust-img-vhd --bin vhd_tool
       - name: Build rust-ntfs (Windows)
-        run: cargo build --release --bin rust-ntfs
+        run: cargo build --release --locked --bin rust-ntfs
       - name: Generate raw image and wrap in GPT-partitioned VHD
         shell: pwsh
         run: |
