@@ -173,7 +173,11 @@ jobs:
         shell: pwsh
         run: |
           git clone --depth 1 --branch v0.2.0 https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
-          cargo install --path $env:RUNNER_TEMP/rust-img-vhd --bin vhd_tool --locked
+          # am-img-vhd v0.2.0 path-deps am-fs-core (`../rust-fs-core`), so the
+          # sibling must sit next to it; v0.2.2 satisfies its `version = "0.2"`.
+          # No --locked: v0.2.0 ships no Cargo.lock, so locking is unsatisfiable.
+          git clone --depth 1 --branch v0.2.2 https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
+          cargo install --path $env:RUNNER_TEMP/rust-img-vhd --bin vhd_tool
       - name: Build rust-ntfs (Windows)
         run: cargo build --release --bin rust-ntfs
       - name: Generate raw image and wrap in GPT-partitioned VHD
