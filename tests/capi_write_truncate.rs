@@ -69,13 +69,17 @@ fn capi_truncate_shrinks() {
 }
 
 #[test]
-fn capi_truncate_rejects_growth() {
+fn capi_truncate_grows() {
+    // POSIX truncate semantics through the C ABI: truncating UP extends the
+    // file. big.bin is 8 MiB; fs_ntfs_truncate to 9 MiB returns the new size
+    // and grows the file (the new tail reads back as zeros). Earlier MVP
+    // rejected growth; the driver now supports it via grow_nonresident.
     let img = working_copy("grow");
     let img_c = CString::new(img.as_str()).unwrap();
     let p_c = CString::new("/big.bin").unwrap();
     let n = unsafe { fs_ntfs_truncate(img_c.as_ptr(), p_c.as_ptr(), 9 * 1024 * 1024) };
-    assert_eq!(n, -1);
-    assert!(last_error().contains("grow"));
+    assert_eq!(n, (9 * 1024 * 1024) as i64, "last_error={}", last_error());
+    assert_eq!(value_length(&img, "/big.bin"), 9 * 1024 * 1024);
 }
 
 #[test]
