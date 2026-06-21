@@ -56,6 +56,10 @@ jobs:
             toolchain: stable-aarch64-pc-windows-gnullvm
     steps:
       - uses: actions/checkout@v4
+        with:
+          # am-fs-core is a nested submodule at vendor/rust-fs-core (path
+          # dep); without it `cargo build` fails to resolve the dependency.
+          submodules: recursive
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -170,3 +174,59 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*.sha256
+
+  # ---------------------------------------------------------------------------
+  # crates.io publish — mirrors the sister crates (am-fs-core, am-img-*, …).
+  # Trusted publishing (OIDC) via crates-io-auth-action; no stored token.
+  # Runs only on version-tag pushes. Split test/publish so the `release`
+  # environment's protection gates only the actual publish step.
+  # ---------------------------------------------------------------------------
+  crates-test:
+    name: crates.io gate (test)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive  # am-fs-core path dep at vendor/rust-fs-core
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+          components: clippy
+      - name: verify tag matches Cargo.toml version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate_ver=$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"(.*)"/\1/')
+          if [ "$tag" != "$crate_ver" ]; then
+            echo "tag $tag does not match Cargo.toml version $crate_ver" >&2
+            exit 1
+          fi
+      - run: cargo test --release
+      - run: cargo clippy --all-targets -- -D warnings
+
+  crates-publish:
+    name: publish to crates.io
+    needs: crates-test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: rust-lang/crates-io-auth-action@v1.0.4
+        id: auth
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        # No --locked: publish rewrites the am-fs-core path dep into its
+        # registry version (0.2.x from crates.io), which --locked forbids.
+        run: cargo publish
