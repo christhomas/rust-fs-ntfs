@@ -1,79 +1,13 @@
 #!/usr/bin/env bash
+# github-guard hook: pre-commit
 #
-# Pre-commit hook — runs the two fast checks CI enforces, so a push
-# doesn't fail on something we could have caught locally in <30s.
+# Fires:    On `git commit`, before the commit message is requested.
+# Use for:  Linting, formatting, and fast checks on the staged snapshot.
+# Blocking: yes (non-zero aborts the commit)
 #
-# Enable once per clone:
-#   git config core.hooksPath .githooks
-# or:
-#   ./scripts/install-hooks.sh
-#
-# Skip for a single WIP commit (use sparingly):
-#   git commit --no-verify
-#
-# NOTE: we deliberately don't run `cargo test` here — the test suite
-# needs qemu-system-x86 + root + generated disk images and takes
-# minutes. That stays in CI. Fmt + clippy are the ones that have bitten
-# us before ("release: 0.1.2" shipped with an unformatted test line;
-# CI caught it but only after the push).
-#
-# IMPORTANT — toolchain pinning: rustfmt/clippy output differs between
-# toolchain versions, so a hook running the *default* toolchain can pass
-# while CI (which pins the version in rust-toolchain.toml) fails on the
-# very same code — exactly the divergence that let unformatted lines
-# reach a PR. To make local == CI we run fmt/clippy through the exact
-# pinned toolchain via `rustup run <channel> cargo …` (the `cargo
-# +<channel>` form only works when cargo is the rustup proxy, which it
-# isn't everywhere). If the pinned toolchain isn't installed we refuse
-# to commit rather than silently checking with a different rustfmt.
-
-set -euo pipefail
-
-cd "$(git rev-parse --show-toplevel)"
-
-# --- resolve the pinned toolchain (matches CI's dtolnay/rust-toolchain) ---
-toolchain=""
-if [ -f rust-toolchain.toml ]; then
-    toolchain="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-        rust-toolchain.toml | head -1)"
-fi
-
-# `cargo_pinned <args...>` runs cargo under the pinned toolchain when we can,
-# else the default (with a warning). Refuses if the pin is named but missing.
-use_rustup=0
-if [ -n "$toolchain" ]; then
-    if command -v rustup >/dev/null 2>&1 && rustup run "$toolchain" true >/dev/null 2>&1; then
-        use_rustup=1
-    else
-        echo "[pre-commit] ERROR: pinned toolchain '$toolchain' (rust-toolchain.toml) is not installed."
-        echo "[pre-commit]        CI uses it; checking with a different rustfmt/clippy would be unreliable."
-        echo "[pre-commit]        Install it:  rustup toolchain install $toolchain --component rustfmt clippy"
-        echo "[pre-commit]        Or bypass once (NOT recommended):  git commit --no-verify"
-        exit 1
-    fi
-else
-    echo "[pre-commit] WARNING: no channel in rust-toolchain.toml; using the default toolchain (may diverge from CI)."
-fi
-
-cargo_pinned() {
-    if [ "$use_rustup" = "1" ]; then
-        rustup run "$toolchain" cargo "$@"
-    else
-        cargo "$@"
-    fi
-}
-
-label="${toolchain:-default}"
-
-echo "[pre-commit] cargo fmt --check  (toolchain: $label)"
-if ! cargo_pinned fmt --check; then
-    echo
-    echo "[pre-commit] rustfmt would reformat the above files."
-    echo "[pre-commit] Fix with: rustup run $label cargo fmt   (or: cargo fmt)"
-    exit 1
-fi
-
-echo "[pre-commit] cargo clippy --all-targets -- -D warnings  (toolchain: $label)"
-cargo_pinned clippy --all-targets -- -D warnings
-
-echo "[pre-commit] OK"
+# Dispatcher: runs every executable script in  .githooks/pre-commit.d/  in lexical
+# order. Add behaviour by dropping a guard script there; remove it by deleting
+# the file (or `chmod -x`). No pre-commit.d/ (or an empty one) = no-op. Managed by
+# github-guard — edit guards in the .d/ dir, not this file.
+d=$(cd "$(dirname "$0")" && pwd)
+exec "$d/lib/run-guards.sh" "$(basename "$0")" "$@"
