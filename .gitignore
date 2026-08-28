@@ -61,3 +61,6 @@ diag/
 /privatekey
 /privatekey.*
 .test-env
+
+# chore fingerprint cache (sources:/generates: checksums). Derived data.
+.chore/
