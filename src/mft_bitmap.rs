@@ -6,7 +6,14 @@
 //!
 //! On small volumes this bitmap is typically resident. On larger volumes
 //! it's non-resident and stored in clusters via its own data-run list.
-//! Both cases are handled here.
+//!
+//! Both layouts are handled here, and **both read and write the same
+//! storage**. The resident form is read back out of `$MFT`'s own record,
+//! not from a copy taken at [`locate_io`] time: a copy goes stale the
+//! instant a bit is written, and the callers of this module allocate a
+//! record and then, on a later failure, free the bit they have just set.
+//! A read that could not see the preceding write turned every one of
+//! those rollbacks into a no-op and leaked the MFT record.
 //!
 //! References (no GPL code consulted): $Bitmap and $MFT layout per
 //! Windows Internals 7th ed. ch. "NTFS On-Disk Structure" and MS-FSCC.
@@ -28,10 +35,12 @@ pub struct MftBitmap {
 
 pub enum MftBitmapLayout {
     Resident {
-        /// Byte offset within the MFT record where the resident data starts.
+        /// Byte offset within `$MFT`'s own record where the resident data
+        /// starts. Every read and every write goes through here — the
+        /// bitmap's bytes are deliberately *not* cached in this struct.
         data_offset_in_record: usize,
-        /// Current resident bytes of the bitmap.
-        bytes: Vec<u8>,
+        /// Length of the resident value, in bytes.
+        value_length: usize,
         /// Record-number ceiling (bitmap length in bits).
         total_bits: u64,
     },
@@ -39,6 +48,16 @@ pub enum MftBitmapLayout {
         runs: Vec<DataRun>,
         total_bits: u64,
     },
+}
+
+impl MftBitmap {
+    /// Record-number ceiling: how many bits this bitmap describes.
+    pub fn total_bits(&self) -> u64 {
+        match &self.layout {
+            MftBitmapLayout::Resident { total_bits, .. } => *total_bits,
+            MftBitmapLayout::NonResident { total_bits, .. } => *total_bits,
+        }
+    }
 }
 
 pub fn locate(image: &Path) -> Result<MftBitmap, String> {
@@ -57,10 +76,17 @@ pub fn locate_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<MftBitmap, String> {
         let val_off = bm.resident_value_offset.ok_or("no value_offset")? as usize;
         let val_len = bm.resident_value_length.ok_or("no value_length")? as usize;
         let data_offset_in_record = bm.attr_offset + val_off;
-        let bytes = record[data_offset_in_record..data_offset_in_record + val_len].to_vec();
+        if data_offset_in_record + val_len > record.len() {
+            return Err(format!(
+                "resident $MFT:$Bitmap [{data_offset_in_record}..\
+                 {}] extends past record end {}",
+                data_offset_in_record + val_len,
+                record.len()
+            ));
+        }
         MftBitmapLayout::Resident {
             data_offset_in_record,
-            bytes,
+            value_length: val_len,
             total_bits: val_len as u64 * 8,
         }
     } else {
@@ -109,10 +135,7 @@ pub fn find_free_record_io<T: BlockIo + ?Sized>(
     bm: &MftBitmap,
     hint: u64,
 ) -> Result<Option<u64>, String> {
-    let total = match &bm.layout {
-        MftBitmapLayout::Resident { total_bits, .. } => *total_bits,
-        MftBitmapLayout::NonResident { total_bits, .. } => *total_bits,
-    };
+    let total = bm.total_bits();
     // Two passes: [hint..total), then [0..hint).
     for (begin, finish) in [(hint, total), (0, hint.min(total))] {
         let mut n = begin;
@@ -136,22 +159,14 @@ pub fn count_free(image: &Path, bm: &MftBitmap) -> Result<u64, String> {
 }
 
 pub fn count_free_io<T: BlockIo + ?Sized>(io: &mut T, bm: &MftBitmap) -> Result<u64, String> {
-    match &bm.layout {
-        MftBitmapLayout::Resident {
-            bytes, total_bits, ..
-        } => {
-            let set: u64 = bytes.iter().map(|b| b.count_ones() as u64).sum();
-            Ok(total_bits.saturating_sub(set))
-        }
-        MftBitmapLayout::NonResident { total_bits, .. } => {
-            let total_bytes = total_bits.div_ceil(8);
-            let mut set: u64 = 0;
-            for i in 0..total_bytes {
-                set += read_bitmap_byte_io(io, bm, i)?.count_ones() as u64;
-            }
-            Ok(total_bits.saturating_sub(set))
-        }
+    // One loop for both layouts: `read_bitmap_byte_io` is the only reader
+    // of either, so this cannot drift away from what the allocator sees.
+    let total_bits = bm.total_bits();
+    let mut set: u64 = 0;
+    for i in 0..total_bits.div_ceil(8) {
+        set += read_bitmap_byte_io(io, bm, i)?.count_ones() as u64;
     }
+    Ok(total_bits.saturating_sub(set))
 }
 
 /// Mark MFT record `n` as allocated (set bit = 1).
@@ -204,15 +219,25 @@ fn read_bitmap_byte_io<T: BlockIo + ?Sized>(
     byte_idx: u64,
 ) -> Result<u8, String> {
     match &bm.layout {
-        MftBitmapLayout::Resident { bytes, .. } => {
+        MftBitmapLayout::Resident {
+            data_offset_in_record,
+            value_length,
+            ..
+        } => {
             let i = byte_idx as usize;
-            if i >= bytes.len() {
+            if i >= *value_length {
                 return Err(format!(
-                    "byte_idx {i} past resident bitmap length {}",
-                    bytes.len()
+                    "byte_idx {i} past resident bitmap length {value_length}"
                 ));
             }
-            Ok(bytes[i])
+            // Read through to $MFT's own record — the same record
+            // `write_bitmap_byte_io` writes to. Reading a snapshot taken at
+            // `locate_io` time instead would not see our own writes.
+            let (_, record) = read_mft_record_io(io, MFT_RECORD_NUMBER)?;
+            record
+                .get(data_offset_in_record + i)
+                .copied()
+                .ok_or_else(|| format!("byte_idx {byte_idx} past record end"))
         }
         MftBitmapLayout::NonResident { runs, .. } => {
             let (_, disk_offset) = disk_offset_for_byte(bm, runs, byte_idx)?;
@@ -311,7 +336,7 @@ mod tests {
             params: params(cluster_size),
             layout: MftBitmapLayout::Resident {
                 data_offset_in_record: 0,
-                bytes: vec![],
+                value_length: 0,
                 total_bits: 0,
             },
         }
@@ -409,17 +434,47 @@ mod tests {
         }
     }
 
-    /// Resident MftBitmap backed directly by `bytes` (reads never touch I/O).
-    fn resident_bm(bytes: Vec<u8>) -> MftBitmap {
-        let total_bits = bytes.len() as u64 * 8;
-        MftBitmap {
-            params: params(4096),
-            layout: MftBitmapLayout::Resident {
-                data_offset_in_record: 0,
-                bytes,
-                total_bits,
-            },
-        }
+    /// A formatted volume whose `$MFT:$Bitmap` has been rewritten as a
+    /// **resident** attribute, with `bitmap_bytes` as its value (one bit
+    /// per MFT record, LSB first).
+    ///
+    /// `mkfs` only ever emits the non-resident form, so the resident
+    /// layout is unreachable from anything this crate produces and has to
+    /// be built by hand to be exercised at all. Everything below goes
+    /// through the real `locate_io`, so the layout under test is the one
+    /// a foreign volume would hand us.
+    fn resident_bitmap_volume(bitmap_bytes: &[u8]) -> MemDev {
+        const SIZE: u64 = 64 * 1024 * 1024;
+        let mut dev = MemDev::new(SIZE as usize);
+        crate::mkfs::format_filesystem(&mut dev as &mut dyn BlockIo, SIZE, 4096, 4096, None, None)
+            .expect("format_filesystem");
+
+        update_mft_record_io(&mut dev, MFT_RECORD_NUMBER, |record| {
+            let old = attr_io::find_attribute(record, AttrType::Bitmap, None)
+                .ok_or_else(|| "$MFT has no unnamed $Bitmap".to_string())?;
+            let resident = crate::record_build::build_resident_unnamed_attribute(
+                AttrType::Bitmap as u32,
+                old.attribute_id,
+                bitmap_bytes,
+            )?;
+            crate::attr_resize::replace_attribute(record, old.attr_offset, &resident)
+        })
+        .expect("rewrite $MFT:$Bitmap as resident");
+
+        dev
+    }
+
+    /// Records 0..24 in use (the system files `mkfs` writes), 24..64 free.
+    const SYSTEM_RECORDS_IN_USE: [u8; 8] = [0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+    /// A volume whose `$MFT:$Bitmap` is resident with value `bytes`, plus
+    /// the `MftBitmap` `locate_io` derives from it. Both halves are needed:
+    /// the resident layout addresses `$MFT`'s record, so the reads and the
+    /// writes below are real I/O against `dev`.
+    fn resident_bm(bytes: &[u8]) -> (MemDev, MftBitmap) {
+        let mut dev = resident_bitmap_volume(bytes);
+        let bm_val = locate_io(&mut dev).expect("locate resident $MFT:$Bitmap");
+        (dev, bm_val)
     }
 
     /// Non-resident MftBitmap whose bitmap data is at disk byte 0
@@ -442,13 +497,12 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // is_allocated_io — Resident layout (no real I/O needed for reads).
+    // is_allocated_io — Resident layout.
     // -------------------------------------------------------------------------
 
     #[test]
     fn is_allocated_resident_set_bit_returns_true() {
-        let mut dev = MemDev::new(0);
-        let bm_val = resident_bm(vec![0b0010_0000]); // bit 5 set = record 5 allocated
+        let (mut dev, bm_val) = resident_bm(&[0b0010_0000]); // bit 5 set = record 5 allocated
         assert!(is_allocated_io(&mut dev, &bm_val, 5).unwrap());
         assert!(!is_allocated_io(&mut dev, &bm_val, 4).unwrap());
         assert!(!is_allocated_io(&mut dev, &bm_val, 6).unwrap());
@@ -456,8 +510,7 @@ mod tests {
 
     #[test]
     fn is_allocated_resident_all_bits_set() {
-        let mut dev = MemDev::new(0);
-        let bm_val = resident_bm(vec![0xFF]);
+        let (mut dev, bm_val) = resident_bm(&[0xFF]);
         for n in 0..8u64 {
             assert!(is_allocated_io(&mut dev, &bm_val, n).unwrap(), "record {n}");
         }
@@ -465,9 +518,8 @@ mod tests {
 
     #[test]
     fn is_allocated_resident_bit_in_second_byte() {
-        let mut dev = MemDev::new(0);
         // byte[1] bit 2 = record 10
-        let bm_val = resident_bm(vec![0x00, 0b0000_0100]);
+        let (mut dev, bm_val) = resident_bm(&[0x00, 0b0000_0100]);
         assert!(!is_allocated_io(&mut dev, &bm_val, 8).unwrap());
         assert!(!is_allocated_io(&mut dev, &bm_val, 9).unwrap());
         assert!(is_allocated_io(&mut dev, &bm_val, 10).unwrap());
@@ -475,28 +527,25 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // count_free_io — Resident layout (pure bit count, no I/O).
+    // count_free_io — Resident layout.
     // -------------------------------------------------------------------------
 
     #[test]
     fn count_free_resident_all_free() {
-        let mut dev = MemDev::new(0);
-        let bm_val = resident_bm(vec![0x00, 0x00]); // 16 bits, all free
+        let (mut dev, bm_val) = resident_bm(&[0x00, 0x00]); // 16 bits, all free
         assert_eq!(count_free_io(&mut dev, &bm_val).unwrap(), 16);
     }
 
     #[test]
     fn count_free_resident_all_allocated() {
-        let mut dev = MemDev::new(0);
-        let bm_val = resident_bm(vec![0xFF, 0xFF]);
+        let (mut dev, bm_val) = resident_bm(&[0xFF, 0xFF]);
         assert_eq!(count_free_io(&mut dev, &bm_val).unwrap(), 0);
     }
 
     #[test]
     fn count_free_resident_known_mixed_pattern() {
-        let mut dev = MemDev::new(0);
         // 0b1100_1100 → 4 set; 0b1010_1010 → 4 set; 8 free of 16.
-        let bm_val = resident_bm(vec![0b1100_1100, 0b1010_1010]);
+        let (mut dev, bm_val) = resident_bm(&[0b1100_1100, 0b1010_1010]);
         assert_eq!(count_free_io(&mut dev, &bm_val).unwrap(), 8);
     }
 
@@ -506,40 +555,35 @@ mod tests {
 
     #[test]
     fn find_free_resident_all_free_returns_hint() {
-        let mut dev = MemDev::new(0);
-        let bm_val = resident_bm(vec![0x00, 0x00]);
+        let (mut dev, bm_val) = resident_bm(&[0x00, 0x00]);
         assert_eq!(find_free_record_io(&mut dev, &bm_val, 0).unwrap(), Some(0));
         assert_eq!(find_free_record_io(&mut dev, &bm_val, 5).unwrap(), Some(5));
     }
 
     #[test]
     fn find_free_resident_skips_allocated_bits() {
-        let mut dev = MemDev::new(0);
         // bits 0..4 set (0b0000_1111), bit 4 free
-        let bm_val = resident_bm(vec![0b0000_1111]);
+        let (mut dev, bm_val) = resident_bm(&[0b0000_1111]);
         assert_eq!(find_free_record_io(&mut dev, &bm_val, 0).unwrap(), Some(4));
     }
 
     #[test]
     fn find_free_resident_wraps_around() {
-        let mut dev = MemDev::new(0);
         // bits 4..8 set, bits 0..4 free; hint=4 → wraps → returns 0
-        let bm_val = resident_bm(vec![0b1111_0000]);
+        let (mut dev, bm_val) = resident_bm(&[0b1111_0000]);
         assert_eq!(find_free_record_io(&mut dev, &bm_val, 4).unwrap(), Some(0));
     }
 
     #[test]
     fn find_free_resident_all_allocated_returns_none() {
-        let mut dev = MemDev::new(0);
-        let bm_val = resident_bm(vec![0xFF, 0xFF]);
+        let (mut dev, bm_val) = resident_bm(&[0xFF, 0xFF]);
         assert_eq!(find_free_record_io(&mut dev, &bm_val, 0).unwrap(), None);
     }
 
     #[test]
     fn find_free_resident_single_free_bit() {
-        let mut dev = MemDev::new(0);
         // Only bit 3 is free
-        let bm_val = resident_bm(vec![0b1111_0111]);
+        let (mut dev, bm_val) = resident_bm(&[0b1111_0111]);
         assert_eq!(find_free_record_io(&mut dev, &bm_val, 0).unwrap(), Some(3));
     }
 
@@ -601,5 +645,70 @@ mod tests {
         free_io(&mut dev, &bm_val, 7).unwrap();
         assert!(!is_allocated_io(&mut dev, &bm_val, 7).unwrap());
         assert!(is_allocated_io(&mut dev, &bm_val, 8).unwrap());
+    }
+
+    // -------------------------------------------------------------------------
+    // allocate_io / free_io — Resident layout, on a real formatted volume.
+    // -------------------------------------------------------------------------
+
+    /// The allocator contract every rollback site in `write.rs` depends on:
+    /// after `allocate_io` succeeds, the paired `free_io` must succeed.
+    #[test]
+    fn resident_free_after_allocate_succeeds() {
+        let (mut dev, bm_val) = resident_bm(&SYSTEM_RECORDS_IN_USE);
+        assert!(
+            matches!(bm_val.layout, MftBitmapLayout::Resident { .. }),
+            "fixture must produce the Resident layout"
+        );
+
+        let rec = find_free_record_io(&mut dev, &bm_val, 24)
+            .unwrap()
+            .expect("volume must have a free MFT record");
+        allocate_io(&mut dev, &bm_val, rec).unwrap();
+        free_io(&mut dev, &bm_val, rec)
+            .expect("free after allocate must succeed — every rollback site depends on it");
+        assert!(
+            !is_allocated_io(&mut dev, &bm_val, rec).unwrap(),
+            "the freed bit must be clear on disk"
+        );
+    }
+
+    /// The asymmetry itself: a resident write must be visible to the next
+    /// resident read.
+    #[test]
+    fn resident_allocate_is_visible_to_the_next_read() {
+        let (mut dev, bm_val) = resident_bm(&SYSTEM_RECORDS_IN_USE);
+
+        allocate_io(&mut dev, &bm_val, 40).unwrap();
+        assert!(
+            is_allocated_io(&mut dev, &bm_val, 40).unwrap(),
+            "allocate_io wrote the bit; is_allocated_io must see it"
+        );
+        assert_eq!(
+            find_free_record_io(&mut dev, &bm_val, 40).unwrap(),
+            Some(41),
+            "the allocated record must no longer be handed out"
+        );
+    }
+
+    /// `count_free_io` reads the same bitmap and must move with it.
+    #[test]
+    fn resident_count_free_reflects_allocation() {
+        let (mut dev, bm_val) = resident_bm(&SYSTEM_RECORDS_IN_USE);
+
+        let before = count_free_io(&mut dev, &bm_val).unwrap();
+        assert_eq!(before, 64 - 24);
+        allocate_io(&mut dev, &bm_val, 30).unwrap();
+        assert_eq!(count_free_io(&mut dev, &bm_val).unwrap(), before - 1);
+        free_io(&mut dev, &bm_val, 30).unwrap();
+        assert_eq!(count_free_io(&mut dev, &bm_val).unwrap(), before);
+    }
+
+    /// A resident bitmap read must still refuse a byte past its value.
+    #[test]
+    fn resident_read_past_bitmap_length_errors() {
+        let (mut dev, bm_val) = resident_bm(&SYSTEM_RECORDS_IN_USE);
+        let err = read_bitmap_byte_io(&mut dev, &bm_val, 8).unwrap_err();
+        assert!(err.contains("past resident bitmap length"), "{err}");
     }
 }

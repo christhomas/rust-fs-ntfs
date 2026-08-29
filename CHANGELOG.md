@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A resident `$MFT:$Bitmap` now reads back what it just wrote, so the
+  MFT allocator's rollback works.** The resident layout served reads
+  from a copy of the bitmap taken when the attribute was located, while
+  writes patched `$MFT`'s record on disk — so a bit set by `allocate_io`
+  was invisible to the next read. `create_file`/`mkdir` set the bit
+  before writing the new record and free it again if a later step fails;
+  that free re-read the stale copy, reported `MFT record N already free`
+  and cleared nothing, leaking the record. The resident value is no
+  longer cached at all: both layouts read through the same path their
+  writes take. The create/mkdir rollbacks also stop discarding their own
+  errors — the original failure is still what the caller receives, with
+  a failed rollback appended to it rather than swallowed.
+
 ## [0.3.0] — 2026-06-02
 
 ### Fixed

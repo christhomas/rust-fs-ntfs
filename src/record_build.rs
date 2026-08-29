@@ -493,7 +493,7 @@ pub fn build_resident_volume_name_attribute(attr_id: u16, label_utf16: &[u8]) ->
     buf
 }
 
-fn build_resident_unnamed_attribute(
+pub(crate) fn build_resident_unnamed_attribute(
     attr_type: u32,
     attr_id: u16,
     value: &[u8],
