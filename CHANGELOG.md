@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.4] — 2026-08-29
+
 ### Fixed
 
 - **A resident `$MFT:$Bitmap` now reads back what it just wrote, so the
