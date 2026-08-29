@@ -230,6 +230,18 @@ are documented there.
 Reverse chronological highlights from `git log`. Full per-commit
 history available via `git log` in the repo.
 
+### 2026-08-29 — 0.3.4
+
+- The resident `$MFT:$Bitmap` now reads back what it just wrote. The
+  resident layout served reads from a copy taken when the attribute was
+  located, while writes patched `$MFT`'s record on disk — so a bit set by
+  `allocate_io` was invisible to the next read, every MFT rollback failed
+  with "MFT record N already free", and six call sites discarded that
+  error with `let _ =`.
+- A rollback that cannot complete now says so: the caller still receives
+  the error that actually failed, with the leaked record appended, rather
+  than the leak being silent.
+
 ### 2026-05-24
 
 - `feat(read)`: `read_reparse_point` exposes raw `(tag, data)` for
