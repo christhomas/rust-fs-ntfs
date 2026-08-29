@@ -1085,6 +1085,53 @@ pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u6
     create_file_io(&mut io, parent_path, basename)
 }
 
+/// Undo the MFT-record allocation `create_file_io` / `mkdir_io` made,
+/// after a later step of the create failed, and report the result of that
+/// undo through the error the caller already receives.
+///
+/// `cause` stays the primary error, because it is the failure the caller
+/// has to act on. What is new is that a failure *of the rollback itself*
+/// is appended to it rather than discarded: a rollback that silently fails
+/// leaks the MFT record. Its `$MFT:$Bitmap` bit stays set with no record
+/// referencing it, `find_free_record_io` will never hand that slot out
+/// again, and nothing short of chkdsk reclaims it — the volume quietly
+/// loses one file's worth of capacity per failed create, and the operator
+/// is told only about the original error.
+///
+/// `clear_in_use` asks for the record's IN_USE flag to be cleared first.
+/// That is only meaningful once the record bytes have actually landed on
+/// disk; before that there is nothing to clear.
+fn undo_new_record_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    mbm: &mft_bitmap::MftBitmap,
+    new_rec: u64,
+    clear_in_use: bool,
+    cause: String,
+) -> String {
+    let mut failures: Vec<String> = Vec::new();
+    if clear_in_use {
+        if let Err(e) = update_mft_record_io(io, new_rec, |record| {
+            let cur = u16::from_le_bytes([record[0x16], record[0x17]]);
+            let new = cur & !crate::mft_io::MFT_FLAG_IN_USE;
+            record[0x16..0x18].copy_from_slice(&new.to_le_bytes());
+            Ok(())
+        }) {
+            failures.push(format!("clearing IN_USE failed: {e}"));
+        }
+    }
+    if let Err(e) = mft_bitmap::free_io(io, mbm, new_rec) {
+        failures.push(format!("freeing the $MFT:$Bitmap bit failed: {e}"));
+    }
+    if failures.is_empty() {
+        cause
+    } else {
+        format!(
+            "{cause} (rollback incomplete, MFT record {new_rec} leaked: {})",
+            failures.join("; ")
+        )
+    }
+}
+
 pub fn create_file_io<T: BlockIo + ?Sized>(
     io: &mut T,
     parent_path: &str,
@@ -1154,12 +1201,22 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
     // Write the record bytes at the correct disk offset.
     let rec_offset = crate::mft_io::mft_record_offset(&params, new_rec);
     if let Err(e) = io.write_all_at(rec_offset, &new_record) {
-        let _ = crate::mft_bitmap::free_io(io, &mbm, new_rec);
-        return Err(format!("write new record: {e}"));
+        return Err(undo_new_record_io(
+            io,
+            &mbm,
+            new_rec,
+            false,
+            format!("write new record: {e}"),
+        ));
     }
     if let Err(e) = io.sync() {
-        let _ = crate::mft_bitmap::free_io(io, &mbm, new_rec);
-        return Err(format!("fsync new record: {e}"));
+        return Err(undo_new_record_io(
+            io,
+            &mbm,
+            new_rec,
+            false,
+            format!("fsync new record: {e}"),
+        ));
     }
 
     // Insert index entry into parent.
@@ -1175,14 +1232,13 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
         insert_entry_in_parent_io(io, parent_rec, parent_has_overflow, &entry_bytes, basename);
     if let Err(e) = insert_res {
         // Roll back: clear IN_USE on the new record + free the bitmap bit.
-        let _ = update_mft_record_io(io, new_rec, |record| {
-            let cur = u16::from_le_bytes([record[0x16], record[0x17]]);
-            let new = cur & !crate::mft_io::MFT_FLAG_IN_USE;
-            record[0x16..0x18].copy_from_slice(&new.to_le_bytes());
-            Ok(())
-        });
-        let _ = crate::mft_bitmap::free_io(io, &mbm, new_rec);
-        return Err(format!("insert index entry: {e}"));
+        return Err(undo_new_record_io(
+            io,
+            &mbm,
+            new_rec,
+            true,
+            format!("insert index entry: {e}"),
+        ));
     }
 
     Ok(new_rec)
@@ -1344,12 +1400,22 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
 
     let rec_offset = crate::mft_io::mft_record_offset(&params, new_rec);
     if let Err(e) = io.write_all_at(rec_offset, &new_record) {
-        let _ = crate::mft_bitmap::free_io(io, &mbm, new_rec);
-        return Err(format!("write new dir record: {e}"));
+        return Err(undo_new_record_io(
+            io,
+            &mbm,
+            new_rec,
+            false,
+            format!("write new dir record: {e}"),
+        ));
     }
     if let Err(e) = io.sync() {
-        let _ = crate::mft_bitmap::free_io(io, &mbm, new_rec);
-        return Err(format!("fsync new dir record: {e}"));
+        return Err(undo_new_record_io(
+            io,
+            &mbm,
+            new_rec,
+            false,
+            format!("fsync new dir record: {e}"),
+        ));
     }
 
     let new_file_reference = crate::record_build::encode_file_reference(new_rec, new_seq);
@@ -1363,14 +1429,14 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
     let insert_res =
         insert_entry_in_parent_io(io, parent_rec, parent_has_overflow, &entry_bytes, basename);
     if let Err(e) = insert_res {
-        let _ = update_mft_record_io(io, new_rec, |record| {
-            let cur = u16::from_le_bytes([record[0x16], record[0x17]]);
-            let new = cur & !crate::mft_io::MFT_FLAG_IN_USE;
-            record[0x16..0x18].copy_from_slice(&new.to_le_bytes());
-            Ok(())
-        });
-        let _ = crate::mft_bitmap::free_io(io, &mbm, new_rec);
-        return Err(format!("insert dir index entry: {e}"));
+        // Roll back: clear IN_USE on the new record + free the bitmap bit.
+        return Err(undo_new_record_io(
+            io,
+            &mbm,
+            new_rec,
+            true,
+            format!("insert dir index entry: {e}"),
+        ));
     }
 
     Ok(new_rec)
