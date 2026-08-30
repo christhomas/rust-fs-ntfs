@@ -66,14 +66,45 @@ The report calls this a two-line deletion.
 
 A partial failure leaves the bitmap inconsistent with the records it describes.
 
-### B3, B4 — ten hand-written `free_all` rollbacks in one 164-line function, and a rename that commits step 1 then runs step 2 with no rollback
+### B4 — a rename that committed step 1 and then ran step 2 with no rollback — **fixed**
 
-**B3 and B4 are the pair worth reading together.** One function writes its
-rollback out ten times and is currently correct; another, four hundred lines
-away, omits it entirely and leaves a torn rename. Because neither is a named,
-shared idiom, the divergence is invisible — which is the same shape as B2, and
-the reason B2 was worth fixing by extraction rather than by patching the fifth
-copy.
+A variable-length rename is two record writes with no journal between them:
+
+1. swap the parent's `$INDEX_ROOT` entry;
+2. rewrite the file's own `$FILE_NAME`.
+
+Each `update_mft_record_io` is durable on its own, so **a failure at step 2 left
+step 1 standing**: the directory names the new basename while the file's
+`$FILE_NAME` still reads the old one. A torn rename, produced silently — the
+kind of inconsistency chkdsk reports and this crate would never notice itself.
+
+The bytes needed to undo step 1 were already in hand: `parent_record_bytes` is
+read before it and nothing writes to the parent in between. Step 2's failure now
+restores them and returns the original error.
+
+If the rollback *also* fails the volume genuinely is torn, and no further write
+here can be trusted to repair it, so the error says exactly what is on disk
+rather than reporting only the first failure.
+
+`restore_mft_record_io` is the named idiom, in `mft_io.rs` beside the primitive
+it undoes. Its doc says what it is not: a record whose previous bytes the caller
+still holds, not a general undo, and no help once a second record is committed
+too. That naming is the point — B3 and B7 are two more rollback shapes written
+out by hand, and the reason this one could go missing is that none of them had a
+name to be missing from.
+
+Three tests, over a `BlockIo` that refuses writes to one MFT record — the only
+way to fail step 2 without failing the operation earlier. Mutation-checked:
+removing the rollback fails
+`a_failed_rename_leaves_the_directory_naming_the_old_file` on
+`the old name must be back in the directory index`.
+
+### B3, B7 — two more hand-written rollback shapes — **fixable, not yet done**
+
+One 164-line function writes its `free_all` rollback out ten times and is
+currently correct; `create_file_io` spells out a third distinct shape. Both are
+right today. B4 is what happens when a fourth site forgets, which is the
+argument for giving these a name too.
 
 ### The remainder
 
@@ -84,7 +115,7 @@ the report with locations and coverage notes.
 
 ## Verification
 
-583 unit tests pass, up from 580. `chore lint` clean.
+586 unit tests pass, up from 583. `chore lint` clean.
 
 The 63 locally-failing test binaries are pre-existing missing `test-disks/*.img`
 fixtures — there is no `mkntfs` on macOS. CI generates them.

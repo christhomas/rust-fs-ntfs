@@ -389,6 +389,48 @@ where
     Ok(())
 }
 
+/// Put an MFT record back exactly as it was read.
+///
+/// A named idiom for undoing a committed record write when a later step
+/// of the same logical operation fails. Multi-record operations here
+/// have no journal: each [`update_mft_record_io`] is durable on its own,
+/// so a failure at step 2 leaves step 1 standing unless something puts
+/// it back.
+///
+/// `saved` must be the post-fixup bytes an earlier [`read_mft_record_io`]
+/// returned for this record — the same form the mutator sees. The fixup
+/// array is re-applied on the way out, which bumps the update sequence
+/// number: this is a fresh write of the old content, not a pretence that
+/// no write happened.
+///
+/// It is deliberately narrow. It restores a record whose *previous*
+/// bytes the caller still holds; it is not a general undo, and it cannot
+/// help once a second record has also been committed.
+///
+/// # Errors
+///
+/// If `saved` is not one record long, or the write fails. A caller that
+/// gets an error here has a torn operation on disk and should say so in
+/// the error it returns, because nothing further can repair it.
+pub fn restore_mft_record_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    saved: &[u8],
+) -> Result<(), String> {
+    update_mft_record_io(io, record_number, |record| {
+        if record.len() != saved.len() {
+            return Err(format!(
+                "cannot restore record {record_number}: saved copy is {} bytes, \
+                 the record is {}",
+                saved.len(),
+                record.len()
+            ));
+        }
+        record.copy_from_slice(saved);
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
