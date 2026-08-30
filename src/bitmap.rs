@@ -241,6 +241,10 @@ fn mutate_bits_io<T: BlockIo + ?Sized>(
     let first_byte = lcn / 8;
     let end_byte_excl = (lcn + n).div_ceil(8);
     let mut bytes = read_bitmap_bytes_io(io, bm, first_byte, end_byte_excl - first_byte)?;
+    // The pre-image, kept so a write that fails partway can be undone.
+    // Every caller of the write half has already read these bytes in
+    // order to change them, so this costs a copy rather than a read.
+    let before = bytes.clone();
 
     for i in 0..n {
         let bit = lcn + i - first_byte * 8;
@@ -259,23 +263,59 @@ fn mutate_bits_io<T: BlockIo + ?Sized>(
             clear_bit(&mut bytes, byte_idx, bit_in_byte);
         }
     }
-    write_bitmap_bytes_io(io, bm, first_byte, &bytes)?;
+    write_bitmap_bytes_io(io, bm, first_byte, &bytes, &before)?;
     Ok(())
 }
 
 // -- byte-level bitmap I/O -------------------------------------------------
 
-fn read_bitmap_bytes_io<T: BlockIo + ?Sized>(
-    io: &mut T,
+/// One contiguous piece of a `$Bitmap` byte range, and where it lives.
+///
+/// A `$Bitmap` may be fragmented, so a byte range that is contiguous in
+/// the file is not contiguous on disk: it becomes one chunk per data
+/// run it crosses.
+struct MappedChunk {
+    /// Byte offset on the device.
+    disk_offset: u64,
+    /// Offset of this chunk within the caller's buffer.
+    cursor: usize,
+    /// Length in bytes.
+    len: usize,
+}
+
+/// Resolve `[start_byte, start_byte + len)` of `$Bitmap` into the disk
+/// chunks it occupies.
+///
+/// # Why this is a plan rather than a loop that does the work
+///
+/// The read and write halves each used to walk the runs themselves —
+/// two functions that were line-for-line identical apart from
+/// `read_exact_at` against `write_all_at` and the buffer direction. Two
+/// copies of a mapping walk on a mutation path is how one of them ends
+/// up wrong.
+///
+/// Resolving the whole range **before** any I/O also buys the write
+/// half something the loop could not give it: an unmapped or sparse
+/// VCN halfway along is discovered before the first byte is written,
+/// rather than after. `mutate_bits_io` validates every bit before
+/// touching its buffer; this is the same discipline one layer down.
+///
+/// # Errors
+///
+/// A VCN the runs do not cover, or one in a sparse run. `$Bitmap` is
+/// never sparse in practice — a hole would mean clusters whose
+/// allocation state is unrecorded — so both are corruption rather than
+/// an unsupported layout.
+fn map_bitmap_range(
     bm: &BitmapLocation,
     start_byte: u64,
     len: u64,
-) -> Result<Vec<u8>, String> {
-    let mut out = vec![0u8; len as usize];
-    let mut cursor_in_out = 0usize;
-    let mut file_offset = start_byte;
-    let end = start_byte + len;
+) -> Result<Vec<MappedChunk>, String> {
     let cluster_size = bm.params.cluster_size;
+    let end = start_byte + len;
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    let mut file_offset = start_byte;
 
     while file_offset < end {
         let vcn = file_offset / cluster_size;
@@ -287,53 +327,94 @@ fn read_bitmap_bytes_io<T: BlockIo + ?Sized>(
             .ok_or_else(|| format!("VCN {vcn} not mapped in $Bitmap"))?;
         let lcn = run
             .lcn
-            .ok_or_else(|| format!("VCN {vcn} is in sparse $Bitmap run?"))?;
-        let run_end_vcn = run.starting_vcn + run.length;
-        let run_end_offset = run_end_vcn * cluster_size;
-        let max_this_run = run_end_offset - file_offset;
-        let chunk = max_this_run.min(end - file_offset) as usize;
+            .ok_or_else(|| format!("VCN {vcn} is in a sparse $Bitmap run"))?;
+        let run_end_offset = (run.starting_vcn + run.length) * cluster_size;
+        let chunk = (run_end_offset - file_offset).min(end - file_offset) as usize;
 
-        let disk_offset = (lcn + (vcn - run.starting_vcn)) * cluster_size + off_in_cluster;
-        io.read_exact_at(disk_offset, &mut out[cursor_in_out..cursor_in_out + chunk])
-            .map_err(|e| format!("read bitmap: {e}"))?;
-
-        cursor_in_out += chunk;
+        out.push(MappedChunk {
+            disk_offset: (lcn + (vcn - run.starting_vcn)) * cluster_size + off_in_cluster,
+            cursor,
+            len: chunk,
+        });
+        cursor += chunk;
         file_offset += chunk as u64;
     }
     Ok(out)
 }
 
+fn read_bitmap_bytes_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    bm: &BitmapLocation,
+    start_byte: u64,
+    len: u64,
+) -> Result<Vec<u8>, String> {
+    let mut out = vec![0u8; len as usize];
+    for c in map_bitmap_range(bm, start_byte, len)? {
+        io.read_exact_at(c.disk_offset, &mut out[c.cursor..c.cursor + c.len])
+            .map_err(|e| format!("read bitmap: {e}"))?;
+    }
+    Ok(out)
+}
+
+/// Write `data` over `$Bitmap` at `start_byte`, all or nothing.
+///
+/// `previous` is what those bytes held before — the caller has it,
+/// because every caller read them in order to change them.
+///
+/// # Why a partial write is not acceptable here
+///
+/// A fragmented `$Bitmap` takes one `write_all_at` per data run. If the
+/// second fails after the first succeeded, the first chunk is already
+/// on disk, `sync` never runs, and `Err` comes back with the bitmap in
+/// a state nobody tracks — a bitmap that disagrees with the records it
+/// describes, which is exactly what `chkdsk` exists to find.
+///
+/// So a failure rewrites the chunks that did land, from `previous`.
+///
+/// # Errors
+///
+/// The mapping errors from [`map_bitmap_range`], raised before any byte
+/// is written; or a write failure, in which case the error also says
+/// whether the rollback succeeded — if it did not, the bitmap really is
+/// inconsistent and no further write here can be trusted to fix it.
 fn write_bitmap_bytes_io<T: BlockIo + ?Sized>(
     io: &mut T,
     bm: &BitmapLocation,
     start_byte: u64,
     data: &[u8],
+    previous: &[u8],
 ) -> Result<(), String> {
-    let cluster_size = bm.params.cluster_size;
-    let mut cursor = 0usize;
-    let mut file_offset = start_byte;
-    let end = start_byte + data.len() as u64;
+    debug_assert_eq!(
+        data.len(),
+        previous.len(),
+        "the pre-image must cover the same range as the new bytes"
+    );
+    let chunks = map_bitmap_range(bm, start_byte, data.len() as u64)?;
 
-    while file_offset < end {
-        let vcn = file_offset / cluster_size;
-        let off_in_cluster = file_offset % cluster_size;
-        let run = bm
-            .runs
-            .iter()
-            .find(|r| vcn >= r.starting_vcn && vcn < r.starting_vcn + r.length)
-            .ok_or_else(|| format!("VCN {vcn} not mapped"))?;
-        let lcn = run.lcn.ok_or_else(|| format!("VCN {vcn} in sparse run"))?;
-        let run_end_vcn = run.starting_vcn + run.length;
-        let run_end_offset = run_end_vcn * cluster_size;
-        let max_this_run = run_end_offset - file_offset;
-        let chunk = max_this_run.min(end - file_offset) as usize;
-
-        let disk_offset = (lcn + (vcn - run.starting_vcn)) * cluster_size + off_in_cluster;
-        io.write_all_at(disk_offset, &data[cursor..cursor + chunk])
-            .map_err(|e| format!("write bitmap: {e}"))?;
-
-        cursor += chunk;
-        file_offset += chunk as u64;
+    for (i, c) in chunks.iter().enumerate() {
+        if let Err(e) = io.write_all_at(c.disk_offset, &data[c.cursor..c.cursor + c.len]) {
+            let failure = format!("write bitmap: {e}");
+            // Put back the chunks that did land.
+            let mut rollback_failed = None;
+            for done in &chunks[..i] {
+                if let Err(re) = io.write_all_at(
+                    done.disk_offset,
+                    &previous[done.cursor..done.cursor + done.len],
+                ) {
+                    rollback_failed = Some(re);
+                    break;
+                }
+            }
+            let _ = io.sync();
+            return Err(match rollback_failed {
+                None => failure,
+                Some(re) => format!(
+                    "{failure}; and rolling the earlier chunks back failed too ({re}): \
+                     $Bitmap now records an allocation state that does not match the \
+                     records it describes — run chkdsk"
+                ),
+            });
+        }
     }
     io.sync()?;
     Ok(())
@@ -438,6 +519,168 @@ mod tests {
             total_bits: n_bytes * 8,
             value_length: n_bytes,
         }
+    }
+
+    /// A `$Bitmap` split across two non-adjacent runs.
+    ///
+    /// **No test used one before**, which is the whole reason G5
+    /// survived: every mapped-chunk loop in this file walks runs, and a
+    /// single-run bitmap exercises exactly one iteration of it.
+    ///
+    /// Run 0 holds VCN 0 at LCN 1; run 1 holds VCN 1 at LCN 5. So a
+    /// write spanning the cluster boundary becomes two `write_all_at`
+    /// calls at far-apart disk offsets — which is what makes a partial
+    /// failure observable.
+    fn make_fragmented_bm(cluster_size: u64, n_bytes: u64) -> BitmapLocation {
+        let mut bm = make_bm(cluster_size, n_bytes);
+        bm.runs = vec![
+            DataRun {
+                starting_vcn: 0,
+                length: 1,
+                lcn: Some(1),
+            },
+            DataRun {
+                starting_vcn: 1,
+                length: 1,
+                lcn: Some(5),
+            },
+        ];
+        bm
+    }
+
+    /// A device that refuses writes landing at or past `deny_from`.
+    struct FailsWritesFrom {
+        inner: MemDev,
+        deny_from: u64,
+    }
+
+    impl BlockIo for FailsWritesFrom {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            self.inner.read_exact_at(offset, buf)
+        }
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            if offset >= self.deny_from {
+                return Err("injected write failure".to_string());
+            }
+            self.inner.write_all_at(offset, buf)
+        }
+        fn size(&self) -> u64 {
+            self.inner.size()
+        }
+    }
+
+    // --- a bitmap write is all or nothing ---------------------------------
+
+    /// A write that fails on the second run must not leave the first
+    /// run's bytes changed.
+    ///
+    /// The write half issues one `write_all_at` per data run. Before
+    /// this, a failure on run 2 left run 1 already on disk, `io.sync()`
+    /// never ran, and `Err` came back with `$Bitmap` in a state nobody
+    /// tracked — while `mutate_bits_io` validates every bit before
+    /// touching its buffer, so the all-or-nothing intent was explicit
+    /// and the write half broke it.
+    #[test]
+    fn a_bitmap_write_that_fails_partway_leaves_the_bitmap_as_it_was() {
+        let cluster = 4096u64;
+        // 8192 bytes of bitmap ⇒ the write spans VCN 0 and VCN 1.
+        let bm = make_fragmented_bm(cluster, 2 * cluster);
+        let mut inner = MemDev::new((cluster * 8) as usize);
+        // Every cluster allocated, so clearing the range is legal —
+        // `mutate_bits_io` refuses to free a bit that is already free,
+        // and that check runs before any write.
+        for b in 0..cluster as usize {
+            inner.buf[cluster as usize + b] = 0xFF; // run 0, at LCN 1
+        }
+        inner.buf[(5 * cluster) as usize] = 0xFF; // run 1, at LCN 5
+        let before_run0: Vec<u8> = inner.buf[cluster as usize..(2 * cluster) as usize].to_vec();
+
+        // Deny run 1's disk region (LCN 5) but allow run 0's (LCN 1).
+        let mut dev = FailsWritesFrom {
+            inner,
+            deny_from: 5 * cluster,
+        };
+
+        // Free a range that starts in run 0 and ends in run 1, so the
+        // write is split across both.
+        let first_bit = 0u64;
+        let n = cluster * 8 + 8; // past the end of run 0's byte range
+        let err = mutate_bits_io(&mut dev, &bm, first_bit, n, false)
+            .expect_err("the write must fail when its second run does");
+        assert!(
+            err.contains("injected write failure"),
+            "the failure should name its cause: {err}"
+        );
+
+        assert_eq!(
+            &dev.inner.buf[cluster as usize..(2 * cluster) as usize],
+            &before_run0[..],
+            "run 0's bytes must be back as they were — a failed bitmap write \
+             that leaves half its change on disk is a bitmap that disagrees \
+             with the records it describes"
+        );
+    }
+
+    /// The write half refuses an unmapped range without writing.
+    ///
+    /// Tested against `write_bitmap_bytes_io` directly, because through
+    /// `mutate_bits_io` it is unreachable: the read half walks the same
+    /// runs first and fails there. Removing the write half's own check
+    /// therefore breaks nothing end-to-end — which is precisely why it
+    /// needs a test of its own rather than an assumption that the outer
+    /// path covers it.
+    ///
+    /// It is defence in depth, and it is cheap: the plan is built
+    /// before the first `write_all_at`, so a caller that ever writes
+    /// without reading first still cannot leave half a change behind.
+    #[test]
+    fn the_write_half_refuses_an_unmapped_range_without_writing() {
+        let cluster = 4096u64;
+        let mut bm = make_fragmented_bm(cluster, 2 * cluster);
+        bm.runs.truncate(1); // VCN 1 is now unmapped
+
+        let mut dev = MemDev::new((cluster * 8) as usize);
+        for b in 0..cluster as usize {
+            dev.buf[cluster as usize + b] = 0xAA;
+        }
+        let before: Vec<u8> = dev.buf[cluster as usize..(2 * cluster) as usize].to_vec();
+
+        let data = vec![0xFFu8; (cluster + 8) as usize];
+        let previous = vec![0xAAu8; (cluster + 8) as usize];
+        let err = write_bitmap_bytes_io(&mut dev, &bm, 0, &data, &previous)
+            .expect_err("an unmapped VCN must be refused");
+        assert!(err.contains("not mapped"), "got: {err}");
+        assert_eq!(
+            &dev.buf[cluster as usize..(2 * cluster) as usize],
+            &before[..],
+            "the mappable chunk must not have been written before the \
+             unmappable one was discovered"
+        );
+    }
+
+    /// And end to end, the read half refuses first — which is where the
+    /// guarantee actually comes from today.
+    #[test]
+    fn an_unmapped_run_is_refused_before_any_byte_is_written() {
+        let cluster = 4096u64;
+        let mut bm = make_fragmented_bm(cluster, 2 * cluster);
+        // Drop run 1: VCN 1 is now unmapped.
+        bm.runs.truncate(1);
+
+        let mut dev = MemDev::new((cluster * 8) as usize);
+        for b in 0..cluster as usize {
+            dev.buf[cluster as usize + b] = 0xFF;
+        }
+        let before: Vec<u8> = dev.buf[cluster as usize..(2 * cluster) as usize].to_vec();
+
+        let err = mutate_bits_io(&mut dev, &bm, 0, cluster * 8 + 8, false)
+            .expect_err("an unmapped VCN must be refused");
+        assert!(err.contains("not mapped"), "got: {err}");
+        assert_eq!(
+            &dev.buf[cluster as usize..(2 * cluster) as usize],
+            &before[..],
+            "nothing may be written when part of the range cannot be mapped"
+        );
     }
 
     // --- is_allocated_io ---------------------------------------------------
