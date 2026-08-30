@@ -2784,20 +2784,65 @@ pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
     let total_clusters = (data.len() as u64).div_ceil(cluster_size);
 
     let bm = crate::bitmap::locate_bitmap_io(io)?;
-    // Free every run we've allocated so far — used on every error path so a
-    // partial failure never leaks clusters.
-    let free_all = |io: &mut T, allocated: &[(u64, u64)]| {
-        for &(lcn, n) in allocated {
+
+    // Every cluster this call has taken, so a failure anywhere below can
+    // give them all back.
+    //
+    // The rollback used to be a closure invoked at **ten** separate
+    // error paths, each spelled `free_all(io, &allocated); return
+    // Err(...)`. Every one of them was correct, and none of them had a
+    // test: removing any single one left the whole suite green. That is
+    // the shape an eleventh omission hides in — and B4, the torn
+    // rename, is what happens when one is actually forgotten.
+    //
+    // Now the work happens in `write_sparse_file_inner`, which uses `?`
+    // throughout, and the rollback happens once, here. One test of one
+    // failure path exercises the rollback for all of them, because
+    // there is only one.
+    let mut allocated: Vec<(u64, u64)> = Vec::new();
+    let outcome = write_sparse_file_inner(
+        io,
+        rec,
+        &params,
+        &bm,
+        data,
+        &segments,
+        attr_id,
+        total_clusters,
+        &mut allocated,
+    );
+    if outcome.is_err() {
+        for &(lcn, n) in &allocated {
             let _ = crate::bitmap::free_io(io, &bm, lcn, n);
         }
-    };
+    }
+    outcome
+}
 
+/// The body of [`write_sparse_file_io`], with every failure as a `?`.
+///
+/// `allocated` is the caller's, so the clusters taken before a failure
+/// are still visible to it afterwards. That is the whole reason this is
+/// a separate function rather than a block: the rollback needs the list
+/// after the error, and `?` discards everything local.
+#[allow(clippy::too_many_arguments)]
+fn write_sparse_file_inner<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    params: &crate::mft_io::BootParams,
+    bm: &crate::bitmap::BitmapLocation,
+    data: &[u8],
+    segments: &[crate::sparse::SparseSegment],
+    attr_id: u16,
+    total_clusters: u64,
+    allocated: &mut Vec<(u64, u64)>,
+) -> Result<(), String> {
+    let cluster_size = params.cluster_size;
     // Allocate one contiguous run per Data segment, write its bytes, and
     // record (lcn, n) for rollback. Holes allocate nothing.
     let mut data_lcns: Vec<u64> = Vec::new();
-    let mut allocated: Vec<(u64, u64)> = Vec::new();
     let mut hint = params.mft_lcn;
-    for seg in &segments {
+    for seg in segments {
         let crate::sparse::SparseSegment::Data {
             clusters,
             byte_start,
@@ -2808,69 +2853,39 @@ pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
             continue; // holes: nothing to allocate or write
         };
         let n = *clusters;
-        let lcn = match crate::bitmap::find_free_run_io(io, &bm, n, hint) {
-            Ok(Some(l)) => l,
-            Ok(None) => {
-                free_all(io, &allocated);
-                return Err(format!("no contiguous free run of {n} clusters"));
-            }
-            Err(e) => {
-                free_all(io, &allocated);
-                return Err(e);
-            }
-        };
-        if let Err(e) = crate::bitmap::allocate_io(io, &bm, lcn, n) {
-            free_all(io, &allocated);
-            return Err(format!("allocate {n}@{lcn}: {e}"));
-        }
+        let lcn = crate::bitmap::find_free_run_io(io, bm, n, hint)?
+            .ok_or_else(|| format!("no contiguous free run of {n} clusters"))?;
+        crate::bitmap::allocate_io(io, bm, lcn, n)
+            .map_err(|e| format!("allocate {n}@{lcn}: {e}"))?;
         allocated.push((lcn, n));
         data_lcns.push(lcn);
         hint = lcn + n;
 
         let disk = lcn * cluster_size;
-        if let Err(e) = io.write_all_at(disk, &data[*byte_start..*byte_start + *byte_len]) {
-            free_all(io, &allocated);
-            return Err(format!("write data segment: {e}"));
-        }
+        io.write_all_at(disk, &data[*byte_start..*byte_start + *byte_len])
+            .map_err(|e| format!("write data segment: {e}"))?;
         // Zero-pad the last (possibly partial) cluster of the run.
         let pad = (n * cluster_size) as usize - *byte_len;
         if pad > 0 {
             let zeros = vec![0u8; pad];
-            if let Err(e) = io.write_all_at(disk + *byte_len as u64, &zeros) {
-                free_all(io, &allocated);
-                return Err(format!("write zero-pad: {e}"));
-            }
+            io.write_all_at(disk + *byte_len as u64, &zeros)
+                .map_err(|e| format!("write zero-pad: {e}"))?;
         }
     }
-    if let Err(e) = io.sync() {
-        free_all(io, &allocated);
-        return Err(format!("fsync data: {e}"));
-    }
+    io.sync().map_err(|e| format!("fsync data: {e}"))?;
 
-    let runs = match crate::sparse::build_runs(&segments, &data_lcns) {
-        Ok(r) => r,
-        Err(e) => {
-            free_all(io, &allocated);
-            return Err(e);
-        }
-    };
+    let runs = crate::sparse::build_runs(segments, &data_lcns)?;
     // encode_runs can fail at runtime (length > i63, LCN delta overflow,
     // VCN overflow); roll back the cluster allocations like every other
     // error path here, so a failure never leaks $Bitmap clusters.
-    let mapping_pairs = match data_runs::encode_runs(&runs) {
-        Ok(mp) => mp,
-        Err(e) => {
-            free_all(io, &allocated);
-            return Err(e);
-        }
-    };
+    let mapping_pairs = data_runs::encode_runs(&runs)?;
 
     // Sparse attributes carry two distinct size fields: `allocated_size`
     // (0x28) is the FULL VCN-span (holes included); `total_allocated`
     // (0x40) is only the real (non-hole) cluster bytes — the on-disk
     // footprint. See build_sparse_nonresident_data_attribute.
     let full_allocated_length = total_clusters * cluster_size;
-    let total_allocated_length = crate::sparse::allocated_clusters(&segments) * cluster_size;
+    let total_allocated_length = crate::sparse::allocated_clusters(segments) * cluster_size;
     let data_size = data.len() as u64;
     let last_vcn = if total_clusters == 0 {
         -1i64
@@ -2878,7 +2893,7 @@ pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
         (total_clusters - 1) as i64
     };
 
-    let new_attr_bytes = match crate::record_build::build_sparse_nonresident_data_attribute(
+    let new_attr_bytes = crate::record_build::build_sparse_nonresident_data_attribute(
         attr_id,
         data_size,
         full_allocated_length,
@@ -2886,18 +2901,12 @@ pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
         data_size, // initialized_length: holes within it read as zeros
         last_vcn,
         &mapping_pairs,
-    ) {
-        Ok(b) => b,
-        Err(e) => {
-            free_all(io, &allocated);
-            return Err(e);
-        }
-    };
+    )?;
 
     // In one RMW: set FILE_ATTRIBUTE_SPARSE_FILE on $STANDARD_INFORMATION
     // (in place, no shift) then replace the resident $DATA with the new
     // non-resident sparse attribute.
-    let res = update_mft_record_io(io, rec, |record| {
+    update_mft_record_io(io, rec, |record| {
         let si = attr_io::find_attribute(record, AttrType::StandardInformation, None)
             .ok_or("$STANDARD_INFORMATION not found")?;
         let si_val =
@@ -2915,12 +2924,8 @@ pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
         let loc = attr_io::find_attribute(record, AttrType::Data, None)
             .ok_or("$DATA vanished during RMW")?;
         crate::attr_resize::replace_attribute(record, loc.attr_offset, &new_attr_bytes)
-    });
-    if let Err(e) = res {
-        free_all(io, &allocated);
-        return Err(format!("replace $DATA: {e}"));
-    }
-    Ok(())
+    })
+    .map_err(|e| format!("replace $DATA: {e}"))
 }
 
 /// High-level: write `new_data` as the entire content of the file.
@@ -4146,6 +4151,69 @@ mod tests {
         assert!(crate::index_io::find_index_entry(&root, "xyz.txt")
             .unwrap()
             .is_some());
+    }
+
+    // --- a failed sparse write leaks no clusters ------------------------------
+
+    /// A `write_sparse_file` that fails part-way frees everything it
+    /// took.
+    ///
+    /// The allocation loop rolls back on ten separate error paths, each
+    /// spelled `free_all(io, &allocated); return Err(...)`. **None of
+    /// them had a test**: removing any one of the ten left the whole
+    /// suite green, which is exactly why forgetting an eleventh would
+    /// be invisible.
+    ///
+    /// No fault injection here. The volume is filled until the second
+    /// data segment cannot find a run, which is the failure the loop is
+    /// written for.
+    #[test]
+    fn a_sparse_write_that_runs_out_of_space_frees_what_it_took() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "sparse.bin").unwrap();
+
+        let bm = crate::bitmap::locate_bitmap_io(&mut dev).unwrap();
+        let free_before = crate::bitmap::count_free_io(&mut dev, &bm).unwrap();
+        assert!(free_before > 0, "the fixture must have free space");
+
+        // Take all but a handful of clusters, so the first segment of the
+        // sparse write succeeds and a later one cannot.
+        let params = crate::mft_io::read_boot_params_io(&mut dev).unwrap();
+        let cluster = params.cluster_size;
+        // Free space is not one run — metadata is scattered through it —
+        // so take it in whatever chunks are available.
+        let leave_free = 4u64;
+        let mut take = 64u64;
+        while crate::bitmap::count_free_io(&mut dev, &bm).unwrap() > leave_free {
+            match crate::bitmap::find_free_run_io(&mut dev, &bm, take, 0) {
+                Ok(Some(lcn)) => crate::bitmap::allocate_io(&mut dev, &bm, lcn, take).unwrap(),
+                _ if take > 1 => take /= 2,
+                _ => break,
+            }
+        }
+        let free_at_start = crate::bitmap::count_free_io(&mut dev, &bm).unwrap();
+        assert!(
+            free_at_start <= leave_free * 2,
+            "the volume should be nearly full, {free_at_start} clusters free"
+        );
+
+        // Two data segments either side of a hole. The first fits in
+        // what is left; the pair does not.
+        let seg = (cluster * 2) as usize;
+        let mut data = vec![0xAAu8; seg];
+        data.extend(std::iter::repeat_n(0u8, cluster as usize * 4)); // hole
+        data.extend(std::iter::repeat_n(0xBBu8, seg));
+
+        let err = write_sparse_file_io(&mut dev, "/sparse.bin", &data)
+            .expect_err("the volume is too full for both segments");
+        assert!(!err.is_empty());
+
+        let free_after = crate::bitmap::count_free_io(&mut dev, &bm).unwrap();
+        assert_eq!(
+            free_after, free_at_start,
+            "a failed sparse write must free every cluster it took — \
+             leaked clusters are unreachable until chkdsk finds them"
+        );
     }
 
     // --- rename_replace_io: the two-step rename is undoable --------------------

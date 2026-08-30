@@ -131,12 +131,39 @@ removing the rollback fails
 `a_failed_rename_leaves_the_directory_naming_the_old_file` on
 `the old name must be back in the directory index`.
 
-### B3, B7 — two more hand-written rollback shapes — **fixable, not yet done**
+### B3 — one rollback instead of ten — **fixed**
 
-One 164-line function writes its `free_all` rollback out ten times and is
-currently correct; `create_file_io` spells out a third distinct shape. Both are
-right today. B4 is what happens when a fourth site forgets, which is the
-argument for giving these a name too.
+`write_sparse_file_io` had a `free_all` closure — already named — invoked at
+**ten separate error paths**, each spelled `free_all(io, &allocated); return
+Err(...)`. Every one was correct.
+
+**None of them had a test.** Removing any single one left the whole suite green,
+which is exactly the shape an eleventh omission hides in — and B4, the torn
+rename, is what happens when one is actually forgotten.
+
+The work moved into `write_sparse_file_inner`, which uses `?` throughout;
+`allocated` belongs to the caller, so the clusters taken before a failure are
+still visible after it, and the rollback happens **once**. That is the whole
+reason it is a separate function rather than a block: `?` discards everything
+local, and the rollback needs the list after the error.
+
+**The measurement is the argument.** A new test fills the volume until a sparse
+write's second segment cannot find a run, then requires the free-cluster count to
+be what it was before:
+
+| | rollback disabled | test result |
+|---|---|---|
+| before, `allocate_io` path | one of ten | **passes** — not reached |
+| before, `find_free_run` path | one of ten | fails |
+| after, the single rollback | all paths | **fails** |
+
+One test of one failure path now exercises the rollback for all of them, because
+there is only one.
+
+### B7 — `create_file_io`'s third rollback shape — **fixable, not yet done**
+
+A distinct shape again: clear `IN_USE`, free the MFT bitmap bit. Worth the same
+treatment, in its own change.
 
 ### C1 — two adjacent write entry points meant opposite things by `len == 0` — **documented and pinned**
 
@@ -180,7 +207,7 @@ the report with locations and coverage notes.
 
 ## Verification
 
-589 unit tests pass, up from 586. `chore lint` clean.
+590 unit tests pass, up from 589. `chore lint` clean.
 
 The 63 locally-failing test binaries are pre-existing missing `test-disks/*.img`
 fixtures — there is no `mkntfs` on macOS. CI generates them.
