@@ -106,6 +106,39 @@ currently correct; `create_file_io` spells out a third distinct shape. Both are
 right today. B4 is what happens when a fourth site forgets, which is the
 argument for giving these a name too.
 
+### C1 — two adjacent write entry points meant opposite things by `len == 0` — **documented and pinned**
+
+```c
+int64_t fs_ntfs_write_file(image, path, offset, buf, len);
+int64_t fs_ntfs_write_file_contents(image, path, buf, len);
+```
+
+Both open with `if len == 0`, and mean the opposite by it. The ranged write
+returns 0 and does nothing — **without opening the image or resolving the path**,
+so a zero-length write to a file that does not exist also returns 0. The
+whole-contents write passes `&[]` through, which **empties the file**.
+
+Both are right. "Rewrite this range" with an empty range is a no-op; "write this
+as the entire contents" with nothing is `open(O_TRUNC)`. The problem is that
+neither is inferable from the signature, and the two sit next to each other with
+identical-looking guards — so a caller cannot be right about both.
+
+The no-op is the library's policy at three levels, not a shortcut in the C
+wrapper: `write::write_at` and `write_at_io` both return `Ok(0)` for empty data
+before resolving anything, so a caller chunking a buffer pays nothing for an
+empty tail. **Changing that is a behaviour change on a published ABI with no
+reported harm behind it, and stays your call.** What was clearly fixable is that
+neither behaviour was written down.
+
+Both now state it, in the Rust doc and in `fs_ntfs.h` where a C caller actually
+reads it, each pointing at the other. Three tests pin the pair — including the
+zero-length write to a path that does not exist, contrasted with the one-byte
+write to the same path that fails — so a later change making them agree in either
+direction has to be deliberate.
+
+The tests format their own image rather than using `test-disks/`, which needs
+`mkntfs` and so only exists on CI.
+
 ### The remainder
 
 A1–A13 (the CLI), the rest of B, C, D (`mkfs.rs`), E, F and G are recorded in

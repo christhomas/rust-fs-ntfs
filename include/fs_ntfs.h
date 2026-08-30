@@ -776,6 +776,15 @@ int fs_ntfs_list_named_streams(const char *image, const char *path,
  * `path`. Transparently dispatches: stays resident if it fits in the
  * MFT record, otherwise allocates clusters and promotes $DATA to
  * non-resident. Returns bytes written, -1 on error.
+ *
+ * len == 0 EMPTIES THE FILE and returns 0 — this replaces the whole
+ * contents, so writing nothing leaves nothing, as open(O_TRUNC) with no
+ * following write does. `buf` is not read when len == 0 and may be
+ * NULL.
+ *
+ * Note that fs_ntfs_write_file() means the OPPOSITE by len == 0: a
+ * ranged write of nothing is nothing, and it does not even check the
+ * path.
  */
 int64_t fs_ntfs_write_file_contents(const char *image,
                                     const char *path,
@@ -869,6 +878,14 @@ int64_t fs_ntfs_truncate(const char *image, const char *path,
  * at `offset`. Size-preserving only (W1 scope); fails with -1 if the
  * write would extend the file, hit a resident attribute, or cross a
  * sparse / compressed range. Returns bytes written on success.
+ *
+ * len == 0 DOES NOTHING and returns 0 — without opening the image or
+ * resolving `path`, so a zero-length write to a path that does not
+ * exist also returns 0.
+ *
+ * Note that fs_ntfs_write_file_contents() means the OPPOSITE by len ==
+ * 0: writing nothing as a whole file empties it. Each is right for its
+ * own operation, and neither is inferable from the signature.
  */
 int64_t fs_ntfs_write_file(const char *image, const char *path,
                            uint64_t offset, const void *buf, uint64_t len);

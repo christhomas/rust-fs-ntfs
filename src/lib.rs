@@ -2009,6 +2009,18 @@ pub extern "C" fn fs_ntfs_delete_named_stream(
 /// Stays resident if it fits; promotes to non-resident (allocating
 /// clusters) if the data exceeds the MFT record's free space.
 /// Returns bytes written, -1 on error.
+///
+/// # `len == 0` **empties the file**
+///
+/// This replaces the whole contents, so writing nothing leaves nothing:
+/// the same thing `open(O_TRUNC)` followed by no write does. `buf` is
+/// not read at all when `len` is 0, so it may be null.
+///
+/// The neighbouring [`fs_ntfs_write_file`] opens with the same
+/// `if len == 0` and means the opposite — a ranged write of nothing is
+/// nothing. Two adjacent entry points, one guard, two meanings; each is
+/// right for its own operation and neither is inferable from the
+/// signature, which is why both now say so.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_write_file_contents(
     image: *const c_char,
@@ -2397,6 +2409,20 @@ pub extern "C" fn fs_ntfs_truncate(
 /// Rewrite `len` bytes at `offset` within an existing non-resident
 /// `$DATA` attribute. Does not extend the file, does not touch sparse
 /// or compressed ranges. Returns bytes written on success, `-1` on error.
+///
+/// # `len == 0` **does nothing**, and checks nothing
+///
+/// It returns 0 without opening the image or resolving `path` — so a
+/// zero-length write to a path that does not exist also returns 0. That
+/// is the library's policy, not a shortcut in this wrapper:
+/// `write::write_at` and `write_at_io` both return `Ok(0)` for empty
+/// data before resolving anything, so a caller chunking a buffer pays
+/// nothing for an empty tail.
+///
+/// The neighbouring [`fs_ntfs_write_file_contents`] opens with the same
+/// `if len == 0` and means the opposite — writing nothing as a whole
+/// file **empties** it. Each is right for its own operation; neither is
+/// inferable from the signature.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_write_file(
     image: *const c_char,
