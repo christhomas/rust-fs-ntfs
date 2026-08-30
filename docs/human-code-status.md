@@ -62,9 +62,41 @@ be right about both.
 
 The report calls this a two-line deletion.
 
-### G5 — the `$Bitmap` byte-range write half has no all-or-nothing behaviour on a multi-run bitmap — High
+### G5 — the `$Bitmap` write half had no all-or-nothing behaviour — **fixed**
 
-A partial failure leaves the bitmap inconsistent with the records it describes.
+`read_bitmap_bytes_io` and `write_bitmap_bytes_io` were line-for-line identical
+apart from `read_exact_at` against `write_all_at`, the buffer direction and a
+trailing `sync` — ~35 duplicated lines of run-walking on a mutation path.
+
+The write half issues **one `write_all_at` per data run**. If run 2 failed after
+run 1 succeeded, the first chunk was already on disk, `sync` never ran, and `Err`
+came back with `$Bitmap` in a state nobody tracked — a bitmap that disagrees with
+the records it describes, which is what chkdsk exists to find. `mutate_bits_io`
+validates every bit *before* touching its buffer, so the all-or-nothing intent
+was explicit and the write half broke it.
+
+**No test used a fragmented bitmap** — the whole file contained one `DataRun`,
+so every run-walking loop in it ran exactly one iteration. That is why this
+survived.
+
+`map_bitmap_range` resolves the whole byte range into its disk chunks first, and
+both halves use it: the duplication is gone and the two are provably consistent.
+The write then plans before it writes, and a failure part-way rewrites the chunks
+that landed from the pre-image — which the caller already holds, because every
+caller read those bytes in order to change them. If the rollback also fails the
+error says so, because at that point nothing further here can be trusted to fix
+it.
+
+Three tests, over a two-run bitmap at non-adjacent LCNs and a device that refuses
+writes past a given offset. Mutation-checked, and the second check is the
+interesting one:
+
+- removing the rollback fails `a_bitmap_write_that_fails_partway…`
+- removing the write half's *own* mapping check fails **nothing end to end**,
+  because `mutate_bits_io` reads first and the read half hits the unmapped VCN
+  before the write is reached. So that property is tested against
+  `write_bitmap_bytes_io` directly and documented as defence in depth rather
+  than as where the guarantee comes from.
 
 ### B4 — a rename that committed step 1 and then ran step 2 with no rollback — **fixed**
 
@@ -148,7 +180,7 @@ the report with locations and coverage notes.
 
 ## Verification
 
-586 unit tests pass, up from 583. `chore lint` clean.
+589 unit tests pass, up from 586. `chore lint` clean.
 
 The 63 locally-failing test binaries are pre-existing missing `test-disks/*.img`
 fixtures — there is no `mkntfs` on macOS. CI generates them.
