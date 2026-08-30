@@ -967,9 +967,7 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
     old_path: &str,
     new_name: &str,
 ) -> Result<(), String> {
-    if new_name.contains('/') || new_name.is_empty() {
-        return Err("new_name must be a basename (no slashes, non-empty)".to_string());
-    }
+    validate_basename(new_name)?;
     let (parent_rec, file_rec, current_basename) = resolve_parent_and_child_io(io, old_path)?;
 
     // Pre-check lengths (UTF-16 code units).
@@ -1068,6 +1066,24 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
 // ---------------------------------------------------------------------------
 // Create regular file (W3)
 // ---------------------------------------------------------------------------
+/// Reject anything that is not a single path component.
+///
+/// Empty, `.`, `..`, or containing a separator. `..` is the one that
+/// matters and the one a hand-written check is most likely to miss: it
+/// is two UTF-16 units, so a same-length rename of any two-character
+/// name to `".."` satisfies the length rule and reaches the directory
+/// index.
+///
+/// Written once because it was written five times, and the fifth —
+/// `rename_same_length_io` — tested only for a separator and emptiness.
+/// That path is public through `facade::rename_same_length` and through
+/// the C ABI as `fs_ntfs_rename_same_length`, with no guard downstream.
+fn validate_basename(name: &str) -> Result<(), String> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+        return Err(format!("invalid basename: '{name}'"));
+    }
+    Ok(())
+}
 
 /// Create an empty regular file named `basename` inside the directory
 /// at `parent_path`. Returns the new file's MFT record number.
@@ -1137,9 +1153,7 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
     parent_path: &str,
     basename: &str,
 ) -> Result<u64, String> {
-    if basename.is_empty() || basename == "." || basename == ".." || basename.contains('/') {
-        return Err(format!("invalid basename: '{basename}'"));
-    }
+    validate_basename(basename)?;
 
     let parent_rec = resolve_path_to_record_number_io(io, parent_path)?;
 
@@ -1345,9 +1359,7 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
     parent_path: &str,
     basename: &str,
 ) -> Result<u64, String> {
-    if basename.is_empty() || basename == "." || basename == ".." || basename.contains('/') {
-        return Err(format!("invalid basename: '{basename}'"));
-    }
+    validate_basename(basename)?;
 
     let parent_rec = resolve_path_to_record_number_io(io, parent_path)?;
 
@@ -2305,13 +2317,7 @@ pub fn link_io<T: BlockIo + ?Sized>(
     new_parent_path: &str,
     new_basename: &str,
 ) -> Result<(), String> {
-    if new_basename.is_empty()
-        || new_basename == "."
-        || new_basename == ".."
-        || new_basename.contains('/')
-    {
-        return Err(format!("invalid basename: '{new_basename}'"));
-    }
+    validate_basename(new_basename)?;
     let target_rec = resolve_path_to_record_number_io(io, existing_path)?;
     let (_, target_record_bytes) = read_mft_record_io(io, target_rec)?;
     let target_flags = crate::mft_io::record_flags(&target_record_bytes);
@@ -3251,13 +3257,7 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     new_basename: &str,
     replace: bool,
 ) -> Result<(), String> {
-    if new_basename.is_empty()
-        || new_basename == "."
-        || new_basename == ".."
-        || new_basename.contains('/')
-    {
-        return Err(format!("invalid basename: '{new_basename}'"));
-    }
+    validate_basename(new_basename)?;
     let (parent_rec, file_rec, old_basename) = resolve_parent_and_child_io(io, old_path)?;
     if old_basename == new_basename {
         return Ok(());
@@ -4865,5 +4865,41 @@ mod tests {
         delete_named_stream(img.path(), "/ads.txt", "tag").unwrap();
         let after = list_named_streams(img.path(), "/ads.txt").unwrap();
         assert!(!after.contains(&"tag".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod basename_validation_tests {
+    use super::validate_basename;
+
+    /// `..` is the case a hand-written check misses, and the one that
+    /// matters: it is two UTF-16 units, so a same-length rename of any
+    /// two-character name to `".."` satisfies the length rule.
+    ///
+    /// `rename_same_length_io` tested only for a separator and
+    /// emptiness while four sibling call sites tested all four
+    /// conditions — and that path is public through
+    /// `facade::rename_same_length` and through the C ABI as
+    /// `fs_ntfs_rename_same_length`, with no guard downstream.
+    #[test]
+    fn dot_dot_is_rejected() {
+        assert!(validate_basename("..").is_err(), "`..` is not a basename");
+        assert!(validate_basename(".").is_err(), "`.` is not a basename");
+    }
+
+    #[test]
+    fn empty_and_separators_are_rejected() {
+        assert!(validate_basename("").is_err());
+        assert!(validate_basename("a/b").is_err());
+        assert!(validate_basename("/").is_err());
+    }
+
+    /// Names that merely contain dots are fine — only the two special
+    /// components are not.
+    #[test]
+    fn ordinary_names_pass() {
+        for ok in ["a", "ab", "..a", "a..", "a.b", "...", "file.txt"] {
+            assert!(validate_basename(ok).is_ok(), "{ok:?} is a legal file name");
+        }
     }
 }
