@@ -3315,6 +3315,16 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
         is_dir,
     )?;
 
+    // A rename is two record writes with no journal between them, and
+    // each one is durable on its own. So step 1 has to be undoable:
+    // otherwise a failure in step 2 leaves the parent index naming the
+    // new basename while the file's own $FILE_NAME still says the old
+    // one — a torn rename, which chkdsk reports and this crate would
+    // have produced silently.
+    //
+    // `parent_record_bytes` was read above and nothing has written to
+    // the parent since, so it is the pre-step-1 state.
+
     // 1) Swap the parent's $INDEX_ROOT entry.
     let upcase = crate::upcase::UpcaseTable::load_io(io).ok();
     update_mft_record_io(io, parent_rec, |record| {
@@ -3330,7 +3340,7 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     })?;
 
     // 2) Update the file's own $FILE_NAME attribute(s).
-    update_mft_record_io(io, file_rec, |record| {
+    if let Err(step_two) = update_mft_record_io(io, file_rec, |record| {
         replace_file_name_with_new_name(
             record,
             &old_basename,
@@ -3339,7 +3349,24 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
             nt_time,
             is_dir,
         )
-    })?;
+    }) {
+        // Put the index back, so the failure leaves the volume as it
+        // was rather than half-renamed.
+        return Err(
+            match crate::mft_io::restore_mft_record_io(io, parent_rec, &parent_record_bytes) {
+                Ok(()) => step_two,
+                // Both the rename and its undo failed. The volume IS
+                // torn now, and no further write here can be trusted to
+                // fix it, so the error says exactly what is on disk
+                // rather than reporting only the first failure.
+                Err(rollback) => format!(
+                    "{step_two}; and rolling the index entry back failed too ({rollback}): \
+                     directory '{new_basename}' entry stands while the file's $FILE_NAME \
+                     still reads '{old_basename}' — run chkdsk"
+                ),
+            },
+        );
+    }
 
     Ok(())
 }
@@ -4119,6 +4146,114 @@ mod tests {
         assert!(crate::index_io::find_index_entry(&root, "xyz.txt")
             .unwrap()
             .is_some());
+    }
+
+    // --- rename_replace_io: the two-step rename is undoable --------------------
+
+    /// A device that refuses writes to one MFT record.
+    ///
+    /// A variable-length rename is two record writes with no journal
+    /// between them: the parent's index, then the file's own
+    /// `$FILE_NAME`. There is no way to make the second fail from the
+    /// outside without failing the I/O, so the test fails it here.
+    struct FailsWritesToRecord {
+        inner: MemDev,
+        /// Byte range of the record whose writes are refused.
+        deny: std::ops::Range<u64>,
+    }
+
+    impl FailsWritesToRecord {
+        /// Deny writes to `record_number`, taking the geometry from the
+        /// formatted volume rather than assuming it.
+        fn new(mut inner: MemDev, record_number: u64) -> Self {
+            let params = crate::mft_io::read_boot_params_io(&mut inner).expect("boot params");
+            let at = crate::mft_io::mft_record_offset(&params, record_number);
+            let size = params.file_record_size;
+            FailsWritesToRecord {
+                inner,
+                deny: at..at + size,
+            }
+        }
+    }
+
+    impl BlockIo for FailsWritesToRecord {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            self.inner.read_exact_at(offset, buf)
+        }
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            if self.deny.contains(&offset) {
+                return Err("injected write failure".to_string());
+            }
+            self.inner.write_all_at(offset, buf)
+        }
+        fn size(&self) -> u64 {
+            self.inner.size()
+        }
+    }
+
+    /// The one that matters: step 1 must not stand when step 2 fails.
+    ///
+    /// Without the rollback the parent index names the NEW basename
+    /// while the file's `$FILE_NAME` still reads the old one — a torn
+    /// rename, produced silently, and the kind of inconsistency chkdsk
+    /// reports rather than one this crate would ever notice itself.
+    #[test]
+    fn a_failed_rename_leaves_the_directory_naming_the_old_file() {
+        let mut vol = fresh_vol();
+        let file_rec = create_file_io(&mut vol, "/", "before.txt").unwrap();
+
+        // A length change, so the variable-length two-step path runs
+        // rather than the same-length one.
+        let mut dev = FailsWritesToRecord::new(vol, file_rec);
+        let err = rename_io(&mut dev, "/before.txt", "after-a-much-longer-name.txt")
+            .expect_err("the rename must fail when its second step does");
+        assert!(
+            err.contains("injected write failure"),
+            "the failure should name its cause, got: {err}"
+        );
+
+        let (_, root) = crate::mft_io::read_mft_record_io(&mut dev, 5).unwrap();
+        assert!(
+            crate::index_io::find_index_entry(&root, "before.txt")
+                .unwrap()
+                .is_some(),
+            "the old name must be back in the directory index"
+        );
+        assert!(
+            crate::index_io::find_index_entry(&root, "after-a-much-longer-name.txt")
+                .unwrap()
+                .is_none(),
+            "the new name must not be left in the directory index"
+        );
+    }
+
+    /// The rollback is reported, not swallowed.
+    ///
+    /// A caller that gets `Ok` back from a failed rename would carry on
+    /// as though it had happened.
+    #[test]
+    fn a_rolled_back_rename_still_reports_failure() {
+        let mut vol = fresh_vol();
+        let file_rec = create_file_io(&mut vol, "/", "keep.txt").unwrap();
+        let mut dev = FailsWritesToRecord::new(vol, file_rec);
+        assert!(rename_io(&mut dev, "/keep.txt", "a-different-length.txt").is_err());
+    }
+
+    /// And the successful path is unaffected.
+    #[test]
+    fn a_variable_length_rename_still_works() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "short.txt").unwrap();
+        rename_io(&mut dev, "/short.txt", "considerably-longer.txt").unwrap();
+        let (_, root) = crate::mft_io::read_mft_record_io(&mut dev, 5).unwrap();
+        assert!(crate::index_io::find_index_entry(&root, "short.txt")
+            .unwrap()
+            .is_none());
+        assert!(
+            crate::index_io::find_index_entry(&root, "considerably-longer.txt")
+                .unwrap()
+                .is_some()
+        );
     }
 
     fn run(starting_vcn: u64, length: u64, lcn: u64) -> DataRun {
