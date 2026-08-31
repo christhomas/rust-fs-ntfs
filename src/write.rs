@@ -1117,15 +1117,46 @@ pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u6
 /// `clear_in_use` asks for the record's IN_USE flag to be cleared first.
 /// That is only meaningful once the record bytes have actually landed on
 /// disk; before that there is nothing to clear.
+/// How far a create got before it failed — which decides how much of it
+/// there is to undo.
+///
+/// This was a `bool` named `clear_in_use`, and at the call sites it read
+/// as `false` and `true` with nothing saying what either meant. The
+/// distinction is real and not obvious: between taking the bitmap bit
+/// and writing the record there is a window where the record on disk is
+/// still whatever was there before, and clearing `IN_USE` in it would be
+/// editing a record this create never wrote.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NewRecordState {
+    /// The bitmap bit is taken but the record bytes never landed. Only
+    /// the bit needs giving back; the record on disk is not ours to
+    /// touch.
+    BitmapOnly,
+    /// The record was written with `IN_USE` set. Both the flag and the
+    /// bit have to be undone, or the volume carries a record that is
+    /// allocated and in use and that no directory names — an orphan
+    /// file record.
+    RecordWritten,
+}
+
+/// Undo a half-made MFT record, and say so if the undo itself fails.
+///
+/// Returns the message the caller should propagate: `cause` on its own
+/// when the rollback succeeded, and `cause` plus what could not be
+/// undone when it did not — because at that point the volume genuinely
+/// carries a leaked record, and reporting only the original failure
+/// would understate what is on disk.
+///
+/// See [`NewRecordState`] for why "how much to undo" is not a boolean.
 fn undo_new_record_io<T: BlockIo + ?Sized>(
     io: &mut T,
     mbm: &mft_bitmap::MftBitmap,
     new_rec: u64,
-    clear_in_use: bool,
+    state: NewRecordState,
     cause: String,
 ) -> String {
     let mut failures: Vec<String> = Vec::new();
-    if clear_in_use {
+    if state == NewRecordState::RecordWritten {
         if let Err(e) = update_mft_record_io(io, new_rec, |record| {
             let cur = u16::from_le_bytes([record[0x16], record[0x17]]);
             let new = cur & !crate::mft_io::MFT_FLAG_IN_USE;
@@ -1219,7 +1250,7 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
             io,
             &mbm,
             new_rec,
-            false,
+            NewRecordState::BitmapOnly,
             format!("write new record: {e}"),
         ));
     }
@@ -1228,7 +1259,7 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
             io,
             &mbm,
             new_rec,
-            false,
+            NewRecordState::BitmapOnly,
             format!("fsync new record: {e}"),
         ));
     }
@@ -1245,12 +1276,11 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
     let insert_res =
         insert_entry_in_parent_io(io, parent_rec, parent_has_overflow, &entry_bytes, basename);
     if let Err(e) = insert_res {
-        // Roll back: clear IN_USE on the new record + free the bitmap bit.
         return Err(undo_new_record_io(
             io,
             &mbm,
             new_rec,
-            true,
+            NewRecordState::RecordWritten,
             format!("insert index entry: {e}"),
         ));
     }
@@ -1416,7 +1446,7 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
             io,
             &mbm,
             new_rec,
-            false,
+            NewRecordState::BitmapOnly,
             format!("write new dir record: {e}"),
         ));
     }
@@ -1425,7 +1455,7 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
             io,
             &mbm,
             new_rec,
-            false,
+            NewRecordState::BitmapOnly,
             format!("fsync new dir record: {e}"),
         ));
     }
@@ -1441,12 +1471,11 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
     let insert_res =
         insert_entry_in_parent_io(io, parent_rec, parent_has_overflow, &entry_bytes, basename);
     if let Err(e) = insert_res {
-        // Roll back: clear IN_USE on the new record + free the bitmap bit.
         return Err(undo_new_record_io(
             io,
             &mbm,
             new_rec,
-            true,
+            NewRecordState::RecordWritten,
             format!("insert dir index entry: {e}"),
         ));
     }
@@ -3816,6 +3845,7 @@ mod tests {
 
     // --- in-memory BlockIo harness for I/O tests ----------------------------
 
+    #[derive(Clone)]
     struct MemDev {
         buf: Vec<u8>,
     }
@@ -4244,6 +4274,14 @@ mod tests {
         }
     }
 
+    impl FailsWritesToRecord {
+        /// The volume underneath, once the injected failure has done
+        /// its job. Everything the failing run wrote is in it.
+        fn into_inner(self) -> MemDev {
+            self.inner
+        }
+    }
+
     impl BlockIo for FailsWritesToRecord {
         fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
             self.inner.read_exact_at(offset, buf)
@@ -4321,6 +4359,114 @@ mod tests {
             crate::index_io::find_index_entry(&root, "considerably-longer.txt")
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    // --- create_file_io: the new record is undone when the parent will not take it ---
+
+    /// The MFT record is given back when the directory insert fails.
+    ///
+    /// `create_file_io` does two things that outlive a failure: it takes
+    /// an MFT record from `$MFT:$Bitmap`, and it writes that record with
+    /// `IN_USE` set. If the parent's index will not take the new entry,
+    /// both have to be undone — otherwise the volume carries a record
+    /// that is allocated and marked in use but that no directory names,
+    /// which is the "orphan file record" chkdsk reports.
+    ///
+    /// Failing the parent's write is the only way to reach that path
+    /// without failing earlier: the new record's own write has already
+    /// succeeded by then. Record 5 is the root directory.
+    #[test]
+    fn a_failed_directory_insert_gives_the_mft_record_back() {
+        let mut vol = fresh_vol();
+        // Where the next create would land, before anything is taken.
+        let mbm = crate::mft_bitmap::locate_io(&mut vol).unwrap();
+        let expected = crate::mft_bitmap::find_free_record_io(&mut vol, &mbm, 24)
+            .unwrap()
+            .expect("a fresh volume has free MFT records");
+
+        let mut dev = FailsWritesToRecord::new(vol, 5);
+        let err = create_file_io(&mut dev, "/", "orphan.txt")
+            .expect_err("the create must fail when the directory insert does");
+        assert!(
+            err.contains("insert index entry"),
+            "the failure should name the step that failed, got: {err}"
+        );
+
+        assert!(
+            !crate::mft_bitmap::is_allocated_io(&mut dev, &mbm, expected).unwrap(),
+            "the MFT record must be freed — a record left allocated but \
+             named by no directory is an orphan chkdsk has to find"
+        );
+    }
+
+    /// The freed record is genuinely reusable afterwards.
+    ///
+    /// Checking the bitmap bit says the byte changed; this says the
+    /// allocator agrees, which is the property that actually matters.
+    #[test]
+    fn the_record_a_failed_create_gave_back_is_used_by_the_next_one() {
+        let mut vol = fresh_vol();
+        let mbm = crate::mft_bitmap::locate_io(&mut vol).unwrap();
+        let expected = crate::mft_bitmap::find_free_record_io(&mut vol, &mbm, 24)
+            .unwrap()
+            .unwrap();
+
+        let mut dev = FailsWritesToRecord::new(vol, 5);
+        assert!(create_file_io(&mut dev, "/", "orphan.txt").is_err());
+
+        // The same volume, carried forward, without the injected
+        // failure — so the next create sees exactly what the failed one
+        // left behind.
+        let mut vol = dev.into_inner();
+        let got = create_file_io(&mut vol, "/", "real.txt").unwrap();
+        assert_eq!(
+            got, expected,
+            "the next create should land on the record the failed one released"
+        );
+    }
+
+    /// `IN_USE` is cleared on the record the failed create wrote.
+    ///
+    /// Read raw rather than through `read_mft_record_io`, which refuses
+    /// a record whose `IN_USE` is clear — the exact state being checked.
+    #[test]
+    fn a_failed_create_clears_in_use_on_the_record_it_wrote() {
+        let mut vol = fresh_vol();
+        let mbm = crate::mft_bitmap::locate_io(&mut vol).unwrap();
+        let rec = crate::mft_bitmap::find_free_record_io(&mut vol, &mbm, 24)
+            .unwrap()
+            .unwrap();
+        let params = crate::mft_io::read_boot_params_io(&mut vol).unwrap();
+        let at = crate::mft_io::mft_record_offset(&params, rec);
+
+        let mut dev = FailsWritesToRecord::new(vol, 5);
+        assert!(create_file_io(&mut dev, "/", "orphan.txt").is_err());
+
+        let mut raw = vec![0u8; params.file_record_size as usize];
+        dev.read_exact_at(at, &mut raw).unwrap();
+        let flags = u16::from_le_bytes([raw[0x16], raw[0x17]]);
+        assert_eq!(
+            flags & crate::mft_io::MFT_FLAG_IN_USE,
+            0,
+            "IN_USE must be clear on a record whose create was rolled back"
+        );
+    }
+
+    /// The directory is not left naming a file that does not exist.
+    #[test]
+    fn a_failed_create_leaves_no_entry_in_the_parent() {
+        let vol = fresh_vol();
+        let mut dev = FailsWritesToRecord::new(vol, 5);
+        assert!(create_file_io(&mut dev, "/", "orphan.txt").is_err());
+
+        // Reads pass through, so these are the bytes that landed.
+        let (_, root) = crate::mft_io::read_mft_record_io(&mut dev, 5).unwrap();
+        assert!(
+            crate::index_io::find_index_entry(&root, "orphan.txt")
+                .unwrap()
+                .is_none(),
+            "the parent must not name a file whose creation failed"
         );
     }
 
