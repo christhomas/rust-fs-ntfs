@@ -160,10 +160,31 @@ be what it was before:
 One test of one failure path now exercises the rollback for all of them, because
 there is only one.
 
-### B7 — `create_file_io`'s third rollback shape — **fixable, not yet done**
+### B7 — `create_file_io`'s third rollback shape — **fixed**
 
-A distinct shape again: clear `IN_USE`, free the MFT bitmap bit. Worth the same
-treatment, in its own change.
+The idiom itself already existed — `undo_new_record_io`, used at six sites
+across `create_file_io` and `create_dir_io`. What did not exist was a **test**:
+disabling either half of it left the whole suite green.
+
+| rollback half disabled | before | after |
+|---|---|---|
+| clearing `IN_USE` | 0 tests fail | 1 |
+| freeing the `$MFT:$Bitmap` bit | 0 | 2 |
+
+Four tests now cover it, over the `FailsWritesToRecord` device B4 introduced —
+pointed at record 5, the root directory, because failing the *parent's* write is
+the only way to reach this path: the new record's own write has already
+succeeded by then. They check the bitmap bit is given back, that the next create
+actually lands on that record (the bit changing and the allocator agreeing are
+different claims), that `IN_USE` is cleared — read raw, since
+`read_mft_record_io` refuses a record whose `IN_USE` is clear, which is the
+state under test — and that the parent names no file whose creation failed.
+
+The `clear_in_use: bool` parameter became `NewRecordState::{BitmapOnly,
+RecordWritten}`. At the call sites it read as bare `false` and `true`, and the
+distinction is not obvious: between taking the bitmap bit and writing the record
+there is a window where the record on disk is still whatever was there before,
+and clearing `IN_USE` in it would be editing a record this create never wrote.
 
 ### C1 — two adjacent write entry points meant opposite things by `len == 0` — **documented and pinned**
 
