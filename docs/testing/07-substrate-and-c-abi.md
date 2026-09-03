@@ -16,7 +16,7 @@
                                 │  BlockDevice trait
         ┌───────────────────────▼───────────────────────┐
         │   am-fs-core substrate                          │   ← tested by
-        │   FileDevice · CallbackDevice · CachingDevice    │     vendor/rust-fs-core
+        │   FileDevice · CallbackDevice · CachingDevice    │     ../rust-fs-core
         │   · FFI slices · LRU cache                       │
         └─────────────────────────────────────────────────┘
 ```
@@ -26,12 +26,12 @@
 ## The substrate: `am-fs-core` (88 tests)
 
 Every read and write the NTFS driver performs goes through the `am-fs-core`
-block-device abstraction (vendored at `vendor/rust-fs-core`, shared with sister
+block-device abstraction (vendored at `../rust-fs-core`, shared with sister
 filesystem crates). If this layer mis-reads a block or mis-caches a write, the
 NTFS code above it is working from corrupted bytes. So it has its own 88-test
 suite, independent of NTFS.
 
-| Component | What it is | Key tests (`vendor/rust-fs-core/tests/`) |
+| Component | What it is | Key tests (`../rust-fs-core/tests/`) |
 |---|---|---|
 | `BlockRead` / `BlockDevice` | the core read / read-write traits, plus `Arc`/`Box` forwarding | `block_forwarding.rs` |
 | `FileDevice` | backed by `std::fs::File`; optional read-only | `cache.rs`, `file_device_edge_cases.rs` |

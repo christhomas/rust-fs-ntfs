@@ -2531,7 +2531,7 @@ For each pending scenario it:
 4. Parses chkdsk verdict from the log (using `strings` to decode
    PowerShell-tee'd UTF-16-LE) and tags status.
 5. Updates the work-list status via
-   `vendor/fs-test-harness/scripts/update-scenario-status.sh`.
+   `../fs-test-harness/scripts/update-scenario-status.sh`.
 
 ### 8.4 SSH bypass for broken ssh-agent
 
@@ -2550,11 +2550,11 @@ Survives ssh-agent outages.
 
 ### 8.5 Helper scripts
 
-- [`vendor/fs-test-harness/scripts/claim-scenario.sh`](../vendor/fs-test-harness/scripts/claim-scenario.sh) — atomic
+- [`../fs-test-harness/scripts/claim-scenario.sh`](../../fs-test-harness/scripts/claim-scenario.sh) — atomic
   claim of a pending scenario by an agent (vendored from `fs-test-harness`).
-- [`vendor/fs-test-harness/scripts/update-scenario-status.sh`](../vendor/fs-test-harness/scripts/update-scenario-status.sh)
+- [`../fs-test-harness/scripts/update-scenario-status.sh`](../../fs-test-harness/scripts/update-scenario-status.sh)
   — set the status of a scenario after the runner finishes.
-- [`vendor/fs-test-harness/scripts/reset-non-passed.sh`](../vendor/fs-test-harness/scripts/reset-non-passed.sh) —
+- [`../fs-test-harness/scripts/reset-non-passed.sh`](../../fs-test-harness/scripts/reset-non-passed.sh) —
   idempotent helper for the multi-pass loop: resets every scenario
   whose status doesn't begin with `passed-` back to `pending`.
 

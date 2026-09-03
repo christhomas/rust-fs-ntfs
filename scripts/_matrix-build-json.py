@@ -61,7 +61,7 @@ def main():
         sys.exit(f"binary not built: {binary_path}")
     binary_sha = run(f"sha256sum {binary_path} | awk '{{print $1}}'")
     matrix_json_sha = run(f"sha256sum {repo}/test-matrix.json | awk '{{print $1}}'")
-    harness_sha = run(f"git -C {repo}/vendor/fs-test-harness rev-parse HEAD")
+    harness_sha = run(f"git -C {repo}/../fs-test-harness rev-parse HEAD")
 
     vm = json.loads(Path(args.vm_info).read_text())
     verdicts = json.loads(Path(args.verdicts).read_text())
