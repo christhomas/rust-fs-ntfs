@@ -24,6 +24,34 @@ vars:
   TRIPLE: aarch64-apple-darwin
   LIBNAME: fs_ntfs
 
+  # THE SIBLING PINS. One declaration each, and the only one.
+  #
+  # These used to live in three places at once: .gitmodules held the
+  # commit, the CI workflows re-stated it in a `git clone --branch`, and
+  # the README told a human a third version of the same thing. Three
+  # copies of one fact is three chances to disagree, and they did.
+  #
+  # FS_CORE_REF MUST MATCH Cargo.lock, AND MATCH WHAT THE OTHER CRATES
+  # EXPECT — those are two constraints, and the second one is why this
+  # says 0.2.3 rather than the 0.2.2 this crate used to pin.
+  #
+  # The sibling at ../rust-fs-core is ONE checkout shared by every crate
+  # in the family. Eight of them (ext4, btrfs, xfs, erofs, squashfs,
+  # qcow2, vhd, partitions) already pin 0.2.3. Checking the sibling out
+  # at 0.2.2 to suit this crate alone would build the other eight
+  # against a library older than their locks claim.
+  #
+  # So joining the sibling model is NOT a version-neutral refactor for
+  # this crate: it requires converging on the version the family already
+  # agreed. That is the cost of one shared copy, and it is the same
+  # property that makes drift impossible rather than merely detectable.
+  FS_CORE_REF: v0.2.3
+
+  # The Windows-VM test harness. Not a cargo dependency — a tool this
+  # repo's scripts invoke — so nothing but this pin governs which
+  # version runs the matrix.
+  HARNESS_REF: v3.11.0
+
 tasks:
   staticlib:
     desc: Build the static library and its headers into this crate's dist/
@@ -72,6 +100,99 @@ tasks:
       # Shipping fs_core.h is ours: the header we emit #includes it, so a
       # consumer handed only fs_ntfs.h cannot compile.
       - 'cp "vendor/rust-fs-core/include/fs_core.h" "{{.OUT}}/include/fs_core.h"'
+
+  siblings:
+    desc: Check out the sibling repos this crate builds against, at their pinned tags
+    # WHY THIS EXISTS, AND WHY IT IS NOT `git submodule update`.
+    #
+    # This crate needs two other repos: am-fs-core (a cargo path dep at
+    # `../rust-fs-core`) and fs-test-harness (a tool the matrix scripts
+    # invoke). Both were git submodules under vendor/, and submodules
+    # turned out to be the wrong shape for a constellation of crates
+    # that depend on each other.
+    #
+    # The reason is that a submodule pins a copy PER CONSUMER. Measured
+    # across this workspace, rust-fs-core existed as FIVE checkouts at
+    # FOUR different versions — v0.2.3-3, v0.2.2 twice, v0.2.1 and
+    # v0.1.0-3 — and nothing reported the divergence, because each repo
+    # was internally consistent with its own pin. One of them had even
+    # drifted from its own lockfile.
+    #
+    # A sibling checkout has one copy on disk, so that class of drift is
+    # not merely detected, it is unrepresentable. The cost is real and
+    # worth stating: every repo on this machine shares that one copy, so
+    # they must agree on the version at any given moment. For a family
+    # that releases together, agreeing is the point. For a repo that
+    # genuinely needs an older line, a submodule is still the better
+    # tool — which is why the dormant win-driver repos keep theirs.
+    #
+    # IT REFUSES TO TOUCH A DIRTY SIBLING. A checkout is destructive to
+    # uncommitted work, and a task that runs in CI must not be a task
+    # that eats a colleague's afternoon when they run it locally. It
+    # reports and fails instead; the human decides.
+    cmds:
+      - |
+        set -eu
+        # name<TAB>url<TAB>ref
+        printf '%s\t%s\t%s\n' \
+          rust-fs-core    https://github.com/antimatter-studios/rust-fs-core.git    '{{.FS_CORE_REF}}' \
+          fs-test-harness https://github.com/antimatter-studios/fs-test-harness.git '{{.HARNESS_REF}}' \
+        | while IFS="$(printf '\t')" read -r name url ref; do
+            dir="../$name"
+
+            if [ ! -d "$dir/.git" ]; then
+              echo "siblings: cloning $name at $ref"
+              git clone --quiet --branch "$ref" "$url" "$dir"
+              continue
+            fi
+
+            # Uncommitted work in the sibling: say so and stop. Anything
+            # else here silently discards someone's changes.
+            if [ -n "$(git -C "$dir" status --porcelain)" ]; then
+              echo "siblings: $name has uncommitted changes — refusing to move it." >&2
+              echo "          Commit or stash them in $dir, then re-run." >&2
+              exit 1
+            fi
+
+            # Already there? Say nothing. This task runs before every
+            # build, and a line of output per sibling per invocation is
+            # noise that trains people to stop reading it.
+            if [ "$(git -C "$dir" rev-parse HEAD)" = "$(git -C "$dir" rev-parse "$ref^{commit}" 2>/dev/null || echo x)" ]; then
+              continue
+            fi
+
+            echo "siblings: moving $name to $ref"
+            git -C "$dir" fetch --quiet --tags origin
+            git -C "$dir" checkout --quiet "$ref"
+          done
+
+  siblings:check:
+    desc: Report whether the siblings are at their pinned tags, changing nothing
+    # The read-only half, for CI and for answering "why does this build
+    # differ from mine". `siblings` moves things; this one never does,
+    # so it is safe to run against a working tree you care about.
+    silent: true
+    cmds:
+      - |
+        set -eu
+        printf '%s\t%s\n' \
+          rust-fs-core    '{{.FS_CORE_REF}}' \
+          fs-test-harness '{{.HARNESS_REF}}' \
+        | while IFS="$(printf '\t')" read -r name ref; do
+            dir="../$name"
+            if [ ! -d "$dir/.git" ]; then
+              printf '  %-16s MISSING (want %s)\n' "$name" "$ref"
+              continue
+            fi
+            have="$(git -C "$dir" describe --tags --always 2>/dev/null || echo '?')"
+            dirty=""
+            [ -n "$(git -C "$dir" status --porcelain)" ] && dirty=" [dirty]"
+            if [ "$(git -C "$dir" rev-parse HEAD)" = "$(git -C "$dir" rev-parse "$ref^{commit}" 2>/dev/null || echo x)" ]; then
+              printf '  %-16s ok   %s%s\n' "$name" "$have" "$dirty"
+            else
+              printf '  %-16s DRIFT have=%s want=%s%s\n' "$name" "$have" "$ref" "$dirty"
+            fi
+          done
 
   lint:
     desc: Formatting and clippy, exactly as CI runs them
