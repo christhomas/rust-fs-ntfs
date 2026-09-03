@@ -10,7 +10,7 @@ a corroborated bug-fix loop, so that any regression in our writer or
 reader is caught **before** it lands on `main`.
 
 > **Current matrix entry point** (2026-05-24): `bash scripts/matrix-baseline.sh`
-> drives the full 42-scenario sweep via the `vendor/fs-test-harness/`
+> drives the full 42-scenario sweep via the `../fs-test-harness/`
 > submodule against the VM described in `.test-env`. See
 > [`docs/status.md` Current matrix state](status.md) for the per-branch
 > sealed-run table. Per-bug history lives in
@@ -86,7 +86,7 @@ the next scenario. Never wait for a human to confirm.
 ## Connecting to the Windows VM
 
 All Windows-side execution goes through `scripts/matrix-baseline.sh`
-and the dispatcher under `vendor/fs-test-harness/scripts/`. Agents do
+and the dispatcher under `../fs-test-harness/scripts/`. Agents do
 NOT invent their own SSH commands or interact with the VM directly
 outside of these scripts.
 
@@ -146,7 +146,7 @@ A volume is "valid" when ALL of:
   identical results to reopening on the other host.
 
 The current sealed runs (42/42 ok) prove this for the matrix
-scenarios in `vendor/fs-test-harness/test-matrix.json`. See
+scenarios in `../fs-test-harness/test-matrix.json`. See
 [`docs/status.md` Current matrix state](status.md) for the per-branch
 seal table.
 
@@ -458,7 +458,7 @@ VM unreachable or a depended-upon tool missing.
 
 The matrix is "done" when **all of**:
 
-- Every scenario in `vendor/fs-test-harness/test-matrix.json` has
+- Every scenario in `../fs-test-harness/test-matrix.json` has
   status `passed-*` (currently 42/42 on staging-2 — see status.md).
 - All Linux tests still pass on the merged main.
 - `chkdsk readonly = 0` across the matrix (already achieved; `/scan`
@@ -543,13 +543,13 @@ of the run.
        -b "agent/${AGENT_SESSION}" staging-2  # or current integration tip
    cd ".claude/worktrees/${AGENT_SESSION}"
    bash scripts/install-hooks.sh             # pre-commit guards
-   git submodule update --init --recursive   # harness submodule
+   chore siblings                            # harness + fs-core siblings
    ```
 
 4. **Claim a scenario** from the harness work list:
 
    ```sh
-   bash vendor/fs-test-harness/scripts/claim-scenario.sh "$AGENT_SESSION"
+   bash ../fs-test-harness/scripts/claim-scenario.sh "$AGENT_SESSION"
    ```
 
 5. **Run the scenario** end-to-end. If a step fails, enter the

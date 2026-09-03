@@ -165,7 +165,7 @@ to look:
 | operation_sequence string (v1) | `recipe[]` array (v2) | The v1 arrow-string `mac:format -> win:chkdsk(readonly,/scan)` becomes a v2 recipe of typed steps with `host: "host" / "vm"` per step. |
 
 Cross-driver vocabulary index lives in
-[`vendor/fs-test-harness/docs/vocabulary.md`](vendor/fs-test-harness/docs/vocabulary.md);
+[`../fs-test-harness/docs/vocabulary.md`](../fs-test-harness/docs/vocabulary.md);
 contributor-facing translation rules + bloat-prevention conventions
 are documented there.
 
@@ -186,7 +186,7 @@ are documented there.
   runtime.
 - **chkdsk validation:** the `test-matrix.json` matrix runs through
   the vendored `fs-test-harness` runner (see
-  `vendor/fs-test-harness/scripts/test-windows-matrix.sh`), which on Windows
+  `../fs-test-harness/scripts/test-windows-matrix.sh`), which on Windows
   shells out to `rust-ntfs format`, Microsoft's `format.com`, and
   Microsoft's `chkdsk` to validate every formatted image. On non-
   Windows hosts the matrix tests are reported as ignored. Microsoft's
@@ -198,7 +198,7 @@ are documented there.
   enumerate, write, repeat-mount stability cycles) through a single
   declarative JSON contract; results from a Windows VM stream back
   over SSH. See `harness.toml` for the op declarations and
-  `vendor/fs-test-harness/` for the runner.
+  `../fs-test-harness/` for the runner.
 - **Fuzz:** `fuzz/` carries cargo-fuzz harnesses for the three
   byte-decoders most likely to regress (data-runs, attribute headers,
   INDX block headers).
@@ -312,6 +312,9 @@ history available via `git log` in the repo.
   sibling path. Clone with `--recurse-submodules` (or
   `git submodule update --init --recursive`) and the crate is
   self-buildable — no side-by-side checkout required.
+  *(Superseded 2026-09-04: the submodules are gone and the sibling
+  is back, pinned by `chore siblings`. Left as written because it
+  records what was true then.)*
 - `fix(facade)`: `Filesystem::volume_info()` now reads the real
   `$VOLUME_INFORMATION` bytes via upstream `ntfs.volume_info()`
   instead of returning a hardcoded `(3, 1)`. Fresh-format volumes
@@ -469,19 +472,19 @@ Drivers:
 - `scripts/setup-windows-vm.sh` / `.ps1` — bootstrap a Windows VM
   with the toolchain needed to run `format.com` / `chkdsk` plus
   `vhd_tool` for the wrapper-image lifecycle.
-- `vendor/fs-test-harness/scripts/test-windows-matrix.sh` — orchestrator that
+- `../fs-test-harness/scripts/test-windows-matrix.sh` — orchestrator that
   tars the consumer source, SSHes to the VM, invokes the harness's
   `run-matrix` runner, and pulls per-scenario diag back to the Mac.
-- `vendor/fs-test-harness/scripts/claim-scenario.sh`,
-  `vendor/fs-test-harness/scripts/update-scenario-status.sh`,
-  `vendor/fs-test-harness/scripts/reset-non-passed.sh` — generic, FS-agnostic
+- `../fs-test-harness/scripts/claim-scenario.sh`,
+  `../fs-test-harness/scripts/update-scenario-status.sh`,
+  `../fs-test-harness/scripts/reset-non-passed.sh` — generic, FS-agnostic
   state-machine over `test-matrix.json`. Vendored from
   `antimatter-studios/fs-test-harness`.
 
 Agent coordination rules: see
 [`docs/multi-agent-test-protocol.md`](docs/multi-agent-test-protocol.md)
 (historical — describes the v1 matrix flow; some script names have
-moved into `vendor/fs-test-harness/scripts/`).
+moved into `../fs-test-harness/scripts/`).
 
 ### Pre-commit hooks
 

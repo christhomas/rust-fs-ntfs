@@ -79,7 +79,7 @@ tasks:
       # fs_core.h is a source of ours because we ship it (see the cp below).
       # THIS PATH AND THE cp MUST AGREE, and nothing checks that they do —
       # it is the same path Cargo.toml resolves am-fs-core from.
-      - 'vendor/rust-fs-core/include/fs_core.h'
+      - '../rust-fs-core/include/fs_core.h'
 
     # Templated, which is fine here where it is not fine above: the check
     # renders these correctly, and every entry is an exact path rather than a
@@ -99,7 +99,7 @@ tasks:
       - 'cp include/{{.LIBNAME}}.h "{{.OUT}}/include/{{.LIBNAME}}.h"'
       # Shipping fs_core.h is ours: the header we emit #includes it, so a
       # consumer handed only fs_ntfs.h cannot compile.
-      - 'cp "vendor/rust-fs-core/include/fs_core.h" "{{.OUT}}/include/fs_core.h"'
+      - 'cp "../rust-fs-core/include/fs_core.h" "{{.OUT}}/include/fs_core.h"'
 
   siblings:
     desc: Check out the sibling repos this crate builds against, at their pinned tags
@@ -175,6 +175,10 @@ tasks:
     cmds:
       - |
         set -eu
+        # The `while` below runs in a subshell (right-hand side of a
+        # pipe), so a variable set inside it does not survive. A file
+        # does.
+        flag="$(mktemp)"
         printf '%s\t%s\n' \
           rust-fs-core    '{{.FS_CORE_REF}}' \
           fs-test-harness '{{.HARNESS_REF}}' \
@@ -182,6 +186,7 @@ tasks:
             dir="../$name"
             if [ ! -d "$dir/.git" ]; then
               printf '  %-16s MISSING (want %s)\n' "$name" "$ref"
+              echo drift >> "$flag"
               continue
             fi
             have="$(git -C "$dir" describe --tags --always 2>/dev/null || echo '?')"
@@ -191,8 +196,20 @@ tasks:
               printf '  %-16s ok   %s%s\n' "$name" "$have" "$dirty"
             else
               printf '  %-16s DRIFT have=%s want=%s%s\n' "$name" "$have" "$ref" "$dirty"
+              echo drift >> "$flag"
             fi
           done
+
+        # Non-zero on drift, so this is a GATE and not merely a report.
+        # `build` and `test` depend on it: a crate compiled against a
+        # sibling checkout nobody pinned is a build nobody can
+        # reproduce, and compile time is when you want to hear about it.
+        if [ -s "$flag" ]; then
+          rm -f "$flag"
+          echo "siblings: run 'chore siblings' to move them to their pinned tags." >&2
+          exit 1
+        fi
+        rm -f "$flag"
 
   lint:
     desc: Formatting and clippy, exactly as CI runs them
@@ -209,10 +226,15 @@ tasks:
 
   build:
     desc: Debug build
+    # cargo already BUILDS the sibling — it is a path dep. What cargo
+    # cannot know is whether that checkout is the one this crate
+    # intends, which is what the gate answers.
+    deps: [siblings:check]
     cmds: ['cargo build']
 
   test:
     desc: Test suite
+    deps: [siblings:check]
     cmds: ['cargo test']
 
   clean:

@@ -44,8 +44,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive  # am-fs-core path dep at vendor/rust-fs-core
+      - name: check out sibling repos
+        # Replaces `submodules: recursive`. The pins live in chores.yml,
+        # so CI and a developer's machine read the same declaration
+        # instead of restating it in YAML.
+        shell: bash
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/antimatter-studios/chore/main/install.sh | bash -s -- -b /usr/local/bin
+          chore siblings
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -104,8 +110,14 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: check out sibling repos
+        # Replaces `submodules: recursive`. The pins live in chores.yml,
+        # so CI and a developer's machine read the same declaration
+        # instead of restating it in YAML.
+        shell: bash
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/antimatter-studios/chore/main/install.sh | bash -s -- -b /usr/local/bin
+          chore siblings
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -677,8 +689,14 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: check out sibling repos
+        # Replaces `submodules: recursive`. The pins live in chores.yml,
+        # so CI and a developer's machine read the same declaration
+        # instead of restating it in YAML.
+        shell: bash
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/antimatter-studios/chore/main/install.sh | bash -s -- -b /usr/local/bin
+          chore siblings
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
