@@ -13,11 +13,11 @@ dependencies = [
 
 [[package]]
 name = "am-fs-core"
-version = "0.2.3"
+version = "0.2.4"
 
 [[package]]
 name = "am-fs-ntfs"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "am-fs-core",
  "criterion",
