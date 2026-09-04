@@ -53,20 +53,42 @@ jobs:
         # An unpinned installer would make this workflow's behaviour
         # depend on whatever chore shipped that morning, which is the
         # opposite of what pinning the siblings is for.
+        #
+        # WINDOWS RUNNERS FALL BACK TO PLAIN CLONES. chore publishes
+        # darwin and linux builds only, and `uname -s` under Git Bash
+        # reports MINGW64_NT-*, so there is nothing to install. The
+        # fallback re-states the pins, which is exactly the duplication
+        # `chore siblings` exists to remove -- so it reads them OUT OF
+        # chores.yml rather than hardcoding them, and the single
+        # declaration still holds.
         shell: bash
         run: |
           set -euo pipefail
-          ver=0.9.0
+          pin() { sed -n "s/^  $1: *//p" chores.yml | tr -d '\r'; }
+
           case "$(uname -s)-$(uname -m)" in
-            Linux-x86_64)   asset="chore-$ver-linux-x86_64.tar.gz" ;;
-            Linux-aarch64)  asset="chore-$ver-linux-arm64.tar.gz" ;;
-            Darwin-arm64)   asset="chore-$ver-darwin-arm64.tar.gz" ;;
-            Darwin-x86_64)  asset="chore-$ver-darwin-x86_64.tar.gz" ;;
-            *) echo "no chore build for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+            Linux-x86_64)   asset="chore-0.9.0-linux-x86_64.tar.gz" ;;
+            Linux-aarch64)  asset="chore-0.9.0-linux-arm64.tar.gz" ;;
+            Darwin-arm64)   asset="chore-0.9.0-darwin-arm64.tar.gz" ;;
+            Darwin-x86_64)  asset="chore-0.9.0-darwin-x86_64.tar.gz" ;;
+            *)              asset="" ;;   # Windows: no chore build
           esac
-          curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v$ver/$asset" \
-            | sudo tar xz -C /usr/local/bin chore
-          chore siblings
+
+          if [ -n "$asset" ]; then
+            curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v0.9.0/$asset" \
+              | sudo tar xz -C /usr/local/bin chore
+            chore siblings
+          else
+            core_ref="$(pin FS_CORE_REF)"
+            harness_ref="$(pin HARNESS_REF)"
+            echo "chore has no build for $(uname -s); cloning siblings directly"
+            echo "  am-fs-core      $core_ref"
+            echo "  fs-test-harness $harness_ref"
+            git clone --quiet --depth 1 --branch "$core_ref" \
+              https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+            git clone --quiet --depth 1 --branch "$harness_ref" \
+              https://github.com/antimatter-studios/fs-test-harness.git ../fs-test-harness
+          fi
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -134,20 +156,42 @@ jobs:
         # An unpinned installer would make this workflow's behaviour
         # depend on whatever chore shipped that morning, which is the
         # opposite of what pinning the siblings is for.
+        #
+        # WINDOWS RUNNERS FALL BACK TO PLAIN CLONES. chore publishes
+        # darwin and linux builds only, and `uname -s` under Git Bash
+        # reports MINGW64_NT-*, so there is nothing to install. The
+        # fallback re-states the pins, which is exactly the duplication
+        # `chore siblings` exists to remove -- so it reads them OUT OF
+        # chores.yml rather than hardcoding them, and the single
+        # declaration still holds.
         shell: bash
         run: |
           set -euo pipefail
-          ver=0.9.0
+          pin() { sed -n "s/^  $1: *//p" chores.yml | tr -d '\r'; }
+
           case "$(uname -s)-$(uname -m)" in
-            Linux-x86_64)   asset="chore-$ver-linux-x86_64.tar.gz" ;;
-            Linux-aarch64)  asset="chore-$ver-linux-arm64.tar.gz" ;;
-            Darwin-arm64)   asset="chore-$ver-darwin-arm64.tar.gz" ;;
-            Darwin-x86_64)  asset="chore-$ver-darwin-x86_64.tar.gz" ;;
-            *) echo "no chore build for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+            Linux-x86_64)   asset="chore-0.9.0-linux-x86_64.tar.gz" ;;
+            Linux-aarch64)  asset="chore-0.9.0-linux-arm64.tar.gz" ;;
+            Darwin-arm64)   asset="chore-0.9.0-darwin-arm64.tar.gz" ;;
+            Darwin-x86_64)  asset="chore-0.9.0-darwin-x86_64.tar.gz" ;;
+            *)              asset="" ;;   # Windows: no chore build
           esac
-          curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v$ver/$asset" \
-            | sudo tar xz -C /usr/local/bin chore
-          chore siblings
+
+          if [ -n "$asset" ]; then
+            curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v0.9.0/$asset" \
+              | sudo tar xz -C /usr/local/bin chore
+            chore siblings
+          else
+            core_ref="$(pin FS_CORE_REF)"
+            harness_ref="$(pin HARNESS_REF)"
+            echo "chore has no build for $(uname -s); cloning siblings directly"
+            echo "  am-fs-core      $core_ref"
+            echo "  fs-test-harness $harness_ref"
+            git clone --quiet --depth 1 --branch "$core_ref" \
+              https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+            git clone --quiet --depth 1 --branch "$harness_ref" \
+              https://github.com/antimatter-studios/fs-test-harness.git ../fs-test-harness
+          fi
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -728,20 +772,42 @@ jobs:
         # An unpinned installer would make this workflow's behaviour
         # depend on whatever chore shipped that morning, which is the
         # opposite of what pinning the siblings is for.
+        #
+        # WINDOWS RUNNERS FALL BACK TO PLAIN CLONES. chore publishes
+        # darwin and linux builds only, and `uname -s` under Git Bash
+        # reports MINGW64_NT-*, so there is nothing to install. The
+        # fallback re-states the pins, which is exactly the duplication
+        # `chore siblings` exists to remove -- so it reads them OUT OF
+        # chores.yml rather than hardcoding them, and the single
+        # declaration still holds.
         shell: bash
         run: |
           set -euo pipefail
-          ver=0.9.0
+          pin() { sed -n "s/^  $1: *//p" chores.yml | tr -d '\r'; }
+
           case "$(uname -s)-$(uname -m)" in
-            Linux-x86_64)   asset="chore-$ver-linux-x86_64.tar.gz" ;;
-            Linux-aarch64)  asset="chore-$ver-linux-arm64.tar.gz" ;;
-            Darwin-arm64)   asset="chore-$ver-darwin-arm64.tar.gz" ;;
-            Darwin-x86_64)  asset="chore-$ver-darwin-x86_64.tar.gz" ;;
-            *) echo "no chore build for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+            Linux-x86_64)   asset="chore-0.9.0-linux-x86_64.tar.gz" ;;
+            Linux-aarch64)  asset="chore-0.9.0-linux-arm64.tar.gz" ;;
+            Darwin-arm64)   asset="chore-0.9.0-darwin-arm64.tar.gz" ;;
+            Darwin-x86_64)  asset="chore-0.9.0-darwin-x86_64.tar.gz" ;;
+            *)              asset="" ;;   # Windows: no chore build
           esac
-          curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v$ver/$asset" \
-            | sudo tar xz -C /usr/local/bin chore
-          chore siblings
+
+          if [ -n "$asset" ]; then
+            curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v0.9.0/$asset" \
+              | sudo tar xz -C /usr/local/bin chore
+            chore siblings
+          else
+            core_ref="$(pin FS_CORE_REF)"
+            harness_ref="$(pin HARNESS_REF)"
+            echo "chore has no build for $(uname -s); cloning siblings directly"
+            echo "  am-fs-core      $core_ref"
+            echo "  fs-test-harness $harness_ref"
+            git clone --quiet --depth 1 --branch "$core_ref" \
+              https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+            git clone --quiet --depth 1 --branch "$harness_ref" \
+              https://github.com/antimatter-studios/fs-test-harness.git ../fs-test-harness
+          fi
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
