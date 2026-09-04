@@ -25,6 +25,14 @@ crate-type = ["staticlib", "rlib"]
 name = "rust-ntfs"
 path = "src/bin/rust_ntfs/main.rs"
 
+# The formatter under the name the convention uses. Shares
+# rust_ntfs/format.rs with the subcommand above via #[path], so there is
+# one implementation. Underscore because cargo rejects a dot in a target
+# name; the release job packages it as `mkfs.ntfs`.
+[[bin]]
+name = "mkfs_ntfs"
+path = "src/bin/mkfs_ntfs.rs"
+
 [dependencies]
 # `log` is the de-facto standard logging facade. Consumers (FSKit
 # extension, CLI, integration tests) install whichever subscriber
