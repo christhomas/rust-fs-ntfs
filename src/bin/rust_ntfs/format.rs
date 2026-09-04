@@ -16,8 +16,12 @@ use fs_ntfs::mkfs::format_filesystem;
 use std::path::Path;
 use std::process::ExitCode;
 
+/// Usage text. `{PROG}` stands in for however the tool was invoked --
+/// two binaries share this file, `rust-ntfs format` and `mkfs.ntfs`,
+/// and a message naming the wrong one sends the reader to a command
+/// they did not run.
 const USAGE: &str = "\
-Usage: rust-ntfs format [options] <device>
+Usage: {PROG} [options] <device>
 
 Options:
   -L, --label <label>      Volume label (max 32 UTF-16 code units after encode).
@@ -58,22 +62,28 @@ struct Opts {
     device: Option<String>,
 }
 
-pub fn run(args: Vec<String>) -> ExitCode {
-    match run_inner(args) {
+/// `prog` is the name this invocation should call itself by, in usage
+/// and in every message.
+fn usage(prog: &str) -> String {
+    USAGE.replace("{PROG}", prog)
+}
+
+pub fn run(args: Vec<String>, prog: &str) -> ExitCode {
+    match run_inner(args, prog) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
-            eprintln!("rust-ntfs format: {msg}");
+            eprintln!("{prog}: {msg}");
             ExitCode::FAILURE
         }
     }
 }
 
-fn run_inner(args: Vec<String>) -> Result<(), String> {
-    let opts = parse_args(args)?;
+fn run_inner(args: Vec<String>, prog: &str) -> Result<(), String> {
+    let opts = parse_args(args, prog)?;
     let device = opts
         .device
         .as_deref()
-        .ok_or_else(|| format!("missing positional <device> argument\n\n{USAGE}"))?;
+        .ok_or_else(|| format!("missing positional <device> argument\n\n{}", usage(prog)))?;
 
     let cluster_size = opts.cluster_size.unwrap_or(4096);
     let mft_record_size = opts.mft_record_size.unwrap_or(4096);
@@ -99,7 +109,7 @@ fn run_inner(args: Vec<String>) -> Result<(), String> {
                 }
                 if !opts.quiet {
                     eprintln!(
-                        "rust-ntfs format: --create-size: {device} already exists ({} bytes); leaving as-is",
+                        "{prog}: --create-size: {device} already exists ({} bytes); leaving as-is",
                         meta.len()
                     );
                 }
@@ -111,7 +121,7 @@ fn run_inner(args: Vec<String>) -> Result<(), String> {
                     .map_err(|e| format!("--create-size: set_len({n}) on {device}: {e}"))?;
                 drop(f);
                 if !opts.quiet {
-                    eprintln!("rust-ntfs format: --create-size: created {device} ({n} bytes)");
+                    eprintln!("{prog}: --create-size: created {device} ({n} bytes)");
                 }
             }
         }
@@ -132,7 +142,7 @@ fn run_inner(args: Vec<String>) -> Result<(), String> {
 
     if !opts.quiet {
         eprintln!(
-            "rust-ntfs format: formatting {device} ({size} bytes, cluster_size={cluster_size}, mft_record_size={mft_record_size}{}{})",
+            "{prog}: formatting {device} ({size} bytes, cluster_size={cluster_size}, mft_record_size={mft_record_size}{}{})",
             if opts.quick { ", quick" } else { "" },
             if opts.dry_run { ", dry-run" } else { "" }
         );
@@ -140,7 +150,7 @@ fn run_inner(args: Vec<String>) -> Result<(), String> {
 
     if opts.dry_run {
         if !opts.quiet {
-            eprintln!("rust-ntfs format: dry-run — no writes performed");
+            eprintln!("{prog}: dry-run — no writes performed");
         }
         let _ = (opts.force, opts.quick);
         return Ok(());
@@ -162,19 +172,19 @@ fn run_inner(args: Vec<String>) -> Result<(), String> {
     }
 
     if !opts.quiet {
-        eprintln!("rust-ntfs format: {device} formatted successfully");
+        eprintln!("{prog}: {device} formatted successfully");
     }
     Ok(())
 }
 
-fn parse_args(args: Vec<String>) -> Result<Opts, String> {
+fn parse_args(args: Vec<String>, prog: &str) -> Result<Opts, String> {
     let mut opts = Opts::default();
     let mut iter = args.into_iter();
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "-h" | "--help" => {
-                print!("{USAGE}");
+                print!("{}", usage(prog));
                 std::process::exit(0);
             }
             "-L" | "--label" => {
@@ -218,7 +228,7 @@ fn parse_args(args: Vec<String>) -> Result<Opts, String> {
                 opts.create_size = Some(parse_size(&v)?);
             }
             other if other.starts_with('-') => {
-                return Err(format!("unknown flag: {other}\n\n{USAGE}"));
+                return Err(format!("unknown flag: {other}\n\n{}", usage(prog)));
             }
             _ => {
                 if opts.device.is_some() {

@@ -67,7 +67,7 @@ fn main() -> ExitCode {
     };
     let rest: Vec<String> = args.collect();
     match subcmd.as_str() {
-        "format" => format::run(rest),
+        "format" => format::run(rest, "rust-ntfs format"),
         "ls" => ls::run(rest),
         "touch" => touch::run(rest),
         "mkdir" => mkdir::run(rest),
