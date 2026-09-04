@@ -230,6 +230,17 @@ are documented there.
 Reverse chronological highlights from `git log`. Full per-commit
 history available via `git log` in the repo.
 
+### 2026-09-04 — 0.3.5
+
+- Dropped the git submodules: `am-fs-core` and the Windows test harness
+  now resolve from sibling checkouts pinned by `chore siblings`, matching
+  the rest of the family. This was the last repo still using submodules.
+- The lockfile moves `am-fs-core` 0.2.2 → 0.2.4 — it had been two
+  releases behind, which is the drift a per-consumer submodule pin hides.
+- Covered the create rollback: disabling either half of
+  `undo_new_record_io` had left the suite green. Four tests now pin it.
+- `clear_in_use: bool` → `NewRecordState::{BitmapOnly, RecordWritten}`.
+
 ### 2026-08-29 — 0.3.4
 
 - The resident `$MFT:$Bitmap` now reads back what it just wrote. The

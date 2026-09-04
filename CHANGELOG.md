@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-09-04
+
+### Changed
+
+- **This crate no longer uses git submodules.** `am-fs-core` resolves
+  from the sibling checkout at `../rust-fs-core` and the Windows test
+  harness from `../fs-test-harness`, pinned by `chore siblings` — which
+  is how the other thirteen crates in the family have always worked.
+  This repo was the last one out of step.
+
+  A submodule pins a copy per consumer, so drift is silent: measured
+  across the workspace, `rust-fs-core` existed as five checkouts at four
+  different versions and nothing reported it. A shared sibling has one
+  copy, which makes that class of drift unrepresentable rather than
+  merely detectable.
+
+- **The lockfile moves `am-fs-core` 0.2.2 → 0.2.4.** It had been pinning
+  a version two releases behind the rest of the family — exactly the
+  drift the submodule made invisible.
+
+- `chore build` and `chore test` now verify the siblings are at their
+  pinned tags before compiling, and fail with both versions named if
+  they are not.
+
+### Fixes
+
+- **The create rollback is covered.** `undo_new_record_io` was used at
+  six sites but had no test: disabling either half — clearing `IN_USE`,
+  or freeing the `$MFT:$Bitmap` bit — left the whole suite green. Four
+  tests now cover it. Without the rollback a failed create leaves an MFT
+  record allocated and marked in use that no directory names, which is
+  the orphan record chkdsk reports.
+
+- `clear_in_use: bool` became `NewRecordState::{BitmapOnly, RecordWritten}`.
+  The distinction is not obvious from a boolean: between taking the
+  bitmap bit and writing the record there is a window where the record
+  on disk is still whatever was there before, and clearing `IN_USE` in
+  it would be editing a record this create never wrote.
+
 ## [0.3.4] — 2026-08-29
 
 ### Fixed
