@@ -39,7 +39,7 @@ grep -rhc '#\[test\]' src/*.rs | paste -sd+ - | bc        # → 525
 
 ```bash
 cargo test -p am-fs-core
-grep -rhc '#\[test\]' vendor/rust-fs-core/tests/*.rs | paste -sd+ - | bc   # → 88
+grep -rhc '#\[test\]' ../rust-fs-core/tests/*.rs | paste -sd+ - | bc   # → 88
 ```
 
 ---
@@ -134,7 +134,7 @@ an exact Windows build.
 ```bash
 echo "unit:        $(grep -rhc '#\[test\]' src/*.rs                  | paste -sd+ - | bc)"   # 525
 echo "integration: $(grep -rhc '#\[test\]' tests/*.rs                | paste -sd+ - | bc)"   # 645
-echo "substrate:   $(grep -rhc '#\[test\]' vendor/rust-fs-core/tests/*.rs | paste -sd+ - | bc)"  # 88
+echo "substrate:   $(grep -rhc '#\[test\]' ../rust-fs-core/tests/*.rs | paste -sd+ - | bc)"  # 88
 echo "test files:  $(ls tests/*.rs | wc -l)"                                                  # 89
 echo "fuzz:        $(ls fuzz/fuzz_targets/*.rs | wc -l)"                                       # 3
 echo "scenarios:   $(python3 -c "import json;print(len(json.load(open('test-matrix.json'))['scenarios']))")"  # 44

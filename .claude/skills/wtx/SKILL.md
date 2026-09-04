@@ -166,7 +166,7 @@ loop is:
 
 | Script | What it does |
 |---|---|
-| `scripts/run-matrix.sh` | Underlying harness wrapper (`vendor/fs-test-harness`). Filters by substring. |
+| `scripts/run-matrix.sh` | Underlying harness wrapper (`../fs-test-harness`). Filters by substring. |
 | `scripts/matrix-baseline.sh` | Runs matrix + writes `test-diagnostics/matrix-results.json`. `--smoke` for 5 scenarios. |
 | `scripts/matrix-diff.sh OLD NEW` | Pretty deltas. Non-zero exit on `ok → FAILED` regressions. |
 | `scripts/matrix-verify.sh` | Check seal status of working tree against committed JSON. |
@@ -208,9 +208,9 @@ bash scripts/matrix-diff.sh /tmp/m1.json /tmp/m2.json
 ## What this skill explicitly does NOT cover
 
 - The Windows VM provisioning (IP, SSH keys, work directory) — that's
-  in `vendor/fs-test-harness/scripts/setup-local.sh` and the
+  in `../fs-test-harness/scripts/setup-local.sh` and the
   `.test-env` file.
-- The harness internals — see `vendor/fs-test-harness/README.md`.
+- The harness internals — see `../fs-test-harness/README.md`.
 - The clean-room reverse-engineering rules — see
   `docs/chkdsk-improvement-findings.md` §1.6.
 

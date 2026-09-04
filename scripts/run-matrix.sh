@@ -4,7 +4,8 @@
 # or any signal).
 #
 # Why a wrapper instead of fixing the harness directly:
-# * The harness lives in `vendor/fs-test-harness/` (git submodule);
+# * The harness lives in `../fs-test-harness/` (a sibling checkout,
+#   pinned by `chore siblings`);
 #   we don't own its lifecycle. Cleanup belongs in consumer code.
 # * `init-image` (and ship-to-host) create .img files under HOST_IMAGE_DIR
 #   and have no opinion about who removes them. Without this trap the
@@ -19,7 +20,7 @@
 #   Stale locks (from killed processes) can be removed with:
 #     rm -rf /tmp/ntfs-matrix-lock-*
 #
-# Usage: same as `vendor/fs-test-harness/scripts/run-tests.sh`. All
+# Usage: same as `../fs-test-harness/scripts/run-tests.sh`. All
 # arguments pass straight through. Examples:
 #
 #   bash scripts/run-matrix.sh                  # full matrix
@@ -267,4 +268,4 @@ start_ssh_mux
 ensure_vm_workdir
 
 # Forward to the real runner.
-bash "$repo_root/vendor/fs-test-harness/scripts/run-tests.sh" "${forwarded_args[@]+"${forwarded_args[@]}"}"
+bash "$repo_root/../fs-test-harness/scripts/run-tests.sh" "${forwarded_args[@]+"${forwarded_args[@]}"}"
