@@ -45,7 +45,7 @@ vars:
   # this crate: it requires converging on the version the family already
   # agreed. That is the cost of one shared copy, and it is the same
   # property that makes drift impossible rather than merely detectable.
-  FS_CORE_REF: v0.2.3
+  FS_CORE_REF: v0.2.4
 
   # The Windows-VM test harness. Not a cargo dependency — a tool this
   # repo's scripts invoke — so nothing but this pin governs which
