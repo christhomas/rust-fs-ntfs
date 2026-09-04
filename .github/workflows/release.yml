@@ -48,9 +48,24 @@ jobs:
         # Replaces `submodules: recursive`. The pins live in chores.yml,
         # so CI and a developer's machine read the same declaration
         # instead of restating it in YAML.
+        #
+        # chore is fetched from its release tarball at a PINNED version.
+        # An unpinned installer would make this workflow's behaviour
+        # depend on whatever chore shipped that morning, which is the
+        # opposite of what pinning the siblings is for.
         shell: bash
         run: |
-          curl -fsSL https://raw.githubusercontent.com/antimatter-studios/chore/main/install.sh | bash -s -- -b /usr/local/bin
+          set -euo pipefail
+          ver=0.9.0
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64)   asset="chore-$ver-linux-x86_64.tar.gz" ;;
+            Linux-aarch64)  asset="chore-$ver-linux-arm64.tar.gz" ;;
+            Darwin-arm64)   asset="chore-$ver-darwin-arm64.tar.gz" ;;
+            Darwin-x86_64)  asset="chore-$ver-darwin-x86_64.tar.gz" ;;
+            *) echo "no chore build for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+          esac
+          curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v$ver/$asset" \
+            | sudo tar xz -C /usr/local/bin chore
           chore siblings
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -114,9 +129,24 @@ jobs:
         # Replaces `submodules: recursive`. The pins live in chores.yml,
         # so CI and a developer's machine read the same declaration
         # instead of restating it in YAML.
+        #
+        # chore is fetched from its release tarball at a PINNED version.
+        # An unpinned installer would make this workflow's behaviour
+        # depend on whatever chore shipped that morning, which is the
+        # opposite of what pinning the siblings is for.
         shell: bash
         run: |
-          curl -fsSL https://raw.githubusercontent.com/antimatter-studios/chore/main/install.sh | bash -s -- -b /usr/local/bin
+          set -euo pipefail
+          ver=0.9.0
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64)   asset="chore-$ver-linux-x86_64.tar.gz" ;;
+            Linux-aarch64)  asset="chore-$ver-linux-arm64.tar.gz" ;;
+            Darwin-arm64)   asset="chore-$ver-darwin-arm64.tar.gz" ;;
+            Darwin-x86_64)  asset="chore-$ver-darwin-x86_64.tar.gz" ;;
+            *) echo "no chore build for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+          esac
+          curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v$ver/$asset" \
+            | sudo tar xz -C /usr/local/bin chore
           chore siblings
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -693,9 +723,24 @@ jobs:
         # Replaces `submodules: recursive`. The pins live in chores.yml,
         # so CI and a developer's machine read the same declaration
         # instead of restating it in YAML.
+        #
+        # chore is fetched from its release tarball at a PINNED version.
+        # An unpinned installer would make this workflow's behaviour
+        # depend on whatever chore shipped that morning, which is the
+        # opposite of what pinning the siblings is for.
         shell: bash
         run: |
-          curl -fsSL https://raw.githubusercontent.com/antimatter-studios/chore/main/install.sh | bash -s -- -b /usr/local/bin
+          set -euo pipefail
+          ver=0.9.0
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64)   asset="chore-$ver-linux-x86_64.tar.gz" ;;
+            Linux-aarch64)  asset="chore-$ver-linux-arm64.tar.gz" ;;
+            Darwin-arm64)   asset="chore-$ver-darwin-arm64.tar.gz" ;;
+            Darwin-x86_64)  asset="chore-$ver-darwin-x86_64.tar.gz" ;;
+            *) echo "no chore build for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+          esac
+          curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v$ver/$asset" \
+            | sudo tar xz -C /usr/local/bin chore
           chore siblings
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
