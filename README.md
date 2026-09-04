@@ -165,7 +165,7 @@ to look:
 | operation_sequence string (v1) | `recipe[]` array (v2) | The v1 arrow-string `mac:format -> win:chkdsk(readonly,/scan)` becomes a v2 recipe of typed steps with `host: "host" / "vm"` per step. |
 
 Cross-driver vocabulary index lives in
-[`../fs-test-harness/docs/vocabulary.md`](../fs-test-harness/docs/vocabulary.md);
+[`docs/vocabulary.md` in fs-test-harness](https://github.com/antimatter-studios/fs-test-harness/blob/main/docs/vocabulary.md);
 contributor-facing translation rules + bloat-prevention conventions
 are documented there.
 
