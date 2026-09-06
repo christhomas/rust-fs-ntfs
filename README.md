@@ -230,6 +230,30 @@ are documented there.
 Reverse chronological highlights from `git log`. Full per-commit
 history available via `git log` in the repo.
 
+### 2026-09-06 — 0.4.0
+
+- `mkfs.ntfs` ships as its own binary, sharing the formatter with the
+  subcommand rather than duplicating it.
+- An index edit stays inside the index it is editing. For an
+  `$INDEX_ROOT` the buffer is the whole MFT record and the index lives
+  in one attribute's resident value; the shift and the zero-fill were
+  bounded by the record, so they ranged over every other attribute and
+  the shredded record was written back reporting success.
+- Removing or inserting an index entry consults `IE_FLAG_HAS_SUBNODE`.
+  An entry may carry a child VCN, and shifting it away orphaned the
+  whole subtree — invisible to this crate's own reader, which scans
+  rather than descends, and visible to chkdsk.
+- A file's runs may not free the volume's own clusters. `unlink` and
+  `truncate` pushed every run into the bitmap bounded only by
+  `$Bitmap`'s own size, so a record whose runs overlap `$MFT` freed
+  live system clusters.
+- A write offset is checked against the volume before anything is
+  written.
+- The driver is bounded against the bytes it is handed at the trust
+  boundary: MFT record validation, on-disk lengths used as allocation
+  sizes, an unclamped `$LogFile` fill, index-entry name walks, and two
+  bitmap walks that could fail to terminate.
+
 ### 2026-09-04 — 0.3.5
 
 - Dropped the git submodules: `am-fs-core` and the Windows test harness
