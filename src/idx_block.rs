@@ -152,7 +152,17 @@ pub fn vcn_to_disk_offset(ia: &IndexAllocation, vcn: u64) -> Result<u64, String>
         .find(|r| vcn >= r.starting_vcn && vcn < r.starting_vcn + r.length)
         .ok_or_else(|| format!("VCN {vcn} not mapped in $INDEX_ALLOCATION"))?;
     let lcn = run.lcn.ok_or_else(|| format!("VCN {vcn} in sparse run"))?;
-    Ok((lcn + (vcn - run.starting_vcn)) * ia.params.cluster_size)
+    // Checked and bounded by the volume, for the whole index block --
+    // the run lookup above proves only that the block's FIRST cluster
+    // is in a run, and the transfer is `block_size` bytes.
+    crate::mft_io::cluster_span(
+        &ia.params,
+        lcn,
+        vcn - run.starting_vcn,
+        0,
+        ia.block_size,
+        u64::MAX,
+    )
 }
 
 /// Read an INDX block at the given VCN, applying fixup. Returns the
@@ -247,7 +257,12 @@ mod tests {
                 cluster_size,
                 mft_lcn: 4,
                 file_record_size: 1024,
-                total_sectors: 0,
+                // A real boot sector always says how big the volume is,
+                // and cluster_span judges every transfer against it. 512 MiB
+                // at 512-byte sectors is larger than anything these tests
+                // address, so the bound is present without being the thing
+                // under test.
+                total_sectors: 1 << 20,
                 serial_number: 0,
                 oem_id: *b"NTFS    ",
             },

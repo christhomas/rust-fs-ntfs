@@ -101,7 +101,7 @@ fn allocate_contiguous_rejects_overflow() {
     let last = bm.total_bits - 1;
     // Asking for 5 clusters starting at the last valid LCN overflows.
     let err = bitmap::allocate(Path::new(&img), &bm, last, 5).unwrap_err();
-    assert!(err.contains("exceeds"), "{err:?}");
+    assert!(err.contains("not inside"), "{err:?}");
 }
 
 #[test]

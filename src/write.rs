@@ -515,7 +515,20 @@ pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
         let remaining = (data.len() - cursor_in_data) as u64;
         let chunk = remaining.min(max_in_this_run) as usize;
 
-        let disk_offset = (lcn + (vcn - run.starting_vcn)) * cluster_size + off_in_cluster;
+        // Checked and bounded by the volume and the device; see
+        // `mft_io::cluster_span`. `decode_runs` rejects only a negative
+        // absolute LCN, so an LCN near 2^52 at 4 KiB clusters wrapped
+        // this product to a LOW offset -- the caller's file bytes over
+        // the boot sector, $MFT or $Bitmap, reported as a successful
+        // write.
+        let disk_offset = crate::mft_io::cluster_span(
+            &params,
+            lcn,
+            vcn - run.starting_vcn,
+            off_in_cluster,
+            chunk as u64,
+            io.size(),
+        )?;
         io.write_all_at(disk_offset, &data[cursor_in_data..cursor_in_data + chunk])
             .map_err(|e| format!("write: {e}"))?;
 
@@ -2504,6 +2517,22 @@ fn set_si_file_attributes_bit(record: &mut [u8], bit: u32, set: bool) -> Result<
         .ok_or_else(|| "$STANDARD_INFORMATION not found".to_string())?;
     let data_start = attr_io::resident_value_start(&loc)
         .ok_or_else(|| "$STANDARD_INFORMATION not resident".to_string())?;
+    // The file-attributes word sits 0x20 into the value, so the value
+    // has to be that long. `AttrIter` bounds where a value starts and
+    // ends but imposes no minimum on its length, so a
+    // $STANDARD_INFORMATION with a short one put this write inside the
+    // NEXT attribute -- for the usual $FILE_NAME, over the low bytes of
+    // its parent-directory reference, committed with a correct fixup
+    // and a correct bytes_used so nothing downstream noticed. The three
+    // sibling setters in this file all check; this one and the sparse
+    // path did not.
+    let value_length = loc.resident_value_length.unwrap_or(0) as usize;
+    if value_length < SI_FILE_ATTRIBUTES + 4 {
+        return Err(format!(
+            "$STANDARD_INFORMATION value is {value_length} bytes, too short to hold its \
+             file attributes"
+        ));
+    }
     let off = data_start + SI_FILE_ATTRIBUTES;
     let current = u32::from_le_bytes([
         record[off],
@@ -2940,6 +2969,12 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
             .ok_or("$STANDARD_INFORMATION not found")?;
         let si_val =
             attr_io::resident_value_start(&si).ok_or("$STANDARD_INFORMATION not resident")?;
+        // The value has to reach its own file-attributes word; see
+        // `set_si_file_attributes_bit`. Without this the write landed
+        // in the next attribute.
+        if (si.resident_value_length.unwrap_or(0) as usize) < SI_FILE_ATTRIBUTES + 4 {
+            return Err("$STANDARD_INFORMATION is too short to hold its file attributes".into());
+        }
         let fa_off = si_val + SI_FILE_ATTRIBUTES;
         let fa = u32::from_le_bytes([
             record[fa_off],

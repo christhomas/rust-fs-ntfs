@@ -203,7 +203,62 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
 
 /// Byte offset of MFT record `record_number` on disk.
 pub fn mft_record_offset(params: &BootParams, record_number: u64) -> u64 {
-    params.mft_lcn * params.cluster_size + record_number * params.file_record_size
+    // Saturating. `mft_lcn` is a full-range `u64` off the boot sector
+    // -- `parse_boot_params_from_bytes` validates `bytes_per_sector`,
+    // `sectors_per_cluster` and `file_record_size` and never this --
+    // and `record_number` comes from a directory index entry. In
+    // release, where this crate ships with `overflow-checks` off, the
+    // product wrapped, and a wrapped offset is not a read that fails:
+    // it is a read, or a WRITE, somewhere else on the volume.
+    // `create_file_io` builds a fresh record and writes it here without
+    // reading first, so nothing downstream would notice.
+    //
+    // Saturating gives an offset no device reaches. Callers that write
+    // must still check the result against the device -- see
+    // `cluster_span`.
+    params
+        .mft_lcn
+        .saturating_mul(params.cluster_size)
+        .saturating_add(record_number.saturating_mul(params.file_record_size))
+}
+
+/// Where a run of clusters lands on the device, or a refusal.
+///
+/// `lcn`, `vcn` and the run's own start all come out of a mapping-pair
+/// list off the disk, and `decode_runs` rejects only a negative
+/// absolute LCN -- anything up to `i64::MAX` passes. Multiplied by the
+/// cluster size the product wraps in release, and a wrapped offset is a
+/// read or a write somewhere else on the volume: file bytes over the
+/// boot sector, a bitmap read-modify-write over an MFT record.
+///
+/// The one function in this crate that got this right is
+/// `read::nonresident_contiguous_disk_range`; every other site did the
+/// multiply raw.
+pub fn cluster_span(
+    params: &BootParams,
+    lcn: u64,
+    within_run: u64,
+    byte_offset: u64,
+    len: u64,
+    device_bytes: u64,
+) -> Result<u64, String> {
+    let start = lcn
+        .checked_add(within_run)
+        .and_then(|cluster| cluster.checked_mul(params.cluster_size))
+        .and_then(|at| at.checked_add(byte_offset))
+        .ok_or_else(|| format!("cluster {lcn} plus {within_run} leaves the address space"))?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| format!("a transfer at {start} of {len} bytes leaves the address space"))?;
+    // The volume as the boot sector describes it, and the device as it
+    // really is: a transfer has to be inside both.
+    let volume = params.volume_bytes().min(device_bytes);
+    if end > volume {
+        return Err(format!(
+            "a transfer spans [{start}, {end}) on a volume of {volume} bytes"
+        ));
+    }
+    Ok(start)
 }
 
 /// In-memory MFT record header offsets (per Windows Internals 7th ed.).
@@ -658,7 +713,12 @@ mod tests {
             cluster_size: 4096,
             mft_lcn: 4,
             file_record_size: 1024,
-            total_sectors: 0,
+            // A real boot sector always says how big the volume is,
+            // and cluster_span judges every transfer against it. 512 MiB
+            // at 512-byte sectors is larger than anything these tests
+            // address, so the bound is present without being the thing
+            // under test.
+            total_sectors: 1 << 20,
             serial_number: 0,
             oem_id: *b"NTFS    ",
         };
