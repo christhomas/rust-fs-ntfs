@@ -49,11 +49,39 @@ pub struct BitmapLocation {
     pub total_bits: u64,
     /// Logical byte length of `$Bitmap`'s $DATA.
     pub value_length: u64,
+    /// How many clusters `$MFT` occupies, so a free can be refused
+    /// before it hands them out. Zero when `$MFT`'s own length could
+    /// not be read, which leaves only the boot sector guarded.
+    pub mft_clusters: u64,
 }
 
 pub fn locate_bitmap(image: &Path) -> Result<BitmapLocation, String> {
     let mut io = PathIo::open_ro(image)?;
     locate_bitmap_io(&mut io)
+}
+
+impl BitmapLocation {
+    /// Whether `[lcn, lcn + n)` covers clusters the volume needs.
+    ///
+    /// `unlink` and `truncate` push every run of every non-resident
+    /// attribute of a file straight into [`free_io`], bounded only by
+    /// `$Bitmap`'s own size. A file record whose `$DATA` runs overlap
+    /// `$MFT` therefore made `unlink` mark live system clusters free,
+    /// and the next allocation handed them out.
+    ///
+    /// The boot sector is cluster 0. `$MFT` is where everything else
+    /// is, and its length is read once when the bitmap is located.
+    pub fn covers_the_volumes_own(&self, lcn: u64, n: u64) -> bool {
+        let end = lcn.saturating_add(n);
+        if lcn == 0 {
+            return true;
+        }
+        if self.mft_clusters == 0 {
+            return false;
+        }
+        let mft_end = self.params.mft_lcn.saturating_add(self.mft_clusters);
+        lcn < mft_end && self.params.mft_lcn < end
+    }
 }
 
 pub fn locate_bitmap_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BitmapLocation, String> {
@@ -74,11 +102,17 @@ pub fn locate_bitmap_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BitmapLocatio
     let runs = data_runs::decode_runs(&record[mapping_start..mapping_end])?;
     let value_length = loc.non_resident_value_length.ok_or("no value_length")?;
     // total bits = value_length * 8; each bit covers one cluster.
+    // $MFT's own extent, so `free_io` can refuse to hand it out. Read
+    // once here rather than on every free.
+    let mft_clusters = crate::read::nonresident_contiguous_disk_range(io, 0, AttrType::Data, None)
+        .map(|(_, len)| len.div_ceil(params.cluster_size.max(1)))
+        .unwrap_or(0);
     Ok(BitmapLocation {
         params,
         runs,
         total_bits: value_length.saturating_mul(8),
         value_length,
+        mft_clusters,
     })
 }
 
@@ -218,6 +252,14 @@ pub fn free_io<T: BlockIo + ?Sized>(
     lcn: u64,
     n: u64,
 ) -> Result<(), String> {
+    // Not the volume's own clusters, however a file record describes
+    // its runs. See `BitmapLocation::covers_the_volumes_own`.
+    if bm.covers_the_volumes_own(lcn, n) {
+        return Err(format!(
+            "clusters [{lcn}, +{n}) hold the volume's own structures and are not a \
+             file's to free"
+        ));
+    }
     mutate_bits_io(io, bm, lcn, n, false)
 }
 
@@ -581,6 +623,9 @@ mod tests {
             }],
             total_bits: n_bytes * 8,
             value_length: n_bytes,
+            // $MFT is not modelled in these fixtures, so nothing is guarded
+            // as its own; the guard is exercised in its own test.
+            mft_clusters: 0,
         }
     }
 
@@ -904,13 +949,15 @@ mod tests {
         assert_eq!(byte1, 0b0000_0011, "bits 0-1 of byte 1 (clusters 8-9)");
     }
 
+    /// Cluster 0 is $Boot, so a file never frees it and `free_io`
+    /// refuses to -- the round trip starts at cluster 1.
     #[test]
     fn allocate_io_then_free_io_full_roundtrip() {
         let mut dev = MemDev::new(8192);
         let bm = make_bm(4096, 4);
-        allocate_io(&mut dev, &bm, 0, 32).unwrap();
-        assert_eq!(count_free_io(&mut dev, &bm).unwrap(), 0);
-        free_io(&mut dev, &bm, 0, 32).unwrap();
+        allocate_io(&mut dev, &bm, 1, 31).unwrap();
+        assert_eq!(count_free_io(&mut dev, &bm).unwrap(), 1);
+        free_io(&mut dev, &bm, 1, 31).unwrap();
         assert_eq!(count_free_io(&mut dev, &bm).unwrap(), 32);
     }
 
@@ -1126,6 +1173,9 @@ mod range_bound_tests {
             runs: Vec::new(),
             total_bits,
             value_length: total_bits / 8,
+            // $MFT is not modelled in these fixtures, so nothing is guarded
+            // as its own; the guard is exercised in its own test.
+            mft_clusters: 0,
         }
     }
 
@@ -1148,5 +1198,61 @@ mod range_bound_tests {
         // And the ordinary out-of-range case still reads the same way.
         let why = mutate_bits_io(&mut dev, &bm, 30, 4, true).unwrap_err();
         assert!(why.contains("not inside"), "{why}");
+    }
+}
+
+#[cfg(test)]
+mod volume_own_tests {
+    use super::*;
+    use crate::mft_io::BootParams;
+
+    fn located(mft_lcn: u64, mft_clusters: u64) -> BitmapLocation {
+        BitmapLocation {
+            params: BootParams {
+                bytes_per_sector: 512,
+                sectors_per_cluster: 8,
+                cluster_size: 4096,
+                mft_lcn,
+                file_record_size: 1024,
+                total_sectors: 1 << 20,
+                serial_number: 0,
+                oem_id: *b"NTFS    ",
+            },
+            runs: Vec::new(),
+            total_bits: 1 << 16,
+            value_length: 1 << 13,
+            mft_clusters,
+        }
+    }
+
+    /// `unlink` and `truncate` push every run of every non-resident
+    /// attribute of a file straight into `free_io`, bounded only by
+    /// `$Bitmap`'s own size. A file record whose `$DATA` runs overlap
+    /// `$MFT` therefore made `unlink` mark live system clusters free,
+    /// and the next allocation handed them out.
+    #[test]
+    fn a_files_runs_may_not_free_the_volumes_own_clusters() {
+        let bm = located(64, 32); // $MFT at clusters 64..96
+
+        // The boot sector is cluster 0.
+        assert!(bm.covers_the_volumes_own(0, 1));
+        assert!(bm.covers_the_volumes_own(0, 4096));
+
+        // $MFT, from any direction.
+        assert!(bm.covers_the_volumes_own(64, 1), "its first cluster");
+        assert!(bm.covers_the_volumes_own(95, 1), "its last");
+        assert!(bm.covers_the_volumes_own(60, 8), "a run reaching into it");
+        assert!(bm.covers_the_volumes_own(90, 16), "a run leaving it");
+        assert!(bm.covers_the_volumes_own(1, 1000), "a run swallowing it");
+
+        // An ordinary file's clusters.
+        assert!(!bm.covers_the_volumes_own(1, 63), "up to $MFT");
+        assert!(!bm.covers_the_volumes_own(96, 100), "past $MFT");
+
+        // When $MFT's length could not be read there is nothing to
+        // compare it against, and only the boot sector is guarded.
+        let unknown = located(64, 0);
+        assert!(unknown.covers_the_volumes_own(0, 1));
+        assert!(!unknown.covers_the_volumes_own(64, 32));
     }
 }
