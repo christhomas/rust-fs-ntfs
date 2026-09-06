@@ -456,17 +456,32 @@ pub fn remove_index_entry(
     entry: &IndexEntryLocation,
     block_kind: BlockKind,
 ) -> Result<(), String> {
-    let (ih_start, _ir_attr_offset) = match block_kind {
+    // THE INDEX ENDS WHERE THE THING HOLDING IT ENDS.
+    //
+    // For an $INDEX_ROOT, `buf` is the whole MFT record and the index
+    // lives inside one attribute's resident value -- so the entries
+    // cannot reach past that value, however large `total_size` says
+    // they are. Bounding by `buf.len()` instead let the shift and the
+    // zero-fill below range over every other attribute in the record:
+    // $FILE_NAME, $DATA, $INDEX_ALLOCATION. `find_index_entry` supplies
+    // such an entry because its own walk is bounded the same way.
+    let (ih_start, index_limit) = match block_kind {
         BlockKind::IndexRoot => {
             let ir = attr_io::find_attribute(buf, AttrType::IndexRoot, Some(stream::I30))
                 .ok_or_else(|| "$INDEX_ROOT:$I30 missing".to_string())?;
             let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
+            let val_len = ir.resident_value_length.ok_or("no value_length")? as usize;
+            if val_len < IR_INDEX_HEADER_OFFSET {
+                return Err(format!(
+                    "$INDEX_ROOT:$I30 value is {val_len} bytes, too short to hold an index"
+                ));
+            }
             (
                 ir.attr_offset + val_off + IR_INDEX_HEADER_OFFSET,
-                ir.attr_offset,
+                ir.attr_offset + val_off + val_len,
             )
         }
-        BlockKind::IndexAllocation => (crate::idx_block::INDX_INDEX_HEADER_OFFSET, 0),
+        BlockKind::IndexAllocation => (crate::idx_block::INDX_INDEX_HEADER_OFFSET, buf.len()),
     };
 
     let total_size_pos = ih_start + IH_TOTAL_SIZE_OF_ENTRIES;
@@ -482,11 +497,41 @@ pub fn remove_index_entry(
     // for two `copy_within` calls below. It was compared only against
     // `entry_end`, another number from the same index, so nothing tied
     // either of them to the buffer.
-    if tail_end > buf.len() || entry_end > tail_end || entry.record_offset > entry_end {
+    if tail_end > index_limit
+        || entry_end > tail_end
+        || entry.record_offset < ih_start
+        || entry.record_offset > entry_end
+    {
         return Err(format!(
-            "index says its entries end at {tail_end} in a {}-byte block",
-            buf.len()
+            "index says its entries end at {tail_end}, past the {index_limit} where the \
+             index itself does"
         ));
+    }
+
+    // AN ENTRY WITH A CHILD IS NOT ONE TO SHIFT AWAY.
+    //
+    // In a B-tree index an entry may carry an 8-byte child VCN in its
+    // tail, and every key strictly less than it lives down that child.
+    // Removing the entry removes the pointer with it, so the whole
+    // subtree is orphaned: those files vanish from the tree while
+    // their $I30 bitmap bits stay set and their clusters stay
+    // allocated. This driver's own reader hides it, because it
+    // brute-force scans every allocated INDX block rather than
+    // descending -- so it surfaces on Windows, in chkdsk.
+    //
+    // Refusing is what this crate already does for the other index
+    // shapes it cannot maintain; splitting and rebalancing is the work
+    // that would make it possible.
+    let entry_flags = u16::from_le_bytes([
+        buf[entry.record_offset + IE_FLAGS],
+        buf[entry.record_offset + IE_FLAGS + 1],
+    ]);
+    if entry_flags & IE_FLAG_HAS_SUBNODE != 0 {
+        return Err(
+            "the entry to remove points at a sub-node; removing it would orphan that \
+             subtree (index B-tree maintenance is not implemented)"
+                .to_string(),
+        );
     }
 
     // Shift following entries back.
@@ -621,7 +666,13 @@ pub fn insert_entry_into_index_root_with_collation(
         .ok_or_else(|| "$INDEX_ROOT:$I30 missing".to_string())?;
     let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
     let old_val_len = ir.resident_value_length.ok_or("no value_length")? as usize;
+    if old_val_len < IR_INDEX_HEADER_OFFSET {
+        return Err(format!(
+            "$INDEX_ROOT:$I30 value is {old_val_len} bytes, too short to hold an index"
+        ));
+    }
     let ih_start = ir.attr_offset + val_off + IR_INDEX_HEADER_OFFSET;
+    let index_limit = ir.attr_offset + val_off + old_val_len;
 
     let first_entry_rel = u32::from_le_bytes([
         record[ih_start + IH_FIRST_ENTRY_OFFSET],
@@ -636,10 +687,42 @@ pub fn insert_entry_into_index_root_with_collation(
         record[ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 3],
     ]) as usize;
 
+    // BOTH ARE RAW u32s, and both bound a `copy_within` below.
+    // Nothing tied either to the value the index lives in, so a
+    // `first_entry_rel` past `total_size` produced a reversed range,
+    // and one inside the value but not at an entry boundary spliced
+    // the new entry into the middle of an existing one -- and THAT
+    // record was written back.
+    let entries_end = ih_start
+        .checked_add(total_size)
+        .filter(|end| *end <= index_limit)
+        .ok_or_else(|| {
+            format!("the index says its entries end past its own {old_val_len}-byte value")
+        })?;
+    if first_entry_rel > total_size {
+        return Err(format!(
+            "the index says its first entry is {first_entry_rel} bytes in, past the \
+             {total_size} bytes of entries it has"
+        ));
+    }
+
+    // An interior node's entries each carry a child VCN in their tail,
+    // and `build_file_name_index_entry` makes a leaf entry with none.
+    // Splicing one in would leave the node's key ordering describing
+    // children that are not there. See the note in
+    // `remove_index_entry`.
+    if record[ih_start + IH_FLAGS_OFFSET] & IH_FLAG_HAS_SUBNODES != 0 {
+        return Err(
+            "$INDEX_ROOT:$I30 has sub-nodes; inserting into an interior node needs \
+             index B-tree maintenance, which is not implemented"
+                .to_string(),
+        );
+    }
+
     // Find sorted insertion position. Walk existing entries until we
     // find one whose name is >= new_name or hit the LAST sentinel.
     let mut cursor = ih_start + first_entry_rel;
-    let end = ih_start + total_size;
+    let end = entries_end;
     let new_utf16: Vec<u16> = new_name.encode_utf16().collect();
 
     while cursor < end && cursor + IE_KEY_START <= record.len() {
@@ -1443,6 +1526,80 @@ mod tests {
     }
 
     // --- remove_index_entry -----------------------------------------------
+
+    /// For an `$INDEX_ROOT` the buffer is the WHOLE MFT record, and
+    /// the index lives inside one attribute's resident value. Bounding
+    /// `total_size` by the record instead of by that value let the
+    /// shift and the zero-fill range over every other attribute --
+    /// $FILE_NAME, $DATA, $INDEX_ALLOCATION -- and
+    /// `update_mft_record_io` then re-applied the fixup and wrote the
+    /// shredded record back, reporting success.
+    #[test]
+    fn an_index_claiming_more_than_its_own_value_is_refused() {
+        let entry = make_entry(10, 5, "target");
+        let mut rec = index_root_record(&[entry]);
+        let loc = find_index_entry(&rec, "target").unwrap().unwrap();
+
+        // The control: it removes.
+        let mut ok = rec.clone();
+        remove_index_entry(&mut ok, &loc, BlockKind::IndexRoot).expect("a well-formed index");
+
+        // Now say the entries run to the end of the record. The value
+        // is a few dozen bytes; the record is 1024.
+        let ir = attr_io::find_attribute(&rec, AttrType::IndexRoot, Some(stream::I30)).unwrap();
+        let ih =
+            ir.attr_offset + ir.resident_value_offset.unwrap() as usize + IR_INDEX_HEADER_OFFSET;
+        let at = ih + IH_TOTAL_SIZE_OF_ENTRIES;
+        rec[at..at + 4].copy_from_slice(&900u32.to_le_bytes());
+
+        let why = remove_index_entry(&mut rec, &loc, BlockKind::IndexRoot).unwrap_err();
+        assert!(
+            why.contains("past the"),
+            "an index claiming 900 bytes of entries inside a much smaller value was \
+             answered with {why}"
+        );
+    }
+
+    /// In a B-tree index an entry may carry a child VCN in its tail,
+    /// and every key less than it lives down that child. Shifting the
+    /// entry away takes the pointer with it and orphans the subtree:
+    /// those files vanish from the tree while their bitmap bits stay
+    /// set. This crate's own reader hides it -- it brute-force scans
+    /// every allocated INDX block rather than descending -- so it
+    /// surfaces in chkdsk.
+    #[test]
+    fn removing_an_entry_that_points_at_a_subtree_is_refused() {
+        let entry = make_entry(10, 5, "target");
+        let mut rec = index_root_record(&[entry]);
+        let loc = find_index_entry(&rec, "target").unwrap().unwrap();
+
+        // Give the entry a child pointer.
+        let at = loc.record_offset + IE_FLAGS;
+        let flags = u16::from_le_bytes([rec[at], rec[at + 1]]) | IE_FLAG_HAS_SUBNODE;
+        rec[at..at + 2].copy_from_slice(&flags.to_le_bytes());
+
+        let why = remove_index_entry(&mut rec, &loc, BlockKind::IndexRoot).unwrap_err();
+        assert!(why.contains("orphan"), "{why}");
+    }
+
+    /// The mirror of the same gap: `build_file_name_index_entry` makes
+    /// a leaf entry with no child VCN, so splicing one into an interior
+    /// node leaves its key ordering describing children that are not
+    /// there.
+    #[test]
+    fn inserting_into_an_interior_node_is_refused() {
+        let existing = make_entry(10, 5, "aaa");
+        let mut rec = index_root_record(&[existing]);
+        let ir = attr_io::find_attribute(&rec, AttrType::IndexRoot, Some(stream::I30)).unwrap();
+        let ih =
+            ir.attr_offset + ir.resident_value_offset.unwrap() as usize + IR_INDEX_HEADER_OFFSET;
+        rec[ih + IH_FLAGS_OFFSET] |= IH_FLAG_HAS_SUBNODES;
+
+        let new_entry = make_entry(11, 5, "bbb");
+        let why = insert_entry_into_index_root_with_collation(&mut rec, &new_entry, "bbb", None)
+            .unwrap_err();
+        assert!(why.contains("sub-nodes"), "{why}");
+    }
 
     #[test]
     fn remove_index_entry_makes_entry_unfindable() {
