@@ -231,15 +231,23 @@ fn mutate_bits_io<T: BlockIo + ?Sized>(
     if n == 0 {
         return Ok(());
     }
-    if lcn + n > bm.total_bits {
-        return Err(format!(
-            "range [{lcn}..{}] exceeds total_bits {}",
-            lcn + n,
-            bm.total_bits
-        ));
-    }
+    // Checked: `lcn` and `n` reach here from a file's own run list,
+    // where `decode_runs` permits an LCN up to 2^63 and a length up to
+    // 2^64. `lcn + n` wrapping to a small number made this guard pass,
+    // and `end_byte_excl - first_byte` then underflowed into a huge
+    // allocation below -- a capacity-overflow panic, or an abort for
+    // values that merely do not fit.
+    let last = lcn
+        .checked_add(n)
+        .filter(|end| *end <= bm.total_bits)
+        .ok_or_else(|| {
+            format!(
+                "range [{lcn}, +{n}) is not inside the {} bits $Bitmap describes",
+                bm.total_bits
+            )
+        })?;
     let first_byte = lcn / 8;
-    let end_byte_excl = (lcn + n).div_ceil(8);
+    let end_byte_excl = last.div_ceil(8);
     let mut bytes = read_bitmap_bytes_io(io, bm, first_byte, end_byte_excl - first_byte)?;
     // The pre-image, kept so a write that fails partway can be undone.
     // Every caller of the write half has already read these bytes in
@@ -356,7 +364,20 @@ fn map_bitmap_range(
             .min(end - file_offset) as usize;
 
         out.push(MappedChunk {
-            disk_offset: (lcn + (vcn - run.starting_vcn)) * cluster_size + off_in_cluster,
+            // Checked and bounded by the volume; see
+            // `mft_io::cluster_span`. Every $Bitmap read AND write goes
+            // through here, and `mutate_bits_io` is a read-modify-write
+            // -- so a run pointing at the boot sector or an MFT record
+            // turned the first create or unlink into a targeted bit
+            // flip anywhere on the device.
+            disk_offset: crate::mft_io::cluster_span(
+                &bm.params,
+                lcn,
+                vcn - run.starting_vcn,
+                off_in_cluster,
+                chunk as u64,
+                u64::MAX,
+            )?,
             cursor,
             len: chunk,
         });
@@ -451,9 +472,22 @@ pub fn count_free(image: &Path, bm: &BitmapLocation) -> Result<u64, String> {
 }
 
 pub fn count_free_io<T: BlockIo + ?Sized>(io: &mut T, bm: &BitmapLocation) -> Result<u64, String> {
-    let total_bytes = bm.value_length;
-    let bytes = read_bitmap_bytes_io(io, bm, 0, total_bytes)?;
-    let set: u64 = bytes.iter().map(|b| b.count_ones() as u64).sum();
+    // IN CHUNKS. `value_length` is $Bitmap's declared, unvalidated
+    // `data_length`, and this read it whole into one buffer: 2^40 asks
+    // for a terabyte, which `handle_alloc_error` answers by aborting --
+    // past the FFI guard, taking the host process with it.
+    // `find_free_run_io` already streams the same bitmap 64 KiB at a
+    // time; this did not.
+    const CHUNK: u64 = 64 * 1024;
+    let total_bytes = bm.value_length.min(bm.total_bits.div_ceil(8));
+    let mut set: u64 = 0;
+    let mut at = 0u64;
+    while at < total_bytes {
+        let n = CHUNK.min(total_bytes - at);
+        let bytes = read_bitmap_bytes_io(io, bm, at, n)?;
+        set += bytes.iter().map(|b| b.count_ones() as u64).sum::<u64>();
+        at += n;
+    }
     // Bits past total_bits (if any, due to padding) are required to be
     // zero by the spec; count_ones is safe to subtract from total.
     Ok(bm.total_bits.saturating_sub(set))
@@ -487,11 +521,11 @@ mod tests {
     use super::*;
     use crate::block_io::BlockIo;
 
-    struct MemDev {
+    pub(super) struct MemDev {
         buf: Vec<u8>,
     }
     impl MemDev {
-        fn new(size: usize) -> Self {
+        pub(super) fn new(size: usize) -> Self {
             Self {
                 buf: vec![0u8; size],
             }
@@ -530,7 +564,12 @@ mod tests {
                 cluster_size,
                 mft_lcn: 0,
                 file_record_size: 1024,
-                total_sectors: 0,
+                // A real boot sector always says how big the volume is,
+                // and cluster_span judges every transfer against it. 512 MiB
+                // at 512-byte sectors is larger than anything these tests
+                // address, so the bound is present without being the thing
+                // under test.
+                total_sectors: 1 << 20,
                 serial_number: 0,
                 oem_id: *b"NTFS    ",
             },
@@ -918,7 +957,7 @@ mod tests {
         let mut dev = MemDev::new(8192);
         let bm = make_bm(4096, 4); // 32 clusters
         let err = allocate_io(&mut dev, &bm, 30, 4).unwrap_err(); // 30+4=34 > 32
-        assert!(err.contains("exceeds"), "{err}");
+        assert!(err.contains("not inside"), "{err}");
     }
 
     #[test]
@@ -1063,5 +1102,51 @@ mod tests {
         let bm = locate_bitmap_io(&mut dev).unwrap();
         // Cluster 0 holds the boot sector — always allocated.
         assert!(is_allocated_io(&mut dev, &bm, 0).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod range_bound_tests {
+    use super::tests::MemDev;
+    use super::*;
+    use crate::mft_io::BootParams;
+
+    fn bm(total_bits: u64) -> BitmapLocation {
+        BitmapLocation {
+            params: BootParams {
+                bytes_per_sector: 512,
+                sectors_per_cluster: 8,
+                cluster_size: 4096,
+                mft_lcn: 4,
+                file_record_size: 1024,
+                total_sectors: 1 << 20,
+                serial_number: 0,
+                oem_id: *b"NTFS    ",
+            },
+            runs: Vec::new(),
+            total_bits,
+            value_length: total_bits / 8,
+        }
+    }
+
+    /// `lcn` and `n` reach `mutate_bits_io` from a file's own run list,
+    /// where `decode_runs` permits an LCN up to 2^63 and a length up to
+    /// 2^64. `lcn + n` wrapping to a small number made the range guard
+    /// pass, and `end_byte_excl - first_byte` then underflowed into an
+    /// allocation of nearly 2^61 bytes -- a capacity-overflow panic, or
+    /// an abort for values that merely do not fit.
+    #[test]
+    fn a_range_whose_end_wraps_is_refused_by_the_guard_that_bounds_it() {
+        let mut dev = MemDev::new(8192);
+        let bm = bm(32);
+
+        // The pair the wrap needs: 2^63 + 2^63 is zero, which is
+        // "inside" any bitmap.
+        let why = mutate_bits_io(&mut dev, &bm, 1 << 63, 1 << 63, true).unwrap_err();
+        assert!(why.contains("not inside"), "{why}");
+
+        // And the ordinary out-of-range case still reads the same way.
+        let why = mutate_bits_io(&mut dev, &bm, 30, 4, true).unwrap_err();
+        assert!(why.contains("not inside"), "{why}");
     }
 }

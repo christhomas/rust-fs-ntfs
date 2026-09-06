@@ -311,7 +311,15 @@ fn disk_offset_for_byte(
         .copied()
         .ok_or_else(|| format!("byte_idx {byte_idx} (VCN {vcn}) not mapped in $MFT:$Bitmap"))?;
     let lcn = run.lcn.ok_or("sparse $MFT bitmap run")?;
-    let disk = (lcn + (vcn - run.starting_vcn)) * bm.params.cluster_size + off_in_cluster;
+    // Checked and bounded by the volume; see `mft_io::cluster_span`.
+    let disk = crate::mft_io::cluster_span(
+        &bm.params,
+        lcn,
+        vcn - run.starting_vcn,
+        off_in_cluster,
+        1,
+        u64::MAX,
+    )?;
     Ok((run, disk))
 }
 
@@ -327,7 +335,12 @@ mod tests {
             cluster_size,
             mft_lcn: 0,
             file_record_size: 1024,
-            total_sectors: 0,
+            // A real boot sector always says how big the volume is,
+            // and cluster_span judges every transfer against it. 512 MiB
+            // at 512-byte sectors is larger than anything these tests
+            // address, so the bound is present without being the thing
+            // under test.
+            total_sectors: 1 << 20,
             serial_number: 0,
             oem_id: *b"NTFS    ",
         }
@@ -367,8 +380,10 @@ mod tests {
         assert_eq!(ordinary.total_bits(), 64);
 
         // And a volume that does not say how big it is cannot judge.
+        let mut silent = params(4096);
+        silent.total_sectors = 0;
         let unknown = MftBitmap {
-            params: params(4096),
+            params: silent,
             layout: MftBitmapLayout::NonResident {
                 runs: Vec::new(),
                 total_bits: 1_000_000,

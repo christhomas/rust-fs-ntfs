@@ -208,14 +208,25 @@ pub fn index_root_has_real_entries(record: &[u8]) -> Result<bool, String> {
 /// Read the INDEX_HEADER flags byte from an `$INDEX_ROOT`. Returns
 /// `Some(flags)` if the record contains `$INDEX_ROOT:$I30`,
 /// otherwise `None`.
+fn ih_start(ir: &attr_io::AttrLocation) -> Option<usize> {
+    let val_off = ir.resident_value_offset? as usize;
+    ir.attr_offset
+        .checked_add(val_off)?
+        .checked_add(IR_INDEX_HEADER_OFFSET)
+}
+
 pub fn index_root_flags(record: &[u8]) -> Option<u8> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))?;
     if !ir.is_resident {
         return None;
     }
-    let val_off = ir.resident_value_offset? as usize;
-    let ih_start = ir.attr_offset + val_off + IR_INDEX_HEADER_OFFSET;
-    Some(record[ih_start + IH_FLAGS_OFFSET])
+    // `.get()`, not an index. `AttrIter` guarantees the attribute is
+    // inside the record and the value inside the attribute, but not
+    // that the value is long enough to hold an index header -- so an
+    // $INDEX_ROOT as the last attribute with a short value put this
+    // read past the end. It is the first call in every mutating path,
+    // and the root directory's own record is enough to reach it.
+    record.get(ih_start(&ir)? + IH_FLAGS_OFFSET).copied()
 }
 
 /// Scan a clean (post-fixup) INDX block buffer for the entry whose

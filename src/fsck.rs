@@ -464,6 +464,30 @@ fn locate_volume_flags_io<T: FsckIo>(io: &mut T) -> Result<(u64, u16), String> {
 
 /// Locate `$LogFile`'s `$DATA` on disk. Returns (on-disk byte offset of
 /// the first data byte, total byte length to overwrite).
+/// Ranges `fsck` must not fill, whatever the `$LogFile` record says.
+///
+/// `reset_logfile_io` writes `0xFF` over the range it is given, and
+/// that range comes from the `$LogFile` record on the image being
+/// repaired -- which is exactly the class of image where that record is
+/// expected to be damaged. Requiring the range to be on the device
+/// stops it leaving the volume; it does nothing about a run aimed at
+/// the volume's own structures.
+///
+/// The two that matter are the boot sector, which is where a volume
+/// starts, and `$MFT`, which is where everything else is. `fsck_io`
+/// runs the reset FIRST, so filling either of them destroys the volume
+/// and then reports success, counting the bytes it destroyed.
+fn forbidden_fill_ranges(params: &crate::mft_io::BootParams, mft_bytes: u64) -> [(u64, u64); 2] {
+    let boot = (0u64, u64::from(params.bytes_per_sector).max(512));
+    let mft_start = params.mft_lcn.saturating_mul(params.cluster_size);
+    let mft = (mft_start, mft_start.saturating_add(mft_bytes));
+    [boot, mft]
+}
+
+fn ranges_overlap(a: (u64, u64), b: (u64, u64)) -> bool {
+    a.0 < b.1 && b.0 < a.1
+}
+
 fn locate_logfile_data_io<T: FsckIo>(io: &mut T) -> Result<(u64, u64), String> {
     // Native: `$LogFile`'s unnamed `$DATA` is non-resident and laid out as a
     // single contiguous extent; the helper returns its on-disk offset + the
@@ -476,6 +500,25 @@ fn locate_logfile_data_io<T: FsckIo>(io: &mut T) -> Result<(u64, u64), String> {
     )?;
     if length == 0 {
         return Err("$LogFile $DATA has zero length".to_string());
+    }
+    // Not over the boot sector, and not over $MFT. See
+    // `forbidden_fill_ranges`.
+    let params = crate::mft_io::read_boot_params_io(io)?;
+    let mft_bytes = crate::read::nonresident_contiguous_disk_range(io, 0, AttrType::Data, None)
+        .map(|(_, len)| len)
+        // A fragmented or unreadable $MFT gives no length to compare, so
+        // the record size times the records the volume could hold is the
+        // fallback: a smaller guess would leave part of $MFT unguarded.
+        .unwrap_or_else(|_| params.volume_bytes());
+    let fill = (offset, offset.saturating_add(length));
+    for forbidden in forbidden_fill_ranges(&params, mft_bytes) {
+        if ranges_overlap(fill, forbidden) {
+            return Err(format!(
+                "$LogFile says its data is at [{}, {}), which overlaps [{}, {}) -- the \
+                 volume's own structures",
+                fill.0, fill.1, forbidden.0, forbidden.1
+            ));
+        }
     }
     Ok((offset, length))
 }
@@ -1016,5 +1059,58 @@ mod hostile_logfile_tests {
              the end of the volume",
             dev.buf.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod fill_range_tests {
+    use super::*;
+    use crate::mft_io::BootParams;
+
+    fn params() -> BootParams {
+        BootParams {
+            bytes_per_sector: 512,
+            sectors_per_cluster: 8,
+            cluster_size: 4096,
+            mft_lcn: 1024,
+            file_record_size: 1024,
+            total_sectors: 1 << 20,
+            serial_number: 0,
+            oem_id: *b"NTFS    ",
+        }
+    }
+
+    /// The fill's range comes from the `$LogFile` record on the image
+    /// being repaired -- exactly the class of image where that record
+    /// is expected to be damaged -- and `fsck_io` runs the reset
+    /// FIRST. Requiring the range to be on the device stops it leaving
+    /// the volume and says nothing about a run aimed at the volume's
+    /// own structures.
+    #[test]
+    fn a_fill_over_the_boot_sector_or_the_mft_is_refused() {
+        let p = params();
+        let mft_at = 1024 * 4096;
+        let mft_bytes = 16 * 1024 * 1024;
+        let forbidden = forbidden_fill_ranges(&p, mft_bytes);
+
+        // The boot sector, and $MFT.
+        assert_eq!(forbidden[0], (0, 512));
+        assert_eq!(forbidden[1], (mft_at, mft_at + mft_bytes));
+
+        let overlaps = |fill: (u64, u64)| forbidden.iter().any(|f| ranges_overlap(fill, *f));
+
+        assert!(overlaps((0, 4096)), "starting at the boot sector");
+        assert!(overlaps((511, 8192)), "one byte into the boot sector");
+        assert!(overlaps((mft_at, mft_at + 4096)), "the start of $MFT");
+        assert!(
+            overlaps((mft_at + mft_bytes - 1, mft_at + mft_bytes + 4096)),
+            "the last byte of $MFT"
+        );
+
+        // Where a $LogFile actually lives: after the boot sector and
+        // clear of $MFT.
+        assert!(!overlaps((512, 4096)), "between the two");
+        assert!(!overlaps((mft_at + mft_bytes, mft_at + mft_bytes + 4096)));
+        assert!(!overlaps((64 * 1024 * 1024, 64 * 1024 * 1024 + 4096)));
     }
 }
