@@ -89,6 +89,22 @@ pub struct BootParams {
     pub oem_id: [u8; 8],
 }
 
+impl BootParams {
+    /// How many bytes the volume holds.
+    ///
+    /// The ceiling for anything an attribute says its value is: a
+    /// non-resident value lives in clusters, and a volume has only so
+    /// many. Without it, $UpCase with a data_length of 2^48 asked for
+    /// 281 terabytes on the first operation of any mount --
+    /// resolve_path loads $UpCase before any lookup -- and
+    /// handle_alloc_error answers that by aborting, past the FFI
+    /// boundary's guard.
+    pub fn volume_bytes(&self) -> u64 {
+        self.total_sectors
+            .saturating_mul(u64::from(self.bytes_per_sector))
+    }
+}
+
 /// Parse the 512-byte boot sector at offset 0 for the subset of fields we
 /// need. Does not validate the NTFS magic ("NTFS    " at +3) or checksum
 /// — upstream `Ntfs::new` already does that during read-side parsing.
@@ -136,9 +152,23 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
     // 2^|val| bytes (common: -10 ⇒ 1024 byte records).
     let cpmr = boot[BOOT_OFF_CLUSTERS_PER_MFT_RECORD] as i8;
     let file_record_size = if cpmr > 0 {
-        (cpmr as u64) * cluster_size
+        (cpmr as u64).saturating_mul(cluster_size)
     } else {
-        1u64 << ((-(cpmr as i16)) as u32)
+        // A shift, and the amount comes from one signed byte of the
+        // boot sector: -128 asks for `1 << 128`. The plausibility check
+        // below would reject the answer, but the shift happens first --
+        // a panic in a checked build, and in release a masked shift
+        // that only survives by accident. `checked_shl` puts the
+        // rejection ahead of the arithmetic.
+        match 1u64.checked_shl((-(cpmr as i16)) as u32) {
+            Some(size) => size,
+            None => {
+                return Err(format!(
+                    "clusters_per_mft_record {cpmr} asks for a record of 2^{} bytes",
+                    -(cpmr as i16)
+                ))
+            }
+        }
     };
     if !(512..=16384).contains(&file_record_size) {
         return Err(format!(

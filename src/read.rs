@@ -274,9 +274,7 @@ fn read_value_from_record<T: BlockIo + ?Sized>(
         return read_compressed_nonresident(io, params, record, loc);
     }
 
-    let data_size = loc
-        .non_resident_value_length
-        .ok_or("non-resident attr has no data size")? as usize;
+    let data_size = bounded_value_length(params, &loc.non_resident_value_length, "non-resident")?;
     let init_size = u64::from_le_bytes(
         record[loc.attr_offset + attr_off::NONRES_INITIALIZED_LENGTH
             ..loc.attr_offset + attr_off::NONRES_INITIALIZED_LENGTH + 8]
@@ -408,6 +406,42 @@ fn read_nonresident_range<T: BlockIo + ?Sized>(
 
 /// Non-resident attribute header: compression-unit exponent (u16 at +0x22).
 /// The unit is `2^exp` clusters (4 ⇒ 16 clusters, the LZNT1 default).
+/// The largest compression unit NTFS defines, as its base-2 log.
+///
+/// NTFS compresses in units of sixteen clusters, so the field is 4 on
+/// every volume anyone has. It is a u16, and it was checked only
+/// against zero.
+const MAX_COMPRESSION_UNIT: u32 = 4;
+
+/// A non-resident attribute's declared length, once it is known to be
+/// something the volume could hold.
+///
+/// `data_length` is a `u64` off the disk and it is the size of the
+/// buffer this reader allocates before reading a byte. Nothing in the
+/// crate compared an attribute length to the volume's size, so
+/// `$UpCase` -- which `resolve_path` loads before any lookup, so on the
+/// first operation of any mount -- with `data_length = 0x0000_FFFF_FFFF_FFFF`
+/// on a 10 MB image gave `memory allocation of 281474976710655 bytes
+/// failed`. That is an abort, not a catchable error: the FFI guard
+/// never sees it.
+///
+/// A non-resident value lives in clusters, and a volume has only so
+/// many.
+fn bounded_value_length(
+    params: &crate::mft_io::BootParams,
+    declared: &Option<u64>,
+    what: &str,
+) -> Result<usize, String> {
+    let declared = declared.ok_or(format!("{what} attr has no data size"))?;
+    let volume = params.volume_bytes();
+    if declared > volume {
+        return Err(format!(
+            "{what} attribute says its value is {declared} bytes, on a volume of {volume}"
+        ));
+    }
+    Ok(declared as usize)
+}
+
 const NONRES_COMPRESSION_UNIT: usize = 0x22;
 
 /// Read a compressed non-resident attribute, decompressing each compression
@@ -424,15 +458,22 @@ fn read_compressed_nonresident<T: BlockIo + ?Sized>(
     record: &[u8],
     loc: &attr_io::AttrLocation,
 ) -> Result<Vec<u8>, String> {
-    let data_size = loc
-        .non_resident_value_length
-        .ok_or("compressed attr has no data size")? as usize;
+    let data_size = bounded_value_length(params, &loc.non_resident_value_length, "compressed")?;
     let cu_exp = u16::from_le_bytes([
         record[loc.attr_offset + NONRES_COMPRESSION_UNIT],
         record[loc.attr_offset + NONRES_COMPRESSION_UNIT + 1],
     ]) as u32;
-    if cu_exp == 0 {
-        return Err("compressed flag set but compression_unit is 0".to_string());
+    // NTFS compresses in units of 16 clusters, which is
+    // `compression_unit = 4`; the field is the base-2 log of the
+    // cluster count and the format defines no larger unit. It was
+    // rejected only at zero, so 62 shifted `unit_clusters` to a value
+    // whose product with the cluster size wrapped to 0 -- and the loop
+    // below advances by that product, so a release build hung.
+    if cu_exp == 0 || cu_exp > MAX_COMPRESSION_UNIT {
+        return Err(format!(
+            "compression_unit is {cu_exp}, where {MAX_COMPRESSION_UNIT} is the largest \
+             unit NTFS compresses in"
+        ));
     }
     let unit_clusters = 1usize << cu_exp;
     let mpo = loc
@@ -791,14 +832,40 @@ pub fn nonresident_contiguous_disk_range<T: BlockIo + ?Sized>(
     let lcn = run
         .lcn
         .ok_or("non-resident attribute's only run is a sparse hole")?;
-    let extent_bytes = run.length * params.cluster_size;
+    // THE RANGE HAS TO BE ON THE DEVICE.
+    //
+    // The only guard here used to compare two fields of the same
+    // attribute against each other, and its multiply wrapped. Both come
+    // off the disk, and callers treat the answer as a flat range to
+    // write over: `fsck::reset_logfile_io` fills it with 0xFF. A
+    // `$LogFile` naming a run of 2^30 clusters at an lcn of the
+    // caller's choosing directed a terabyte of 0xFF anywhere on the
+    // device -- over the MFT on a raw disk, or inflating a sparse image
+    // until the host volume filled.
+    let extent_bytes = run
+        .length
+        .checked_mul(params.cluster_size)
+        .ok_or_else(|| format!("{attr_type:?} extent length overflows"))?;
     if extent_bytes < length {
         return Err(format!(
             "nonresident_contiguous_disk_range: {attr_type:?} extent ({extent_bytes} bytes) shorter \
              than value length ({length})"
         ));
     }
-    Ok((lcn * params.cluster_size, length))
+    let start = lcn
+        .checked_mul(params.cluster_size)
+        .ok_or_else(|| format!("{attr_type:?} extent starts past the address space"))?;
+    let end = start
+        .checked_add(length)
+        .ok_or_else(|| format!("{attr_type:?} extent ends past the address space"))?;
+    let device = io.size();
+    if end > device {
+        return Err(format!(
+            "nonresident_contiguous_disk_range: {attr_type:?} in record {record_number} spans \
+             [{start}, {end}) on a device of {device} bytes"
+        ));
+    }
+    Ok((start, length))
 }
 
 /// One entry in a directory listing.

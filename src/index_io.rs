@@ -49,6 +49,35 @@ const FN_NAME_LENGTH_OFFSET: usize = 0x40;
 const FN_NAMESPACE_OFFSET: usize = 0x41;
 const FN_NAME_OFFSET: usize = 0x42;
 
+/// The UTF-16 name of the index entry at `cursor`, bounded by the entry.
+///
+/// `name_length` is one unvalidated byte, so the name it describes can
+/// be up to 510 bytes long -- and two of the four entry walks in this
+/// file sliced `record[name_start .. name_start + name_length * 2]`
+/// with no bound at all, having proved only that the entry's own
+/// `length` fits in the buffer. `collect_entries` is the walk that does
+/// bound every read; this is that bound, written once.
+fn entry_name(buf: &[u8], cursor: usize, length: usize) -> Result<Vec<u16>, String> {
+    let name_length = usize::from(
+        *buf.get(cursor + IE_KEY_START + FN_NAME_LENGTH_OFFSET)
+            .ok_or("index entry ends before its name length")?,
+    );
+    let name_start = cursor + IE_KEY_START + FN_NAME_OFFSET;
+    let name_end = name_start
+        .checked_add(name_length * 2)
+        .ok_or("index entry name length overflows")?;
+    if name_end > cursor + length || name_end > buf.len() {
+        return Err(format!(
+            "index entry at {cursor} says its name is {name_length} characters, which \
+             runs past the {length}-byte entry"
+        ));
+    }
+    Ok(buf[name_start..name_end]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect())
+}
+
 /// One located index entry inside an `$INDEX_ROOT`.
 #[derive(Debug, Clone, Copy)]
 pub struct IndexEntryLocation {
@@ -114,15 +143,15 @@ pub fn find_index_entry(record: &[u8], wanted: &str) -> Result<Option<IndexEntry
             return Err(format!("malformed index entry at {cursor}"));
         }
         if key_length >= FN_NAME_OFFSET {
-            let key_start = cursor + IE_KEY_START;
-            let name_length = record[key_start + FN_NAME_LENGTH_OFFSET] as usize;
-            let name_start = key_start + FN_NAME_OFFSET;
-            if name_start + name_length * 2 <= record.len() && name_length == wanted_utf16.len() {
-                let name_u16: Vec<u16> = record[name_start..name_start + name_length * 2]
-                    .chunks_exact(2)
-                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                    .collect();
-                if name_u16 == wanted_utf16 {
+            // Bounded by the entry rather than by the buffer: the
+            // length byte itself sits 0x40 into the key, which the
+            // entry's own `length` may not reach, and a name bounded
+            // only by the buffer reads the next entry's bytes as this
+            // one's name.
+            let name_u16 = entry_name(record, cursor, length).unwrap_or_default();
+            let name_length = name_u16.len();
+            if name_length == wanted_utf16.len() && name_u16 == wanted_utf16 {
+                {
                     let file_ref = u64::from_le_bytes(
                         record[cursor + IE_FILE_REFERENCE..cursor + IE_FILE_REFERENCE + 8]
                             .try_into()
@@ -242,15 +271,15 @@ fn scan_entries_for_name(
             return Err(format!("malformed index entry at {cursor}"));
         }
         if key_length >= FN_NAME_OFFSET {
-            let key_start = *cursor + IE_KEY_START;
-            let name_length = buf[key_start + FN_NAME_LENGTH_OFFSET] as usize;
-            let name_start = key_start + FN_NAME_OFFSET;
-            if name_start + name_length * 2 <= buf.len() && name_length == wanted_utf16.len() {
-                let name_u16: Vec<u16> = buf[name_start..name_start + name_length * 2]
-                    .chunks_exact(2)
-                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                    .collect();
-                if name_u16 == wanted_utf16 {
+            // Bounded by the entry rather than by the buffer: the
+            // length byte itself sits 0x40 into the key, which the
+            // entry's own `length` may not reach, and a name bounded
+            // only by the buffer reads the next entry's bytes as this
+            // one's name.
+            let name_u16 = entry_name(buf, *cursor, length).unwrap_or_default();
+            let name_length = name_u16.len();
+            if name_length == wanted_utf16.len() && name_u16 == wanted_utf16 {
+                {
                     let file_ref = u64::from_le_bytes(
                         buf[*cursor + IE_FILE_REFERENCE..*cursor + IE_FILE_REFERENCE + 8]
                             .try_into()
@@ -438,8 +467,15 @@ pub fn remove_index_entry(
     ]) as usize;
     let entry_end = entry.record_offset + entry.length;
     let tail_end = ih_start + total_size;
-    if entry_end > tail_end {
-        return Err("entry extends past total_size".to_string());
+    // `total_size` is a raw u32 off the disk and `tail_end` is a bound
+    // for two `copy_within` calls below. It was compared only against
+    // `entry_end`, another number from the same index, so nothing tied
+    // either of them to the buffer.
+    if tail_end > buf.len() || entry_end > tail_end || entry.record_offset > entry_end {
+        return Err(format!(
+            "index says its entries end at {tail_end} in a {}-byte block",
+            buf.len()
+        ));
     }
 
     // Shift following entries back.
@@ -606,13 +642,7 @@ pub fn insert_entry_into_index_root_with_collation(
         if length == 0 || cursor + length > record.len() {
             return Err("malformed index during insert".to_string());
         }
-        let key_start = cursor + IE_KEY_START;
-        let name_len = record[key_start + FN_NAME_LENGTH_OFFSET] as usize;
-        let name_start = key_start + FN_NAME_OFFSET;
-        let existing_utf16: Vec<u16> = record[name_start..name_start + name_len * 2]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
+        let existing_utf16 = entry_name(record, cursor, length)?;
         if compare_names(&new_utf16, &existing_utf16, upcase) != std::cmp::Ordering::Greater {
             // new goes before existing
             break;
@@ -727,13 +757,7 @@ pub fn insert_entry_into_indx_block_with_collation(
         if length == 0 || cursor + length > block.len() {
             return Err("malformed INDX entry during insert".to_string());
         }
-        let key_start = cursor + IE_KEY_START;
-        let name_len = block[key_start + FN_NAME_LENGTH_OFFSET] as usize;
-        let name_start = key_start + FN_NAME_OFFSET;
-        let existing_utf16: Vec<u16> = block[name_start..name_start + name_len * 2]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
+        let existing_utf16 = entry_name(block, cursor, length)?;
         if compare_names(&new_utf16, &existing_utf16, upcase) != std::cmp::Ordering::Greater {
             break;
         }
@@ -836,8 +860,18 @@ pub fn rename_filename_attribute_same_length(
             Some(v) => v as usize,
             None => continue,
         };
+        let value_length = loc.resident_value_length.unwrap_or(0) as usize;
+        // The name length sits 0x40 into the $FILE_NAME value and the
+        // name itself at 0x42, so a value shorter than that describes
+        // no name to compare.
+        if value_length < FN_NAME_OFFSET {
+            continue;
+        }
         let data_start = loc.attr_offset + value_offset;
         let name_length_byte = record[data_start + FN_NAME_LENGTH_OFFSET] as usize;
+        if FN_NAME_OFFSET + name_length_byte * 2 > value_length {
+            continue;
+        }
         if name_length_byte != old_utf16.len() {
             continue;
         }
@@ -955,6 +989,34 @@ mod tests {
     }
 
     // --- find_index_entry ---
+
+    /// `name_length` is one unvalidated byte, so it describes up to
+    /// 510 bytes of name, and two of the four entry walks in this file
+    /// sliced with it having proved only that the entry's own `length`
+    /// fits in the buffer. Reached from create, mkdir and rename.
+    #[test]
+    fn an_index_entry_name_that_runs_past_the_entry_is_refused() {
+        let entry = make_entry(42, 5, "hello");
+        let length = entry.len();
+        let mut buf = entry.clone();
+
+        // The control: the real name comes back.
+        let name = entry_name(&buf, 0, length).expect("a well-formed entry");
+        assert_eq!(String::from_utf16_lossy(&name), "hello");
+
+        // A name longer than the entry that holds it.
+        buf[IE_KEY_START + FN_NAME_LENGTH_OFFSET] = 0xFF;
+        assert!(
+            entry_name(&buf, 0, length).is_err(),
+            "a 255-character name was read out of a {length}-byte entry"
+        );
+
+        // And an entry too short to reach its own name-length byte.
+        assert!(entry_name(&entry, 0, IE_KEY_START).is_err());
+        // The last entry in a block: nothing past it to read from.
+        let at = buf.len() - 8;
+        assert!(entry_name(&buf, at, 8).is_err());
+    }
 
     #[test]
     fn find_index_entry_empty_dir_returns_none() {
