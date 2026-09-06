@@ -18,8 +18,8 @@ use crate::block_io::BlockIo;
 use crate::data_runs::{encode_runs, DataRun};
 use crate::mft_io::apply_fixup_on_write;
 use crate::record_build::{
-    align8, build_nonresident_attribute, build_nonresident_data_attribute, nt_time_now, FA_ARCHIVE,
-    FA_HIDDEN, FA_NTFS_DIRECTORY, FA_NTFS_VIEW_INDEX, FA_SYSTEM,
+    align8, build_nonresident_attribute, build_nonresident_data_attribute, encode_file_reference,
+    nt_time_now, FA_ARCHIVE, FA_HIDDEN, FA_NTFS_DIRECTORY, FA_NTFS_VIEW_INDEX, FA_SYSTEM,
 };
 use crate::upcase;
 
@@ -1782,10 +1782,6 @@ fn place_record(
     Ok(())
 }
 
-fn encode_file_reference(record_number: u64, sequence: u16) -> u64 {
-    (record_number & 0x0000_FFFF_FFFF_FFFF) | ((sequence as u64) << 48)
-}
-
 fn write_standard_information(
     rec: &mut [u8],
     at: usize,
@@ -2821,37 +2817,5 @@ mod tests {
         // type_code field at offset 128 within each 160-byte entry (after 128-byte name).
         let type_code = u32::from_le_bytes([t[128], t[129], t[130], t[131]]);
         assert_eq!(type_code, 0x10, "first entry type = $STANDARD_INFORMATION");
-    }
-
-    // --- encode_file_reference --------------------------------------------
-
-    #[test]
-    fn encode_file_reference_record_number_in_low_48_bits() {
-        let fr = encode_file_reference(42, 1);
-        let record_num = fr & 0x0000_FFFF_FFFF_FFFF;
-        assert_eq!(record_num, 42);
-    }
-
-    #[test]
-    fn encode_file_reference_sequence_in_high_16_bits() {
-        let fr = encode_file_reference(0, 0xBEEF);
-        let seq = (fr >> 48) as u16;
-        assert_eq!(seq, 0xBEEF);
-    }
-
-    #[test]
-    fn encode_file_reference_combined() {
-        let fr = encode_file_reference(5, 3);
-        assert_eq!(fr & 0x0000_FFFF_FFFF_FFFF, 5, "record number");
-        assert_eq!((fr >> 48) as u16, 3, "sequence");
-    }
-
-    #[test]
-    fn encode_file_reference_truncates_record_num_to_48_bits() {
-        // Record numbers > 2^48 have the high bits masked off.
-        let big = 0x0001_0000_0000_0000u64; // bit 48 set
-        let fr = encode_file_reference(big, 0);
-        let record_num = fr & 0x0000_FFFF_FFFF_FFFF;
-        assert_eq!(record_num, 0, "bit 48 masked off");
     }
 }
