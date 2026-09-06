@@ -326,9 +326,31 @@ impl<'a> Iterator for AttrIter<'a> {
         }
 
         let non_resident = self.record[self.cursor + attr_off::NON_RESIDENT] != 0;
+
+        // THE HEADER HAS TO BE INSIDE THE ATTRIBUTE.
+        //
+        // A resident header is 0x18 bytes and a non-resident one 0x40,
+        // and the fields read below sit at fixed offsets inside them.
+        // `length` is checked above; the header size was not, so an
+        // attribute of `length = 8` was yielded and then had its
+        // `initialized_size` read from bytes 0x38..0x40 -- past the end
+        // of the record when the attribute sat near the end of it.
+        let header = if non_resident { 0x40 } else { 0x18 };
+        if length < header {
+            return None;
+        }
+
         let name_length = self.record[self.cursor + attr_off::NAME_LENGTH];
         let name_offset = read_u16_le(self.record, self.cursor + attr_off::NAME_OFFSET)?;
         let attribute_id = read_u16_le(self.record, self.cursor + attr_off::ATTRIBUTE_ID)?;
+
+        // A name, where there is one, is inside the attribute too.
+        if name_length != 0 {
+            let name_end = (name_offset as usize).checked_add(usize::from(name_length) * 2)?;
+            if name_end > length {
+                return None;
+            }
+        }
 
         let mut loc = AttrLocation {
             type_code,
@@ -344,24 +366,50 @@ impl<'a> Iterator for AttrIter<'a> {
             non_resident_mapping_pairs_offset: None,
         };
 
+        // THE VALUE HAS TO BE INSIDE THE ATTRIBUTE TOO.
+        //
+        // These three fields were yielded exactly as the disk gave
+        // them, and around thirty call sites then used them as slice
+        // bounds, allocation sizes and disk write offsets. Two of those
+        // sites check them and the rest assume the iterator did.
+        //
+        //   - `resident_value_offset` + `resident_value_length` is
+        //     where a resident value sits. Unchecked, `$VOLUME_INFORMATION`
+        //     with a value_offset of 0xFFF0 and a plausible length made
+        //     `set_dirty` write two bytes into a neighbouring MFT record.
+        //   - `mapping_pairs_offset` is where a non-resident
+        //     attribute's run list starts, and `read.rs` slices
+        //     `record[attr_offset + mpo .. attr_offset + attr_length]`.
+        //     One byte changed in a normal $DATA header -- mpo 0xFFFF --
+        //     gave "range start index 65591 out of range for slice of
+        //     length 1024".
+        //
+        // An attribute whose own header does not describe something
+        // inside itself is not an attribute, and the iterator stops
+        // where it stops for a bad `length`.
         if !non_resident {
-            loc.resident_value_length = Some(read_u32_le(
-                self.record,
-                self.cursor + attr_off::RESIDENT_VALUE_LENGTH,
-            )?);
-            loc.resident_value_offset = Some(read_u16_le(
-                self.record,
-                self.cursor + attr_off::RESIDENT_VALUE_OFFSET,
-            )?);
+            let value_length =
+                read_u32_le(self.record, self.cursor + attr_off::RESIDENT_VALUE_LENGTH)? as usize;
+            let value_offset =
+                read_u16_le(self.record, self.cursor + attr_off::RESIDENT_VALUE_OFFSET)? as usize;
+            if value_offset < header || value_offset.checked_add(value_length)? > length {
+                return None;
+            }
+            loc.resident_value_length = Some(value_length as u32);
+            loc.resident_value_offset = Some(value_offset as u16);
         } else {
+            let mapping_pairs_offset = read_u16_le(
+                self.record,
+                self.cursor + attr_off::NONRES_MAPPING_PAIRS_OFFSET,
+            )? as usize;
+            if mapping_pairs_offset < header || mapping_pairs_offset > length {
+                return None;
+            }
             loc.non_resident_value_length = Some(read_u64_le(
                 self.record,
                 self.cursor + attr_off::NONRES_DATA_LENGTH,
             )?);
-            loc.non_resident_mapping_pairs_offset = Some(read_u16_le(
-                self.record,
-                self.cursor + attr_off::NONRES_MAPPING_PAIRS_OFFSET,
-            )?);
+            loc.non_resident_mapping_pairs_offset = Some(mapping_pairs_offset as u16);
         }
 
         self.cursor += length;
@@ -496,6 +544,94 @@ mod tests {
     }
 
     // --- iter_attributes ---------------------------------------------------
+
+    /// The iterator's three yielded offsets -- where a resident value
+    /// sits, how long it is, and where a non-resident attribute's run
+    /// list starts -- came off the disk untouched, and around thirty
+    /// call sites used them as slice bounds, allocation sizes and disk
+    /// write offsets. Two of those sites check them; the rest assume
+    /// the iterator did.
+    ///
+    /// An attribute whose own header does not describe something inside
+    /// itself is not an attribute, and the iterator stops where it
+    /// stops for a `length` that is not a multiple of eight.
+    #[test]
+    fn an_attribute_whose_value_is_not_inside_it_is_not_yielded() {
+        // The control: a well-formed record with one of each.
+        let good = RecordBuilder::new(1024, 0x38)
+            .push_resident(0x10, 1, b"standard information", &[])
+            .push_nonresident(0x80, 4096, &[0x21, 0x01, 0x00])
+            .finish();
+        assert_eq!(iter_attributes(&good).count(), 2, "the control record");
+
+        // `mapping_pairs_offset` past the attribute's own length. One
+        // byte changed in a normal $DATA header; before this it gave
+        // "range start index 65591 out of range for slice of length
+        // 1024" out of `read.rs`.
+        let mut hostile = good.clone();
+        let data_at = iter_attributes(&good)
+            .find(|a| a.type_code == 0x80)
+            .expect("the $DATA attribute")
+            .attr_offset;
+        hostile[data_at + attr_off::NONRES_MAPPING_PAIRS_OFFSET
+            ..data_at + attr_off::NONRES_MAPPING_PAIRS_OFFSET + 2]
+            .copy_from_slice(&0xFFFFu16.to_le_bytes());
+        assert_eq!(
+            iter_attributes(&hostile).count(),
+            1,
+            "the $DATA attribute names a run list outside itself and was yielded anyway"
+        );
+
+        // A resident value that starts inside the attribute and ends
+        // outside it: the shape that made `set_dirty` write into a
+        // neighbouring MFT record.
+        let si_at = iter_attributes(&good)
+            .find(|a| a.type_code == 0x10)
+            .expect("the $STANDARD_INFORMATION attribute")
+            .attr_offset;
+        let mut hostile = good.clone();
+        hostile
+            [si_at + attr_off::RESIDENT_VALUE_LENGTH..si_at + attr_off::RESIDENT_VALUE_LENGTH + 4]
+            .copy_from_slice(&0xFFFFu32.to_le_bytes());
+        assert!(
+            !iter_attributes(&hostile).any(|a| a.type_code == 0x10),
+            "a resident value 65535 bytes long was yielded from an attribute of 48"
+        );
+
+        // And one that starts outside it entirely.
+        let mut hostile = good.clone();
+        hostile
+            [si_at + attr_off::RESIDENT_VALUE_OFFSET..si_at + attr_off::RESIDENT_VALUE_OFFSET + 2]
+            .copy_from_slice(&0xFFF0u16.to_le_bytes());
+        assert!(!iter_attributes(&hostile).any(|a| a.type_code == 0x10));
+    }
+
+    /// The fields at fixed offsets inside an attribute header are only
+    /// there when the attribute is long enough to hold the header. A
+    /// non-resident one of `length = 8` had `initialized_size` read
+    /// from bytes 0x38..0x40 of it.
+    #[test]
+    fn an_attribute_shorter_than_its_own_header_is_not_yielded() {
+        let good = RecordBuilder::new(1024, 0x38)
+            .push_nonresident(0x80, 4096, &[0x21, 0x01, 0x00])
+            .finish();
+        let at = iter_attributes(&good)
+            .next()
+            .expect("one attribute")
+            .attr_offset;
+
+        let mut hostile = good.clone();
+        hostile[at + attr_off::LENGTH..at + attr_off::LENGTH + 4]
+            .copy_from_slice(&8u32.to_le_bytes());
+        assert_eq!(iter_attributes(&hostile).count(), 0);
+
+        // A resident header is 0x18, so 0x10 is short for one too.
+        let mut hostile = good.clone();
+        hostile[at + attr_off::NON_RESIDENT] = 0;
+        hostile[at + attr_off::LENGTH..at + attr_off::LENGTH + 4]
+            .copy_from_slice(&16u32.to_le_bytes());
+        assert_eq!(iter_attributes(&hostile).count(), 0);
+    }
 
     #[test]
     fn iter_empty_record_yields_no_attributes() {

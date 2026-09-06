@@ -346,7 +346,60 @@ pub fn read_mft_record_io<T: BlockIo + ?Sized>(
     io.read_exact_at(offset, &mut buf)
         .map_err(|e| format!("read record {record_number}: {e}"))?;
     apply_fixup_on_read(&mut buf, params.bytes_per_sector)?;
+    check_record_header(&buf, record_number)?;
     Ok((params, buf))
+}
+
+/// Record-header offsets used by the check below.
+const REC_ATTRS_OFFSET: usize = 0x14;
+const REC_BYTES_USED: usize = 0x18;
+const REC_BYTES_ALLOCATED: usize = 0x1C;
+
+/// The two lengths in a file record's header describe the record, so
+/// they cannot be larger than it.
+///
+/// `bytes_used` says how much of the record holds attributes, and
+/// `bytes_allocated` how much of it there is. Nothing validated either,
+/// and every compaction in `attr_resize` and `write` reads `bytes_used`
+/// raw and hands it to `copy_within` -- with the only capacity guard
+/// being against `bytes_allocated`, itself unvalidated. `bytes_used`
+/// larger than the record is a panic there, and `bytes_used - diff`
+/// underflowing is a huge slice bound.
+///
+/// One of those functions, `remove_attribute_at`, does clamp; the two
+/// hand-rolled copies of it do not. Checking here means none of them
+/// has to.
+///
+/// A free record is left alone: it has no attributes, its header is
+/// zeroed or stale, and `update_mft_record_io` refuses to write to it
+/// on its own IN_USE check.
+fn check_record_header(record: &[u8], record_number: u64) -> Result<(), String> {
+    if &record[0..4] != FILE_MAGIC || record_flags(record) & MFT_FLAG_IN_USE == 0 {
+        return Ok(());
+    }
+    let read_u32 = |at: usize| -> usize {
+        u32::from_le_bytes(record[at..at + 4].try_into().expect("4 bytes")) as usize
+    };
+    let read_u16 = |at: usize| -> usize {
+        u16::from_le_bytes(record[at..at + 2].try_into().expect("2 bytes")) as usize
+    };
+    let bytes_used = read_u32(REC_BYTES_USED);
+    let bytes_allocated = read_u32(REC_BYTES_ALLOCATED);
+    let attrs_offset = read_u16(REC_ATTRS_OFFSET);
+    if bytes_used > record.len() || bytes_allocated > record.len() {
+        return Err(format!(
+            "MFT record {record_number} says it uses {bytes_used} of {bytes_allocated} \
+             bytes, in a record of {}",
+            record.len()
+        ));
+    }
+    if attrs_offset > bytes_used {
+        return Err(format!(
+            "MFT record {record_number} puts its attributes at {attrs_offset}, past the \
+             {bytes_used} bytes it says it uses"
+        ));
+    }
+    Ok(())
 }
 
 /// Read-modify-write an MFT record. The `mutate` closure receives the
@@ -584,6 +637,45 @@ mod tests {
     }
 
     // --- record_flags ------------------------------------------------------
+
+    /// `bytes_used` and `bytes_allocated` describe the record, so they
+    /// cannot be larger than it -- and every compaction in
+    /// `attr_resize` and `write` reads `bytes_used` raw and hands it to
+    /// `copy_within`, guarded only against `bytes_allocated`, which is
+    /// itself off the disk. One of those functions clamps; the two
+    /// hand-rolled copies of it do not.
+    #[test]
+    fn a_record_whose_lengths_are_larger_than_it_is_refused() {
+        let mut record = vec![0u8; 1024];
+        record[0..4].copy_from_slice(FILE_MAGIC);
+        record[0x16..0x18].copy_from_slice(&MFT_FLAG_IN_USE.to_le_bytes());
+        record[0x14..0x16].copy_from_slice(&0x38u16.to_le_bytes());
+        record[0x18..0x1C].copy_from_slice(&512u32.to_le_bytes());
+        record[0x1C..0x20].copy_from_slice(&1024u32.to_le_bytes());
+        check_record_header(&record, 5).expect("a well-formed header");
+
+        let mut hostile = record.clone();
+        hostile[0x18..0x1C].copy_from_slice(&0x4000u32.to_le_bytes());
+        assert!(check_record_header(&hostile, 5).is_err());
+
+        let mut hostile = record.clone();
+        hostile[0x1C..0x20].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        assert!(check_record_header(&hostile, 5).is_err());
+
+        // Attributes cannot start after the part of the record that
+        // holds them ends.
+        let mut hostile = record.clone();
+        hostile[0x14..0x16].copy_from_slice(&600u16.to_le_bytes());
+        assert!(check_record_header(&hostile, 5).is_err());
+
+        // A free record keeps its own counsel: it has no attributes,
+        // its header is stale or zeroed, and the write path refuses it
+        // on its own IN_USE check.
+        let mut free = record.clone();
+        free[0x16..0x18].copy_from_slice(&0u16.to_le_bytes());
+        free[0x18..0x1C].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        assert!(check_record_header(&free, 5).is_ok());
+    }
 
     #[test]
     fn record_flags_reads_u16_le_at_offset_0x16() {
