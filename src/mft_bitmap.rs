@@ -52,11 +52,29 @@ pub enum MftBitmapLayout {
 
 impl MftBitmap {
     /// Record-number ceiling: how many bits this bitmap describes.
+    ///
+    /// Bounded by how many MFT records the volume could hold. The
+    /// declared bit count is `$MFT:$Bitmap`'s `data_length` times
+    /// eight, off the disk, with nothing tying it to `$MFT` -- and
+    /// `count_free_io` loops over every byte of it, one read per byte.
+    /// At the field's maximum that is 2^61 iterations.
+    ///
+    /// A bit describes a record, and a record occupies
+    /// `file_record_size` bytes of a volume that has only so many.
     pub fn total_bits(&self) -> u64 {
-        match &self.layout {
+        let declared = match &self.layout {
             MftBitmapLayout::Resident { total_bits, .. } => *total_bits,
             MftBitmapLayout::NonResident { total_bits, .. } => *total_bits,
+        };
+        let record_size = self.params.file_record_size.max(1);
+        let capacity = self.params.volume_bytes() / record_size;
+        // A volume that does not say how big it is cannot judge the
+        // bitmap, and answering zero to every question would be worse
+        // than answering what the bitmap said.
+        if capacity == 0 {
+            return declared;
         }
+        declared.min(capacity)
     }
 }
 
@@ -313,6 +331,50 @@ mod tests {
             serial_number: 0,
             oem_id: *b"NTFS    ",
         }
+    }
+
+    /// `count_free_io` reads one byte per eight bits of this, one
+    /// device read each, and the declared count is
+    /// `$MFT:$Bitmap`'s `data_length` times eight with nothing tying it
+    /// to `$MFT`. At the field's maximum that is 2^61 iterations.
+    ///
+    /// A bit describes a record, and a record occupies
+    /// `file_record_size` bytes of a volume that has only so many.
+    #[test]
+    fn a_bitmap_claiming_more_records_than_the_volume_holds_is_capped() {
+        let mut p = params(4096);
+        p.total_sectors = 32768; // 16 MiB at 512-byte sectors
+        let capacity = 16 * 1024 * 1024 / 1024; // 16384 records
+
+        let hostile = MftBitmap {
+            params: p,
+            layout: MftBitmapLayout::NonResident {
+                runs: Vec::new(),
+                total_bits: u64::MAX / 8,
+            },
+        };
+        assert_eq!(hostile.total_bits(), capacity);
+
+        // A plausible count is left alone, padding and all.
+        let ordinary = MftBitmap {
+            params: p,
+            layout: MftBitmapLayout::Resident {
+                data_offset_in_record: 0,
+                value_length: 8,
+                total_bits: 64,
+            },
+        };
+        assert_eq!(ordinary.total_bits(), 64);
+
+        // And a volume that does not say how big it is cannot judge.
+        let unknown = MftBitmap {
+            params: params(4096),
+            layout: MftBitmapLayout::NonResident {
+                runs: Vec::new(),
+                total_bits: 1_000_000,
+            },
+        };
+        assert_eq!(unknown.total_bits(), 1_000_000);
     }
 
     fn run(starting_vcn: u64, length: u64, lcn: u64) -> DataRun {

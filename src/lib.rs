@@ -144,7 +144,9 @@ fn infer_errno_from_message(msg: &str) -> c_int {
 /// need it to persist.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_last_error() -> *const c_char {
-    LAST_ERROR.with(|cell| cell.borrow().as_ptr())
+    ffi_guard("fs_ntfs_last_error", std::ptr::null(), move || {
+        LAST_ERROR.with(|cell| cell.borrow().as_ptr())
+    })
 }
 
 /// Companion to `fs_ntfs_last_error`. Returns a POSIX-style errno
@@ -153,17 +155,21 @@ pub extern "C" fn fs_ntfs_last_error() -> *const c_char {
 /// without parsing the error string.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_last_errno() -> c_int {
-    LAST_ERRNO.with(|cell| *cell.borrow())
+    ffi_guard("fs_ntfs_last_errno", -1, move || {
+        LAST_ERRNO.with(|cell| *cell.borrow())
+    })
 }
 
 /// Reset the thread-local error state. Primarily useful in tests /
 /// after a caller has consumed the last error.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_clear_last_error() {
-    LAST_ERROR.with(|cell| {
-        *cell.borrow_mut() = CString::new("").unwrap();
-    });
-    LAST_ERRNO.with(|cell| *cell.borrow_mut() = 0);
+    ffi_guard("fs_ntfs_clear_last_error", (), move || {
+        LAST_ERROR.with(|cell| {
+            *cell.borrow_mut() = CString::new("").unwrap();
+        });
+        LAST_ERRNO.with(|cell| *cell.borrow_mut() = 0);
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +192,41 @@ pub extern "C" fn fs_ntfs_clear_last_error() {
 // The helpers below collapse those into one call/macro each. They do
 // not change error-string content or return values — purely textual
 // compression. See callers throughout this file.
+
+/// Run an FFI body so that a panic becomes an error return.
+///
+/// EVERY ENTRY POINT IN THIS FILE GOES THROUGH HERE. An `extern "C"`
+/// function that unwinds aborts the process -- Rust inserts the abort
+/// shim itself -- so before this existed, any panic anywhere under the
+/// C ABI took the whole host process down rather than returning a
+/// failure. In an FSKit extension that is the mount disappearing.
+///
+/// This crate parses attacker-controlled bytes: a `$DATA` attribute
+/// whose `mapping_pairs_offset` exceeds its own length, an index entry
+/// whose name runs past its record, a compaction that shifts by a
+/// `bytes_used` larger than the record. Each of those is a slice
+/// index, and a slice index out of range is a panic in every profile.
+/// The bounds themselves are worth fixing one at a time; this is what
+/// makes the ones nobody has found yet survivable.
+///
+/// It is not a substitute for those bounds. `catch_unwind` catches
+/// unwinds and nothing else, so an allocation failure -- which goes to
+/// `handle_alloc_error` and aborts -- still ends the process, and a
+/// loop that does not terminate still hangs. Those need real limits.
+///
+/// The sibling ext4 and btrfs drivers have had the same wrapper since
+/// they were written; this file had none.
+fn ffi_guard<T, F: FnOnce() -> T>(what: &str, fallback: T, body: F) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(value) => value,
+        Err(_) => {
+            set_error(&format!(
+                "{what}: the driver panicked reading this filesystem"
+            ));
+            fallback
+        }
+    }
+}
 
 /// Record `e` as the thread-local last-error and return the int sentinel.
 /// Use in `Err` arms returning an `int` from an FFI function.
@@ -467,57 +508,59 @@ fn make_dirent(file_record_number: u64, file_type: u8, name: &[u8]) -> FsNtfsDir
 /// "Device exclusivity contract" for the full rationale.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle {
-    if device_path.is_null() {
-        set_error("null device path");
-        return std::ptr::null_mut();
-    }
-
-    let path = match unsafe { CStr::from_ptr(device_path) }.to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            set_error(&format!("invalid path: {e}"));
+    ffi_guard("fs_ntfs_mount", std::ptr::null_mut(), move || {
+        if device_path.is_null() {
+            set_error("null device path");
             return std::ptr::null_mut();
         }
-    };
 
-    // Validate it's a parseable NTFS volume via the native read layer (boot
-    // sector + OEM signature + `$Volume`), no upstream `Ntfs::new`.
-    {
-        let mut io = match RwPathIo::open_ro(std::path::Path::new(path)) {
-            Ok(io) => io,
+        let path = match unsafe { CStr::from_ptr(device_path) }.to_str() {
+            Ok(s) => s,
             Err(e) => {
-                set_error(&format!("open '{path}': {e}"));
+                set_error(&format!("invalid path: {e}"));
                 return std::ptr::null_mut();
             }
         };
-        if let Err(e) = read::read_volume_info(&mut io) {
-            set_error(&format!("ntfs init: {e}"));
-            return std::ptr::null_mut();
-        }
-    }
 
-    // Mimic `ntfs.sys`'s "upgrade on mount". Path-based mount is
-    // RW-capable (the mutator API reopens RW per call), so apply the
-    // 1.2 -> 3.1 upgrade best-effort. Failure is logged at `warn` and
-    // does not fail the mount.
-    match crate::fsck::upgrade_volume_version(path) {
-        Ok(true) => {
-            log::info!(target: "fs_ntfs", "upgraded $VOLUME_INFORMATION 1.2 -> 3.1 on {path}")
+        // Validate it's a parseable NTFS volume via the native read layer (boot
+        // sector + OEM signature + `$Volume`), no upstream `Ntfs::new`.
+        {
+            let mut io = match RwPathIo::open_ro(std::path::Path::new(path)) {
+                Ok(io) => io,
+                Err(e) => {
+                    set_error(&format!("open '{path}': {e}"));
+                    return std::ptr::null_mut();
+                }
+            };
+            if let Err(e) = read::read_volume_info(&mut io) {
+                set_error(&format!("ntfs init: {e}"));
+                return std::ptr::null_mut();
+            }
         }
-        Ok(false) => {
-            log::debug!(target: "fs_ntfs", "no $VOLUME_INFORMATION upgrade needed on {path}")
-        }
-        Err(e) => {
-            log::warn!(target: "fs_ntfs", "$VOLUME_INFORMATION upgrade skipped on {path}: {e}")
-        }
-    }
 
-    let bridge = Box::new(FsNtfsHandle {
-        source: Some(MountSource::Path(PathBuf::from(path))),
-        writable: true,
-    });
-    log::info!(target: "fs_ntfs", "mount path={path}");
-    Box::into_raw(bridge)
+        // Mimic `ntfs.sys`'s "upgrade on mount". Path-based mount is
+        // RW-capable (the mutator API reopens RW per call), so apply the
+        // 1.2 -> 3.1 upgrade best-effort. Failure is logged at `warn` and
+        // does not fail the mount.
+        match crate::fsck::upgrade_volume_version(path) {
+            Ok(true) => {
+                log::info!(target: "fs_ntfs", "upgraded $VOLUME_INFORMATION 1.2 -> 3.1 on {path}")
+            }
+            Ok(false) => {
+                log::debug!(target: "fs_ntfs", "no $VOLUME_INFORMATION upgrade needed on {path}")
+            }
+            Err(e) => {
+                log::warn!(target: "fs_ntfs", "$VOLUME_INFORMATION upgrade skipped on {path}: {e}")
+            }
+        }
+
+        let bridge = Box::new(FsNtfsHandle {
+            source: Some(MountSource::Path(PathBuf::from(path))),
+            writable: true,
+        });
+        log::info!(target: "fs_ntfs", "mount path={path}");
+        Box::into_raw(bridge)
+    })
 }
 
 /// Mount an NTFS volume via caller-supplied read (and optionally write)
@@ -528,62 +571,68 @@ pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle
 /// the full read API; mutators work when a `write` callback is provided.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) -> *mut FsNtfsHandle {
-    if cfg.is_null() {
-        set_error("null config");
-        return std::ptr::null_mut();
-    }
-
-    let cfg = unsafe { &*cfg };
-
-    // Validate it's a parseable NTFS volume via the native read layer over a
-    // read-only callback `BlockIo` (no upstream `Ntfs::new`).
-    {
-        let mut io = CallbackBlockIo {
-            read_fn: cfg.read,
-            write_fn: None,
-            context: cfg.context,
-            size: cfg.size_bytes,
-        };
-        if let Err(e) = read::read_volume_info(&mut io) {
-            set_error(&format!("ntfs init: {e}"));
-            return std::ptr::null_mut();
-        }
-    }
-
-    // Mimic `ntfs.sys`'s "upgrade on mount". Only fire when the
-    // caller supplied a write callback — otherwise the mount is
-    // effectively RO and the upgrade write would fail. Best-effort;
-    // failure logged at `warn` and does not fail the mount.
-    if cfg.write.is_some() {
-        let mut io = CallbackBlockIo {
-            read_fn: cfg.read,
-            write_fn: cfg.write,
-            context: cfg.context,
-            size: cfg.size_bytes,
-        };
-        match crate::fsck::upgrade_volume_version_io(&mut io) {
-            Ok(true) => {
-                log::info!(target: "fs_ntfs", "upgraded $VOLUME_INFORMATION 1.2 -> 3.1 (callback mount)")
+    ffi_guard(
+        "fs_ntfs_mount_with_callbacks",
+        std::ptr::null_mut(),
+        move || {
+            if cfg.is_null() {
+                set_error("null config");
+                return std::ptr::null_mut();
             }
-            Ok(false) => {
-                log::debug!(target: "fs_ntfs", "no $VOLUME_INFORMATION upgrade needed (callback mount)")
-            }
-            Err(e) => {
-                log::warn!(target: "fs_ntfs", "$VOLUME_INFORMATION upgrade skipped (callback mount): {e}")
-            }
-        }
-    }
 
-    let bridge = Box::new(FsNtfsHandle {
-        source: Some(MountSource::Callbacks {
-            read_fn: cfg.read,
-            write_fn: cfg.write,
-            context: cfg.context,
-            size: cfg.size_bytes,
-        }),
-        writable: cfg.write.is_some(),
-    });
-    Box::into_raw(bridge)
+            let cfg = unsafe { &*cfg };
+
+            // Validate it's a parseable NTFS volume via the native read layer over a
+            // read-only callback `BlockIo` (no upstream `Ntfs::new`).
+            {
+                let mut io = CallbackBlockIo {
+                    read_fn: cfg.read,
+                    write_fn: None,
+                    context: cfg.context,
+                    size: cfg.size_bytes,
+                };
+                if let Err(e) = read::read_volume_info(&mut io) {
+                    set_error(&format!("ntfs init: {e}"));
+                    return std::ptr::null_mut();
+                }
+            }
+
+            // Mimic `ntfs.sys`'s "upgrade on mount". Only fire when the
+            // caller supplied a write callback — otherwise the mount is
+            // effectively RO and the upgrade write would fail. Best-effort;
+            // failure logged at `warn` and does not fail the mount.
+            if cfg.write.is_some() {
+                let mut io = CallbackBlockIo {
+                    read_fn: cfg.read,
+                    write_fn: cfg.write,
+                    context: cfg.context,
+                    size: cfg.size_bytes,
+                };
+                match crate::fsck::upgrade_volume_version_io(&mut io) {
+                    Ok(true) => {
+                        log::info!(target: "fs_ntfs", "upgraded $VOLUME_INFORMATION 1.2 -> 3.1 (callback mount)")
+                    }
+                    Ok(false) => {
+                        log::debug!(target: "fs_ntfs", "no $VOLUME_INFORMATION upgrade needed (callback mount)")
+                    }
+                    Err(e) => {
+                        log::warn!(target: "fs_ntfs", "$VOLUME_INFORMATION upgrade skipped (callback mount): {e}")
+                    }
+                }
+            }
+
+            let bridge = Box::new(FsNtfsHandle {
+                source: Some(MountSource::Callbacks {
+                    read_fn: cfg.read,
+                    write_fn: cfg.write,
+                    context: cfg.context,
+                    size: cfg.size_bytes,
+                }),
+                writable: cfg.write.is_some(),
+            });
+            Box::into_raw(bridge)
+        },
+    )
 }
 
 /// Mount via an `FsCoreDevice` handle from a sister crate
@@ -606,43 +655,49 @@ pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) ->
 pub extern "C" fn fs_ntfs_mount_with_fs_core_device(
     handle: *mut fs_core::ffi::FsCoreDevice,
 ) -> *mut FsNtfsHandle {
-    if handle.is_null() {
-        set_error("null fs_core handle");
-        return std::ptr::null_mut();
-    }
+    ffi_guard(
+        "fs_ntfs_mount_with_fs_core_device",
+        std::ptr::null_mut(),
+        move || {
+            if handle.is_null() {
+                set_error("null fs_core handle");
+                return std::ptr::null_mut();
+            }
 
-    // Safety: `handle` is non-null (checked above) and the C ABI
-    // contract documented in `include/fs_ntfs.h` requires the caller to
-    // keep the pointer valid for the duration of this call. The clone
-    // takes a fresh `Arc` reference so the underlying device outlives
-    // any subsequent mutation of the handle.
-    let inner = unsafe { (*handle).inner().clone() };
-    let size = fs_core::BlockRead::size_bytes(&inner);
+            // Safety: `handle` is non-null (checked above) and the C ABI
+            // contract documented in `include/fs_ntfs.h` requires the caller to
+            // keep the pointer valid for the duration of this call. The clone
+            // takes a fresh `Arc` reference so the underlying device outlives
+            // any subsequent mutation of the handle.
+            let inner = unsafe { (*handle).inner().clone() };
+            let size = fs_core::BlockRead::size_bytes(&inner);
 
-    // Validate via the native read layer over a read-only fs-core `BlockIo`.
-    {
-        let mut io = FsCoreBlockIo {
-            device: inner.clone(),
-            size,
-        };
-        if let Err(e) = read::read_volume_info(&mut io) {
-            set_error(&format!("ntfs init: {e}"));
-            return std::ptr::null_mut();
-        }
-    }
+            // Validate via the native read layer over a read-only fs-core `BlockIo`.
+            {
+                let mut io = FsCoreBlockIo {
+                    device: inner.clone(),
+                    size,
+                };
+                if let Err(e) = read::read_volume_info(&mut io) {
+                    set_error(&format!("ntfs init: {e}"));
+                    return std::ptr::null_mut();
+                }
+            }
 
-    let bridge = Box::new(FsNtfsHandle {
-        // Record the device so the native read path can build a
-        // `BlockIo`; `writable: false` is what makes this a read-only
-        // mount — the mutator API refuses before ever building a
-        // writable `BlockIo`, even though the device may be physically
-        // writable. RW callers must use
-        // `fs_ntfs_mount_rw_with_fs_core_device` instead.
-        source: Some(MountSource::FsCore { device: inner }),
-        writable: false,
-    });
-    log::info!(target: "fs_ntfs", "mount via fs_core handle (size={size})");
-    Box::into_raw(bridge)
+            let bridge = Box::new(FsNtfsHandle {
+                // Record the device so the native read path can build a
+                // `BlockIo`; `writable: false` is what makes this a read-only
+                // mount — the mutator API refuses before ever building a
+                // writable `BlockIo`, even though the device may be physically
+                // writable. RW callers must use
+                // `fs_ntfs_mount_rw_with_fs_core_device` instead.
+                source: Some(MountSource::FsCore { device: inner }),
+                writable: false,
+            });
+            log::info!(target: "fs_ntfs", "mount via fs_core handle (size={size})");
+            Box::into_raw(bridge)
+        },
+    )
 }
 
 /// Mount an NTFS volume RW via an `FsCoreDevice` handle from a sister
@@ -670,57 +725,69 @@ pub extern "C" fn fs_ntfs_mount_with_fs_core_device(
 pub extern "C" fn fs_ntfs_mount_rw_with_fs_core_device(
     handle: *mut fs_core::ffi::FsCoreDevice,
 ) -> *mut FsNtfsHandle {
-    if handle.is_null() {
-        set_error("null fs_core handle");
-        return std::ptr::null_mut();
-    }
+    ffi_guard(
+        "fs_ntfs_mount_rw_with_fs_core_device",
+        std::ptr::null_mut(),
+        move || {
+            if handle.is_null() {
+                set_error("null fs_core handle");
+                return std::ptr::null_mut();
+            }
 
-    // Safety: same contract as the RO sibling above. The Arc clone
-    // here is the source-of-truth reference recorded in MountSource;
-    // the second clone below is for the BufReader-backed reader used
-    // by the read path.
-    let device = unsafe { (*handle).inner().clone() };
-    let size = fs_core::BlockRead::size_bytes(&device);
+            // Safety: same contract as the RO sibling above. The Arc clone
+            // here is the source-of-truth reference recorded in MountSource;
+            // the second clone below is for the BufReader-backed reader used
+            // by the read path.
+            let device = unsafe { (*handle).inner().clone() };
+            let size = fs_core::BlockRead::size_bytes(&device);
 
-    // Validate via the native read layer over the fs-core `BlockIo`.
-    {
-        let mut io = FsCoreBlockIo {
-            device: device.clone(),
-            size,
-        };
-        if let Err(e) = read::read_volume_info(&mut io) {
-            set_error(&format!("ntfs init: {e}"));
-            return std::ptr::null_mut();
-        }
-    }
+            // Validate via the native read layer over the fs-core `BlockIo`.
+            {
+                let mut io = FsCoreBlockIo {
+                    device: device.clone(),
+                    size,
+                };
+                if let Err(e) = read::read_volume_info(&mut io) {
+                    set_error(&format!("ntfs init: {e}"));
+                    return std::ptr::null_mut();
+                }
+            }
 
-    // Mimic `ntfs.sys`'s "upgrade on mount": if the volume was
-    // fresh-formatted (major=1, minor=2, UPGRADE_ON_MOUNT set —
-    // what Microsoft `format.com` and our `mkfs` produce), rewrite
-    // it to 3.1 with the flag cleared so volumes touched by our
-    // driver look "already upgraded" to Windows, parallel to what
-    // `ntfs.sys` would have done on first RW mount.
-    //
-    // Best-effort: log on failure but don't fail the mount. The
-    // volume is still usable in its pre-upgrade form.
-    if fs_core::BlockDevice::is_writable(&device) {
-        let mut fsck_io = FsCoreBlockIo {
-            device: device.clone(),
-            size,
-        };
-        match crate::fsck::upgrade_volume_version_io(&mut fsck_io) {
-            Ok(true) => log::info!(target: "fs_ntfs", "upgraded $VOLUME_INFORMATION 1.2 -> 3.1"),
-            Ok(false) => log::debug!(target: "fs_ntfs", "no $VOLUME_INFORMATION upgrade needed"),
-            Err(e) => log::warn!(target: "fs_ntfs", "$VOLUME_INFORMATION upgrade skipped: {e}"),
-        }
-    }
+            // Mimic `ntfs.sys`'s "upgrade on mount": if the volume was
+            // fresh-formatted (major=1, minor=2, UPGRADE_ON_MOUNT set —
+            // what Microsoft `format.com` and our `mkfs` produce), rewrite
+            // it to 3.1 with the flag cleared so volumes touched by our
+            // driver look "already upgraded" to Windows, parallel to what
+            // `ntfs.sys` would have done on first RW mount.
+            //
+            // Best-effort: log on failure but don't fail the mount. The
+            // volume is still usable in its pre-upgrade form.
+            if fs_core::BlockDevice::is_writable(&device) {
+                let mut fsck_io = FsCoreBlockIo {
+                    device: device.clone(),
+                    size,
+                };
+                match crate::fsck::upgrade_volume_version_io(&mut fsck_io) {
+                    Ok(true) => {
+                        log::info!(target: "fs_ntfs", "upgraded $VOLUME_INFORMATION 1.2 -> 3.1")
+                    }
+                    Ok(false) => {
+                        log::debug!(target: "fs_ntfs", "no $VOLUME_INFORMATION upgrade needed")
+                    }
+                    Err(e) => {
+                        log::warn!(target: "fs_ntfs", "$VOLUME_INFORMATION upgrade skipped: {e}")
+                    }
+                }
+            }
 
-    let bridge = Box::new(FsNtfsHandle {
-        source: Some(MountSource::FsCore { device }),
-        writable: true,
-    });
-    log::info!(target: "fs_ntfs", "mount rw via fs_core handle (size={size})");
-    Box::into_raw(bridge)
+            let bridge = Box::new(FsNtfsHandle {
+                source: Some(MountSource::FsCore { device }),
+                writable: true,
+            });
+            log::info!(target: "fs_ntfs", "mount rw via fs_core handle (size={size})");
+            Box::into_raw(bridge)
+        },
+    )
 }
 
 /// Owned `BlockIo` constructed from a [`FsNtfsHandle`] for the
@@ -889,12 +956,14 @@ fn handle_to_ro_io(handle: &FsNtfsHandle) -> Result<HandleIo, String> {
 /// after calling this.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_umount(fs: *mut FsNtfsHandle) {
-    if !fs.is_null() {
-        log::info!(target: "fs_ntfs", "umount handle={fs:p}");
-        unsafe {
-            drop(Box::from_raw(fs));
+    ffi_guard("fs_ntfs_umount", (), move || {
+        if !fs.is_null() {
+            log::info!(target: "fs_ntfs", "umount handle={fs:p}");
+            unsafe {
+                drop(Box::from_raw(fs));
+            }
         }
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -908,36 +977,38 @@ pub extern "C" fn fs_ntfs_get_volume_info(
     fs: *mut FsNtfsHandle,
     info: *mut FsNtfsVolumeInfo,
 ) -> c_int {
-    if fs.is_null() || info.is_null() {
-        return -1;
-    }
+    ffi_guard("fs_ntfs_get_volume_info", -1, move || {
+        if fs.is_null() || info.is_null() {
+            return -1;
+        }
 
-    let bridge = unsafe { &*fs };
-    let out = unsafe { &mut *info };
+        let bridge = unsafe { &*fs };
+        let out = unsafe { &mut *info };
 
-    // Native read layer: boot geometry + serial, `$VOLUME_INFORMATION`
-    // version, and `$VOLUME_NAME` label.
-    let mut io = match handle_to_ro_io(bridge) {
-        Ok(io) => io,
-        Err(e) => return err_int(e),
-    };
-    let vi = match read::read_volume_info(&mut io) {
-        Ok(v) => v,
-        Err(e) => return err_int(e),
-    };
+        // Native read layer: boot geometry + serial, `$VOLUME_INFORMATION`
+        // version, and `$VOLUME_NAME` label.
+        let mut io = match handle_to_ro_io(bridge) {
+            Ok(io) => io,
+            Err(e) => return err_int(e),
+        };
+        let vi = match read::read_volume_info(&mut io) {
+            Ok(v) => v,
+            Err(e) => return err_int(e),
+        };
 
-    out.volume_name = [0u8; 128];
-    let name_bytes = vi.label.as_bytes();
-    let copy_len = std::cmp::min(name_bytes.len(), 127);
-    out.volume_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-    out.cluster_size = vi.cluster_size;
-    out.total_size = vi.total_size;
-    out.total_clusters = vi.total_clusters;
-    out.serial_number = vi.serial_number;
-    out.ntfs_version_major = vi.version_major as u16;
-    out.ntfs_version_minor = vi.version_minor as u16;
+        out.volume_name = [0u8; 128];
+        let name_bytes = vi.label.as_bytes();
+        let copy_len = std::cmp::min(name_bytes.len(), 127);
+        out.volume_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        out.cluster_size = vi.cluster_size;
+        out.total_size = vi.total_size;
+        out.total_clusters = vi.total_clusters;
+        out.serial_number = vi.serial_number;
+        out.ntfs_version_major = vi.version_major as u16;
+        out.ntfs_version_minor = vi.version_minor as u16;
 
-    0
+        0
+    })
 }
 
 /// Extended volume info — populates `FsNtfsVolumeInfoV2`. Adds the
@@ -950,42 +1021,44 @@ pub extern "C" fn fs_ntfs_get_volume_info_v2(
     fs: *mut FsNtfsHandle,
     info: *mut FsNtfsVolumeInfoV2,
 ) -> c_int {
-    if fs.is_null() || info.is_null() {
-        return -1;
-    }
-    let bridge = unsafe { &*fs };
-    let out = unsafe { &mut *info };
+    ffi_guard("fs_ntfs_get_volume_info_v2", -1, move || {
+        if fs.is_null() || info.is_null() {
+            return -1;
+        }
+        let bridge = unsafe { &*fs };
+        let out = unsafe { &mut *info };
 
-    let mut io = match handle_to_ro_io(bridge) {
-        Ok(io) => io,
-        Err(e) => return err_int(e),
-    };
-    let vi = match read::read_volume_info(&mut io) {
-        Ok(v) => v,
-        Err(e) => return err_int(e),
-    };
+        let mut io = match handle_to_ro_io(bridge) {
+            Ok(io) => io,
+            Err(e) => return err_int(e),
+        };
+        let vi = match read::read_volume_info(&mut io) {
+            Ok(v) => v,
+            Err(e) => return err_int(e),
+        };
 
-    out.volume_name = [0u8; 128];
-    let name_bytes = vi.label.as_bytes();
-    let copy_len = std::cmp::min(name_bytes.len(), 127);
-    out.volume_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-    out.cluster_size = vi.cluster_size;
-    out.total_size = vi.total_size;
-    out.total_clusters = vi.total_clusters;
-    out.serial_number = vi.serial_number;
-    out.mft_record_size = vi.file_record_size;
-    out.bytes_per_sector = vi.bytes_per_sector as u32;
-    out.ntfs_version_major = vi.version_major as u16;
-    out.ntfs_version_minor = vi.version_minor as u16;
-    out.volume_flags = vi.flags;
-    out.is_dirty = if vi.flags & read::VOLUME_IS_DIRTY != 0 {
-        1
-    } else {
+        out.volume_name = [0u8; 128];
+        let name_bytes = vi.label.as_bytes();
+        let copy_len = std::cmp::min(name_bytes.len(), 127);
+        out.volume_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        out.cluster_size = vi.cluster_size;
+        out.total_size = vi.total_size;
+        out.total_clusters = vi.total_clusters;
+        out.serial_number = vi.serial_number;
+        out.mft_record_size = vi.file_record_size;
+        out.bytes_per_sector = vi.bytes_per_sector as u32;
+        out.ntfs_version_major = vi.version_major as u16;
+        out.ntfs_version_minor = vi.version_minor as u16;
+        out.volume_flags = vi.flags;
+        out.is_dirty = if vi.flags & read::VOLUME_IS_DIRTY != 0 {
+            1
+        } else {
+            0
+        };
+        out._pad = [0u8; 5];
+
         0
-    };
-    out._pad = [0u8; 5];
-
-    0
+    })
 }
 
 /// Set the volume label on an unmounted NTFS image. Empty `label`
@@ -995,28 +1068,30 @@ pub extern "C" fn fs_ntfs_get_volume_info_v2(
 /// UTF-16 code units; longer labels are rejected.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_set_volume_label(image: *const c_char, label: *const c_char) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_set_volume_label: null or non-UTF-8 image");
-        return -1;
-    };
-    let label_str = if label.is_null() {
-        ""
-    } else {
-        match unsafe { CStr::from_ptr(label) }.to_str() {
-            Ok(s) => s,
-            Err(_) => {
-                set_error("fs_ntfs_set_volume_label: non-UTF-8 label");
-                return -1;
+    ffi_guard("fs_ntfs_set_volume_label", -1, move || {
+        let Some(img) = cstr_to_path(image) else {
+            set_error("fs_ntfs_set_volume_label: null or non-UTF-8 image");
+            return -1;
+        };
+        let label_str = if label.is_null() {
+            ""
+        } else {
+            match unsafe { CStr::from_ptr(label) }.to_str() {
+                Ok(s) => s,
+                Err(_) => {
+                    set_error("fs_ntfs_set_volume_label: non-UTF-8 label");
+                    return -1;
+                }
+            }
+        };
+        match write::set_volume_label(std::path::Path::new(img), label_str) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_error(&e);
+                -1
             }
         }
-    };
-    match write::set_volume_label(std::path::Path::new(img), label_str) {
-        Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
-    }
+    })
 }
 
 /// Read the volume label from an unmounted NTFS image into `out_buf`
@@ -1036,26 +1111,28 @@ pub extern "C" fn fs_ntfs_read_volume_label(
     out_buf: *mut c_char,
     out_buf_len: usize,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_read_volume_label: null or non-UTF-8 image");
-        return -1;
-    };
-    if out_buf.is_null() {
-        set_error("fs_ntfs_read_volume_label: null out_buf");
-        return -1;
-    }
-    match write::read_volume_label(std::path::Path::new(img)) {
-        Ok(label) => {
-            let bytes = label.as_bytes();
-            let n = std::cmp::min(bytes.len(), out_buf_len);
-            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf as *mut u8, n) };
-            n as c_int
+    ffi_guard("fs_ntfs_read_volume_label", -1, move || {
+        let Some(img) = cstr_to_path(image) else {
+            set_error("fs_ntfs_read_volume_label: null or non-UTF-8 image");
+            return -1;
+        };
+        if out_buf.is_null() {
+            set_error("fs_ntfs_read_volume_label: null out_buf");
+            return -1;
         }
-        Err(e) => {
-            set_error(&e);
-            -1
+        match write::read_volume_label(std::path::Path::new(img)) {
+            Ok(label) => {
+                let bytes = label.as_bytes();
+                let n = std::cmp::min(bytes.len(), out_buf_len);
+                unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf as *mut u8, n) };
+                n as c_int
+            }
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
         }
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,94 +1149,96 @@ pub extern "C" fn fs_ntfs_stat(
     path: *const c_char,
     attr: *mut FsNtfsAttr,
 ) -> c_int {
-    if fs.is_null() || path.is_null() || attr.is_null() {
-        return -1;
-    }
+    ffi_guard("fs_ntfs_stat", -1, move || {
+        if fs.is_null() || path.is_null() || attr.is_null() {
+            return -1;
+        }
 
-    let bridge = unsafe { &*fs };
-    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-    let out = unsafe { &mut *attr };
+        let bridge = unsafe { &*fs };
+        let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        let out = unsafe { &mut *attr };
 
-    // Zero out
-    *out = FsNtfsAttr {
-        file_record_number: 0,
-        size: 0,
-        atime_sec: 0,
-        mtime_sec: 0,
-        ctime_sec: 0,
-        crtime_sec: 0,
-        atime_nsec: 0,
-        mtime_nsec: 0,
-        ctime_nsec: 0,
-        crtime_nsec: 0,
-        mode: 0,
-        link_count: 0,
-        file_type: 0,
-        attributes: 0,
-    };
+        // Zero out
+        *out = FsNtfsAttr {
+            file_record_number: 0,
+            size: 0,
+            atime_sec: 0,
+            mtime_sec: 0,
+            ctime_sec: 0,
+            crtime_sec: 0,
+            atime_nsec: 0,
+            mtime_nsec: 0,
+            ctime_nsec: 0,
+            crtime_nsec: 0,
+            mode: 0,
+            link_count: 0,
+            file_type: 0,
+            attributes: 0,
+        };
 
-    // Native read layer: resolve + stat over a read-only `BlockIo`.
-    let mut io = match handle_to_ro_io(bridge) {
-        Ok(io) => io,
-        Err(e) => return err_int(e),
-    };
-    let rec = match read::resolve_path(&mut io, path_str) {
-        Ok(r) => r,
-        Err(e) => return err_int(e),
-    };
-    let st = match read::read_stat(&mut io, rec) {
-        Ok(s) => s,
-        Err(e) => return err_int(e),
-    };
+        // Native read layer: resolve + stat over a read-only `BlockIo`.
+        let mut io = match handle_to_ro_io(bridge) {
+            Ok(io) => io,
+            Err(e) => return err_int(e),
+        };
+        let rec = match read::resolve_path(&mut io, path_str) {
+            Ok(r) => r,
+            Err(e) => return err_int(e),
+        };
+        let st = match read::read_stat(&mut io, rec) {
+            Ok(s) => s,
+            Err(e) => return err_int(e),
+        };
 
-    let (crtime_sec, crtime_nsec) = nt_parts(st.created_nt);
-    let (mtime_sec, mtime_nsec) = nt_parts(st.modified_nt);
-    let (atime_sec, atime_nsec) = nt_parts(st.accessed_nt);
-    let (ctime_sec, ctime_nsec) = nt_parts(st.mft_modified_nt);
+        let (crtime_sec, crtime_nsec) = nt_parts(st.created_nt);
+        let (mtime_sec, mtime_nsec) = nt_parts(st.modified_nt);
+        let (atime_sec, atime_nsec) = nt_parts(st.accessed_nt);
+        let (ctime_sec, ctime_nsec) = nt_parts(st.mft_modified_nt);
 
-    out.file_record_number = rec;
-    out.size = st.size;
-    out.atime_sec = atime_sec;
-    out.mtime_sec = mtime_sec;
-    out.ctime_sec = ctime_sec;
-    out.crtime_sec = crtime_sec;
-    out.atime_nsec = atime_nsec;
-    out.mtime_nsec = mtime_nsec;
-    out.ctime_nsec = ctime_nsec;
-    out.crtime_nsec = crtime_nsec;
-    out.link_count = st.link_count;
-    out.attributes = st.file_attributes;
-    // file_type / mode per the C ABI (`fs_ntfs_file_type_t`): 1=REG_FILE,
-    // 2=DIR; a symlink/junction reparse tag overrides below.
-    if st.is_dir {
-        out.mode = 0o040755;
-        out.file_type = 2; // FS_NTFS_FT_DIR
-    } else {
-        out.mode = 0o100644;
-        out.file_type = 1; // FS_NTFS_FT_REG_FILE
-    }
+        out.file_record_number = rec;
+        out.size = st.size;
+        out.atime_sec = atime_sec;
+        out.mtime_sec = mtime_sec;
+        out.ctime_sec = ctime_sec;
+        out.crtime_sec = crtime_sec;
+        out.atime_nsec = atime_nsec;
+        out.mtime_nsec = mtime_nsec;
+        out.ctime_nsec = ctime_nsec;
+        out.crtime_nsec = crtime_nsec;
+        out.link_count = st.link_count;
+        out.attributes = st.file_attributes;
+        // file_type / mode per the C ABI (`fs_ntfs_file_type_t`): 1=REG_FILE,
+        // 2=DIR; a symlink/junction reparse tag overrides below.
+        if st.is_dir {
+            out.mode = 0o040755;
+            out.file_type = 2; // FS_NTFS_FT_DIR
+        } else {
+            out.mode = 0o100644;
+            out.file_type = 1; // FS_NTFS_FT_REG_FILE
+        }
 
-    // Reparse tag (symlink / junction) overrides the file_type, matching the
-    // old `fill_attr`: only the tag tells us which kind. WOF / LX_SYMLINK /
-    // dedup tags leave file_type alone so POSIX callers can read the data.
-    if let Ok(rp) = read::read_attribute_value(&mut io, rec, AttrType::ReparsePoint, None) {
-        if rp.len() >= 4 {
-            let tag = u32::from_le_bytes([rp[0], rp[1], rp[2], rp[3]]);
-            match tag {
-                0xA000_000C => {
-                    out.file_type = 7; // FS_NTFS_FT_SYMLINK
-                    out.mode = 0o120777;
+        // Reparse tag (symlink / junction) overrides the file_type, matching the
+        // old `fill_attr`: only the tag tells us which kind. WOF / LX_SYMLINK /
+        // dedup tags leave file_type alone so POSIX callers can read the data.
+        if let Ok(rp) = read::read_attribute_value(&mut io, rec, AttrType::ReparsePoint, None) {
+            if rp.len() >= 4 {
+                let tag = u32::from_le_bytes([rp[0], rp[1], rp[2], rp[3]]);
+                match tag {
+                    0xA000_000C => {
+                        out.file_type = 7; // FS_NTFS_FT_SYMLINK
+                        out.mode = 0o120777;
+                    }
+                    0xA000_0003 => out.file_type = 8, // FS_NTFS_FT_JUNCTION
+                    _ => {}
                 }
-                0xA000_0003 => out.file_type = 8, // FS_NTFS_FT_JUNCTION
-                _ => {}
             }
         }
-    }
 
-    0
+        0
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1176,64 +1255,67 @@ pub extern "C" fn fs_ntfs_dir_open(
     fs: *mut FsNtfsHandle,
     path: *const c_char,
 ) -> *mut FsNtfsDirIter {
-    if fs.is_null() || path.is_null() {
-        return std::ptr::null_mut();
-    }
+    ffi_guard("fs_ntfs_dir_open", std::ptr::null_mut(), move || {
+        if fs.is_null() || path.is_null() {
+            return std::ptr::null_mut();
+        }
 
-    let bridge = unsafe { &*fs };
-    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
+        let bridge = unsafe { &*fs };
+        let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
 
-    // Native read layer: resolve, then materialise the whole listing.
-    let mut io = match handle_to_ro_io(bridge) {
-        Ok(io) => io,
-        Err(e) => return err_ptr(e),
-    };
-    let current_record_number = match read::resolve_path(&mut io, path_str) {
-        Ok(r) => r,
-        Err(e) => return err_ptr(e),
-    };
+        // Native read layer: resolve, then materialise the whole listing.
+        let mut io = match handle_to_ro_io(bridge) {
+            Ok(io) => io,
+            Err(e) => return err_ptr(e),
+        };
+        let current_record_number = match read::resolve_path(&mut io, path_str) {
+            Ok(r) => r,
+            Err(e) => return err_ptr(e),
+        };
 
-    // Synthesize "." and ".." at the head of the listing. NTFS indexes
-    // don't store them; POSIX readdir callers expect them. The root's parent
-    // is itself.
-    let parent_record_number = if current_record_number == read::ROOT_RECORD_NUMBER {
-        current_record_number
-    } else {
-        // Fall back to self-ref rather than erroring out the whole listing.
-        read::read_parent_record(&mut io, current_record_number).unwrap_or(current_record_number)
-    };
+        // Synthesize "." and ".." at the head of the listing. NTFS indexes
+        // don't store them; POSIX readdir callers expect them. The root's parent
+        // is itself.
+        let parent_record_number = if current_record_number == read::ROOT_RECORD_NUMBER {
+            current_record_number
+        } else {
+            // Fall back to self-ref rather than erroring out the whole listing.
+            read::read_parent_record(&mut io, current_record_number)
+                .unwrap_or(current_record_number)
+        };
 
-    let real = match read::read_dir_entries(&mut io, current_record_number) {
-        Ok(v) => v,
-        Err(e) => return err_ptr(e),
-    };
+        let real = match read::read_dir_entries(&mut io, current_record_number) {
+            Ok(v) => v,
+            Err(e) => return err_ptr(e),
+        };
 
-    // Hold the listing as lightweight records; `fs_ntfs_dir_next` widens each
-    // into the fixed-size C dirent on demand (one `String` per entry on the
-    // heap, not one ~1 KiB `FsNtfsDirent`). "." and ".." are dirs.
-    let mut entries = Vec::with_capacity(real.len() + 2);
-    entries.push(read::DirEntry {
-        name: ".".to_string(),
-        record_number: current_record_number,
-        is_dir: true,
-    });
-    entries.push(read::DirEntry {
-        name: "..".to_string(),
-        record_number: parent_record_number,
-        is_dir: true,
-    });
-    entries.extend(real);
+        // Hold the listing as lightweight records; `fs_ntfs_dir_next` widens each
+        // into the fixed-size C dirent on demand (one `String` per entry on the
+        // heap, not one ~1 KiB `FsNtfsDirent`). "." and ".." are dirs.
+        let mut entries = Vec::with_capacity(real.len() + 2);
+        entries.push(read::DirEntry {
+            name: ".".to_string(),
+            record_number: current_record_number,
+            is_dir: true,
+        });
+        entries.push(read::DirEntry {
+            name: "..".to_string(),
+            record_number: parent_record_number,
+            is_dir: true,
+        });
+        entries.extend(real);
 
-    let iter = Box::new(FsNtfsDirIter {
-        entries,
-        pos: 0,
-        current: make_dirent(0, 0, b""),
-        skipped_count: 0,
-    });
-    Box::into_raw(iter)
+        let iter = Box::new(FsNtfsDirIter {
+            entries,
+            pos: 0,
+            current: make_dirent(0, 0, b""),
+            skipped_count: 0,
+        });
+        Box::into_raw(iter)
+    })
 }
 
 /// How many index entries were silently skipped during the most recent
@@ -1242,11 +1324,13 @@ pub extern "C" fn fs_ntfs_dir_open(
 /// volume; a non-zero value means the listing is incomplete.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_dir_skipped(iter: *const FsNtfsDirIter) -> i64 {
-    if iter.is_null() {
-        return -1;
-    }
-    let it = unsafe { &*iter };
-    it.skipped_count as i64
+    ffi_guard("fs_ntfs_dir_skipped", -1, move || {
+        if iter.is_null() {
+            return -1;
+        }
+        let it = unsafe { &*iter };
+        it.skipped_count as i64
+    })
 }
 
 /// Advance the iterator and return a pointer to the next [`FsNtfsDirent`], or
@@ -1256,32 +1340,36 @@ pub extern "C" fn fs_ntfs_dir_skipped(iter: *const FsNtfsDirIter) -> i64 {
 /// advancing, as readdir callers already do.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_dir_next(iter: *mut FsNtfsDirIter) -> *const FsNtfsDirent {
-    if iter.is_null() {
-        return std::ptr::null();
-    }
+    ffi_guard("fs_ntfs_dir_next", std::ptr::null(), move || {
+        if iter.is_null() {
+            return std::ptr::null();
+        }
 
-    let it = unsafe { &mut *iter };
-    if it.pos >= it.entries.len() {
-        return std::ptr::null();
-    }
-    // Widen the lightweight record into the fixed-size C dirent on demand,
-    // reusing the single scratch buffer. FS_NTFS_FT_DIR (2) / REG_FILE (1).
-    let e = &it.entries[it.pos];
-    let file_type = if e.is_dir { 2 } else { 1 };
-    it.current = make_dirent(e.record_number, file_type, e.name.as_bytes());
-    it.pos += 1;
-    &it.current as *const FsNtfsDirent
+        let it = unsafe { &mut *iter };
+        if it.pos >= it.entries.len() {
+            return std::ptr::null();
+        }
+        // Widen the lightweight record into the fixed-size C dirent on demand,
+        // reusing the single scratch buffer. FS_NTFS_FT_DIR (2) / REG_FILE (1).
+        let e = &it.entries[it.pos];
+        let file_type = if e.is_dir { 2 } else { 1 };
+        it.current = make_dirent(e.record_number, file_type, e.name.as_bytes());
+        it.pos += 1;
+        &it.current as *const FsNtfsDirent
+    })
 }
 
 /// Free a directory iterator returned by [`fs_ntfs_dir_open`]. Passing NULL
 /// is a no-op.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_dir_close(iter: *mut FsNtfsDirIter) {
-    if !iter.is_null() {
-        unsafe {
-            drop(Box::from_raw(iter));
+    ffi_guard("fs_ntfs_dir_close", (), move || {
+        if !iter.is_null() {
+            unsafe {
+                drop(Box::from_raw(iter));
+            }
         }
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1301,69 +1389,71 @@ pub extern "C" fn fs_ntfs_read_file(
     offset: u64,
     length: u64,
 ) -> i64 {
-    if fs.is_null() || path.is_null() || buf.is_null() {
-        return -1;
-    }
-
-    // `length` is the caller-provided size of `buf`. We later build a
-    // `&mut [u8]` over it via `slice::from_raw_parts_mut`, whose safety
-    // contract requires the length to not exceed `isize::MAX` bytes (and on
-    // a 32-bit target, to fit in `usize` at all). Reject anything larger up
-    // front rather than risk UB / a truncating cast.
-    if length > isize::MAX as u64 {
-        set_error("fs_ntfs_read_file: length exceeds isize::MAX");
-        return -1;
-    }
-    let length = length as usize;
-
-    let bridge = unsafe { &*fs };
-    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-
-    // Native read layer: build a read-only `BlockIo` from the mount source
-    // (works for every mount, including read-only ones). The native reader
-    // decompresses LZNT1 `$DATA` transparently and refuses encrypted ($EFS)
-    // attributes, so the only special case left is WOF.
-    let mut io = match handle_to_ro_io(bridge) {
-        Ok(io) => io,
-        Err(e) => return err_i64(e),
-    };
-
-    let rec = match read::resolve_path(&mut io, path_str) {
-        Ok(r) => r,
-        Err(e) => return err_i64(e),
-    };
-
-    // §3.8 WOF (Windows Overlay Filter): a WOF-compressed file's unnamed
-    // `$DATA` is empty + sparse; the real bytes live in a `WofCompressedData`
-    // ADS, and the file carries an `IO_REPARSE_TAG_WOF` (0x80000017)
-    // `$REPARSE_POINT`. A plain `$DATA` read would silently return zeros, so
-    // detect the tag and fail loudly until XPRESS/LZX lands
-    // (docs/future-features.md §3.8).
-    if let Ok(rp) = read::read_attribute_value(&mut io, rec, AttrType::ReparsePoint, None) {
-        if rp.len() >= 4 && u32::from_le_bytes([rp[0], rp[1], rp[2], rp[3]]) == 0x8000_0017 {
-            set_error(
-                "file is WOF-compressed (IO_REPARSE_TAG_WOF); decompression not yet supported",
-            );
+    ffi_guard("fs_ntfs_read_file", -1, move || {
+        if fs.is_null() || path.is_null() || buf.is_null() {
             return -1;
         }
-    }
 
-    // Ranged native read of the unnamed `$DATA` — reads only the clusters
-    // overlapping the window, so a small read of a huge file doesn't
-    // materialise the whole stream. Sparse holes read as zeros.
-    let data = match read::read_attribute_range(&mut io, rec, AttrType::Data, None, offset, length)
-    {
-        Ok(d) => d,
-        Err(e) => return err_i64(e),
-    };
+        // `length` is the caller-provided size of `buf`. We later build a
+        // `&mut [u8]` over it via `slice::from_raw_parts_mut`, whose safety
+        // contract requires the length to not exceed `isize::MAX` bytes (and on
+        // a 32-bit target, to fit in `usize` at all). Reject anything larger up
+        // front rather than risk UB / a truncating cast.
+        if length > isize::MAX as u64 {
+            set_error("fs_ntfs_read_file: length exceeds isize::MAX");
+            return -1;
+        }
+        let length = length as usize;
 
-    let n = data.len().min(length);
-    let out_buf = unsafe { slice::from_raw_parts_mut(buf as *mut u8, length) };
-    out_buf[..n].copy_from_slice(&data[..n]);
-    n as i64
+        let bridge = unsafe { &*fs };
+        let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+
+        // Native read layer: build a read-only `BlockIo` from the mount source
+        // (works for every mount, including read-only ones). The native reader
+        // decompresses LZNT1 `$DATA` transparently and refuses encrypted ($EFS)
+        // attributes, so the only special case left is WOF.
+        let mut io = match handle_to_ro_io(bridge) {
+            Ok(io) => io,
+            Err(e) => return err_i64(e),
+        };
+
+        let rec = match read::resolve_path(&mut io, path_str) {
+            Ok(r) => r,
+            Err(e) => return err_i64(e),
+        };
+
+        // §3.8 WOF (Windows Overlay Filter): a WOF-compressed file's unnamed
+        // `$DATA` is empty + sparse; the real bytes live in a `WofCompressedData`
+        // ADS, and the file carries an `IO_REPARSE_TAG_WOF` (0x80000017)
+        // `$REPARSE_POINT`. A plain `$DATA` read would silently return zeros, so
+        // detect the tag and fail loudly until XPRESS/LZX lands
+        // (docs/future-features.md §3.8).
+        if let Ok(rp) = read::read_attribute_value(&mut io, rec, AttrType::ReparsePoint, None) {
+            if rp.len() >= 4 && u32::from_le_bytes([rp[0], rp[1], rp[2], rp[3]]) == 0x8000_0017 {
+                set_error(
+                    "file is WOF-compressed (IO_REPARSE_TAG_WOF); decompression not yet supported",
+                );
+                return -1;
+            }
+        }
+
+        // Ranged native read of the unnamed `$DATA` — reads only the clusters
+        // overlapping the window, so a small read of a huge file doesn't
+        // materialise the whole stream. Sparse holes read as zeros.
+        let data =
+            match read::read_attribute_range(&mut io, rec, AttrType::Data, None, offset, length) {
+                Ok(d) => d,
+                Err(e) => return err_i64(e),
+            };
+
+        let n = data.len().min(length);
+        let out_buf = unsafe { slice::from_raw_parts_mut(buf as *mut u8, length) };
+        out_buf[..n].copy_from_slice(&data[..n]);
+        n as i64
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1382,80 +1472,82 @@ pub extern "C" fn fs_ntfs_readlink(
     buf: *mut c_char,
     bufsize: usize,
 ) -> c_int {
-    if fs.is_null() || path.is_null() || buf.is_null() {
-        set_error("fs_ntfs_readlink: null argument");
-        return -1;
-    }
-    let bridge = unsafe { &*fs };
-    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_error("fs_ntfs_readlink: non-UTF-8 path");
+    ffi_guard("fs_ntfs_readlink", -1, move || {
+        if fs.is_null() || path.is_null() || buf.is_null() {
+            set_error("fs_ntfs_readlink: null argument");
             return -1;
         }
-    };
-    // Native read layer: resolve + fetch the whole `$REPARSE_POINT` value.
-    let mut io = match handle_to_ro_io(bridge) {
-        Ok(io) => io,
-        Err(e) => return err_int(e),
-    };
-    let rec = match read::resolve_path(&mut io, path_str) {
-        Ok(r) => r,
-        Err(e) => return err_int(e),
-    };
-    let reparse = match read::read_attribute_value(&mut io, rec, AttrType::ReparsePoint, None) {
-        Ok(b) => b,
-        Err(_) => {
-            set_error("not a reparse point");
+        let bridge = unsafe { &*fs };
+        let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                set_error("fs_ntfs_readlink: non-UTF-8 path");
+                return -1;
+            }
+        };
+        // Native read layer: resolve + fetch the whole `$REPARSE_POINT` value.
+        let mut io = match handle_to_ro_io(bridge) {
+            Ok(io) => io,
+            Err(e) => return err_int(e),
+        };
+        let rec = match read::resolve_path(&mut io, path_str) {
+            Ok(r) => r,
+            Err(e) => return err_int(e),
+        };
+        let reparse = match read::read_attribute_value(&mut io, rec, AttrType::ReparsePoint, None) {
+            Ok(b) => b,
+            Err(_) => {
+                set_error("not a reparse point");
+                return -1;
+            }
+        };
+        // Decode tag + tag-specific path.
+        if reparse.len() < 8 {
+            set_error("reparse data too short");
             return -1;
         }
-    };
-    // Decode tag + tag-specific path.
-    if reparse.len() < 8 {
-        set_error("reparse data too short");
-        return -1;
-    }
-    let tag = u32::from_le_bytes([reparse[0], reparse[1], reparse[2], reparse[3]]);
-    let data_len = u16::from_le_bytes([reparse[4], reparse[5]]) as usize;
-    let data_start = 8usize;
-    if data_start + data_len > reparse.len() {
-        set_error("reparse data_length runs past attribute value");
-        return -1;
-    }
-    let data = &reparse[data_start..data_start + data_len];
-    let target = match tag {
-        0xA000_000C /* SYMLINK */ => decode_symlink_print_name(data),
-        0xA000_0003 /* MOUNT_POINT */ => decode_mount_point_print_name(data),
-        other => {
-            set_error(&format!("unsupported reparse tag {other:#010x}"));
+        let tag = u32::from_le_bytes([reparse[0], reparse[1], reparse[2], reparse[3]]);
+        let data_len = u16::from_le_bytes([reparse[4], reparse[5]]) as usize;
+        let data_start = 8usize;
+        if data_start + data_len > reparse.len() {
+            set_error("reparse data_length runs past attribute value");
             return -1;
         }
-    };
-    let target = match target {
-        Some(t) => t,
-        None => {
-            set_error("reparse print name is empty");
+        let data = &reparse[data_start..data_start + data_len];
+        let target = match tag {
+            0xA000_000C /* SYMLINK */ => decode_symlink_print_name(data),
+            0xA000_0003 /* MOUNT_POINT */ => decode_mount_point_print_name(data),
+            other => {
+                set_error(&format!("unsupported reparse tag {other:#010x}"));
+                return -1;
+            }
+        };
+        let target = match target {
+            Some(t) => t,
+            None => {
+                set_error("reparse print name is empty");
+                return -1;
+            }
+        };
+        // Strip NT-path prefix "\\??\\" so POSIX callers see a sensible path.
+        let cleaned = target
+            .strip_prefix(r"\??\")
+            .map(String::from)
+            .unwrap_or(target);
+        let bytes = cleaned.as_bytes();
+        if bytes.len() + 1 > bufsize {
+            set_error(&format!(
+                "readlink: buffer too small (need {}, have {bufsize})",
+                bytes.len() + 1
+            ));
             return -1;
         }
-    };
-    // Strip NT-path prefix "\\??\\" so POSIX callers see a sensible path.
-    let cleaned = target
-        .strip_prefix(r"\??\")
-        .map(String::from)
-        .unwrap_or(target);
-    let bytes = cleaned.as_bytes();
-    if bytes.len() + 1 > bufsize {
-        set_error(&format!(
-            "readlink: buffer too small (need {}, have {bufsize})",
-            bytes.len() + 1
-        ));
-        return -1;
-    }
-    unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, bytes.len());
-        *(buf.add(bytes.len())) = 0; // NUL terminator
-    }
-    bytes.len() as c_int
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, bytes.len());
+            *(buf.add(bytes.len())) = 0; // NUL terminator
+        }
+        bytes.len() as c_int
+    })
 }
 
 /// Decode the PrintName field from a SymbolicLinkReparseBuffer
@@ -1521,38 +1613,44 @@ fn cstr_to_path<'a>(path: *const c_char) -> Option<&'a str> {
 /// success, `-1` on error. Scans the entire `$Bitmap`.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_free_clusters(path: *const c_char) -> i64 {
-    cstr_or_return!(path, "fs_ntfs_free_clusters", "path", -1);
-    match crate::bitmap::locate_bitmap(std::path::Path::new(path))
-        .and_then(|bm| crate::bitmap::count_free(std::path::Path::new(path), &bm))
-    {
-        Ok(n) => n as i64,
-        Err(e) => err_i64(e),
-    }
+    ffi_guard("fs_ntfs_free_clusters", -1, move || {
+        cstr_or_return!(path, "fs_ntfs_free_clusters", "path", -1);
+        match crate::bitmap::locate_bitmap(std::path::Path::new(path))
+            .and_then(|bm| crate::bitmap::count_free(std::path::Path::new(path), &bm))
+        {
+            Ok(n) => n as i64,
+            Err(e) => err_i64(e),
+        }
+    })
 }
 
 /// Count free MFT records in `$MFT:$Bitmap`. Returns the count on
 /// success, `-1` on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mft_free_records(path: *const c_char) -> i64 {
-    cstr_or_return!(path, "fs_ntfs_mft_free_records", "path", -1);
-    match crate::mft_bitmap::locate(std::path::Path::new(path))
-        .and_then(|bm| crate::mft_bitmap::count_free(std::path::Path::new(path), &bm))
-    {
-        Ok(n) => n as i64,
-        Err(e) => err_i64(e),
-    }
+    ffi_guard("fs_ntfs_mft_free_records", -1, move || {
+        cstr_or_return!(path, "fs_ntfs_mft_free_records", "path", -1);
+        match crate::mft_bitmap::locate(std::path::Path::new(path))
+            .and_then(|bm| crate::mft_bitmap::count_free(std::path::Path::new(path), &bm))
+        {
+            Ok(n) => n as i64,
+            Err(e) => err_i64(e),
+        }
+    })
 }
 
 /// Check whether the volume's `VOLUME_IS_DIRTY` flag is set.
 /// Returns `1` if dirty, `0` if clean, `-1` on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_is_dirty(path: *const c_char) -> c_int {
-    cstr_or_return!(path, "fs_ntfs_is_dirty", "path", -1);
-    match fsck::is_dirty(path) {
-        Ok(true) => 1,
-        Ok(false) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_is_dirty", -1, move || {
+        cstr_or_return!(path, "fs_ntfs_is_dirty", "path", -1);
+        match fsck::is_dirty(path) {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Clear the `VOLUME_IS_DIRTY` flag on an NTFS image.
@@ -1562,12 +1660,14 @@ pub extern "C" fn fs_ntfs_is_dirty(path: *const c_char) -> c_int {
 /// `fs_ntfs_last_error()` for the error message.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_clear_dirty(path: *const c_char) -> c_int {
-    cstr_or_return!(path, "fs_ntfs_clear_dirty", "path", -1);
-    match fsck::clear_dirty(path) {
-        Ok(true) => 1,
-        Ok(false) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_clear_dirty", -1, move || {
+        cstr_or_return!(path, "fs_ntfs_clear_dirty", "path", -1);
+        match fsck::clear_dirty(path) {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Overwrite `$LogFile` with the NTFS "empty log" pattern (all `0xFF`).
@@ -1575,11 +1675,13 @@ pub extern "C" fn fs_ntfs_clear_dirty(path: *const c_char) -> c_int {
 /// Returns the number of bytes overwritten on success, `-1` on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_reset_logfile(path: *const c_char) -> i64 {
-    cstr_or_return!(path, "fs_ntfs_reset_logfile", "path", -1);
-    match fsck::reset_logfile(path) {
-        Ok(n) => n as i64,
-        Err(e) => err_i64(e),
-    }
+    ffi_guard("fs_ntfs_reset_logfile", -1, move || {
+        cstr_or_return!(path, "fs_ntfs_reset_logfile", "path", -1);
+        match fsck::reset_logfile(path) {
+            Ok(n) => n as i64,
+            Err(e) => err_i64(e),
+        }
+    })
 }
 
 /// Set any combination of the four NTFS timestamps on a file. Each time
@@ -1598,18 +1700,20 @@ pub extern "C" fn fs_ntfs_set_times(
     mft_record_modification: *const i64,
     access: *const i64,
 ) -> c_int {
-    cstr_or_return!(image, "fs_ntfs_set_times", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_set_times", "path", -1);
-    let times = write::FileTimes {
-        creation: unsafe { creation.as_ref() }.map(|v| *v as u64),
-        modification: unsafe { modification.as_ref() }.map(|v| *v as u64),
-        mft_record_modification: unsafe { mft_record_modification.as_ref() }.map(|v| *v as u64),
-        access: unsafe { access.as_ref() }.map(|v| *v as u64),
-    };
-    match write::set_times(std::path::Path::new(image), path, times) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_set_times", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_set_times", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_set_times", "path", -1);
+        let times = write::FileTimes {
+            creation: unsafe { creation.as_ref() }.map(|v| *v as u64),
+            modification: unsafe { modification.as_ref() }.map(|v| *v as u64),
+            mft_record_modification: unsafe { mft_record_modification.as_ref() }.map(|v| *v as u64),
+            access: unsafe { access.as_ref() }.map(|v| *v as u64),
+        };
+        match write::set_times(std::path::Path::new(image), path, times) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Create an empty regular file. `parent_path` is the absolute
@@ -1621,13 +1725,15 @@ pub extern "C" fn fs_ntfs_create_file(
     parent_path: *const c_char,
     basename: *const c_char,
 ) -> i64 {
-    cstr_or_return!(image, "fs_ntfs_create_file", "image", -1);
-    cstr_or_return!(parent_path, "fs_ntfs_create_file", "parent_path", -1);
-    cstr_or_return!(basename, "fs_ntfs_create_file", "basename", -1);
-    match write::create_file(std::path::Path::new(image), parent_path, basename) {
-        Ok(rn) => rn as i64,
-        Err(e) => err_i64(e),
-    }
+    ffi_guard("fs_ntfs_create_file", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_create_file", "image", -1);
+        cstr_or_return!(parent_path, "fs_ntfs_create_file", "parent_path", -1);
+        cstr_or_return!(basename, "fs_ntfs_create_file", "basename", -1);
+        match write::create_file(std::path::Path::new(image), parent_path, basename) {
+            Ok(rn) => rn as i64,
+            Err(e) => err_i64(e),
+        }
+    })
 }
 
 /// Upsert a single NTFS Extended Attribute. The EA is stored resident
@@ -1643,25 +1749,27 @@ pub extern "C" fn fs_ntfs_write_ea(
     value_len: u64,
     flags: u8,
 ) -> c_int {
-    cstr_or_return!(image, "fs_ntfs_write_ea", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_write_ea", "path", -1);
-    if ea_name.is_null() {
-        set_error("fs_ntfs_write_ea: null ea_name");
-        return -1;
-    }
-    let name_bytes = unsafe { CStr::from_ptr(ea_name) }.to_bytes();
-    let data: &[u8] = if value_len == 0 {
-        &[]
-    } else if value.is_null() {
-        set_error("fs_ntfs_write_ea: null value with non-zero len");
-        return -1;
-    } else {
-        unsafe { slice::from_raw_parts(value as *const u8, value_len as usize) }
-    };
-    match write::write_ea(std::path::Path::new(image), path, name_bytes, data, flags) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_write_ea", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_write_ea", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_write_ea", "path", -1);
+        if ea_name.is_null() {
+            set_error("fs_ntfs_write_ea: null ea_name");
+            return -1;
+        }
+        let name_bytes = unsafe { CStr::from_ptr(ea_name) }.to_bytes();
+        let data: &[u8] = if value_len == 0 {
+            &[]
+        } else if value.is_null() {
+            set_error("fs_ntfs_write_ea: null value with non-zero len");
+            return -1;
+        } else {
+            unsafe { slice::from_raw_parts(value as *const u8, value_len as usize) }
+        };
+        match write::write_ea(std::path::Path::new(image), path, name_bytes, data, flags) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Remove a single Extended Attribute by name. Returns 0 on success,
@@ -1672,17 +1780,19 @@ pub extern "C" fn fs_ntfs_remove_ea(
     path: *const c_char,
     ea_name: *const c_char,
 ) -> c_int {
-    cstr_or_return!(image, "fs_ntfs_remove_ea", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_remove_ea", "path", -1);
-    if ea_name.is_null() {
-        set_error("fs_ntfs_remove_ea: null ea_name");
-        return -1;
-    }
-    let name_bytes = unsafe { CStr::from_ptr(ea_name) }.to_bytes();
-    match write::remove_ea(std::path::Path::new(image), path, name_bytes) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_remove_ea", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_remove_ea", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_remove_ea", "path", -1);
+        if ea_name.is_null() {
+            set_error("fs_ntfs_remove_ea: null ea_name");
+            return -1;
+        }
+        let name_bytes = unsafe { CStr::from_ptr(ea_name) }.to_bytes();
+        match write::remove_ea(std::path::Path::new(image), path, name_bytes) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Enumerate the names of every Extended Attribute on the file at
@@ -1711,44 +1821,46 @@ pub extern "C" fn fs_ntfs_list_ea_keys(
     out_buf_len: usize,
     out_total_len: *mut usize,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_list_ea_keys: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_list_ea_keys: null or non-UTF-8 path");
-        return -1;
-    };
-    if out_total_len.is_null() {
-        set_error("fs_ntfs_list_ea_keys: null out_total_len");
-        return -1;
-    }
-    if out_buf.is_null() && out_buf_len != 0 {
-        set_error("fs_ntfs_list_ea_keys: null out_buf with non-zero out_buf_len");
-        return -1;
-    }
-    match write::list_ea_keys(std::path::Path::new(img), p) {
-        Ok(keys) => {
-            let total: usize = keys.iter().map(|k| k.len() + 1).sum();
-            unsafe { *out_total_len = total };
-            if total > out_buf_len {
-                return -2;
-            }
-            let mut cursor = 0usize;
-            for key in &keys {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(key.as_ptr(), out_buf.add(cursor), key.len());
-                    *out_buf.add(cursor + key.len()) = 0;
+    ffi_guard("fs_ntfs_list_ea_keys", -1, move || {
+        let Some(img) = cstr_to_path(image) else {
+            set_error("fs_ntfs_list_ea_keys: null or non-UTF-8 image");
+            return -1;
+        };
+        let Some(p) = cstr_to_path(path) else {
+            set_error("fs_ntfs_list_ea_keys: null or non-UTF-8 path");
+            return -1;
+        };
+        if out_total_len.is_null() {
+            set_error("fs_ntfs_list_ea_keys: null out_total_len");
+            return -1;
+        }
+        if out_buf.is_null() && out_buf_len != 0 {
+            set_error("fs_ntfs_list_ea_keys: null out_buf with non-zero out_buf_len");
+            return -1;
+        }
+        match write::list_ea_keys(std::path::Path::new(img), p) {
+            Ok(keys) => {
+                let total: usize = keys.iter().map(|k| k.len() + 1).sum();
+                unsafe { *out_total_len = total };
+                if total > out_buf_len {
+                    return -2;
                 }
-                cursor += key.len() + 1;
+                let mut cursor = 0usize;
+                for key in &keys {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(key.as_ptr(), out_buf.add(cursor), key.len());
+                        *out_buf.add(cursor + key.len()) = 0;
+                    }
+                    cursor += key.len() + 1;
+                }
+                keys.len() as c_int
             }
-            keys.len() as c_int
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
         }
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
-    }
+    })
 }
 
 /// Write a resident `$REPARSE_POINT` attribute with `reparse_tag` and
@@ -1763,32 +1875,36 @@ pub extern "C" fn fs_ntfs_write_reparse_point(
     buf: *const c_void,
     len: u64,
 ) -> c_int {
-    cstr_or_return!(image, "fs_ntfs_write_reparse_point", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_write_reparse_point", "path", -1);
-    let data: &[u8] = if len == 0 {
-        &[]
-    } else if buf.is_null() {
-        set_error("fs_ntfs_write_reparse_point: null buf with non-zero len");
-        return -1;
-    } else {
-        unsafe { slice::from_raw_parts(buf as *const u8, len as usize) }
-    };
-    match write::write_reparse_point(std::path::Path::new(image), path, reparse_tag, data) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_write_reparse_point", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_write_reparse_point", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_write_reparse_point", "path", -1);
+        let data: &[u8] = if len == 0 {
+            &[]
+        } else if buf.is_null() {
+            set_error("fs_ntfs_write_reparse_point: null buf with non-zero len");
+            return -1;
+        } else {
+            unsafe { slice::from_raw_parts(buf as *const u8, len as usize) }
+        };
+        match write::write_reparse_point(std::path::Path::new(image), path, reparse_tag, data) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Remove a file's `$REPARSE_POINT` attribute and clear the reparse
 /// flag. Returns 0 on success, -1 on error (e.g. no reparse point).
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_remove_reparse_point(image: *const c_char, path: *const c_char) -> c_int {
-    cstr_or_return!(image, "fs_ntfs_remove_reparse_point", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_remove_reparse_point", "path", -1);
-    match write::remove_reparse_point(std::path::Path::new(image), path) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_remove_reparse_point", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_remove_reparse_point", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_remove_reparse_point", "path", -1);
+        match write::remove_reparse_point(std::path::Path::new(image), path) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Read a file's `$REPARSE_POINT` attribute as raw `(reparse_tag,
@@ -1817,44 +1933,46 @@ pub extern "C" fn fs_ntfs_read_reparse_point(
     out_buf_len: usize,
     out_data_len: *mut usize,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_read_reparse_point: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_read_reparse_point: null or non-UTF-8 path");
-        return -1;
-    };
-    if out_tag.is_null() || out_data_len.is_null() {
-        set_error("fs_ntfs_read_reparse_point: null out_tag / out_data_len");
-        return -1;
-    }
-    if out_buf.is_null() && out_buf_len != 0 {
-        set_error("fs_ntfs_read_reparse_point: null out_buf with non-zero out_buf_len");
-        return -1;
-    }
-    match write::read_reparse_point(std::path::Path::new(img), p) {
-        Ok(Some(rp)) => {
-            unsafe {
-                *out_tag = rp.reparse_tag;
-                *out_data_len = rp.data.len();
-            }
-            if rp.data.len() > out_buf_len {
-                return 2;
-            }
-            if !rp.data.is_empty() {
+    ffi_guard("fs_ntfs_read_reparse_point", -1, move || {
+        let Some(img) = cstr_to_path(image) else {
+            set_error("fs_ntfs_read_reparse_point: null or non-UTF-8 image");
+            return -1;
+        };
+        let Some(p) = cstr_to_path(path) else {
+            set_error("fs_ntfs_read_reparse_point: null or non-UTF-8 path");
+            return -1;
+        };
+        if out_tag.is_null() || out_data_len.is_null() {
+            set_error("fs_ntfs_read_reparse_point: null out_tag / out_data_len");
+            return -1;
+        }
+        if out_buf.is_null() && out_buf_len != 0 {
+            set_error("fs_ntfs_read_reparse_point: null out_buf with non-zero out_buf_len");
+            return -1;
+        }
+        match write::read_reparse_point(std::path::Path::new(img), p) {
+            Ok(Some(rp)) => {
                 unsafe {
-                    std::ptr::copy_nonoverlapping(rp.data.as_ptr(), out_buf, rp.data.len());
+                    *out_tag = rp.reparse_tag;
+                    *out_data_len = rp.data.len();
                 }
+                if rp.data.len() > out_buf_len {
+                    return 2;
+                }
+                if !rp.data.is_empty() {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(rp.data.as_ptr(), out_buf, rp.data.len());
+                    }
+                }
+                1
             }
-            1
+            Ok(None) => 0,
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
         }
-        Ok(None) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
-    }
+    })
 }
 
 /// Create a symlink at `parent_path/basename` pointing to `target`.
@@ -1868,20 +1986,22 @@ pub extern "C" fn fs_ntfs_create_symlink(
     target: *const c_char,
     relative: c_int,
 ) -> i64 {
-    cstr_or_return!(image, "fs_ntfs_create_symlink", "image", -1);
-    cstr_or_return!(parent_path, "fs_ntfs_create_symlink", "parent_path", -1);
-    cstr_or_return!(basename, "fs_ntfs_create_symlink", "basename", -1);
-    cstr_or_return!(target, "fs_ntfs_create_symlink", "target", -1);
-    match write::create_symlink(
-        std::path::Path::new(image),
-        parent_path,
-        basename,
-        target,
-        relative != 0,
-    ) {
-        Ok(rn) => rn as i64,
-        Err(e) => err_i64(e),
-    }
+    ffi_guard("fs_ntfs_create_symlink", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_create_symlink", "image", -1);
+        cstr_or_return!(parent_path, "fs_ntfs_create_symlink", "parent_path", -1);
+        cstr_or_return!(basename, "fs_ntfs_create_symlink", "basename", -1);
+        cstr_or_return!(target, "fs_ntfs_create_symlink", "target", -1);
+        match write::create_symlink(
+            std::path::Path::new(image),
+            parent_path,
+            basename,
+            target,
+            relative != 0,
+        ) {
+            Ok(rn) => rn as i64,
+            Err(e) => err_i64(e),
+        }
+    })
 }
 
 /// Create or replace a resident named `$DATA` stream (Alternate Data
@@ -1894,21 +2014,23 @@ pub extern "C" fn fs_ntfs_write_named_stream(
     buf: *const c_void,
     len: u64,
 ) -> c_int {
-    cstr_or_return!(image, "fs_ntfs_write_named_stream", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_write_named_stream", "path", -1);
-    cstr_or_return!(stream_name, "fs_ntfs_write_named_stream", "stream_name", -1);
-    let data: &[u8] = if len == 0 {
-        &[]
-    } else if buf.is_null() {
-        set_error("fs_ntfs_write_named_stream: null buf with non-zero len");
-        return -1;
-    } else {
-        unsafe { slice::from_raw_parts(buf as *const u8, len as usize) }
-    };
-    match write::write_named_stream(std::path::Path::new(image), path, stream_name, data) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_write_named_stream", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_write_named_stream", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_write_named_stream", "path", -1);
+        cstr_or_return!(stream_name, "fs_ntfs_write_named_stream", "stream_name", -1);
+        let data: &[u8] = if len == 0 {
+            &[]
+        } else if buf.is_null() {
+            set_error("fs_ntfs_write_named_stream: null buf with non-zero len");
+            return -1;
+        } else {
+            unsafe { slice::from_raw_parts(buf as *const u8, len as usize) }
+        };
+        match write::write_named_stream(std::path::Path::new(image), path, stream_name, data) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Enumerate the names of every *named* `$DATA` stream (alternate
@@ -1939,49 +2061,51 @@ pub extern "C" fn fs_ntfs_list_named_streams(
     out_buf_len: usize,
     out_total_len: *mut usize,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_list_named_streams: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_list_named_streams: null or non-UTF-8 path");
-        return -1;
-    };
-    if out_total_len.is_null() {
-        set_error("fs_ntfs_list_named_streams: null out_total_len");
-        return -1;
-    }
-    if out_buf.is_null() && out_buf_len != 0 {
-        set_error("fs_ntfs_list_named_streams: null out_buf with non-zero out_buf_len");
-        return -1;
-    }
-    match write::list_named_streams(std::path::Path::new(img), p) {
-        Ok(names) => {
-            let total: usize = names.iter().map(|n| n.len() + 1).sum();
-            unsafe { *out_total_len = total };
-            if total > out_buf_len {
-                return -2;
-            }
-            let mut cursor = 0usize;
-            for name in &names {
-                let bytes = name.as_bytes();
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        bytes.as_ptr(),
-                        (out_buf as *mut u8).add(cursor),
-                        bytes.len(),
-                    );
-                    *(out_buf as *mut u8).add(cursor + bytes.len()) = 0;
+    ffi_guard("fs_ntfs_list_named_streams", -1, move || {
+        let Some(img) = cstr_to_path(image) else {
+            set_error("fs_ntfs_list_named_streams: null or non-UTF-8 image");
+            return -1;
+        };
+        let Some(p) = cstr_to_path(path) else {
+            set_error("fs_ntfs_list_named_streams: null or non-UTF-8 path");
+            return -1;
+        };
+        if out_total_len.is_null() {
+            set_error("fs_ntfs_list_named_streams: null out_total_len");
+            return -1;
+        }
+        if out_buf.is_null() && out_buf_len != 0 {
+            set_error("fs_ntfs_list_named_streams: null out_buf with non-zero out_buf_len");
+            return -1;
+        }
+        match write::list_named_streams(std::path::Path::new(img), p) {
+            Ok(names) => {
+                let total: usize = names.iter().map(|n| n.len() + 1).sum();
+                unsafe { *out_total_len = total };
+                if total > out_buf_len {
+                    return -2;
                 }
-                cursor += bytes.len() + 1;
+                let mut cursor = 0usize;
+                for name in &names {
+                    let bytes = name.as_bytes();
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            bytes.as_ptr(),
+                            (out_buf as *mut u8).add(cursor),
+                            bytes.len(),
+                        );
+                        *(out_buf as *mut u8).add(cursor + bytes.len()) = 0;
+                    }
+                    cursor += bytes.len() + 1;
+                }
+                names.len() as c_int
             }
-            names.len() as c_int
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
         }
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
-    }
+    })
 }
 
 /// Delete a named `$DATA` stream. Returns 0 on success, -1 on error.
@@ -1991,18 +2115,20 @@ pub extern "C" fn fs_ntfs_delete_named_stream(
     path: *const c_char,
     stream_name: *const c_char,
 ) -> c_int {
-    cstr_or_return!(image, "fs_ntfs_delete_named_stream", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_delete_named_stream", "path", -1);
-    cstr_or_return!(
-        stream_name,
-        "fs_ntfs_delete_named_stream",
-        "stream_name",
-        -1
-    );
-    match write::delete_named_stream(std::path::Path::new(image), path, stream_name) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_delete_named_stream", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_delete_named_stream", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_delete_named_stream", "path", -1);
+        cstr_or_return!(
+            stream_name,
+            "fs_ntfs_delete_named_stream",
+            "stream_name",
+            -1
+        );
+        match write::delete_named_stream(std::path::Path::new(image), path, stream_name) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Write `new_data` as the entire contents of the file at `path`.
@@ -2028,23 +2154,25 @@ pub extern "C" fn fs_ntfs_write_file_contents(
     buf: *const c_void,
     len: u64,
 ) -> i64 {
-    cstr_or_return!(image, "fs_ntfs_write_file_contents", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_write_file_contents", "path", -1);
-    if len == 0 {
-        return match write::write_file_contents(std::path::Path::new(image), path, &[]) {
+    ffi_guard("fs_ntfs_write_file_contents", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_write_file_contents", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_write_file_contents", "path", -1);
+        if len == 0 {
+            return match write::write_file_contents(std::path::Path::new(image), path, &[]) {
+                Ok(n) => n as i64,
+                Err(e) => err_i64(e),
+            };
+        }
+        if buf.is_null() {
+            set_error("fs_ntfs_write_file_contents: null buf with non-zero len");
+            return -1;
+        }
+        let data = unsafe { slice::from_raw_parts(buf as *const u8, len as usize) };
+        match write::write_file_contents(std::path::Path::new(image), path, data) {
             Ok(n) => n as i64,
             Err(e) => err_i64(e),
-        };
-    }
-    if buf.is_null() {
-        set_error("fs_ntfs_write_file_contents: null buf with non-zero len");
-        return -1;
-    }
-    let data = unsafe { slice::from_raw_parts(buf as *const u8, len as usize) };
-    match write::write_file_contents(std::path::Path::new(image), path, data) {
-        Ok(n) => n as i64,
-        Err(e) => err_i64(e),
-    }
+        }
+    })
 }
 
 /// Delete an empty directory. Returns 0 on success, -1 on error.
@@ -2052,12 +2180,14 @@ pub extern "C" fn fs_ntfs_write_file_contents(
 /// overflow (for MVP).
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_rmdir(image: *const c_char, path: *const c_char) -> c_int {
-    cstr_or_return!(image, "fs_ntfs_rmdir", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_rmdir", "path", -1);
-    match write::rmdir(std::path::Path::new(image), path) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_rmdir", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_rmdir", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_rmdir", "path", -1);
+        match write::rmdir(std::path::Path::new(image), path) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Create a new empty directory. Returns the new MFT record number on
@@ -2068,13 +2198,15 @@ pub extern "C" fn fs_ntfs_mkdir(
     parent_path: *const c_char,
     basename: *const c_char,
 ) -> i64 {
-    cstr_or_return!(image, "fs_ntfs_mkdir", "image", -1);
-    cstr_or_return!(parent_path, "fs_ntfs_mkdir", "parent_path", -1);
-    cstr_or_return!(basename, "fs_ntfs_mkdir", "basename", -1);
-    match write::mkdir(std::path::Path::new(image), parent_path, basename) {
-        Ok(rn) => rn as i64,
-        Err(e) => err_i64(e),
-    }
+    ffi_guard("fs_ntfs_mkdir", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_mkdir", "image", -1);
+        cstr_or_return!(parent_path, "fs_ntfs_mkdir", "parent_path", -1);
+        cstr_or_return!(basename, "fs_ntfs_mkdir", "basename", -1);
+        match write::mkdir(std::path::Path::new(image), parent_path, basename) {
+            Ok(rn) => rn as i64,
+            Err(e) => err_i64(e),
+        }
+    })
 }
 
 /// Write `new_data` as the full content of the file's unnamed `$DATA`
@@ -2088,23 +2220,25 @@ pub extern "C" fn fs_ntfs_write_resident_contents(
     buf: *const c_void,
     len: u64,
 ) -> i64 {
-    cstr_or_return!(image, "fs_ntfs_write_resident_contents", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_write_resident_contents", "path", -1);
-    if len == 0 {
-        return match write::write_resident_contents(std::path::Path::new(image), path, &[]) {
+    ffi_guard("fs_ntfs_write_resident_contents", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_write_resident_contents", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_write_resident_contents", "path", -1);
+        if len == 0 {
+            return match write::write_resident_contents(std::path::Path::new(image), path, &[]) {
+                Ok(n) => n as i64,
+                Err(e) => err_i64(e),
+            };
+        }
+        if buf.is_null() {
+            set_error("fs_ntfs_write_resident_contents: null buf with non-zero len");
+            return -1;
+        }
+        let data = unsafe { slice::from_raw_parts(buf as *const u8, len as usize) };
+        match write::write_resident_contents(std::path::Path::new(image), path, data) {
             Ok(n) => n as i64,
             Err(e) => err_i64(e),
-        };
-    }
-    if buf.is_null() {
-        set_error("fs_ntfs_write_resident_contents: null buf with non-zero len");
-        return -1;
-    }
-    let data = unsafe { slice::from_raw_parts(buf as *const u8, len as usize) };
-    match write::write_resident_contents(std::path::Path::new(image), path, data) {
-        Ok(n) => n as i64,
-        Err(e) => err_i64(e),
-    }
+        }
+    })
 }
 
 /// Delete a regular file. Refuses directories. Returns 0 on success,
@@ -2112,12 +2246,14 @@ pub extern "C" fn fs_ntfs_write_resident_contents(
 /// record are freed.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_unlink(image: *const c_char, path: *const c_char) -> c_int {
-    cstr_or_return!(image, "fs_ntfs_unlink", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_unlink", "path", -1);
-    match write::unlink(std::path::Path::new(image), path) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_unlink", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_unlink", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_unlink", "path", -1);
+        match write::unlink(std::path::Path::new(image), path) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Read a file's 16-byte `$OBJECT_ID` into `out_buf[0..16]`. Returns
@@ -2129,20 +2265,22 @@ pub extern "C" fn fs_ntfs_read_object_id(
     path: *const c_char,
     out_buf: *mut u8,
 ) -> c_int {
-    cstr_or_return!(image, "fs_ntfs_read_object_id", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_read_object_id", "path", -1);
-    if out_buf.is_null() {
-        set_error("fs_ntfs_read_object_id: null out_buf");
-        return -1;
-    }
-    match write::read_object_id(std::path::Path::new(image), path) {
-        Ok(Some(guid)) => {
-            unsafe { std::ptr::copy_nonoverlapping(guid.as_ptr(), out_buf, 16) };
-            1
+    ffi_guard("fs_ntfs_read_object_id", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_read_object_id", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_read_object_id", "path", -1);
+        if out_buf.is_null() {
+            set_error("fs_ntfs_read_object_id: null out_buf");
+            return -1;
         }
-        Ok(None) => 0,
-        Err(e) => err_int(e),
-    }
+        match write::read_object_id(std::path::Path::new(image), path) {
+            Ok(Some(guid)) => {
+                unsafe { std::ptr::copy_nonoverlapping(guid.as_ptr(), out_buf, 16) };
+                1
+            }
+            Ok(None) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Write a file's 16-byte `$OBJECT_ID` from `in_buf[0..16]`. Adds the
@@ -2154,27 +2292,29 @@ pub extern "C" fn fs_ntfs_write_object_id(
     path: *const c_char,
     in_buf: *const u8,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_write_object_id: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_write_object_id: null or non-UTF-8 path");
-        return -1;
-    };
-    if in_buf.is_null() {
-        set_error("fs_ntfs_write_object_id: null in_buf");
-        return -1;
-    }
-    let mut object_id = [0u8; 16];
-    unsafe { std::ptr::copy_nonoverlapping(in_buf, object_id.as_mut_ptr(), 16) };
-    match write::write_object_id(std::path::Path::new(img), p, &object_id) {
-        Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
+    ffi_guard("fs_ntfs_write_object_id", -1, move || {
+        let Some(img) = cstr_to_path(image) else {
+            set_error("fs_ntfs_write_object_id: null or non-UTF-8 image");
+            return -1;
+        };
+        let Some(p) = cstr_to_path(path) else {
+            set_error("fs_ntfs_write_object_id: null or non-UTF-8 path");
+            return -1;
+        };
+        if in_buf.is_null() {
+            set_error("fs_ntfs_write_object_id: null in_buf");
+            return -1;
         }
-    }
+        let mut object_id = [0u8; 16];
+        unsafe { std::ptr::copy_nonoverlapping(in_buf, object_id.as_mut_ptr(), 16) };
+        match write::write_object_id(std::path::Path::new(img), p, &object_id) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
+        }
+    })
 }
 
 /// Write the 64-byte extended `$OBJECT_ID` carrying the mandatory
@@ -2192,39 +2332,48 @@ pub extern "C" fn fs_ntfs_write_object_id_extended(
     birth_object: *const u8,
     birth_domain: *const u8,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_write_object_id_extended: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_write_object_id_extended: null or non-UTF-8 path");
-        return -1;
-    };
-    if in_buf.is_null()
-        || birth_volume.is_null()
-        || birth_object.is_null()
-        || birth_domain.is_null()
-    {
-        set_error("fs_ntfs_write_object_id_extended: null GUID pointer");
-        return -1;
-    }
-    let mut object_id = [0u8; 16];
-    let mut bv = [0u8; 16];
-    let mut bo = [0u8; 16];
-    let mut bd = [0u8; 16];
-    unsafe {
-        std::ptr::copy_nonoverlapping(in_buf, object_id.as_mut_ptr(), 16);
-        std::ptr::copy_nonoverlapping(birth_volume, bv.as_mut_ptr(), 16);
-        std::ptr::copy_nonoverlapping(birth_object, bo.as_mut_ptr(), 16);
-        std::ptr::copy_nonoverlapping(birth_domain, bd.as_mut_ptr(), 16);
-    }
-    match write::write_object_id_extended(std::path::Path::new(img), p, &object_id, &bv, &bo, &bd) {
-        Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
+    ffi_guard("fs_ntfs_write_object_id_extended", -1, move || {
+        let Some(img) = cstr_to_path(image) else {
+            set_error("fs_ntfs_write_object_id_extended: null or non-UTF-8 image");
+            return -1;
+        };
+        let Some(p) = cstr_to_path(path) else {
+            set_error("fs_ntfs_write_object_id_extended: null or non-UTF-8 path");
+            return -1;
+        };
+        if in_buf.is_null()
+            || birth_volume.is_null()
+            || birth_object.is_null()
+            || birth_domain.is_null()
+        {
+            set_error("fs_ntfs_write_object_id_extended: null GUID pointer");
+            return -1;
         }
-    }
+        let mut object_id = [0u8; 16];
+        let mut bv = [0u8; 16];
+        let mut bo = [0u8; 16];
+        let mut bd = [0u8; 16];
+        unsafe {
+            std::ptr::copy_nonoverlapping(in_buf, object_id.as_mut_ptr(), 16);
+            std::ptr::copy_nonoverlapping(birth_volume, bv.as_mut_ptr(), 16);
+            std::ptr::copy_nonoverlapping(birth_object, bo.as_mut_ptr(), 16);
+            std::ptr::copy_nonoverlapping(birth_domain, bd.as_mut_ptr(), 16);
+        }
+        match write::write_object_id_extended(
+            std::path::Path::new(img),
+            p,
+            &object_id,
+            &bv,
+            &bo,
+            &bd,
+        ) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
+        }
+    })
 }
 
 /// Read the full `$OBJECT_ID` attribute into `out_buf`. Caller passes
@@ -2243,46 +2392,48 @@ pub extern "C" fn fs_ntfs_read_object_id_extended(
     out_buf: *mut u8,
     out_buf_len: usize,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_read_object_id_extended: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_read_object_id_extended: null or non-UTF-8 path");
-        return -1;
-    };
-    if out_buf.is_null() {
-        set_error("fs_ntfs_read_object_id_extended: null out_buf");
-        return -1;
-    }
-    if out_buf_len < 16 {
-        set_error("fs_ntfs_read_object_id_extended: out_buf_len < 16");
-        return -1;
-    }
-    match write::read_object_id_extended(std::path::Path::new(img), p) {
-        Ok(Some(ext)) => {
-            unsafe { std::ptr::copy_nonoverlapping(ext.object_id.as_ptr(), out_buf, 16) };
-            if let Some((bv, bo, bd)) = ext.birth_ids {
-                if out_buf_len >= 64 {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(bv.as_ptr(), out_buf.add(16), 16);
-                        std::ptr::copy_nonoverlapping(bo.as_ptr(), out_buf.add(32), 16);
-                        std::ptr::copy_nonoverlapping(bd.as_ptr(), out_buf.add(48), 16);
+    ffi_guard("fs_ntfs_read_object_id_extended", -1, move || {
+        let Some(img) = cstr_to_path(image) else {
+            set_error("fs_ntfs_read_object_id_extended: null or non-UTF-8 image");
+            return -1;
+        };
+        let Some(p) = cstr_to_path(path) else {
+            set_error("fs_ntfs_read_object_id_extended: null or non-UTF-8 path");
+            return -1;
+        };
+        if out_buf.is_null() {
+            set_error("fs_ntfs_read_object_id_extended: null out_buf");
+            return -1;
+        }
+        if out_buf_len < 16 {
+            set_error("fs_ntfs_read_object_id_extended: out_buf_len < 16");
+            return -1;
+        }
+        match write::read_object_id_extended(std::path::Path::new(img), p) {
+            Ok(Some(ext)) => {
+                unsafe { std::ptr::copy_nonoverlapping(ext.object_id.as_ptr(), out_buf, 16) };
+                if let Some((bv, bo, bd)) = ext.birth_ids {
+                    if out_buf_len >= 64 {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(bv.as_ptr(), out_buf.add(16), 16);
+                            std::ptr::copy_nonoverlapping(bo.as_ptr(), out_buf.add(32), 16);
+                            std::ptr::copy_nonoverlapping(bd.as_ptr(), out_buf.add(48), 16);
+                        }
+                        64
+                    } else {
+                        16
                     }
-                    64
                 } else {
                     16
                 }
-            } else {
-                16
+            }
+            Ok(None) => 0,
+            Err(e) => {
+                set_error(&e);
+                -1
             }
         }
-        Ok(None) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
-    }
+    })
 }
 
 /// Remove a file's `$OBJECT_ID` attribute. Idempotent: returns 0
@@ -2290,21 +2441,23 @@ pub extern "C" fn fs_ntfs_read_object_id_extended(
 /// on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_remove_object_id(image: *const c_char, path: *const c_char) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_remove_object_id: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_remove_object_id: null or non-UTF-8 path");
-        return -1;
-    };
-    match write::remove_object_id(std::path::Path::new(img), p) {
-        Ok(_removed) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
+    ffi_guard("fs_ntfs_remove_object_id", -1, move || {
+        let Some(img) = cstr_to_path(image) else {
+            set_error("fs_ntfs_remove_object_id: null or non-UTF-8 image");
+            return -1;
+        };
+        let Some(p) = cstr_to_path(path) else {
+            set_error("fs_ntfs_remove_object_id: null or non-UTF-8 path");
+            return -1;
+        };
+        match write::remove_object_id(std::path::Path::new(img), p) {
+            Ok(_removed) => 0,
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
         }
-    }
+    })
 }
 
 /// Add a hard link `new_parent_path/new_basename` pointing at the
@@ -2319,19 +2472,21 @@ pub extern "C" fn fs_ntfs_link(
     new_parent_path: *const c_char,
     new_basename: *const c_char,
 ) -> c_int {
-    cstr_or_return!(image, "fs_ntfs_link", "image", -1);
-    cstr_or_return!(existing_path, "fs_ntfs_link", "existing_path", -1);
-    cstr_or_return!(new_parent_path, "fs_ntfs_link", "new_parent_path", -1);
-    cstr_or_return!(new_basename, "fs_ntfs_link", "new_basename", -1);
-    match write::link(
-        std::path::Path::new(image),
-        existing_path,
-        new_parent_path,
-        new_basename,
-    ) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_link", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_link", "image", -1);
+        cstr_or_return!(existing_path, "fs_ntfs_link", "existing_path", -1);
+        cstr_or_return!(new_parent_path, "fs_ntfs_link", "new_parent_path", -1);
+        cstr_or_return!(new_basename, "fs_ntfs_link", "new_basename", -1);
+        match write::link(
+            std::path::Path::new(image),
+            existing_path,
+            new_parent_path,
+            new_basename,
+        ) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Rename a file (variable length). Returns 0 on success, -1 on error.
@@ -2344,13 +2499,15 @@ pub extern "C" fn fs_ntfs_rename(
     old_path: *const c_char,
     new_basename: *const c_char,
 ) -> c_int {
-    cstr_or_return!(image, "fs_ntfs_rename", "image", -1);
-    cstr_or_return!(old_path, "fs_ntfs_rename", "old_path", -1);
-    cstr_or_return!(new_basename, "fs_ntfs_rename", "new_basename", -1);
-    match write::rename(std::path::Path::new(image), old_path, new_basename) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_rename", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_rename", "image", -1);
+        cstr_or_return!(old_path, "fs_ntfs_rename", "old_path", -1);
+        cstr_or_return!(new_basename, "fs_ntfs_rename", "new_basename", -1);
+        match write::rename(std::path::Path::new(image), old_path, new_basename) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Rename a file in place. `new_name` is the new basename (no `/`).
@@ -2362,13 +2519,15 @@ pub extern "C" fn fs_ntfs_rename_same_length(
     old_path: *const c_char,
     new_name: *const c_char,
 ) -> c_int {
-    cstr_or_return!(image, "fs_ntfs_rename_same_length", "image", -1);
-    cstr_or_return!(old_path, "fs_ntfs_rename_same_length", "old_path", -1);
-    cstr_or_return!(new_name, "fs_ntfs_rename_same_length", "new_name", -1);
-    match write::rename_same_length(std::path::Path::new(image), old_path, new_name) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_rename_same_length", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_rename_same_length", "image", -1);
+        cstr_or_return!(old_path, "fs_ntfs_rename_same_length", "old_path", -1);
+        cstr_or_return!(new_name, "fs_ntfs_rename_same_length", "new_name", -1);
+        match write::rename_same_length(std::path::Path::new(image), old_path, new_name) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Grow a non-resident `$DATA` to `new_size` bytes. Allocates the
@@ -2380,12 +2539,14 @@ pub extern "C" fn fs_ntfs_rename_same_length(
 /// Returns the new size on success, -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_grow(image: *const c_char, path: *const c_char, new_size: u64) -> i64 {
-    cstr_or_return!(image, "fs_ntfs_grow", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_grow", "path", -1);
-    match write::grow_nonresident(std::path::Path::new(image), path, new_size) {
-        Ok(n) => n as i64,
-        Err(e) => err_i64(e),
-    }
+    ffi_guard("fs_ntfs_grow", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_grow", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_grow", "path", -1);
+        match write::grow_nonresident(std::path::Path::new(image), path, new_size) {
+            Ok(n) => n as i64,
+            Err(e) => err_i64(e),
+        }
+    })
 }
 
 /// Shrink a file's non-resident `$DATA` to `new_size` bytes. Clusters
@@ -2398,12 +2559,14 @@ pub extern "C" fn fs_ntfs_truncate(
     path: *const c_char,
     new_size: u64,
 ) -> i64 {
-    cstr_or_return!(image, "fs_ntfs_truncate", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_truncate", "path", -1);
-    match write::truncate(std::path::Path::new(image), path, new_size) {
-        Ok(n) => n as i64,
-        Err(e) => err_i64(e),
-    }
+    ffi_guard("fs_ntfs_truncate", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_truncate", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_truncate", "path", -1);
+        match write::truncate(std::path::Path::new(image), path, new_size) {
+            Ok(n) => n as i64,
+            Err(e) => err_i64(e),
+        }
+    })
 }
 
 /// Rewrite `len` bytes at `offset` within an existing non-resident
@@ -2431,20 +2594,22 @@ pub extern "C" fn fs_ntfs_write_file(
     buf: *const c_void,
     len: u64,
 ) -> i64 {
-    cstr_or_return!(image, "fs_ntfs_write_file", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_write_file", "path", -1);
-    if len == 0 {
-        return 0;
-    }
-    if buf.is_null() {
-        set_error("fs_ntfs_write_file: null buffer with non-zero length");
-        return -1;
-    }
-    let data = unsafe { slice::from_raw_parts(buf as *const u8, len as usize) };
-    match write::write_at(std::path::Path::new(image), path, offset, data) {
-        Ok(n) => n as i64,
-        Err(e) => err_i64(e),
-    }
+    ffi_guard("fs_ntfs_write_file", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_write_file", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_write_file", "path", -1);
+        if len == 0 {
+            return 0;
+        }
+        if buf.is_null() {
+            set_error("fs_ntfs_write_file: null buffer with non-zero length");
+            return -1;
+        }
+        let data = unsafe { slice::from_raw_parts(buf as *const u8, len as usize) };
+        match write::write_at(std::path::Path::new(image), path, offset, data) {
+            Ok(n) => n as i64,
+            Err(e) => err_i64(e),
+        }
+    })
 }
 
 /// Read the file's `$STANDARD_INFORMATION.security_id` (the index into
@@ -2460,32 +2625,34 @@ pub extern "C" fn fs_ntfs_read_security_id(
     path: *const c_char,
     out: *mut u32,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_read_security_id: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(fp) = cstr_to_path(path) else {
-        set_error("fs_ntfs_read_security_id: null or non-UTF-8 path");
-        return -1;
-    };
-    if out.is_null() {
-        set_error("fs_ntfs_read_security_id: null out");
-        return -1;
-    }
-    match write::read_security_id(std::path::Path::new(img), fp) {
-        Ok(Some(id)) => {
-            unsafe { *out = id };
-            1
+    ffi_guard("fs_ntfs_read_security_id", -1, move || {
+        let Some(img) = cstr_to_path(image) else {
+            set_error("fs_ntfs_read_security_id: null or non-UTF-8 image");
+            return -1;
+        };
+        let Some(fp) = cstr_to_path(path) else {
+            set_error("fs_ntfs_read_security_id: null or non-UTF-8 path");
+            return -1;
+        };
+        if out.is_null() {
+            set_error("fs_ntfs_read_security_id: null out");
+            return -1;
         }
-        Ok(None) => {
-            unsafe { *out = 0 };
-            0
+        match write::read_security_id(std::path::Path::new(img), fp) {
+            Ok(Some(id)) => {
+                unsafe { *out = id };
+                1
+            }
+            Ok(None) => {
+                unsafe { *out = 0 };
+                0
+            }
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
         }
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
-    }
+    })
 }
 
 /// Full `$STANDARD_INFORMATION` value (MS-FSCC §2.4.2). The four
@@ -2527,50 +2694,52 @@ pub extern "C" fn fs_ntfs_read_si_full(
     path: *const c_char,
     out: *mut FsNtfsStandardInfo,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_read_si_full: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(p) = cstr_to_path(path) else {
-        set_error("fs_ntfs_read_si_full: null or non-UTF-8 path");
-        return -1;
-    };
-    if out.is_null() {
-        set_error("fs_ntfs_read_si_full: null out");
-        return -1;
-    }
-    match write::read_si_full(std::path::Path::new(img), p) {
-        Ok(si) => {
-            let out_ref = unsafe { &mut *out };
-            out_ref.creation_time = si.creation_time;
-            out_ref.modification_time = si.modification_time;
-            out_ref.mft_modification_time = si.mft_modification_time;
-            out_ref.access_time = si.access_time;
-            out_ref.file_attributes = si.file_attributes;
-            out_ref.maximum_versions = si.maximum_versions;
-            out_ref.version_number = si.version_number;
-            out_ref.class_id = si.class_id;
-            if let Some(v3) = si.v3 {
-                out_ref.owner_id = v3.owner_id;
-                out_ref.security_id = v3.security_id;
-                out_ref.quota = v3.quota;
-                out_ref.usn = v3.usn;
-                out_ref.has_v3 = 1;
-            } else {
-                out_ref.owner_id = 0;
-                out_ref.security_id = 0;
-                out_ref.quota = 0;
-                out_ref.usn = 0;
-                out_ref.has_v3 = 0;
+    ffi_guard("fs_ntfs_read_si_full", -1, move || {
+        let Some(img) = cstr_to_path(image) else {
+            set_error("fs_ntfs_read_si_full: null or non-UTF-8 image");
+            return -1;
+        };
+        let Some(p) = cstr_to_path(path) else {
+            set_error("fs_ntfs_read_si_full: null or non-UTF-8 path");
+            return -1;
+        };
+        if out.is_null() {
+            set_error("fs_ntfs_read_si_full: null out");
+            return -1;
+        }
+        match write::read_si_full(std::path::Path::new(img), p) {
+            Ok(si) => {
+                let out_ref = unsafe { &mut *out };
+                out_ref.creation_time = si.creation_time;
+                out_ref.modification_time = si.modification_time;
+                out_ref.mft_modification_time = si.mft_modification_time;
+                out_ref.access_time = si.access_time;
+                out_ref.file_attributes = si.file_attributes;
+                out_ref.maximum_versions = si.maximum_versions;
+                out_ref.version_number = si.version_number;
+                out_ref.class_id = si.class_id;
+                if let Some(v3) = si.v3 {
+                    out_ref.owner_id = v3.owner_id;
+                    out_ref.security_id = v3.security_id;
+                    out_ref.quota = v3.quota;
+                    out_ref.usn = v3.usn;
+                    out_ref.has_v3 = 1;
+                } else {
+                    out_ref.owner_id = 0;
+                    out_ref.security_id = 0;
+                    out_ref.quota = 0;
+                    out_ref.usn = 0;
+                    out_ref.has_v3 = 0;
+                }
+                out_ref._pad = [0u8; 7];
+                0
             }
-            out_ref._pad = [0u8; 7];
-            0
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
         }
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
-    }
+    })
 }
 
 /// Point a file at an existing `$Secure:$SDS` entry by writing the
@@ -2587,21 +2756,23 @@ pub extern "C" fn fs_ntfs_set_security_id(
     path: *const c_char,
     security_id: u32,
 ) -> c_int {
-    let Some(img) = cstr_to_path(image) else {
-        set_error("fs_ntfs_set_security_id: null or non-UTF-8 image");
-        return -1;
-    };
-    let Some(fp) = cstr_to_path(path) else {
-        set_error("fs_ntfs_set_security_id: null or non-UTF-8 path");
-        return -1;
-    };
-    match write::set_security_id(std::path::Path::new(img), fp, security_id) {
-        Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
+    ffi_guard("fs_ntfs_set_security_id", -1, move || {
+        let Some(img) = cstr_to_path(image) else {
+            set_error("fs_ntfs_set_security_id: null or non-UTF-8 image");
+            return -1;
+        };
+        let Some(fp) = cstr_to_path(path) else {
+            set_error("fs_ntfs_set_security_id: null or non-UTF-8 path");
+            return -1;
+        };
+        match write::set_security_id(std::path::Path::new(img), fp, security_id) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
         }
-    }
+    })
 }
 
 /// Add / remove bits in `$STANDARD_INFORMATION.file_attributes`. Bits in
@@ -2614,19 +2785,21 @@ pub extern "C" fn fs_ntfs_set_file_attributes(
     add_flags: u32,
     remove_flags: u32,
 ) -> c_int {
-    cstr_or_return!(image, "fs_ntfs_set_file_attributes", "image", -1);
-    cstr_or_return!(path, "fs_ntfs_set_file_attributes", "path", -1);
-    match write::set_file_attributes(
-        std::path::Path::new(image),
-        path,
-        write::FileAttributesChange {
-            add: add_flags,
-            remove: remove_flags,
-        },
-    ) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_set_file_attributes", -1, move || {
+        cstr_or_return!(image, "fs_ntfs_set_file_attributes", "image", -1);
+        cstr_or_return!(path, "fs_ntfs_set_file_attributes", "path", -1);
+        match write::set_file_attributes(
+            std::path::Path::new(image),
+            path,
+            write::FileAttributesChange {
+                add: add_flags,
+                remove: remove_flags,
+            },
+        ) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2668,15 +2841,17 @@ pub extern "C" fn fs_ntfs_create_file_h(
     parent_path: *const c_char,
     basename: *const c_char,
 ) -> i64 {
-    cstr_or_return!(parent_path, "fs_ntfs_create_file_h", "parent_path", -1);
-    cstr_or_return!(basename, "fs_ntfs_create_file_h", "basename", -1);
-    let Ok(mut io) = handle_io_from_ptr(fs) else {
-        return -1;
-    };
-    match write::create_file_io(&mut io, parent_path, basename) {
-        Ok(rn) => rn as i64,
-        Err(e) => err_i64(e),
-    }
+    ffi_guard("fs_ntfs_create_file_h", -1, move || {
+        cstr_or_return!(parent_path, "fs_ntfs_create_file_h", "parent_path", -1);
+        cstr_or_return!(basename, "fs_ntfs_create_file_h", "basename", -1);
+        let Ok(mut io) = handle_io_from_ptr(fs) else {
+            return -1;
+        };
+        match write::create_file_io(&mut io, parent_path, basename) {
+            Ok(rn) => rn as i64,
+            Err(e) => err_i64(e),
+        }
+    })
 }
 
 /// Handle-based [`fs_ntfs_write_file_contents`].
@@ -2687,35 +2862,39 @@ pub extern "C" fn fs_ntfs_write_file_contents_h(
     buf: *const c_void,
     len: u64,
 ) -> i64 {
-    cstr_or_return!(path, "fs_ntfs_write_file_contents_h", "path", -1);
-    let data: &[u8] = if len == 0 {
-        &[]
-    } else if buf.is_null() {
-        set_error("fs_ntfs_write_file_contents_h: null buf with non-zero len");
-        return -1;
-    } else {
-        unsafe { slice::from_raw_parts(buf as *const u8, len as usize) }
-    };
-    let Ok(mut io) = handle_io_from_ptr(fs) else {
-        return -1;
-    };
-    match write::write_file_contents_io(&mut io, path, data) {
-        Ok(n) => n as i64,
-        Err(e) => err_i64(e),
-    }
+    ffi_guard("fs_ntfs_write_file_contents_h", -1, move || {
+        cstr_or_return!(path, "fs_ntfs_write_file_contents_h", "path", -1);
+        let data: &[u8] = if len == 0 {
+            &[]
+        } else if buf.is_null() {
+            set_error("fs_ntfs_write_file_contents_h: null buf with non-zero len");
+            return -1;
+        } else {
+            unsafe { slice::from_raw_parts(buf as *const u8, len as usize) }
+        };
+        let Ok(mut io) = handle_io_from_ptr(fs) else {
+            return -1;
+        };
+        match write::write_file_contents_io(&mut io, path, data) {
+            Ok(n) => n as i64,
+            Err(e) => err_i64(e),
+        }
+    })
 }
 
 /// Handle-based [`fs_ntfs_unlink`].
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_unlink_h(fs: *mut FsNtfsHandle, path: *const c_char) -> c_int {
-    cstr_or_return!(path, "fs_ntfs_unlink_h", "path", -1);
-    let Ok(mut io) = handle_io_from_ptr(fs) else {
-        return -1;
-    };
-    match write::unlink_io(&mut io, path) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_unlink_h", -1, move || {
+        cstr_or_return!(path, "fs_ntfs_unlink_h", "path", -1);
+        let Ok(mut io) = handle_io_from_ptr(fs) else {
+            return -1;
+        };
+        match write::unlink_io(&mut io, path) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Handle-based [`fs_ntfs_rename`].
@@ -2725,15 +2904,17 @@ pub extern "C" fn fs_ntfs_rename_h(
     old_path: *const c_char,
     new_basename: *const c_char,
 ) -> c_int {
-    cstr_or_return!(old_path, "fs_ntfs_rename_h", "old_path", -1);
-    cstr_or_return!(new_basename, "fs_ntfs_rename_h", "new_basename", -1);
-    let Ok(mut io) = handle_io_from_ptr(fs) else {
-        return -1;
-    };
-    match write::rename_io(&mut io, old_path, new_basename) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_rename_h", -1, move || {
+        cstr_or_return!(old_path, "fs_ntfs_rename_h", "old_path", -1);
+        cstr_or_return!(new_basename, "fs_ntfs_rename_h", "new_basename", -1);
+        let Ok(mut io) = handle_io_from_ptr(fs) else {
+            return -1;
+        };
+        match write::rename_io(&mut io, old_path, new_basename) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// `fs_ntfs_rename2_h` flag bits. `FS_NTFS_RENAME_REPLACE` enables
@@ -2759,23 +2940,25 @@ pub extern "C" fn fs_ntfs_rename2_h(
     new_basename: *const c_char,
     flags: c_int,
 ) -> c_int {
-    cstr_or_return!(old_path, "fs_ntfs_rename2_h", "old_path", -1);
-    cstr_or_return!(new_basename, "fs_ntfs_rename2_h", "new_basename", -1);
-    // Reject any flag bits we don't define so future additions can be
-    // detected by callers via EINVAL probing.
-    let known = FS_NTFS_RENAME_REPLACE;
-    if flags & !known != 0 {
-        set_error("fs_ntfs_rename2_h: invalid (unknown) flag bits");
-        return -1;
-    }
-    let replace = flags & FS_NTFS_RENAME_REPLACE != 0;
-    let Ok(mut io) = handle_io_from_ptr(fs) else {
-        return -1;
-    };
-    match write::rename_replace_io(&mut io, old_path, new_basename, replace) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_rename2_h", -1, move || {
+        cstr_or_return!(old_path, "fs_ntfs_rename2_h", "old_path", -1);
+        cstr_or_return!(new_basename, "fs_ntfs_rename2_h", "new_basename", -1);
+        // Reject any flag bits we don't define so future additions can be
+        // detected by callers via EINVAL probing.
+        let known = FS_NTFS_RENAME_REPLACE;
+        if flags & !known != 0 {
+            set_error("fs_ntfs_rename2_h: invalid (unknown) flag bits");
+            return -1;
+        }
+        let replace = flags & FS_NTFS_RENAME_REPLACE != 0;
+        let Ok(mut io) = handle_io_from_ptr(fs) else {
+            return -1;
+        };
+        match write::rename_replace_io(&mut io, old_path, new_basename, replace) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Handle-based [`fs_ntfs_mkdir`].
@@ -2785,28 +2968,32 @@ pub extern "C" fn fs_ntfs_mkdir_h(
     parent_path: *const c_char,
     basename: *const c_char,
 ) -> i64 {
-    cstr_or_return!(parent_path, "fs_ntfs_mkdir_h", "parent_path", -1);
-    cstr_or_return!(basename, "fs_ntfs_mkdir_h", "basename", -1);
-    let Ok(mut io) = handle_io_from_ptr(fs) else {
-        return -1;
-    };
-    match write::mkdir_io(&mut io, parent_path, basename) {
-        Ok(rn) => rn as i64,
-        Err(e) => err_i64(e),
-    }
+    ffi_guard("fs_ntfs_mkdir_h", -1, move || {
+        cstr_or_return!(parent_path, "fs_ntfs_mkdir_h", "parent_path", -1);
+        cstr_or_return!(basename, "fs_ntfs_mkdir_h", "basename", -1);
+        let Ok(mut io) = handle_io_from_ptr(fs) else {
+            return -1;
+        };
+        match write::mkdir_io(&mut io, parent_path, basename) {
+            Ok(rn) => rn as i64,
+            Err(e) => err_i64(e),
+        }
+    })
 }
 
 /// Handle-based [`fs_ntfs_rmdir`].
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_rmdir_h(fs: *mut FsNtfsHandle, path: *const c_char) -> c_int {
-    cstr_or_return!(path, "fs_ntfs_rmdir_h", "path", -1);
-    let Ok(mut io) = handle_io_from_ptr(fs) else {
-        return -1;
-    };
-    match write::rmdir_io(&mut io, path) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_rmdir_h", -1, move || {
+        cstr_or_return!(path, "fs_ntfs_rmdir_h", "path", -1);
+        let Ok(mut io) = handle_io_from_ptr(fs) else {
+            return -1;
+        };
+        match write::rmdir_io(&mut io, path) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Handle-based [`fs_ntfs_truncate`].
@@ -2816,14 +3003,16 @@ pub extern "C" fn fs_ntfs_truncate_h(
     path: *const c_char,
     new_size: u64,
 ) -> i64 {
-    cstr_or_return!(path, "fs_ntfs_truncate_h", "path", -1);
-    let Ok(mut io) = handle_io_from_ptr(fs) else {
-        return -1;
-    };
-    match write::truncate_io(&mut io, path, new_size) {
-        Ok(n) => n as i64,
-        Err(e) => err_i64(e),
-    }
+    ffi_guard("fs_ntfs_truncate_h", -1, move || {
+        cstr_or_return!(path, "fs_ntfs_truncate_h", "path", -1);
+        let Ok(mut io) = handle_io_from_ptr(fs) else {
+            return -1;
+        };
+        match write::truncate_io(&mut io, path, new_size) {
+            Ok(n) => n as i64,
+            Err(e) => err_i64(e),
+        }
+    })
 }
 
 /// Handle-based [`fs_ntfs_set_times`].
@@ -2836,20 +3025,22 @@ pub extern "C" fn fs_ntfs_set_times_h(
     mft_record_modification: *const i64,
     access: *const i64,
 ) -> c_int {
-    cstr_or_return!(path, "fs_ntfs_set_times_h", "path", -1);
-    let times = write::FileTimes {
-        creation: unsafe { creation.as_ref() }.map(|v| *v as u64),
-        modification: unsafe { modification.as_ref() }.map(|v| *v as u64),
-        mft_record_modification: unsafe { mft_record_modification.as_ref() }.map(|v| *v as u64),
-        access: unsafe { access.as_ref() }.map(|v| *v as u64),
-    };
-    let Ok(mut io) = handle_io_from_ptr(fs) else {
-        return -1;
-    };
-    match write::set_times_io(&mut io, path, times) {
-        Ok(()) => 0,
-        Err(e) => err_int(e),
-    }
+    ffi_guard("fs_ntfs_set_times_h", -1, move || {
+        cstr_or_return!(path, "fs_ntfs_set_times_h", "path", -1);
+        let times = write::FileTimes {
+            creation: unsafe { creation.as_ref() }.map(|v| *v as u64),
+            modification: unsafe { modification.as_ref() }.map(|v| *v as u64),
+            mft_record_modification: unsafe { mft_record_modification.as_ref() }.map(|v| *v as u64),
+            access: unsafe { access.as_ref() }.map(|v| *v as u64),
+        };
+        let Ok(mut io) = handle_io_from_ptr(fs) else {
+            return -1;
+        };
+        match write::set_times_io(&mut io, path, times) {
+            Ok(()) => 0,
+            Err(e) => err_int(e),
+        }
+    })
 }
 
 /// Handle-based sibling of [`fs_ntfs_write_object_id_extended`]. Writes
@@ -2873,42 +3064,44 @@ pub extern "C" fn fs_ntfs_set_object_id_extended_h(
     birth_object: *const u8,
     birth_domain: *const u8,
 ) -> c_int {
-    if fs.is_null() {
-        set_error("fs_ntfs_set_object_id_extended_h: null handle");
-        return -1;
-    }
-    let Some(fp) = cstr_to_path(path) else {
-        set_error("fs_ntfs_set_object_id_extended_h: null or non-UTF-8 path");
-        return -1;
-    };
-    if in_buf.is_null()
-        || birth_volume.is_null()
-        || birth_object.is_null()
-        || birth_domain.is_null()
-    {
-        set_error("fs_ntfs_set_object_id_extended_h: null GUID pointer");
-        return -1;
-    }
-    let mut object_id = [0u8; 16];
-    let mut bv = [0u8; 16];
-    let mut bo = [0u8; 16];
-    let mut bd = [0u8; 16];
-    unsafe {
-        std::ptr::copy_nonoverlapping(in_buf, object_id.as_mut_ptr(), 16);
-        std::ptr::copy_nonoverlapping(birth_volume, bv.as_mut_ptr(), 16);
-        std::ptr::copy_nonoverlapping(birth_object, bo.as_mut_ptr(), 16);
-        std::ptr::copy_nonoverlapping(birth_domain, bd.as_mut_ptr(), 16);
-    }
-    let Ok(mut io) = handle_io_from_ptr(fs) else {
-        return -1;
-    };
-    match write::write_object_id_extended_io(&mut io, fp, &object_id, &bv, &bo, &bd) {
-        Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
+    ffi_guard("fs_ntfs_set_object_id_extended_h", -1, move || {
+        if fs.is_null() {
+            set_error("fs_ntfs_set_object_id_extended_h: null handle");
+            return -1;
         }
-    }
+        let Some(fp) = cstr_to_path(path) else {
+            set_error("fs_ntfs_set_object_id_extended_h: null or non-UTF-8 path");
+            return -1;
+        };
+        if in_buf.is_null()
+            || birth_volume.is_null()
+            || birth_object.is_null()
+            || birth_domain.is_null()
+        {
+            set_error("fs_ntfs_set_object_id_extended_h: null GUID pointer");
+            return -1;
+        }
+        let mut object_id = [0u8; 16];
+        let mut bv = [0u8; 16];
+        let mut bo = [0u8; 16];
+        let mut bd = [0u8; 16];
+        unsafe {
+            std::ptr::copy_nonoverlapping(in_buf, object_id.as_mut_ptr(), 16);
+            std::ptr::copy_nonoverlapping(birth_volume, bv.as_mut_ptr(), 16);
+            std::ptr::copy_nonoverlapping(birth_object, bo.as_mut_ptr(), 16);
+            std::ptr::copy_nonoverlapping(birth_domain, bd.as_mut_ptr(), 16);
+        }
+        let Ok(mut io) = handle_io_from_ptr(fs) else {
+            return -1;
+        };
+        match write::write_object_id_extended_io(&mut io, fp, &object_id, &bv, &bo, &bd) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
+        }
+    })
 }
 
 /// Combined recovery: reset `$LogFile` and clear the dirty flag.
@@ -2925,19 +3118,21 @@ pub extern "C" fn fs_ntfs_fsck(
     out_logfile_bytes: *mut u64,
     out_dirty_cleared: *mut u8,
 ) -> c_int {
-    cstr_or_return!(path, "fs_ntfs_fsck", "path", -1);
-    match fsck::fsck(path) {
-        Ok(report) => {
-            if !out_logfile_bytes.is_null() {
-                unsafe { *out_logfile_bytes = report.logfile_bytes };
+    ffi_guard("fs_ntfs_fsck", -1, move || {
+        cstr_or_return!(path, "fs_ntfs_fsck", "path", -1);
+        match fsck::fsck(path) {
+            Ok(report) => {
+                if !out_logfile_bytes.is_null() {
+                    unsafe { *out_logfile_bytes = report.logfile_bytes };
+                }
+                if !out_dirty_cleared.is_null() {
+                    unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };
+                }
+                0
             }
-            if !out_dirty_cleared.is_null() {
-                unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };
-            }
-            0
+            Err(e) => err_int(e),
         }
-        Err(e) => err_int(e),
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3011,40 +3206,42 @@ impl BlockIoTrait for CallbackIo {
 /// `0` if clean, `-1` on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_is_dirty_with_callbacks(cfg: *const FsNtfsBlockdevCfg) -> c_int {
-    if cfg.is_null() {
-        set_error("fs_ntfs_is_dirty_with_callbacks: null config");
-        return -1;
-    }
-    let cfg = unsafe { &*cfg };
-
-    // The write callback is never invoked by `is_dirty`; wire up a
-    // never-called stub so the struct stays total. We picked an unsafe
-    // extern "C" fn that returns EIO if somehow invoked — defense in
-    // depth against a future caller accidentally reaching through it.
-    unsafe extern "C" fn write_stub(
-        _ctx: *mut c_void,
-        _buf: *const c_void,
-        _off: u64,
-        _len: u64,
-    ) -> c_int {
-        5 /* EIO */
-    }
-
-    let mut io = CallbackIo {
-        read_fn: cfg.read,
-        write_fn: cfg.write.unwrap_or(write_stub),
-        context: cfg.context,
-        size: cfg.size_bytes,
-    };
-
-    match fsck::is_dirty_io(&mut io) {
-        Ok(true) => 1,
-        Ok(false) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
+    ffi_guard("fs_ntfs_is_dirty_with_callbacks", -1, move || {
+        if cfg.is_null() {
+            set_error("fs_ntfs_is_dirty_with_callbacks: null config");
+            return -1;
         }
-    }
+        let cfg = unsafe { &*cfg };
+
+        // The write callback is never invoked by `is_dirty`; wire up a
+        // never-called stub so the struct stays total. We picked an unsafe
+        // extern "C" fn that returns EIO if somehow invoked — defense in
+        // depth against a future caller accidentally reaching through it.
+        unsafe extern "C" fn write_stub(
+            _ctx: *mut c_void,
+            _buf: *const c_void,
+            _off: u64,
+            _len: u64,
+        ) -> c_int {
+            5 /* EIO */
+        }
+
+        let mut io = CallbackIo {
+            read_fn: cfg.read,
+            write_fn: cfg.write.unwrap_or(write_stub),
+            context: cfg.context,
+            size: cfg.size_bytes,
+        };
+
+        match fsck::is_dirty_io(&mut io) {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
+        }
+    })
 }
 
 /// Progress callback matching the `fs_ntfs_fsck_progress_fn` C typedef.
@@ -3062,69 +3259,71 @@ pub extern "C" fn fs_ntfs_fsck_with_callbacks(
     out_logfile_bytes: *mut u64,
     out_dirty_cleared: *mut u8,
 ) -> c_int {
-    if cfg.is_null() {
-        set_error("fs_ntfs_fsck_with_callbacks: null config");
-        return -1;
-    }
-    let cfg = unsafe { &*cfg };
+    ffi_guard("fs_ntfs_fsck_with_callbacks", -1, move || {
+        if cfg.is_null() {
+            set_error("fs_ntfs_fsck_with_callbacks: null config");
+            return -1;
+        }
+        let cfg = unsafe { &*cfg };
 
-    let Some(write_fn) = cfg.write else {
-        set_error("fs_ntfs_fsck_with_callbacks: cfg.write is NULL (fsck requires RW)");
-        return -1;
-    };
+        let Some(write_fn) = cfg.write else {
+            set_error("fs_ntfs_fsck_with_callbacks: cfg.write is NULL (fsck requires RW)");
+            return -1;
+        };
 
-    let mut io = CallbackIo {
-        read_fn: cfg.read,
-        write_fn,
-        context: cfg.context,
-        size: cfg.size_bytes,
-    };
+        let mut io = CallbackIo {
+            read_fn: cfg.read,
+            write_fn,
+            context: cfg.context,
+            size: cfg.size_bytes,
+        };
 
-    // Adapter: Rust closure → C function pointer. We need a single
-    // CString per phase transition so the `*const c_char` stays valid
-    // for the duration of the callback invocation. Done by allocating
-    // inside the closure (one CString per emission); acceptable
-    // overhead given progress fires at most a few hundred times per
-    // fsck.
-    //
-    // SendCtx: `*mut c_void` isn't Send, but the closure is kept local
-    // to this stack frame and never crosses a thread boundary, so we
-    // don't need Send. The callback fn pointer + ctx are captured by
-    // move into the closure.
-    struct PtrWrap(*mut c_void);
-    let pctx = PtrWrap(progress_ctx);
-    let pcb = progress_cb;
+        // Adapter: Rust closure → C function pointer. We need a single
+        // CString per phase transition so the `*const c_char` stays valid
+        // for the duration of the callback invocation. Done by allocating
+        // inside the closure (one CString per emission); acceptable
+        // overhead given progress fires at most a few hundred times per
+        // fsck.
+        //
+        // SendCtx: `*mut c_void` isn't Send, but the closure is kept local
+        // to this stack frame and never crosses a thread boundary, so we
+        // don't need Send. The callback fn pointer + ctx are captured by
+        // move into the closure.
+        struct PtrWrap(*mut c_void);
+        let pctx = PtrWrap(progress_ctx);
+        let pcb = progress_cb;
 
-    let mut progress_closure = move |phase: &str, done: u64, total: u64| {
-        if let Some(cb) = pcb {
-            if let Ok(cstr) = CString::new(phase) {
-                let _ = unsafe { cb(pctx.0, cstr.as_ptr(), done, total) };
+        let mut progress_closure = move |phase: &str, done: u64, total: u64| {
+            if let Some(cb) = pcb {
+                if let Ok(cstr) = CString::new(phase) {
+                    let _ = unsafe { cb(pctx.0, cstr.as_ptr(), done, total) };
+                }
+            }
+        };
+
+        #[allow(clippy::type_complexity)]
+        let progress: Option<&mut (dyn FnMut(&str, u64, u64) + '_)> = if pcb.is_some() {
+            Some(&mut progress_closure)
+        } else {
+            None
+        };
+
+        match fsck::fsck_io(&mut io, progress) {
+            Ok(report) => {
+                if !out_logfile_bytes.is_null() {
+                    unsafe { *out_logfile_bytes = report.logfile_bytes };
+                }
+                if !out_dirty_cleared.is_null() {
+                    unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };
+                }
+                0
+            }
+            Err(e) => {
+                set_error(&e);
+                -1
             }
         }
-    };
-
-    #[allow(clippy::type_complexity)]
-    let progress: Option<&mut (dyn FnMut(&str, u64, u64) + '_)> = if pcb.is_some() {
-        Some(&mut progress_closure)
-    } else {
-        None
-    };
-
-    match fsck::fsck_io(&mut io, progress) {
-        Ok(report) => {
-            if !out_logfile_bytes.is_null() {
-                unsafe { *out_logfile_bytes = report.logfile_bytes };
-            }
-            if !out_dirty_cleared.is_null() {
-                unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };
-            }
-            0
-        }
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
-    }
+    })
 }
 
 /// `fs_core` counterpart of [`fs_ntfs_is_dirty_with_callbacks`]. Reads
@@ -3140,25 +3339,27 @@ pub extern "C" fn fs_ntfs_fsck_with_callbacks(
 pub extern "C" fn fs_ntfs_is_dirty_with_fs_core_device(
     handle: *mut fs_core::ffi::FsCoreDevice,
 ) -> c_int {
-    if handle.is_null() {
-        set_error("fs_ntfs_is_dirty_with_fs_core_device: null handle");
-        return -1;
-    }
-    // Safety: handle non-null per the check above; caller-owned per the
-    // doc contract. The Arc clone keeps the device alive through the
-    // call independent of any caller-side close.
-    let device = unsafe { (*handle).inner().clone() };
-    let size = fs_core::BlockRead::size_bytes(&device);
-    let mut io = FsCoreBlockIo { device, size };
-
-    match fsck::is_dirty_io(&mut io) {
-        Ok(true) => 1,
-        Ok(false) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
+    ffi_guard("fs_ntfs_is_dirty_with_fs_core_device", -1, move || {
+        if handle.is_null() {
+            set_error("fs_ntfs_is_dirty_with_fs_core_device: null handle");
+            return -1;
         }
-    }
+        // Safety: handle non-null per the check above; caller-owned per the
+        // doc contract. The Arc clone keeps the device alive through the
+        // call independent of any caller-side close.
+        let device = unsafe { (*handle).inner().clone() };
+        let size = fs_core::BlockRead::size_bytes(&device);
+        let mut io = FsCoreBlockIo { device, size };
+
+        match fsck::is_dirty_io(&mut io) {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
+        }
+    })
 }
 
 /// `fs_core` counterpart of [`fs_ntfs_fsck_with_callbacks`]. Replays
@@ -3187,52 +3388,56 @@ pub extern "C" fn fs_ntfs_fsck_with_fs_core_device(
     out_logfile_bytes: *mut u64,
     out_dirty_cleared: *mut u8,
 ) -> c_int {
-    if handle.is_null() {
-        set_error("fs_ntfs_fsck_with_fs_core_device: null handle");
-        return -1;
-    }
-    let device = unsafe { (*handle).inner().clone() };
-    if !fs_core::BlockDevice::is_writable(&device) {
-        set_error("fs_ntfs_fsck_with_fs_core_device: device is not writable (fsck requires RW)");
-        return -1;
-    }
-    let size = fs_core::BlockRead::size_bytes(&device);
-    let mut io = FsCoreBlockIo { device, size };
+    ffi_guard("fs_ntfs_fsck_with_fs_core_device", -1, move || {
+        if handle.is_null() {
+            set_error("fs_ntfs_fsck_with_fs_core_device: null handle");
+            return -1;
+        }
+        let device = unsafe { (*handle).inner().clone() };
+        if !fs_core::BlockDevice::is_writable(&device) {
+            set_error(
+                "fs_ntfs_fsck_with_fs_core_device: device is not writable (fsck requires RW)",
+            );
+            return -1;
+        }
+        let size = fs_core::BlockRead::size_bytes(&device);
+        let mut io = FsCoreBlockIo { device, size };
 
-    // Same closure-to-fn-pointer adapter as fs_ntfs_fsck_with_callbacks
-    // — see that function for the lifetime / Send rationale.
-    struct PtrWrap(*mut c_void);
-    let pctx = PtrWrap(progress_ctx);
-    let pcb = progress_cb;
-    let mut progress_closure = move |phase: &str, done: u64, total: u64| {
-        if let Some(cb) = pcb {
-            if let Ok(cstr) = CString::new(phase) {
-                let _ = unsafe { cb(pctx.0, cstr.as_ptr(), done, total) };
+        // Same closure-to-fn-pointer adapter as fs_ntfs_fsck_with_callbacks
+        // — see that function for the lifetime / Send rationale.
+        struct PtrWrap(*mut c_void);
+        let pctx = PtrWrap(progress_ctx);
+        let pcb = progress_cb;
+        let mut progress_closure = move |phase: &str, done: u64, total: u64| {
+            if let Some(cb) = pcb {
+                if let Ok(cstr) = CString::new(phase) {
+                    let _ = unsafe { cb(pctx.0, cstr.as_ptr(), done, total) };
+                }
             }
-        }
-    };
-    #[allow(clippy::type_complexity)]
-    let progress: Option<&mut (dyn FnMut(&str, u64, u64) + '_)> = if pcb.is_some() {
-        Some(&mut progress_closure)
-    } else {
-        None
-    };
+        };
+        #[allow(clippy::type_complexity)]
+        let progress: Option<&mut (dyn FnMut(&str, u64, u64) + '_)> = if pcb.is_some() {
+            Some(&mut progress_closure)
+        } else {
+            None
+        };
 
-    match fsck::fsck_io(&mut io, progress) {
-        Ok(report) => {
-            if !out_logfile_bytes.is_null() {
-                unsafe { *out_logfile_bytes = report.logfile_bytes };
+        match fsck::fsck_io(&mut io, progress) {
+            Ok(report) => {
+                if !out_logfile_bytes.is_null() {
+                    unsafe { *out_logfile_bytes = report.logfile_bytes };
+                }
+                if !out_dirty_cleared.is_null() {
+                    unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };
+                }
+                0
             }
-            if !out_dirty_cleared.is_null() {
-                unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };
+            Err(e) => {
+                set_error(&e);
+                -1
             }
-            0
         }
-        Err(e) => {
-            set_error(&e);
-            -1
-        }
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3245,28 +3450,30 @@ pub extern "C" fn fs_ntfs_fsck_with_fs_core_device(
 /// serial. Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mkfs(cfg: *const FsNtfsBlockdevCfg) -> c_int {
-    if cfg.is_null() {
-        set_error("fs_ntfs_mkfs: null config");
-        return -1;
-    }
-    let cfg = unsafe { &*cfg };
-    let Some(write_fn) = cfg.write else {
-        set_error("fs_ntfs_mkfs: cfg.write is NULL (mkfs requires RW)");
-        return -1;
-    };
-    let mut io = block_io::CallbackBlockIo {
-        read_fn: cfg.read,
-        write_fn: Some(write_fn),
-        context: cfg.context,
-        size: cfg.size_bytes,
-    };
-    match mkfs::format_filesystem(&mut io, cfg.size_bytes, 4096, 4096, None, None) {
-        Ok(()) => 0,
-        Err(e) => {
-            set_error(&e);
-            -1
+    ffi_guard("fs_ntfs_mkfs", -1, move || {
+        if cfg.is_null() {
+            set_error("fs_ntfs_mkfs: null config");
+            return -1;
         }
-    }
+        let cfg = unsafe { &*cfg };
+        let Some(write_fn) = cfg.write else {
+            set_error("fs_ntfs_mkfs: cfg.write is NULL (mkfs requires RW)");
+            return -1;
+        };
+        let mut io = block_io::CallbackBlockIo {
+            read_fn: cfg.read,
+            write_fn: Some(write_fn),
+            context: cfg.context,
+            size: cfg.size_bytes,
+        };
+        match mkfs::format_filesystem(&mut io, cfg.size_bytes, 4096, 4096, None, None) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -3775,5 +3982,93 @@ mod capi_read_tests {
         assert!(names.iter().any(|n| n == "sub"), "names: {names:?}");
         fs_ntfs_umount(h);
         // `img` (ImageGuard) removes the file when it drops at end of scope.
+    }
+}
+
+#[cfg(test)]
+mod ffi_guard_tests {
+    use super::*;
+
+    /// An `extern "C"` function that unwinds aborts the process --
+    /// Rust inserts the abort shim itself. Before the guard existed,
+    /// any panic anywhere under the C ABI took the host process down
+    /// rather than returning a failure, which in an FSKit extension is
+    /// the mount disappearing.
+    #[test]
+    fn a_panic_under_the_c_abi_becomes_an_error_return() {
+        // The panic message itself goes to stderr, which is where a
+        // panic belongs; what matters here is what the caller gets.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        let code = ffi_guard("fs_ntfs_test", -1, || -> c_int {
+            panic!("a slice index out of range, say");
+        });
+        assert_eq!(code, -1);
+
+        let pointer = ffi_guard(
+            "fs_ntfs_test",
+            std::ptr::null_mut(),
+            || -> *mut FsNtfsHandle {
+                panic!("or an attribute shorter than it claims");
+            },
+        );
+        assert!(pointer.is_null());
+
+        std::panic::set_hook(previous);
+
+        let why = LAST_ERROR.with(|cell| cell.borrow().to_string_lossy().into_owned());
+        assert!(
+            why.contains("panicked"),
+            "the caller was told {why:?}, which does not say what happened"
+        );
+    }
+
+    /// Every entry point goes through the guard, and this is what keeps
+    /// the next one written from being the exception.
+    ///
+    /// Reading the source is the only way to assert this: there is no
+    /// runtime handle on "the set of `extern \"C\"` functions", and a
+    /// new one that forgets the wrapper is exactly the case a test
+    /// calling the existing ones cannot see.
+    #[test]
+    fn every_c_entry_point_goes_through_the_guard() {
+        let source = include_str!("lib.rs");
+        let mut lines = source.lines().peekable();
+        let mut checked = 0;
+        let mut bare = Vec::new();
+
+        while let Some(line) = lines.next() {
+            if !(line.starts_with("pub extern \"C\" fn")
+                || line.starts_with("pub unsafe extern \"C\" fn"))
+            {
+                continue;
+            }
+            let name = line
+                .split("fn ")
+                .nth(1)
+                .and_then(|rest| rest.split('(').next())
+                .unwrap_or("?")
+                .to_string();
+            // Walk to the end of the signature, then look at the first
+            // line of the body.
+            let mut signature = line.to_string();
+            while !signature.trim_end().ends_with('{') {
+                signature = lines.next().expect("signature ends").to_string();
+            }
+            let first = lines.next().unwrap_or("").trim_start();
+            checked += 1;
+            if !first.starts_with("ffi_guard(") {
+                bare.push(name);
+            }
+        }
+
+        assert!(checked > 60, "only found {checked} entry points to check");
+        assert!(
+            bare.is_empty(),
+            "{} of {checked} C entry points do not go through ffi_guard, so a panic \
+             inside them aborts the host process: {bare:?}",
+            bare.len()
+        );
     }
 }

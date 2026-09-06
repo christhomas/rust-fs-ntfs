@@ -901,3 +901,120 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod hostile_logfile_tests {
+    use super::*;
+    use crate::attr_io::{self, attr_off, AttrType};
+    use crate::block_io::BlockIo;
+    use crate::mft_io::update_mft_record_io;
+    use crate::mkfs::format_filesystem;
+
+    struct MemDev {
+        buf: Vec<u8>,
+    }
+
+    impl BlockIo for MemDev {
+        fn read_exact_at(&mut self, offset: u64, out: &mut [u8]) -> Result<(), String> {
+            let start = offset as usize;
+            let end = start
+                .checked_add(out.len())
+                .ok_or("read past the address space")?;
+            if end > self.buf.len() {
+                return Err(format!("read [{start}, {end}) past {}", self.buf.len()));
+            }
+            out.copy_from_slice(&self.buf[start..end]);
+            Ok(())
+        }
+        fn write_all_at(&mut self, offset: u64, data: &[u8]) -> Result<(), String> {
+            let start = offset as usize;
+            let end = start
+                .checked_add(data.len())
+                .ok_or("write past the address space")?;
+            // Grows, like a file does. That is the point: a write past
+            // the end of an image is not an error, it is a bigger
+            // image.
+            if end > self.buf.len() {
+                self.buf.resize(end, 0);
+            }
+            self.buf[start..end].copy_from_slice(data);
+            Ok(())
+        }
+        fn sync(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn size(&self) -> u64 {
+            self.buf.len() as u64
+        }
+    }
+
+    /// `fsck` fills `$LogFile` with 0xFF, and it asks the record where
+    /// that is. Both numbers -- the run's starting cluster and its
+    /// length -- come off the disk, and the only guard compared two
+    /// fields of the same attribute against each other, with a multiply
+    /// that wrapped.
+    ///
+    /// A `$LogFile` naming a run at a cluster of the caller's choosing
+    /// therefore directed the fill anywhere: over the MFT on a raw
+    /// disk, or -- as here, and as with any image file -- growing the
+    /// image until the host volume filled.
+    #[test]
+    fn a_logfile_run_outside_the_volume_is_refused_before_anything_is_written() {
+        const SIZE: u64 = 16 * 1024 * 1024;
+        let mut dev = MemDev {
+            buf: vec![0u8; SIZE as usize],
+        };
+        format_filesystem(
+            &mut dev as &mut dyn BlockIo,
+            SIZE,
+            4096,
+            4096,
+            Some("LOGTEST"),
+            Some(0x0BADF00D),
+        )
+        .expect("format_filesystem");
+
+        // The control: on the volume as formatted, the reset works.
+        reset_logfile_io(&mut dev, None).expect("reset a well-formed $LogFile");
+
+        // Point $LogFile's only data run at cluster 0x7FFF_FFFF -- 8.8
+        // terabytes into a 16 MiB volume -- keeping the run long enough
+        // that the existing extent-versus-length check still passes.
+        update_mft_record_io(&mut dev, LOGFILE_RECORD_NUMBER, |record| {
+            let data = attr_io::find_attribute(record, AttrType::Data, None)
+                .ok_or("no $DATA on $LogFile")?;
+            let mpo = data
+                .non_resident_mapping_pairs_offset
+                .ok_or("$LogFile $DATA is resident")? as usize;
+            let at = data.attr_offset + mpo;
+            let length_clusters: u32 = 0x0000_0800; // 8 MiB at 4 KiB clusters
+            let lcn: u32 = 0x7FFF_FFFF;
+            // Header nibbles: 4 bytes of lcn, 2 bytes of length.
+            record[at] = 0x42;
+            record[at + 1..at + 3].copy_from_slice(&(length_clusters as u16).to_le_bytes());
+            record[at + 3..at + 7].copy_from_slice(&lcn.to_le_bytes());
+            record[at + 7] = 0; // end of runs
+                                // And say the value is that long, so the extent check passes.
+            let value_length: u64 = u64::from(length_clusters) * 4096;
+            record[data.attr_offset + attr_off::NONRES_DATA_LENGTH
+                ..data.attr_offset + attr_off::NONRES_DATA_LENGTH + 8]
+                .copy_from_slice(&value_length.to_le_bytes());
+            Ok(())
+        })
+        .expect("patch the $LogFile record");
+
+        let before = dev.buf.len();
+        let outcome = reset_logfile_io(&mut dev, None);
+        assert!(
+            outcome.is_err(),
+            "a $LogFile at cluster 0x7FFFFFFF of a 16 MiB volume was accepted"
+        );
+        assert_eq!(
+            dev.buf.len(),
+            before,
+            "the image grew from {before} to {} bytes -- the fill was written past \
+             the end of the volume",
+            dev.buf.len()
+        );
+    }
+}

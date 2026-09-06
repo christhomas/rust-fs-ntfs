@@ -18,6 +18,11 @@ use crate::mkfs::stream;
 
 use std::path::Path;
 
+/// The largest index block NTFS defines.
+///
+/// 64 KiB. The field is a `u32` and was checked only against zero.
+const MAX_INDEX_BLOCK_SIZE: u64 = 65536;
+
 /// Info required to locate + traverse `$INDEX_ALLOCATION` for a parent
 /// directory.
 pub struct IndexAllocation {
@@ -76,6 +81,14 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
     let ir = attr_io::find_attribute(&record, AttrType::IndexRoot, Some(stream::I30))
         .ok_or_else(|| "$INDEX_ROOT:$I30 not found on parent".to_string())?;
     let ir_val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
+    let ir_val_len = ir.resident_value_length.ok_or("no value_length")? as usize;
+    // The block size sits at 0x08..0x0C of the $INDEX_ROOT value, so
+    // there has to be that much value to read it from.
+    if ir_val_len < 0x10 {
+        return Err(format!(
+            "$INDEX_ROOT:$I30 value is {ir_val_len} bytes, too short to hold an index header"
+        ));
+    }
     let ir_data_start = ir.attr_offset + ir_val_off;
     let block_size = u32::from_le_bytes([
         record[ir_data_start + 0x08],
@@ -83,8 +96,18 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
         record[ir_data_start + 0x0A],
         record[ir_data_start + 0x0B],
     ]) as u64;
-    if block_size == 0 {
-        return Err("INDEX_ROOT block_size is zero".to_string());
+    // An index block is read whole into a buffer sized from this, and
+    // it was checked only against zero: 0xFFFFFFFF is a 4 GiB
+    // allocation per block, and anything below four bytes panics on
+    // `&buf[0..4]` before the magic can be checked. NTFS index blocks
+    // are between one sector and 64 KiB, in powers of two.
+    if !(u64::from(params.bytes_per_sector)..=MAX_INDEX_BLOCK_SIZE).contains(&block_size)
+        || !block_size.is_power_of_two()
+    {
+        return Err(format!(
+            "$INDEX_ROOT:$I30 says its blocks are {block_size} bytes, which is not an \
+             index block size"
+        ));
     }
 
     // Get $INDEX_ALLOCATION:$I30 data runs.
