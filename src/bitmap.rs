@@ -328,8 +328,32 @@ fn map_bitmap_range(
         let lcn = run
             .lcn
             .ok_or_else(|| format!("VCN {vcn} is in a sparse $Bitmap run"))?;
-        let run_end_offset = (run.starting_vcn + run.length) * cluster_size;
-        let chunk = (run_end_offset - file_offset).min(end - file_offset) as usize;
+        // Checked, and required to make progress. Both halves of the
+        // sum are run-list fields off the disk, and in release -- where
+        // this crate ships with `overflow-checks` off -- the product
+        // wrapped. Wrapping to exactly `file_offset` makes `chunk`
+        // zero, and then the cursor never advances and `out` grows
+        // until the process dies.
+        let run_end_offset = run
+            .starting_vcn
+            .checked_add(run.length)
+            .and_then(|vcns| vcns.checked_mul(cluster_size))
+            .ok_or_else(|| {
+                format!(
+                    "$Bitmap run at VCN {} ends past the address space",
+                    run.starting_vcn
+                )
+            })?;
+        let chunk = run_end_offset
+            .checked_sub(file_offset)
+            .filter(|remaining| *remaining > 0)
+            .ok_or_else(|| {
+                format!(
+                    "$Bitmap run at VCN {} ends at or before {file_offset}",
+                    run.starting_vcn
+                )
+            })?
+            .min(end - file_offset) as usize;
 
         out.push(MappedChunk {
             disk_offset: (lcn + (vcn - run.starting_vcn)) * cluster_size + off_in_cluster,
