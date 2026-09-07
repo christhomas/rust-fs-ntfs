@@ -58,7 +58,7 @@ log = "0.4"
 # Strictly additive — ntfs's existing BlockIo trait is unchanged; this
 # adds a bridge module so external `fs_core::BlockDevice` implementors
 # (a `Qcow2Reader`, a `SliceReader`, etc.) can be driven by ntfs.
-am-fs-core = { path = "../rust-fs-core", version = "0.2.8" }
+am-fs-core = { path = "../rust-fs-core", version = "0.2.10" }
 
 [dev-dependencies]
 # Upstream read-only NTFS parser, kept ONLY as a test oracle: the native
