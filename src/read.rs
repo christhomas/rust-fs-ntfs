@@ -170,10 +170,20 @@ pub fn read_attribute_value<T: BlockIo + ?Sized>(
 /// and `read_stat` so both handle overflowed (`$ATTRIBUTE_LIST`) files.
 ///
 /// **Limitation (fails loud, never truncates):** a single non-resident
-/// attribute whose run list is split across *multiple* extension records
-/// (i.e. `$ATTRIBUTE_LIST` carries entries for the same type+name with
+/// attribute whose run list is split across *multiple* records (i.e.
+/// `$ATTRIBUTE_LIST` carries entries for the same type+name with
 /// `starting_vcn > 0`) is not yet stitched — this returns `Err` rather than
 /// silently reading only the VCN-0 segment.
+///
+/// That guarantee needs `$ATTRIBUTE_LIST` to be consulted *first*, and it
+/// used to be consulted second: the base record was searched, the
+/// attribute was found there, and the function returned before the check
+/// could run. A split run list is exactly the shape where the VCN-0
+/// segment is in the base record, so the guard sat behind the only case
+/// it was written for and a fragmented file read back its first segment
+/// with `Ok`. When the list is present it is the authority — the base
+/// record's copy of an attribute is one segment among several, and
+/// finding it there says nothing about whether it is the whole thing.
 #[allow(clippy::type_complexity)]
 fn locate_attribute<T: BlockIo + ?Sized>(
     io: &mut T,
@@ -191,29 +201,40 @@ fn locate_attribute<T: BlockIo + ?Sized>(
 > {
     let (params, record) = read_mft_record_io(io, record_number)?;
 
-    // Common case: the attribute lives in the base record.
-    if let Some(loc) = attr_io::find_attribute(&record, attr_type, name) {
-        return Ok(Some((params, record_number, record, loc)));
-    }
-
-    // Overflowed: follow $ATTRIBUTE_LIST to the extension record that holds it.
+    // $ATTRIBUTE_LIST first. It is the authority on where this file's
+    // attributes live, and when it is present the base record's copy of
+    // one is a segment rather than necessarily the whole thing.
     if let Some(al_loc) = attr_io::find_attribute(&record, AttrType::AttributeList, None) {
         let al_value = read_value_from_record(io, &params, &record, &al_loc)?;
         let entries = parse_attribute_list(&al_value)?;
-        let mut matching = entries
+        let matching: Vec<&AttrListEntry> = entries
             .iter()
-            .filter(|e| e.type_code == attr_type as u32 && e.name.as_deref() == name);
+            .filter(|e| e.type_code == attr_type as u32 && e.name.as_deref() == name)
+            .collect();
 
-        if let Some(entry) = matching.clone().find(|e| e.starting_vcn == 0) {
-            // Refuse multi-extent attributes (run list split across records)
-            // rather than returning a truncated value (principle: fail fast).
-            if matching.any(|e| e.starting_vcn != 0) {
+        if !matching.is_empty() {
+            // Refuse a run list split across records rather than
+            // returning the VCN-0 segment and calling it the value.
+            // Stitching the segments is the real answer; a refusal is
+            // the half of it that must not wait, because the other
+            // behaviour is a short read reported as a complete one.
+            if matching.iter().any(|e| e.starting_vcn != 0) {
                 return Err(format!(
                     "locate_attribute: {attr_type:?} (name {name:?}) in record {record_number} is \
-                     split across multiple extension records ($ATTRIBUTE_LIST multi-extent stitching \
-                     not yet supported)"
+                     split across {} records ($ATTRIBUTE_LIST multi-extent stitching not yet \
+                     supported)",
+                    matching.len()
                 ));
             }
+            let entry = matching
+                .iter()
+                .find(|e| e.starting_vcn == 0)
+                .ok_or_else(|| {
+                    format!(
+                    "locate_attribute: $ATTRIBUTE_LIST lists {attr_type:?} (name {name:?}) for \
+                     record {record_number} with no VCN-0 segment"
+                )
+                })?;
             if entry.record_number != record_number {
                 let (ext_params, ext) = read_mft_record_io(io, entry.record_number)?;
                 let loc = attr_io::find_attribute(&ext, attr_type, name).ok_or_else(|| {
@@ -225,7 +246,14 @@ fn locate_attribute<T: BlockIo + ?Sized>(
                 })?;
                 return Ok(Some((ext_params, entry.record_number, ext, loc)));
             }
+            // The single segment is in the base record: fall through.
         }
+        // A list that does not mention this attribute at all says
+        // nothing about it; the base record still might.
+    }
+
+    if let Some(loc) = attr_io::find_attribute(&record, attr_type, name) {
+        return Ok(Some((params, record_number, record, loc)));
     }
 
     Ok(None)
