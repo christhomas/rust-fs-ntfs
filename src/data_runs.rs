@@ -208,12 +208,37 @@ pub fn encode_runs(runs: &[DataRun]) -> Result<Vec<u8>, String> {
 
 fn signed_bytes_needed(n: i64) -> usize {
     // Smallest N (1..=8) such that -2^(8N-1) <= n < 2^(8N-1).
+    //
+    // THE BOUNDS ARE SHIFTED OUT OF `i64::MIN`/`i64::MAX` RATHER THAN
+    // BUILT AND NEGATED.
+    //
+    // This used to compute `half_range = 1i64 << (8 * n_bytes - 1)` and
+    // compare against `-half_range`. At `n_bytes = 8` that shift is
+    // `1i64 << 63`, which IS `i64::MIN` — and `i64::MIN` has no positive
+    // counterpart, so negating it overflowed. A debug build panicked
+    // with "attempt to negate with overflow"; a release build wrapped it
+    // back to `i64::MIN`, made the lower comparison trivially true and
+    // the upper one false for any positive `n`, fell out of the loop and
+    // returned the fallback of 8. Eight is the right answer, so release
+    // was correct through two mistakes cancelling.
+    //
+    // `i64::MIN >> (64 - 8N)` and `i64::MAX >> (64 - 8N)` are exact for
+    // every N in 1..=8 and never need negating, so the loop now states
+    // its own invariant for all eight values instead of seven, and the
+    // fallback below is unreachable rather than load-bearing.
+    //
+    // It is not confined to this crate's own output: `encode_runs` runs
+    // over run lists decoded off disk, and both `truncate` and `grow`
+    // re-encode them, so any volume carrying an LCN delta of 2^55 or
+    // more reaches it. That is a large disk, not a malformed one.
     if n == 0 {
         return 1;
     }
     for n_bytes in 1usize..=8 {
-        let half_range = 1i64 << (8 * n_bytes - 1);
-        if n >= -half_range && n < half_range {
+        let shift = 64 - 8 * n_bytes;
+        let lo = i64::MIN >> shift;
+        let hi = i64::MAX >> shift;
+        if n >= lo && n <= hi {
             return n_bytes;
         }
     }
@@ -249,6 +274,92 @@ pub fn range_has_hole_or_past_end(runs: &[DataRun], vcn_start: u64, n_clusters: 
 
 #[cfg(test)]
 mod tests {
+
+    /// `signed_bytes_needed` used to build its upper bound by shifting a
+    /// 1 up and then negating it. At eight bytes that shift lands on
+    /// `i64::MIN`, which has no positive counterpart, so the negation
+    /// overflowed: a panic in debug, a wrap in release that produced the
+    /// right answer through two mistakes cancelling.
+    ///
+    /// These run in debug like every other `cargo test`, so the panic is
+    /// what they catch. A release-only test would pass today and prove
+    /// nothing.
+    #[test]
+    fn the_extremes_of_the_range_need_eight_bytes_and_do_not_panic() {
+        assert_eq!(signed_bytes_needed(i64::MIN), 8);
+        assert_eq!(signed_bytes_needed(i64::MAX), 8);
+    }
+
+    /// The reachable case: an LCN delta of 2^55 or more is a large disk,
+    /// not a malformed one, and `encode_runs` runs over run lists decoded
+    /// off disk whenever `truncate` or `grow` re-encodes them.
+    #[test]
+    fn a_large_lcn_delta_needs_eight_bytes_and_does_not_panic() {
+        // 2^55 is exactly the top of the seven-byte range, and a
+        // two's-complement range is asymmetric: seven bytes hold
+        // [-2^55, 2^55 - 1]. So the positive value needs eight bytes and
+        // its negation still fits in seven. Asserting 8 for both would
+        // be asserting the encoder is wasteful.
+        assert_eq!(signed_bytes_needed(1i64 << 55), 8);
+        assert_eq!(signed_bytes_needed(-(1i64 << 55)), 7);
+        assert_eq!(signed_bytes_needed((1i64 << 55) - 1), 7);
+    }
+
+    /// The boundaries the loop is supposed to state, so a fix that
+    /// widened everything to eight bytes would be caught: each width's
+    /// largest and smallest value takes that width, and one past it
+    /// takes the next.
+    #[test]
+    fn each_width_is_the_smallest_that_fits() {
+        assert_eq!(signed_bytes_needed(0), 1);
+        for n_bytes in 1usize..=7 {
+            let shift = 64 - 8 * n_bytes;
+            let hi = i64::MAX >> shift;
+            let lo = i64::MIN >> shift;
+            assert_eq!(
+                signed_bytes_needed(hi),
+                n_bytes,
+                "largest in {n_bytes} bytes"
+            );
+            assert_eq!(
+                signed_bytes_needed(lo),
+                n_bytes,
+                "smallest in {n_bytes} bytes"
+            );
+            assert_eq!(
+                signed_bytes_needed(hi + 1),
+                n_bytes + 1,
+                "one past the top of {n_bytes} bytes"
+            );
+            assert_eq!(
+                signed_bytes_needed(lo - 1),
+                n_bytes + 1,
+                "one past the bottom of {n_bytes} bytes"
+            );
+        }
+    }
+
+    /// End to end, through the public encoder that a re-encode reaches.
+    #[test]
+    fn a_run_list_with_a_huge_lcn_delta_encodes_without_panicking() {
+        let runs = vec![
+            DataRun {
+                starting_vcn: 0,
+                length: 1,
+                lcn: Some(1),
+            },
+            DataRun {
+                starting_vcn: 1,
+                length: 1,
+                lcn: Some(1 + (1u64 << 55)),
+            },
+        ];
+        let encoded = encode_runs(&runs).expect("a large delta must encode, not panic");
+        let back = decode_runs(&encoded).expect("and decode again");
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[1].lcn, Some(1 + (1u64 << 55)));
+    }
+
     use super::*;
 
     // --- sign_extend_i64 ---------------------------------------------------
