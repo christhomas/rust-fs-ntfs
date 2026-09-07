@@ -267,6 +267,13 @@ pub mod stream {
     }
 }
 
+/// How many MFT records `$MFTMirr` holds: 0..3, which is `$MFT`,
+/// `$MFTMirr`, `$LogFile` and `$Volume`. The mirror's declared `$DATA`
+/// length is this many records, and exactly this many records are
+/// copied into it -- the two are read together by anything that
+/// recovers from the mirror, so they are written from one constant.
+const MFTMIRR_RECORDS: u64 = 4;
+
 /// Format an NTFS volume in place over a [`BlockIo`].
 pub fn format_filesystem(
     dev: &mut dyn BlockIo,
@@ -374,8 +381,17 @@ pub fn format_filesystem(
     let sds_real_clusters: u64 = 2;
 
     let mftmirr_lcn = cluster_count / 2;
-    // Mirror records 0..3 (4 records). Round up in case record_size > cluster_size.
-    let mftmirr_clusters: u64 = (4 * mft_record_size as u64).div_ceil(cluster_size as u64);
+    // The mirror holds MFT records 0..3 -- $MFT, $MFTMirr, $LogFile and
+    // $Volume, the four a repair needs to reach everything else.
+    let mftmirr_bytes: u64 = MFTMIRR_RECORDS * mft_record_size as u64;
+    // The allocation is cluster-granular, so it rounds up. The comment
+    // that used to sit here worried about `record_size > cluster_size`,
+    // where the rounding adds nothing; the direction that matters is
+    // `cluster_size > 4 x record_size`, where it adds a whole cluster's
+    // worth of records the mirror does not hold. Those extra records
+    // must not appear in the DECLARED length -- see the $DATA lengths
+    // below.
+    let mftmirr_clusters: u64 = mftmirr_bytes.div_ceil(cluster_size as u64);
 
     let backup_boot_lcn = cluster_count - 1;
 
@@ -631,12 +647,23 @@ pub fn format_filesystem(
             lcn: Some(mftmirr_lcn),
         }];
         let mp = encode_runs(&runs)?;
-        let len_bytes = mftmirr_clusters * cluster_size as u64;
+        // allocated is the cluster-rounded extent; data and initialized
+        // are the four records that are actually there.
+        //
+        // These used to be the same rounded number, and a repair tool
+        // divides the DATA length by the record size to learn how many
+        // of $MFT's records it may recover from the mirror. At 64 KiB
+        // clusters with 4 KiB records that said sixteen, and twelve of
+        // the sixteen were zeros -- so a recovery would have written
+        // zeros over $AttrDef, the root directory, $Bitmap, $Boot,
+        // $BadClus, $Secure, $UpCase and $Extend, destroying the volume
+        // it was invoked to save.
+        let allocated_bytes = mftmirr_clusters * cluster_size as u64;
         let data_attr = build_nonresident_data_attribute(
             3,
-            len_bytes,
-            len_bytes,
-            len_bytes,
+            mftmirr_bytes,
+            allocated_bytes,
+            mftmirr_bytes,
             (mftmirr_clusters as i64) - 1,
             &mp,
         )?;
@@ -645,8 +672,8 @@ pub fn format_filesystem(
             rec::MFTMIRR,
             rec::name(rec::MFTMIRR, cluster_size).expect("known rec_num"),
             false,
-            len_bytes,
-            len_bytes,
+            allocated_bytes,
+            mftmirr_bytes,
             &[data_attr],
         )?;
         place_record(&mut mft_buf, rs, rec::MFTMIRR, rec_bytes)?;
@@ -654,8 +681,8 @@ pub fn format_filesystem(
             rec::MFTMIRR,
             rec::name(rec::MFTMIRR, cluster_size).expect("known rec_num"),
             false,
-            len_bytes,
-            len_bytes,
+            allocated_bytes,
+            mftmirr_bytes,
         ));
     }
 
@@ -1401,7 +1428,7 @@ pub fn format_filesystem(
     // 6. Write $MFT to disk + mirror first 4 records ----------------------
     dev.write_all_at(mft_lcn * cluster_size as u64, &mft_buf)?;
 
-    let mirror_size = (4 * rs).min(mft_buf.len());
+    let mirror_size = (MFTMIRR_RECORDS as usize * rs).min(mft_buf.len());
     let mut mirror = vec![0u8; (mftmirr_clusters * cluster_size as u64) as usize];
     mirror[..mirror_size].copy_from_slice(&mft_buf[..mirror_size]);
     dev.write_all_at(mftmirr_lcn * cluster_size as u64, &mirror)?;
