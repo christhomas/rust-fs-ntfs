@@ -2,6 +2,64 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A read offset is checked against the volume before anything is read.
+  The three per-cluster sites in `read.rs` multiplied a disk-supplied
+  LCN by the cluster size raw; a run past the end of the filesystem but
+  inside the device returned its bytes as the file's contents, and an
+  LCN near 2^52 wrapped the product to a low offset in a release build.
+- `$ATTRIBUTE_LIST` is consulted before the base record, not after. A
+  run list split across records has its VCN-0 segment in the base, so
+  the guard that promised to refuse a split attribute sat behind the
+  only path that reached it and a fragmented file read back its first
+  segment with `Ok`.
+- A write past `initialized_length` moves it, so the bytes are
+  readable. Growing a file and writing into the region grown reported
+  success and then read back as zeros, with the data on the platter and
+  unreachable. A write that starts past the field zero-fills the gap
+  first rather than publishing whatever the clusters held before.
+- The index lookups collate the way the index is ordered. Entries go
+  into `$I30` under `COLLATION_FILE_NAME` and were looked up by exact
+  UTF-16 equality, so `Foo.txt` passed the collision check beside
+  `foo.txt` and a duplicate collation key was written; `unlink` could
+  not find an entry path resolution had just found. A case-only rename
+  stays allowed.
+- The write guards catch the flags they say they catch. `write_at`,
+  `truncate` and `grow` masked `0x00FF` — the compression-unit field —
+  while claiming to refuse sparse (`0x8000`) and encrypted (`0x4000`)
+  attributes, so both were written to. One shared predicate now, with
+  the mask beside the offset it is read from.
+- `sectors_per_cluster` has a second encoding above `0x80`, and volumes
+  use it. Read as a literal, a 128 KiB-cluster volume decoded to a
+  126976-byte "cluster" and every offset the driver computed was wrong
+  by that factor without anything failing.
+- `$MFTMirr` declares the four records it holds rather than the cluster
+  it fills. At 32 KiB clusters and above the mirror said it held eight
+  or sixteen records and held four followed by zeros, which a recovery
+  would have written over live system records.
+- An allocation the volume cannot honour fails before it is written.
+  `$Bitmap`'s declared bit count is now bounded by the volume's cluster
+  count, and the two promotion paths and the sparse writer route their
+  offsets through the checked helper the rest of the write path uses.
+- The index ends where the attribute holding it ends, on the read side
+  too. An `$INDEX_ROOT` whose `total_size` exceeded its own value had
+  `readdir` decoding the bytes after the attribute as entries, and
+  `rmdir` deleted a directory whose index header it could not read.
+- A WOF-compressed file is refused by both front doors. The C ABI
+  detected `IO_REPARSE_TAG_WOF` and failed loudly; the Rust API did not,
+  and returned the right number of zero bytes for every file `compact
+  /exe` or Compact OS had touched.
+- An index block that leaves its run is refused rather than transferred
+  anyway. On a volume with clusters smaller than the 4096-byte index
+  block, a block landing across a run boundary took its tail from — and
+  wrote its tail over — the next file's clusters.
+
+### Changed
+
+- The shared `am-fs-core` sibling checkout moves to v0.2.10, in
+  `Cargo.toml`, `chores.yml` and both workflows' Windows clone.
+
 ## [0.4.0] — 2026-09-06
 
 ### Fixed
