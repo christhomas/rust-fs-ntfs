@@ -1067,6 +1067,10 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
     old_path: &str,
     new_name: &str,
 ) -> Result<(), String> {
+    // The directory index is ordered by COLLATION_FILE_NAME, so a
+    // lookup in it has to fold case the same way the insert did;
+    // see `index_io::find_index_entry`.
+    let upcase = crate::upcase::UpcaseTable::load_io(io)?;
     validate_basename(new_name)?;
     let (parent_rec, file_rec, current_basename) = resolve_parent_and_child_io(io, old_path)?;
 
@@ -1090,16 +1094,30 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
     // same key is corruption (chkdsk flags it) and a silent clobber leaks
     // the target. An exact-equal rename is a no-op, handled above only in
     // rename_io; guard it here too since this is also a public entrypoint.
+    //
+    // The entry this file already owns is not a collision. Now that the
+    // lookup collates rather than comparing code units, renaming
+    // readme.txt to README.TXT finds the file's OWN entry under the new
+    // name -- a case-only rename is the one case where the destination
+    // legitimately collates equal to the source, and Windows allows it.
     if new_name != current_basename {
-        if index_io::find_index_entry(&parent_record_bytes, new_name)?.is_some() {
-            return Err(format!("'{new_name}' already exists"));
+        if let Some(clash) =
+            index_io::find_index_entry(&parent_record_bytes, new_name, Some(&upcase))?
+        {
+            if clash.file_record_number != file_rec {
+                return Err(format!("'{new_name}' already exists"));
+            }
         }
         if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
             let ia = idx_block::load_for_directory_io(io, parent_rec)?;
             for vcn in ia.allocated_block_vcns() {
                 let blk = idx_block::read_indx_block_io(io, &ia, vcn)?;
-                if index_io::find_entry_in_indx_block(&blk, new_name)?.is_some() {
-                    return Err(format!("'{new_name}' already exists"));
+                if let Some(clash) =
+                    index_io::find_entry_in_indx_block(&blk, new_name, Some(&upcase))?
+                {
+                    if clash.file_record_number != file_rec {
+                        return Err(format!("'{new_name}' already exists"));
+                    }
                 }
             }
         }
@@ -1107,7 +1125,8 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
         return Ok(());
     }
 
-    let in_root = index_io::find_index_entry(&parent_record_bytes, &current_basename)?;
+    let in_root =
+        index_io::find_index_entry(&parent_record_bytes, &current_basename, Some(&upcase))?;
     if let Some(entry_found) = in_root {
         if entry_found.file_record_number != file_rec {
             return Err(format!(
@@ -1117,7 +1136,7 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
             ));
         }
         update_mft_record_io(io, parent_rec, |record| {
-            let entry = index_io::find_index_entry(record, &current_basename)?
+            let entry = index_io::find_index_entry(record, &current_basename, Some(&upcase))?
                 .ok_or_else(|| "race: $INDEX_ROOT entry vanished during RMW".to_string())?;
             index_io::rename_index_entry_same_length(record, &entry, new_name)
         })?;
@@ -1127,7 +1146,9 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
         let mut patched = false;
         for vcn in ia.allocated_block_vcns() {
             let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
-            if let Some(entry) = index_io::find_entry_in_indx_block(&block, &current_basename)? {
+            if let Some(entry) =
+                index_io::find_entry_in_indx_block(&block, &current_basename, Some(&upcase))?
+            {
                 if entry.file_record_number != file_rec {
                     return Err(format!(
                         "INDX entry at VCN {vcn} points at {} but resolved {file_rec}",
@@ -1135,8 +1156,12 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
                     ));
                 }
                 idx_block::update_indx_block_io(io, &ia, vcn, |block| {
-                    let entry = index_io::find_entry_in_indx_block(block, &current_basename)?
-                        .ok_or_else(|| "race: INDX entry vanished".to_string())?;
+                    let entry = index_io::find_entry_in_indx_block(
+                        block,
+                        &current_basename,
+                        Some(&upcase),
+                    )?
+                    .ok_or_else(|| "race: INDX entry vanished".to_string())?;
                     index_io::rename_index_entry_same_length(block, &entry, new_name)
                 })?;
                 patched = true;
@@ -1284,6 +1309,10 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
     parent_path: &str,
     basename: &str,
 ) -> Result<u64, String> {
+    // The directory index is ordered by COLLATION_FILE_NAME, so a
+    // lookup in it has to fold case the same way the insert did;
+    // see `index_io::find_index_entry`.
+    let upcase = crate::upcase::UpcaseTable::load_io(io)?;
     validate_basename(basename)?;
 
     let parent_rec = resolve_path_to_record_number_io(io, parent_path)?;
@@ -1299,14 +1328,14 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
     let parent_has_overflow = ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0;
 
     // Reject if the entry already exists anywhere (resident or INDX block).
-    if index_io::find_index_entry(&parent_record_bytes, basename)?.is_some() {
+    if index_io::find_index_entry(&parent_record_bytes, basename, Some(&upcase))?.is_some() {
         return Err(format!("'{basename}' already exists in '{parent_path}'"));
     }
     if parent_has_overflow {
         let ia = idx_block::load_for_directory_io(io, parent_rec)?;
         for vcn in ia.allocated_block_vcns() {
             let blk = idx_block::read_indx_block_io(io, &ia, vcn)?;
-            if index_io::find_entry_in_indx_block(&blk, basename)?.is_some() {
+            if index_io::find_entry_in_indx_block(&blk, basename, Some(&upcase))?.is_some() {
                 return Err(format!("'{basename}' already exists in '{parent_path}'"));
             }
         }
@@ -1489,6 +1518,10 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
     parent_path: &str,
     basename: &str,
 ) -> Result<u64, String> {
+    // The directory index is ordered by COLLATION_FILE_NAME, so a
+    // lookup in it has to fold case the same way the insert did;
+    // see `index_io::find_index_entry`.
+    let upcase = crate::upcase::UpcaseTable::load_io(io)?;
     validate_basename(basename)?;
 
     let parent_rec = resolve_path_to_record_number_io(io, parent_path)?;
@@ -1501,14 +1534,14 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
         .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
     let parent_has_overflow = ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0;
-    if index_io::find_index_entry(&parent_record_bytes, basename)?.is_some() {
+    if index_io::find_index_entry(&parent_record_bytes, basename, Some(&upcase))?.is_some() {
         return Err(format!("'{basename}' already exists in '{parent_path}'"));
     }
     if parent_has_overflow {
         let ia = idx_block::load_for_directory_io(io, parent_rec)?;
         for vcn in ia.allocated_block_vcns() {
             let blk = idx_block::read_indx_block_io(io, &ia, vcn)?;
-            if index_io::find_entry_in_indx_block(&blk, basename)?.is_some() {
+            if index_io::find_entry_in_indx_block(&blk, basename, Some(&upcase))?.is_some() {
                 return Err(format!("'{basename}' already exists in '{parent_path}'"));
             }
         }
@@ -2446,6 +2479,10 @@ pub fn link_io<T: BlockIo + ?Sized>(
     new_parent_path: &str,
     new_basename: &str,
 ) -> Result<(), String> {
+    // The directory index is ordered by COLLATION_FILE_NAME, so a
+    // lookup in it has to fold case the same way the insert did;
+    // see `index_io::find_index_entry`.
+    let upcase = crate::upcase::UpcaseTable::load_io(io)?;
     validate_basename(new_basename)?;
     let target_rec = resolve_path_to_record_number_io(io, existing_path)?;
     let (_, target_record_bytes) = read_mft_record_io(io, target_rec)?;
@@ -2467,7 +2504,7 @@ pub fn link_io<T: BlockIo + ?Sized>(
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
         .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
     let parent_has_overflow = ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0;
-    if index_io::find_index_entry(&parent_record_bytes, new_basename)?.is_some() {
+    if index_io::find_index_entry(&parent_record_bytes, new_basename, Some(&upcase))?.is_some() {
         return Err(format!(
             "'{new_basename}' already exists in '{new_parent_path}'"
         ));
@@ -2476,7 +2513,7 @@ pub fn link_io<T: BlockIo + ?Sized>(
         let ia = idx_block::load_for_directory_io(io, new_parent_rec)?;
         for vcn in ia.allocated_block_vcns() {
             let blk = idx_block::read_indx_block_io(io, &ia, vcn)?;
-            if index_io::find_entry_in_indx_block(&blk, new_basename)?.is_some() {
+            if index_io::find_entry_in_indx_block(&blk, new_basename, Some(&upcase))?.is_some() {
                 return Err(format!(
                     "'{new_basename}' already exists in '{new_parent_path}'"
                 ));
@@ -3237,10 +3274,14 @@ fn remove_parent_index_entry_io<T: BlockIo + ?Sized>(
     child_rec: u64,
     basename: &str,
 ) -> Result<(), String> {
+    // The directory index is ordered by COLLATION_FILE_NAME, so a
+    // lookup in it has to fold case the same way the insert did;
+    // see `index_io::find_index_entry`.
+    let upcase = crate::upcase::UpcaseTable::load_io(io)?;
     let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
         .ok_or_else(|| "no $INDEX_ROOT on parent".to_string())?;
-    let in_root = index_io::find_index_entry(&parent_record_bytes, basename)?;
+    let in_root = index_io::find_index_entry(&parent_record_bytes, basename, Some(&upcase))?;
     if let Some(entry) = in_root {
         if entry.file_record_number != child_rec {
             return Err(format!(
@@ -3249,7 +3290,7 @@ fn remove_parent_index_entry_io<T: BlockIo + ?Sized>(
             ));
         }
         update_mft_record_io(io, parent_rec, |record| {
-            let e = index_io::find_index_entry(record, basename)?
+            let e = index_io::find_index_entry(record, basename, Some(&upcase))?
                 .ok_or_else(|| "race: $INDEX_ROOT entry vanished".to_string())?;
             index_io::remove_index_entry(record, &e, index_io::BlockKind::IndexRoot)
         })?;
@@ -3258,7 +3299,9 @@ fn remove_parent_index_entry_io<T: BlockIo + ?Sized>(
         let mut removed = false;
         for vcn in ia.allocated_block_vcns() {
             let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
-            if let Some(entry) = index_io::find_entry_in_indx_block(&block, basename)? {
+            if let Some(entry) =
+                index_io::find_entry_in_indx_block(&block, basename, Some(&upcase))?
+            {
                 if entry.file_record_number != child_rec {
                     return Err(format!(
                         "INDX entry at VCN {vcn} points at {} but resolved {child_rec}",
@@ -3266,7 +3309,7 @@ fn remove_parent_index_entry_io<T: BlockIo + ?Sized>(
                     ));
                 }
                 idx_block::update_indx_block_io(io, &ia, vcn, |block| {
-                    let e = index_io::find_entry_in_indx_block(block, basename)?
+                    let e = index_io::find_entry_in_indx_block(block, basename, Some(&upcase))?
                         .ok_or_else(|| "race: INDX entry vanished".to_string())?;
                     index_io::remove_index_entry(block, &e, index_io::BlockKind::IndexAllocation)
                 })?;
@@ -3413,6 +3456,10 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     new_basename: &str,
     replace: bool,
 ) -> Result<(), String> {
+    // The directory index is ordered by COLLATION_FILE_NAME, so a
+    // lookup in it has to fold case the same way the insert did;
+    // see `index_io::find_index_entry`.
+    let upcase = crate::upcase::UpcaseTable::load_io(io)?;
     validate_basename(new_basename)?;
     let (parent_rec, file_rec, old_basename) = resolve_parent_and_child_io(io, old_path)?;
     if old_basename == new_basename {
@@ -3450,8 +3497,15 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
                 .to_string(),
         );
     }
-    if index_io::find_index_entry(&parent_record_bytes, new_basename)?.is_some() {
-        return Err(format!("'{new_basename}' already exists"));
+    // As in rename_same_length_io: the file's own entry is not a clash.
+    // A collated lookup finds it whenever the new name differs from the
+    // old only by case.
+    if let Some(clash) =
+        index_io::find_index_entry(&parent_record_bytes, new_basename, Some(&upcase))?
+    {
+        if clash.file_record_number != file_rec {
+            return Err(format!("'{new_basename}' already exists"));
+        }
     }
 
     let (_, file_record_bytes) = read_mft_record_io(io, file_rec)?;
@@ -3481,17 +3535,19 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     // `parent_record_bytes` was read above and nothing has written to
     // the parent since, so it is the pre-step-1 state.
 
-    // 1) Swap the parent's $INDEX_ROOT entry.
-    let upcase = crate::upcase::UpcaseTable::load_io(io).ok();
+    // 1) Swap the parent's $INDEX_ROOT entry. The table loaded at the
+    // top of this function serves both halves: the lookup that finds
+    // the old entry and the collated insert of the new one, which had
+    // been loading it a second time.
     update_mft_record_io(io, parent_rec, |record| {
-        let old_entry = index_io::find_index_entry(record, &old_basename)?
+        let old_entry = index_io::find_index_entry(record, &old_basename, Some(&upcase))?
             .ok_or_else(|| format!("old entry '{old_basename}' not found"))?;
         index_io::remove_index_entry(record, &old_entry, index_io::BlockKind::IndexRoot)?;
         index_io::insert_entry_into_index_root_with_collation(
             record,
             &new_entry_bytes,
             new_basename,
-            upcase.as_ref(),
+            Some(&upcase),
         )
     })?;
 
@@ -3535,8 +3591,12 @@ fn find_existing_entry_record_io<T: BlockIo + ?Sized>(
     parent_rec: u64,
     name: &str,
 ) -> Result<Option<u64>, String> {
+    // The directory index is ordered by COLLATION_FILE_NAME, so a
+    // lookup in it has to fold case the same way the insert did;
+    // see `index_io::find_index_entry`.
+    let upcase = crate::upcase::UpcaseTable::load_io(io)?;
     let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
-    if let Some(e) = index_io::find_index_entry(&parent_record_bytes, name)? {
+    if let Some(e) = index_io::find_index_entry(&parent_record_bytes, name, Some(&upcase))? {
         return Ok(Some(e.file_record_number));
     }
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
@@ -3545,7 +3605,7 @@ fn find_existing_entry_record_io<T: BlockIo + ?Sized>(
         let ia = idx_block::load_for_directory_io(io, parent_rec)?;
         for vcn in ia.allocated_block_vcns() {
             let blk = idx_block::read_indx_block_io(io, &ia, vcn)?;
-            if let Some(e) = index_io::find_entry_in_indx_block(&blk, name)? {
+            if let Some(e) = index_io::find_entry_in_indx_block(&blk, name, Some(&upcase))? {
                 return Ok(Some(e.file_record_number));
             }
         }
@@ -4023,7 +4083,7 @@ mod tests {
         assert!(rec_num >= 24, "user files start at record 24+");
         // Find it back in the root index.
         let (_, root_rec) = crate::mft_io::read_mft_record_io(&mut dev, 5).unwrap();
-        let loc = crate::index_io::find_index_entry(&root_rec, "hello.txt").unwrap();
+        let loc = crate::index_io::find_index_entry(&root_rec, "hello.txt", None).unwrap();
         assert!(loc.is_some(), "file must appear in root $INDEX_ROOT");
     }
 
@@ -4050,7 +4110,7 @@ mod tests {
         let rec_num = mkdir_io(&mut dev, "/", "mydir").unwrap();
         assert!(rec_num >= 24);
         let (_, root_rec) = crate::mft_io::read_mft_record_io(&mut dev, 5).unwrap();
-        let loc = crate::index_io::find_index_entry(&root_rec, "mydir").unwrap();
+        let loc = crate::index_io::find_index_entry(&root_rec, "mydir", None).unwrap();
         assert!(loc.is_some());
     }
 
@@ -4297,10 +4357,10 @@ mod tests {
         create_file_io(&mut dev, "/", "abc.txt").unwrap();
         rename_same_length_io(&mut dev, "/abc.txt", "xyz.txt").unwrap();
         let (_, root) = crate::mft_io::read_mft_record_io(&mut dev, 5).unwrap();
-        assert!(crate::index_io::find_index_entry(&root, "abc.txt")
+        assert!(crate::index_io::find_index_entry(&root, "abc.txt", None)
             .unwrap()
             .is_none());
-        assert!(crate::index_io::find_index_entry(&root, "xyz.txt")
+        assert!(crate::index_io::find_index_entry(&root, "xyz.txt", None)
             .unwrap()
             .is_some());
     }
@@ -4442,13 +4502,13 @@ mod tests {
 
         let (_, root) = crate::mft_io::read_mft_record_io(&mut dev, 5).unwrap();
         assert!(
-            crate::index_io::find_index_entry(&root, "before.txt")
+            crate::index_io::find_index_entry(&root, "before.txt", None)
                 .unwrap()
                 .is_some(),
             "the old name must be back in the directory index"
         );
         assert!(
-            crate::index_io::find_index_entry(&root, "after-a-much-longer-name.txt")
+            crate::index_io::find_index_entry(&root, "after-a-much-longer-name.txt", None)
                 .unwrap()
                 .is_none(),
             "the new name must not be left in the directory index"
@@ -4474,11 +4534,11 @@ mod tests {
         create_file_io(&mut dev, "/", "short.txt").unwrap();
         rename_io(&mut dev, "/short.txt", "considerably-longer.txt").unwrap();
         let (_, root) = crate::mft_io::read_mft_record_io(&mut dev, 5).unwrap();
-        assert!(crate::index_io::find_index_entry(&root, "short.txt")
+        assert!(crate::index_io::find_index_entry(&root, "short.txt", None)
             .unwrap()
             .is_none());
         assert!(
-            crate::index_io::find_index_entry(&root, "considerably-longer.txt")
+            crate::index_io::find_index_entry(&root, "considerably-longer.txt", None)
                 .unwrap()
                 .is_some()
         );
@@ -4585,7 +4645,7 @@ mod tests {
         // Reads pass through, so these are the bytes that landed.
         let (_, root) = crate::mft_io::read_mft_record_io(&mut dev, 5).unwrap();
         assert!(
-            crate::index_io::find_index_entry(&root, "orphan.txt")
+            crate::index_io::find_index_entry(&root, "orphan.txt", None)
                 .unwrap()
                 .is_none(),
             "the parent must not name a file whose creation failed"
@@ -5137,9 +5197,11 @@ mod tests {
         // Verify it landed in the root index.
         let mut io = PathIo::open_ro(img.path()).unwrap();
         let (_, root_rec) = crate::mft_io::read_mft_record_io(&mut io, 5).unwrap();
-        assert!(crate::index_io::find_index_entry(&root_rec, "pathfile.txt")
-            .unwrap()
-            .is_some());
+        assert!(
+            crate::index_io::find_index_entry(&root_rec, "pathfile.txt", None)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -5149,9 +5211,11 @@ mod tests {
         assert!(rec >= 24);
         let mut io = PathIo::open_ro(img.path()).unwrap();
         let (_, root_rec) = crate::mft_io::read_mft_record_io(&mut io, 5).unwrap();
-        assert!(crate::index_io::find_index_entry(&root_rec, "pathdir")
-            .unwrap()
-            .is_some());
+        assert!(
+            crate::index_io::find_index_entry(&root_rec, "pathdir", None)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

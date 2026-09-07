@@ -95,14 +95,28 @@ pub struct IndexEntryLocation {
 
 /// Walk the `$INDEX_ROOT` for `$FILE_NAME` (i.e. the `$I30` index of a
 /// directory), returning the located entry whose filename matches
-/// `wanted` (case-sensitive UTF-16 equality). Returns `None` if not
-/// present.
+/// `wanted` under [`compare_names`]. Returns `None` if not present.
+///
+/// `upcase` picks the collation, and it is the same argument the insert
+/// paths take, deliberately: entries go into `$I30` ordered by
+/// `COLLATION_FILE_NAME`, so a lookup that compared UTF-16 code units
+/// for exact equality disagreed with the index it was reading. That let
+/// `Foo.txt` past the collision check in a directory already holding
+/// `foo.txt` — writing a second entry with an equal collation key into
+/// an index NTFS requires to have unique ones — and made the lookup
+/// that detaches a name on unlink miss a name path resolution had just
+/// found. Pass `Some(table)`; `None` is the ASCII-only fold, for unit
+/// tests that have no volume to load `$UpCase` from.
 ///
 /// The walk stops when it encounters an entry with the
 /// `IE_FLAG_LAST` bit. Nested `$INDEX_ALLOCATION` blocks are not
 /// searched here — this primitive only works for small directories
 /// whose index fits entirely in `$INDEX_ROOT`.
-pub fn find_index_entry(record: &[u8], wanted: &str) -> Result<Option<IndexEntryLocation>, String> {
+pub fn find_index_entry(
+    record: &[u8],
+    wanted: &str,
+    upcase: Option<&crate::upcase::UpcaseTable>,
+) -> Result<Option<IndexEntryLocation>, String> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
         .ok_or_else(|| "$INDEX_ROOT:$I30 not found".to_string())?;
     if !ir.is_resident {
@@ -150,7 +164,7 @@ pub fn find_index_entry(record: &[u8], wanted: &str) -> Result<Option<IndexEntry
             // one's name.
             let name_u16 = entry_name(record, cursor, length).unwrap_or_default();
             let name_length = name_u16.len();
-            if name_length == wanted_utf16.len() && name_u16 == wanted_utf16 {
+            if compare_names(&name_u16, &wanted_utf16, upcase) == std::cmp::Ordering::Equal {
                 {
                     let file_ref = u64::from_le_bytes(
                         record[cursor + IE_FILE_REFERENCE..cursor + IE_FILE_REFERENCE + 8]
@@ -238,6 +252,7 @@ pub fn index_root_flags(record: &[u8]) -> Option<u8> {
 pub fn find_entry_in_indx_block(
     block: &[u8],
     wanted: &str,
+    upcase: Option<&crate::upcase::UpcaseTable>,
 ) -> Result<Option<IndexEntryLocation>, String> {
     use crate::idx_block::{
         IH_FIRST_ENTRY_OFFSET, IH_TOTAL_SIZE_OF_ENTRIES, INDX_INDEX_HEADER_OFFSET,
@@ -254,7 +269,7 @@ pub fn find_entry_in_indx_block(
         as usize;
     let mut cursor = ih_start + first_entry_rel;
     let end = ih_start + total_size;
-    scan_entries_for_name(block, &mut cursor, end, wanted)
+    scan_entries_for_name(block, &mut cursor, end, wanted, upcase)
 }
 
 /// Shared scanner: sweep entries starting at `cursor`, stopping at
@@ -264,6 +279,7 @@ fn scan_entries_for_name(
     cursor: &mut usize,
     end: usize,
     wanted: &str,
+    upcase: Option<&crate::upcase::UpcaseTable>,
 ) -> Result<Option<IndexEntryLocation>, String> {
     let wanted_utf16: Vec<u16> = wanted.encode_utf16().collect();
     while *cursor < end && *cursor + IE_KEY_START <= buf.len() {
@@ -289,7 +305,7 @@ fn scan_entries_for_name(
             // one's name.
             let name_u16 = entry_name(buf, *cursor, length).unwrap_or_default();
             let name_length = name_u16.len();
-            if name_length == wanted_utf16.len() && name_u16 == wanted_utf16 {
+            if compare_names(&name_u16, &wanted_utf16, upcase) == std::cmp::Ordering::Equal {
                 {
                     let file_ref = u64::from_le_bytes(
                         buf[*cursor + IE_FILE_REFERENCE..*cursor + IE_FILE_REFERENCE + 8]
@@ -909,8 +925,9 @@ pub fn compare_names(
 /// `FOO.TXT` are distinct files.
 ///
 /// Today this comparator is **not yet wired into `find_index_entry`
-/// or the insert paths** — those still use `compare_names` (case-
-/// insensitive) unconditionally. Plumbing the per-directory flag
+/// or the insert paths** — both now use `compare_names` (case-
+/// insensitive) unconditionally, which is what an index collated by
+/// `COLLATION_FILE_NAME` requires. Plumbing the per-directory flag
 /// through is the next step (future-features.md §3.9). This function
 /// is the building block.
 ///
@@ -1115,7 +1132,7 @@ mod tests {
     #[test]
     fn find_index_entry_empty_dir_returns_none() {
         let rec = index_root_record(&[]);
-        let result = find_index_entry(&rec, "foo").unwrap();
+        let result = find_index_entry(&rec, "foo", None).unwrap();
         assert!(result.is_none());
     }
 
@@ -1123,7 +1140,7 @@ mod tests {
     fn find_index_entry_finds_present_entry() {
         let entry = make_entry(42, 5, "hello");
         let rec = index_root_record(&[entry]);
-        let loc = find_index_entry(&rec, "hello").unwrap().unwrap();
+        let loc = find_index_entry(&rec, "hello", None).unwrap().unwrap();
         assert_eq!(loc.file_record_number, 42);
         assert_eq!(loc.name_length, 5);
     }
@@ -1132,7 +1149,7 @@ mod tests {
     fn find_index_entry_missing_returns_none() {
         let entry = make_entry(42, 5, "hello");
         let rec = index_root_record(&[entry]);
-        assert!(find_index_entry(&rec, "world").unwrap().is_none());
+        assert!(find_index_entry(&rec, "world", None).unwrap().is_none());
     }
 
     #[test]
@@ -1142,21 +1159,21 @@ mod tests {
         let e3 = make_entry(30, 5, "gamma");
         let rec = index_root_record(&[e1, e2, e3]);
         assert_eq!(
-            find_index_entry(&rec, "alpha")
+            find_index_entry(&rec, "alpha", None)
                 .unwrap()
                 .unwrap()
                 .file_record_number,
             10
         );
         assert_eq!(
-            find_index_entry(&rec, "beta")
+            find_index_entry(&rec, "beta", None)
                 .unwrap()
                 .unwrap()
                 .file_record_number,
             20
         );
         assert_eq!(
-            find_index_entry(&rec, "gamma")
+            find_index_entry(&rec, "gamma", None)
                 .unwrap()
                 .unwrap()
                 .file_record_number,
@@ -1165,12 +1182,22 @@ mod tests {
     }
 
     #[test]
-    fn find_index_entry_is_case_sensitive() {
+    fn find_index_entry_collates_the_way_the_index_is_ordered() {
+        // This used to assert the opposite -- that "HELLO" would NOT
+        // find "Hello" -- and pinned the disagreement that let a
+        // duplicate collation key into $I30. The index is ordered by
+        // COLLATION_FILE_NAME, so the lookup folds case the same way.
+        // `None` is the ASCII fold, which is all these five letters
+        // need; the volume's own $UpCase table is what production
+        // callers pass.
         let entry = make_entry(42, 5, "Hello");
         let rec = index_root_record(&[entry]);
-        // find_index_entry uses exact UTF-16 code-unit match, so "HELLO" won't match "Hello"
-        assert!(find_index_entry(&rec, "HELLO").unwrap().is_none());
-        assert!(find_index_entry(&rec, "Hello").unwrap().is_some());
+        assert!(find_index_entry(&rec, "HELLO", None).unwrap().is_some());
+        assert!(find_index_entry(&rec, "hello", None).unwrap().is_some());
+        assert!(find_index_entry(&rec, "Hello", None).unwrap().is_some());
+        // Still not a match for a different name, or for a prefix.
+        assert!(find_index_entry(&rec, "Hell", None).unwrap().is_none());
+        assert!(find_index_entry(&rec, "Hello2", None).unwrap().is_none());
     }
 
     // --- index_root_has_real_entries ---
@@ -1455,7 +1482,7 @@ mod tests {
         let mut rec = index_root_record(&[]);
         let entry = make_entry(42, 5, "hello");
         insert_entry_into_index_root(&mut rec, &entry, "hello").unwrap();
-        let loc = find_index_entry(&rec, "hello").unwrap().unwrap();
+        let loc = find_index_entry(&rec, "hello", None).unwrap().unwrap();
         assert_eq!(loc.file_record_number, 42);
     }
 
@@ -1471,21 +1498,21 @@ mod tests {
         insert_entry_into_index_root(&mut rec, &e_apple, "apple").unwrap();
         // All three must be findable.
         assert_eq!(
-            find_index_entry(&rec, "zoo")
+            find_index_entry(&rec, "zoo", None)
                 .unwrap()
                 .unwrap()
                 .file_record_number,
             3
         );
         assert_eq!(
-            find_index_entry(&rec, "bar")
+            find_index_entry(&rec, "bar", None)
                 .unwrap()
                 .unwrap()
                 .file_record_number,
             2
         );
         assert_eq!(
-            find_index_entry(&rec, "apple")
+            find_index_entry(&rec, "apple", None)
                 .unwrap()
                 .unwrap()
                 .file_record_number,
@@ -1538,7 +1565,7 @@ mod tests {
     fn an_index_claiming_more_than_its_own_value_is_refused() {
         let entry = make_entry(10, 5, "target");
         let mut rec = index_root_record(&[entry]);
-        let loc = find_index_entry(&rec, "target").unwrap().unwrap();
+        let loc = find_index_entry(&rec, "target", None).unwrap().unwrap();
 
         // The control: it removes.
         let mut ok = rec.clone();
@@ -1571,7 +1598,7 @@ mod tests {
     fn removing_an_entry_that_points_at_a_subtree_is_refused() {
         let entry = make_entry(10, 5, "target");
         let mut rec = index_root_record(&[entry]);
-        let loc = find_index_entry(&rec, "target").unwrap().unwrap();
+        let loc = find_index_entry(&rec, "target", None).unwrap().unwrap();
 
         // Give the entry a child pointer.
         let at = loc.record_offset + IE_FLAGS;
@@ -1605,9 +1632,9 @@ mod tests {
     fn remove_index_entry_makes_entry_unfindable() {
         let entry = make_entry(10, 5, "target");
         let mut rec = index_root_record(&[entry]);
-        let loc = find_index_entry(&rec, "target").unwrap().unwrap();
+        let loc = find_index_entry(&rec, "target", None).unwrap().unwrap();
         remove_index_entry(&mut rec, &loc, BlockKind::IndexRoot).unwrap();
-        assert!(find_index_entry(&rec, "target").unwrap().is_none());
+        assert!(find_index_entry(&rec, "target", None).unwrap().is_none());
     }
 
     #[test]
@@ -1616,11 +1643,11 @@ mod tests {
         let e2 = make_entry(2, 5, "beta");
         let e3 = make_entry(3, 5, "gamma");
         let mut rec = index_root_record(&[e1, e2, e3]);
-        let loc = find_index_entry(&rec, "beta").unwrap().unwrap();
+        let loc = find_index_entry(&rec, "beta", None).unwrap().unwrap();
         remove_index_entry(&mut rec, &loc, BlockKind::IndexRoot).unwrap();
-        assert!(find_index_entry(&rec, "beta").unwrap().is_none());
-        assert!(find_index_entry(&rec, "alpha").unwrap().is_some());
-        assert!(find_index_entry(&rec, "gamma").unwrap().is_some());
+        assert!(find_index_entry(&rec, "beta", None).unwrap().is_none());
+        assert!(find_index_entry(&rec, "alpha", None).unwrap().is_some());
+        assert!(find_index_entry(&rec, "gamma", None).unwrap().is_some());
     }
 
     #[test]
@@ -1629,7 +1656,7 @@ mod tests {
         let entry = make_entry(5, 5, "file");
         insert_entry_into_index_root(&mut rec, &entry, "file").unwrap();
         assert!(index_root_has_real_entries(&rec).unwrap());
-        let loc = find_index_entry(&rec, "file").unwrap().unwrap();
+        let loc = find_index_entry(&rec, "file", None).unwrap().unwrap();
         remove_index_entry(&mut rec, &loc, BlockKind::IndexRoot).unwrap();
         assert!(!index_root_has_real_entries(&rec).unwrap());
     }
@@ -1699,12 +1726,12 @@ mod tests {
     #[test]
     fn insert_entry_adds_findable_entry() {
         let mut rec = index_root_record(&[]);
-        assert!(find_index_entry(&rec, "newfile").unwrap().is_none());
+        assert!(find_index_entry(&rec, "newfile", None).unwrap().is_none());
 
         let entry = make_entry(99, 5, "newfile");
         insert_entry_into_index_root(&mut rec, &entry, "newfile").unwrap();
 
-        let loc = find_index_entry(&rec, "newfile").unwrap().unwrap();
+        let loc = find_index_entry(&rec, "newfile", None).unwrap().unwrap();
         assert_eq!(loc.file_record_number, 99);
     }
 
@@ -1717,14 +1744,14 @@ mod tests {
         insert_entry_into_index_root(&mut rec, &e2, "gamma").unwrap();
 
         assert_eq!(
-            find_index_entry(&rec, "alpha")
+            find_index_entry(&rec, "alpha", None)
                 .unwrap()
                 .unwrap()
                 .file_record_number,
             10
         );
         assert_eq!(
-            find_index_entry(&rec, "gamma")
+            find_index_entry(&rec, "gamma", None)
                 .unwrap()
                 .unwrap()
                 .file_record_number,
@@ -1740,8 +1767,8 @@ mod tests {
         let ea = make_entry(1, 5, "a_file");
         insert_entry_into_index_root(&mut rec, &ez, "z_file").unwrap();
         insert_entry_into_index_root(&mut rec, &ea, "a_file").unwrap();
-        assert!(find_index_entry(&rec, "a_file").unwrap().is_some());
-        assert!(find_index_entry(&rec, "z_file").unwrap().is_some());
+        assert!(find_index_entry(&rec, "a_file", None).unwrap().is_some());
+        assert!(find_index_entry(&rec, "z_file", None).unwrap().is_some());
     }
 
     #[test]
@@ -1753,7 +1780,7 @@ mod tests {
         }
         for name in &["alpha", "bravo", "charlie", "delta"] {
             assert!(
-                find_index_entry(&rec, name).unwrap().is_some(),
+                find_index_entry(&rec, name, None).unwrap().is_some(),
                 "missing: {name}"
             );
         }
@@ -1765,12 +1792,12 @@ mod tests {
     fn remove_entry_makes_it_unfindable() {
         let entry = make_entry(42, 5, "removeme");
         let mut rec = index_root_record(&[entry]);
-        assert!(find_index_entry(&rec, "removeme").unwrap().is_some());
+        assert!(find_index_entry(&rec, "removeme", None).unwrap().is_some());
 
-        let loc = find_index_entry(&rec, "removeme").unwrap().unwrap();
+        let loc = find_index_entry(&rec, "removeme", None).unwrap().unwrap();
         remove_index_entry(&mut rec, &loc, BlockKind::IndexRoot).unwrap();
 
-        assert!(find_index_entry(&rec, "removeme").unwrap().is_none());
+        assert!(find_index_entry(&rec, "removeme", None).unwrap().is_none());
     }
 
     #[test]
@@ -1779,11 +1806,11 @@ mod tests {
         let e2 = make_entry(20, 5, "drop");
         let mut rec = index_root_record(&[e1, e2]);
 
-        let loc = find_index_entry(&rec, "drop").unwrap().unwrap();
+        let loc = find_index_entry(&rec, "drop", None).unwrap().unwrap();
         remove_index_entry(&mut rec, &loc, BlockKind::IndexRoot).unwrap();
 
-        assert!(find_index_entry(&rec, "keep").unwrap().is_some());
-        assert!(find_index_entry(&rec, "drop").unwrap().is_none());
+        assert!(find_index_entry(&rec, "keep", None).unwrap().is_some());
+        assert!(find_index_entry(&rec, "drop", None).unwrap().is_none());
     }
 
     #[test]
@@ -1791,14 +1818,14 @@ mod tests {
         let entry = make_entry(5, 5, "file");
         let mut rec = index_root_record(&[entry]);
 
-        let loc = find_index_entry(&rec, "file").unwrap().unwrap();
+        let loc = find_index_entry(&rec, "file", None).unwrap().unwrap();
         remove_index_entry(&mut rec, &loc, BlockKind::IndexRoot).unwrap();
-        assert!(find_index_entry(&rec, "file").unwrap().is_none());
+        assert!(find_index_entry(&rec, "file", None).unwrap().is_none());
 
         let new_entry = make_entry(99, 5, "file");
         insert_entry_into_index_root(&mut rec, &new_entry, "file").unwrap();
         assert_eq!(
-            find_index_entry(&rec, "file")
+            find_index_entry(&rec, "file", None)
                 .unwrap()
                 .unwrap()
                 .file_record_number,
@@ -1812,9 +1839,9 @@ mod tests {
         let e2 = make_entry(2, 5, "two");
         let mut rec = index_root_record(&[e1, e2]);
 
-        let loc1 = find_index_entry(&rec, "one").unwrap().unwrap();
+        let loc1 = find_index_entry(&rec, "one", None).unwrap().unwrap();
         remove_index_entry(&mut rec, &loc1, BlockKind::IndexRoot).unwrap();
-        let loc2 = find_index_entry(&rec, "two").unwrap().unwrap();
+        let loc2 = find_index_entry(&rec, "two", None).unwrap().unwrap();
         remove_index_entry(&mut rec, &loc2, BlockKind::IndexRoot).unwrap();
 
         assert!(!index_root_has_real_entries(&rec).unwrap());
