@@ -93,6 +93,37 @@ pub struct IndexEntryLocation {
     pub name_length: u8,
 }
 
+/// The exclusive end of an `$INDEX_ROOT`'s resident value.
+///
+/// THE INDEX ENDS WHERE THE THING HOLDING IT ENDS. `remove_index_entry`
+/// and `insert_entry_into_index_root_with_collation` state that rule
+/// from the writing side, and the comment on the first of them names
+/// the readers as the source of the entries it has to defend against --
+/// because the readers walked to `ih_start + total_size` bounded only by
+/// the MFT record. An `$INDEX_ROOT` whose `total_size` exceeds its own
+/// value then has `readdir` decoding whatever follows the attribute in
+/// the same record as index entries, each carrying a 48-bit record
+/// number taken from those bytes, which the caller opens.
+fn index_root_value_end(record: &[u8], ir: &attr_io::AttrLocation) -> Result<usize, String> {
+    let off = ir
+        .resident_value_offset
+        .ok_or("$INDEX_ROOT has no value_offset")? as usize;
+    let len = ir
+        .resident_value_length
+        .ok_or("$INDEX_ROOT has no value_length")? as usize;
+    ir.attr_offset
+        .checked_add(off)
+        .and_then(|start| start.checked_add(len))
+        .filter(|&end| end <= record.len())
+        .ok_or_else(|| {
+            format!(
+                "$INDEX_ROOT value [{}+{off}, +{len}) runs past the {}-byte record",
+                ir.attr_offset,
+                record.len()
+            )
+        })
+}
+
 /// Walk the `$INDEX_ROOT` for `$FILE_NAME` (i.e. the `$I30` index of a
 /// directory), returning the located entry whose filename matches
 /// `wanted` under [`compare_names`]. Returns `None` if not present.
@@ -124,6 +155,7 @@ pub fn find_index_entry(
     }
     let ir_value_offset = ir.resident_value_offset.ok_or("no value_offset")? as usize;
     let ir_data_start = ir.attr_offset + ir_value_offset;
+    let value_end = index_root_value_end(record, &ir)?;
 
     let ih_start = ir_data_start + IR_INDEX_HEADER_OFFSET;
     let first_entry_rel = read_u32_le(record, ih_start + IH_FIRST_ENTRY_OFFSET)
@@ -134,11 +166,12 @@ pub fn find_index_entry(
         as usize;
 
     let mut cursor = ih_start + first_entry_rel;
-    let end = ih_start + total_size;
+    // Whichever the header says, the entries stop at the value.
+    let end = (ih_start + total_size).min(value_end);
 
     let wanted_utf16: Vec<u16> = wanted.encode_utf16().collect();
 
-    while cursor < end && cursor + IE_KEY_START <= record.len() {
+    while cursor < end && cursor + IE_KEY_START <= value_end {
         let length =
             u16::from_le_bytes([record[cursor + IE_LENGTH], record[cursor + IE_LENGTH + 1]])
                 as usize;
@@ -153,7 +186,7 @@ pub fn find_index_entry(
         if flags & IE_FLAG_LAST != 0 {
             break;
         }
-        if length == 0 || cursor + length > record.len() {
+        if length == 0 || cursor + length > value_end {
             return Err(format!("malformed index entry at {cursor}"));
         }
         if key_length >= FN_NAME_OFFSET {
@@ -199,6 +232,7 @@ pub fn index_root_has_real_entries(record: &[u8]) -> Result<bool, String> {
     }
     let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
     let ir_data_start = ir.attr_offset + val_off;
+    let value_end = index_root_value_end(record, &ir)?;
     let ih_start = ir_data_start + IR_INDEX_HEADER_OFFSET;
     let first_entry_rel = read_u32_le(record, ih_start + IH_FIRST_ENTRY_OFFSET)
         .ok_or_else(|| "index header too short to read first_entry_offset".to_string())?
@@ -207,9 +241,20 @@ pub fn index_root_has_real_entries(record: &[u8]) -> Result<bool, String> {
         .ok_or_else(|| "index header too short to read total_size".to_string())?
         as usize;
     let first_entry = ih_start + first_entry_rel;
-    let end = ih_start + total_size;
-    if first_entry + IE_KEY_START > record.len() || first_entry + 0x10 > end {
-        return Ok(false);
+    let end = (ih_start + total_size).min(value_end);
+    // AN UNREADABLE INDEX IS NOT AN EMPTY ONE.
+    //
+    // This used to answer Ok(false) here -- "no real entries" -- and
+    // `rmdir` deletes a directory on that answer, orphaning every
+    // child's MFT record. A header that does not parse is the ordinary
+    // result of an interrupted write to a directory record, and it is
+    // the one input where reporting emptiness is destructive: the
+    // caller's response to emptiness is to delete.
+    if first_entry + IE_KEY_START > value_end || first_entry + 0x10 > end {
+        return Err(format!(
+            "$INDEX_ROOT header is unreadable: first entry at {first_entry}, entries end \
+             at {end}, value ends at {value_end}"
+        ));
     }
     // If the very first entry has the LAST flag, the dir is empty.
     let flags = u16::from_le_bytes([
@@ -351,15 +396,23 @@ pub struct DirEntryRaw {
 /// node's INDEX_HEADER within `buf`. Stops at the `IE_FLAG_LAST` sentinel.
 /// Shared by the two public enumerators below so the entry walk lives in one
 /// place (mirrors [`scan_entries_for_name`] but collects instead of matching).
-fn collect_entries(buf: &[u8], ih_start: usize, out: &mut Vec<DirEntryRaw>) -> Result<(), String> {
+fn collect_entries(
+    buf: &[u8],
+    ih_start: usize,
+    // The exclusive end of the thing holding this index node: an
+    // `$INDEX_ROOT`'s resident value, or an INDX block. `total_size`
+    // comes off the disk and does not get to exceed it.
+    limit: usize,
+    out: &mut Vec<DirEntryRaw>,
+) -> Result<(), String> {
     let first_entry_rel = read_u32_le(buf, ih_start + IH_FIRST_ENTRY_OFFSET)
         .ok_or("index node too short to read first_entry_offset")?
         as usize;
     let total_size = read_u32_le(buf, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
         .ok_or("index node too short to read total_size")? as usize;
     let mut cursor = ih_start + first_entry_rel;
-    let end = ih_start + total_size;
-    while cursor < end && cursor + IE_KEY_START <= buf.len() {
+    let end = (ih_start + total_size).min(limit);
+    while cursor < end && cursor + IE_KEY_START <= limit {
         let length =
             u16::from_le_bytes([buf[cursor + IE_LENGTH], buf[cursor + IE_LENGTH + 1]]) as usize;
         let key_length =
@@ -369,13 +422,13 @@ fn collect_entries(buf: &[u8], ih_start: usize, out: &mut Vec<DirEntryRaw>) -> R
         if flags & IE_FLAG_LAST != 0 {
             break;
         }
-        if length == 0 || cursor + length > buf.len() {
+        if length == 0 || cursor + length > limit {
             return Err(format!("malformed index entry at {cursor}"));
         }
         // Bound every read to THIS entry [cursor, entry_end), not the whole
         // buffer: a corrupt key_length/name_length must not let us decode
         // bytes from the next entry/trailer into a fabricated DirEntryRaw.
-        let entry_end = cursor + length; // already validated <= buf.len()
+        let entry_end = cursor + length; // already validated <= limit
         let key_start = cursor + IE_KEY_START;
         if key_length >= FN_NAME_OFFSET && key_start + key_length <= entry_end {
             let name_length = buf[key_start + FN_NAME_LENGTH_OFFSET] as usize;
@@ -416,8 +469,9 @@ pub fn collect_index_root_entries(record: &[u8], out: &mut Vec<DirEntryRaw>) -> 
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
         .ok_or_else(|| "$INDEX_ROOT:$I30 not found".to_string())?;
     let ir_value_offset = ir.resident_value_offset.ok_or("no value_offset")? as usize;
+    let value_end = index_root_value_end(record, &ir)?;
     let ih_start = ir.attr_offset + ir_value_offset + IR_INDEX_HEADER_OFFSET;
-    collect_entries(record, ih_start, out)
+    collect_entries(record, ih_start, value_end, out)
 }
 
 /// Enumerate the `$FILE_NAME` entries in one `$INDEX_ALLOCATION` (INDX) block
@@ -426,7 +480,13 @@ pub fn collect_indx_block_entries(block: &[u8], out: &mut Vec<DirEntryRaw>) -> R
     if block.len() < 4 || &block[0..4] != b"INDX" {
         return Err("not an INDX block (fixup missing?)".to_string());
     }
-    collect_entries(block, crate::idx_block::INDX_INDEX_HEADER_OFFSET, out)
+    // An INDX block is its own buffer; the block is what holds the node.
+    collect_entries(
+        block,
+        crate::idx_block::INDX_INDEX_HEADER_OFFSET,
+        block.len(),
+        out,
+    )
 }
 
 /// Overwrite the UTF-16 name bytes inside an existing index entry's
