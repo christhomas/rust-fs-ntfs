@@ -19,10 +19,13 @@ use crate::index_io::{self, IH_FLAG_HAS_SUBNODES};
 use crate::mft_io::{read_mft_record_io, record_flags, MFT_FLAG_DIRECTORY};
 use crate::upcase::UpcaseTable;
 
-/// Attribute data-flags (header +0x0C, low bits): the value is transformed
-/// and can't be returned as raw bytes by this reader yet.
-const ATTR_FLAG_COMPRESSED: u16 = 0x0001;
-const ATTR_FLAG_ENCRYPTED: u16 = 0x4000;
+/// Attribute data-flags (header +0x0C): the value is transformed and
+/// can't be returned as raw bytes by this reader yet. The names live in
+/// `attr_io::attr_flags` now, beside the offset they are read from, so
+/// that the reader and the three write guards share one definition.
+use crate::attr_io::attr_flags::{
+    COMPRESSED as ATTR_FLAG_COMPRESSED, ENCRYPTED as ATTR_FLAG_ENCRYPTED,
+};
 
 /// MFT record number of the root directory (`.`), fixed by the NTFS spec.
 pub const ROOT_RECORD_NUMBER: u64 = 5;
