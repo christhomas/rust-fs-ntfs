@@ -452,18 +452,7 @@ pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
         );
     }
 
-    // Reject compressed (has compression_unit != 0). We don't decompress
-    // in W1. Check flags field in the attribute header (+0x0C).
-    let flags = u16::from_le_bytes([
-        record[loc.attr_offset + attr_io::attr_off::FLAGS],
-        record[loc.attr_offset + attr_io::attr_off::FLAGS + 1],
-    ]);
-    if flags & 0x00FF != 0 {
-        // Low byte of flags carries compression_unit encoding + sparse + encrypted.
-        return Err(format!(
-            "non-resident $DATA is compressed/sparse/encrypted (flags={flags:#06x})"
-        ));
-    }
+    refuse_transformed_data(&record, &loc, "write_at")?;
 
     let value_length = loc
         .non_resident_value_length
@@ -627,6 +616,45 @@ fn zero_fill_range_io<T: BlockIo + ?Sized>(
     Ok(())
 }
 
+/// Refuse a `$DATA` whose value is transformed, or whose attribute
+/// carries accounting a plain write would leave stale.
+///
+/// The three entry points that call this each had their own copy of the
+/// test, and each copy masked `flags & 0x00FF` -- the compression-unit
+/// field alone -- while its comment said "low byte of flags carries
+/// compression_unit encoding + sparse + encrypted" and its error
+/// message named all three. Sparse is `0x8000` and encrypted is
+/// `0x4000`; neither is in the low byte, so both passed all three
+/// gates.
+///
+/// What that let through: writing plaintext into an `$EFS` file's
+/// clusters leaves it partly ciphertext and partly not, and it decrypts
+/// to noise in the region written -- irreversibly, because the original
+/// ciphertext is gone, and invisibly until someone opens it on Windows.
+/// Writing into a sparse file's mapped clusters leaves
+/// `total_allocated_size` (`+0x40` of the extended header) describing an
+/// allocation that no longer matches, which is exactly what chkdsk
+/// checks.
+///
+/// One predicate, shared, and the mask lives in `attr_io` beside the
+/// offset it is read from, because three private copies is how these
+/// drifted from the reader in the first place.
+fn refuse_transformed_data(
+    record: &[u8],
+    loc: &attr_io::AttrLocation,
+    what: &str,
+) -> Result<(), String> {
+    let flags = attr_io::attribute_flags(record, loc)
+        .ok_or_else(|| format!("{what}: record too short to read the $DATA attribute flags"))?;
+    if flags & attr_io::attr_flags::TRANSFORMED != 0 {
+        return Err(format!(
+            "{what}: non-resident $DATA is {} (flags={flags:#06x})",
+            attr_io::describe_transform_flags(flags)
+        ));
+    }
+    Ok(())
+}
+
 fn find_run_for_vcn(runs: &[DataRun], vcn: u64) -> Option<&DataRun> {
     runs.iter()
         .find(|r| vcn >= r.starting_vcn && vcn < r.starting_vcn + r.length)
@@ -691,15 +719,7 @@ pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
     if loc.is_resident {
         return Err("truncate: resident $DATA unsupported in W2 MVP".to_string());
     }
-    let flags = u16::from_le_bytes([
-        record[loc.attr_offset + attr_io::attr_off::FLAGS],
-        record[loc.attr_offset + attr_io::attr_off::FLAGS + 1],
-    ]);
-    if flags & 0x00FF != 0 {
-        return Err(format!(
-            "compressed/sparse/encrypted non-resident $DATA (flags={flags:#06x})"
-        ));
-    }
+    refuse_transformed_data(&record, &loc, "truncate")?;
 
     let current_len = loc.non_resident_value_length.ok_or("no value_length")?;
     if new_size > current_len {
@@ -851,15 +871,7 @@ pub fn grow_nonresident_by_record_number_io<T: BlockIo + ?Sized>(
     if loc.is_resident {
         return Err("grow_nonresident: refusing resident $DATA (use W2.2 promotion)".to_string());
     }
-    let flags = u16::from_le_bytes([
-        record[loc.attr_offset + attr_io::attr_off::FLAGS],
-        record[loc.attr_offset + attr_io::attr_off::FLAGS + 1],
-    ]);
-    if flags & 0x00FF != 0 {
-        return Err(format!(
-            "compressed/sparse/encrypted non-resident $DATA (flags={flags:#06x})"
-        ));
-    }
+    refuse_transformed_data(&record, &loc, "grow")?;
 
     let current_len = loc.non_resident_value_length.ok_or("no value_length")?;
     if new_size <= current_len {

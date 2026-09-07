@@ -255,6 +255,54 @@ pub mod attr_off {
     pub const NONRES_INITIALIZED_LENGTH: usize = 0x38;
 }
 
+/// Attribute data-flag bits, at attribute-header `+0x0C`.
+///
+/// The low byte is the compression-unit field and the top two bits are
+/// sparse and encrypted, which is the distinction three write guards
+/// got wrong: each tested `flags & 0x00FF` while its error message and
+/// its comment claimed to be catching sparse and encrypted too. The
+/// names live here, next to the offset they are read from, so the
+/// reader and the writers cannot drift apart again.
+pub mod attr_flags {
+    /// Compression-unit field. Non-zero means the value is compressed.
+    pub const COMPRESSION_MASK: u16 = 0x00FF;
+    /// The LZNT1 bit inside [`COMPRESSION_MASK`].
+    pub const COMPRESSED: u16 = 0x0001;
+    /// `$EFS`-encrypted: the value on the clusters is ciphertext.
+    pub const ENCRYPTED: u16 = 0x4000;
+    /// Sparse. The run list has holes, and the header is the extended
+    /// `0x48` form carrying `total_allocated_size` at `+0x40` — the
+    /// accounting that makes a sparse file coherent, and that a plain
+    /// write does not maintain.
+    pub const SPARSE: u16 = 0x8000;
+    /// Every bit that means the value is not the raw bytes, or that the
+    /// attribute carries state a plain write would leave stale.
+    pub const TRANSFORMED: u16 = COMPRESSION_MASK | ENCRYPTED | SPARSE;
+}
+
+/// An attribute's `flags` field (`+0x0C`), or `None` if the record is
+/// too short to hold it.
+pub fn attribute_flags(record: &[u8], loc: &AttrLocation) -> Option<u16> {
+    let at = loc.attr_offset.checked_add(attr_off::FLAGS)?;
+    read_u16_le(record, at)
+}
+
+/// Name the transform bits that are set, for an error message that does
+/// not claim more than it checked. Empty when the value is plain.
+pub fn describe_transform_flags(flags: u16) -> String {
+    let mut set = Vec::new();
+    if flags & attr_flags::COMPRESSION_MASK != 0 {
+        set.push("compressed");
+    }
+    if flags & attr_flags::SPARSE != 0 {
+        set.push("sparse");
+    }
+    if flags & attr_flags::ENCRYPTED != 0 {
+        set.push("encrypted");
+    }
+    set.join("+")
+}
+
 // File-record header offsets we need.
 const REC_OFF_ATTRS_OFFSET: usize = 0x14;
 const REC_OFF_BYTES_USED: usize = 0x18;
