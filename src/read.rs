@@ -299,8 +299,12 @@ fn read_value_from_record<T: BlockIo + ?Sized>(
             break; // rest is uninitialised → stays zero
         }
         if let Some(lcn) = data_runs::vcn_to_lcn(&runs, vcn) {
+            // The LCN came off a mapping-pair list; `decode_runs` proved
+            // only that it is not negative. See `mft_io::cluster_span`.
+            let at =
+                crate::mft_io::cluster_span(params, lcn, 0, 0, params.cluster_size, io.size())?;
             let mut cluster = vec![0u8; cluster_size];
-            io.read_exact_at(lcn * cluster_size as u64, &mut cluster)?;
+            io.read_exact_at(at, &mut cluster)?;
             let copy_len = (file_off + cluster_size).min(readable) - file_off;
             out[file_off..file_off + copy_len].copy_from_slice(&cluster[..copy_len]);
         }
@@ -391,8 +395,11 @@ fn read_nonresident_range<T: BlockIo + ?Sized>(
             continue; // beyond initialized_size or empty → stays zero
         }
         if let Some(lcn) = data_runs::vcn_to_lcn(&runs, vcn) {
+            // Checked and bounded by the volume; see
+            // `mft_io::cluster_span`.
+            let at = crate::mft_io::cluster_span(params, lcn, 0, 0, cs, io.size())?;
             let mut cluster = vec![0u8; cs as usize];
-            io.read_exact_at(lcn * cs, &mut cluster)?;
+            io.read_exact_at(at, &mut cluster)?;
             let in_cluster = (win_start - cluster_byte) as usize;
             let n = (win_end - win_start) as usize;
             let out_off = (win_start - offset) as usize;
@@ -511,8 +518,18 @@ fn read_compressed_nonresident<T: BlockIo + ?Sized>(
         } else {
             let mut raw = Vec::with_capacity(allocated_lcns.len() * cluster_size);
             for lcn in &allocated_lcns {
+                // Checked and bounded by the volume; see
+                // `mft_io::cluster_span`.
+                let at = crate::mft_io::cluster_span(
+                    params,
+                    *lcn,
+                    0,
+                    0,
+                    params.cluster_size,
+                    io.size(),
+                )?;
                 let mut cluster = vec![0u8; cluster_size];
-                io.read_exact_at(lcn * cluster_size as u64, &mut cluster)?;
+                io.read_exact_at(at, &mut cluster)?;
                 raw.extend_from_slice(&cluster);
             }
             let plain = if allocated_lcns.len() == unit_clusters {
