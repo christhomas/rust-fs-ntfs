@@ -2949,12 +2949,29 @@ pub fn promote_resident_data_to_nonresident_io<T: BlockIo + ?Sized>(
     }];
     let mapping_pairs = data_runs::encode_runs(&runs)?;
 
-    // Build new non-resident $DATA attribute.
-    let last_vcn = if new_size == 0 {
-        -1i64
-    } else {
-        (n_clusters - 1) as i64
-    };
+    // HIGHEST VCN IS DERIVED FROM THE RUNS, NOT FROM THE SIZE.
+    //
+    // This used to read `if new_size == 0 { -1 } else { n_clusters - 1 }`,
+    // and `-1` is the encoding for "this attribute maps no clusters" —
+    // which was a lie here, because the `.max(1)` above allocates a
+    // cluster and the run list below covers it whatever the size is. The
+    // header then said three different things: `HighestVcn` no clusters,
+    // `AllocatedLength` one cluster, and the mapping pairs one run.
+    //
+    // `ntfs.sys` validates `HighestVcn` against the mapping pairs when it
+    // opens a non-resident attribute and fails the mismatch with
+    // STATUS_FILE_CORRUPT_ERROR; chkdsk reports the attribute record as
+    // corrupt and may delete the `$DATA`, taking the file's contents with
+    // it. The file that reached this was one truncated to zero and then
+    // promoted, which a user would reasonably expect to be the safest
+    // case there is.
+    //
+    // Computing it from `runs` — the same vector encoded just above — is
+    // what stops the two drifting apart again. It also stays correct on
+    // its own if a later change emits no runs at all, because the sum is
+    // then zero and this is `-1`, which is what `-1` actually means.
+    let clusters_covered: u64 = runs.iter().map(|r| r.length).sum();
+    let last_vcn = clusters_covered as i64 - 1;
     let attr_id = loc.attribute_id;
     let new_attr_bytes = crate::record_build::build_nonresident_data_attribute(
         attr_id,
@@ -3278,11 +3295,11 @@ pub fn promote_attribute_to_nonresident_io<T: BlockIo + ?Sized>(
         lcn: Some(new_lcn),
     }];
     let mapping_pairs = data_runs::encode_runs(&runs)?;
-    let last_vcn = if new_size == 0 {
-        -1i64
-    } else {
-        (n_clusters - 1) as i64
-    };
+
+    // Same derivation as `promote_resident_data_to_nonresident_io`; see
+    // the note there for why it is computed from the runs.
+    let clusters_covered: u64 = runs.iter().map(|r| r.length).sum();
+    let last_vcn = clusters_covered as i64 - 1;
 
     let replace_res = update_mft_record_io(io, rec, |record| {
         let attr_id = match attr_io::find_attribute(record, attr_type, attr_name) {
@@ -4147,6 +4164,117 @@ mod tests {
     }
 
     // --- create_file_io -------------------------------------------------------
+
+    // ---------------------------------------------------------------
+    // A non-resident header has to agree with its own run list
+    // ---------------------------------------------------------------
+
+    /// `(HighestVcn, AllocatedLength, clusters the run list covers)` for
+    /// the unnamed `$DATA` of `rec`, read back off the volume.
+    fn nonresident_data_header(dev: &mut MemDev, rec: u64) -> (i64, u64, u64) {
+        nonresident_header(dev, rec, None)
+    }
+
+    fn nonresident_header(dev: &mut MemDev, rec: u64, name: Option<&str>) -> (i64, u64, u64) {
+        let (_params, record) = crate::mft_io::read_mft_record_io(dev, rec).expect("read record");
+        let loc = attr_io::find_attribute(&record, AttrType::Data, name).expect("$DATA");
+        assert!(!loc.is_resident, "the attribute must have been promoted");
+        let a = loc.attr_offset;
+        let last_vcn = i64::from_le_bytes(record[a + 24..a + 32].try_into().unwrap());
+        let allocated = u64::from_le_bytes(record[a + 40..a + 48].try_into().unwrap());
+        let mpo = loc
+            .non_resident_mapping_pairs_offset
+            .expect("mapping pairs offset") as usize;
+        let runs = crate::data_runs::decode_runs(&record[a + mpo..a + loc.attr_length])
+            .expect("decode runs");
+        let covered: u64 = runs.iter().map(|r| r.length).sum();
+        (last_vcn, allocated, covered)
+    }
+
+    /// THE HEADER MUST NOT CONTRADICT ITSELF.
+    ///
+    /// Promoting an EMPTY value allocated a cluster, emitted a run list
+    /// covering it, set `AllocatedLength` to one cluster — and wrote
+    /// `HighestVcn = -1`, which is the encoding for "this attribute maps
+    /// no clusters". `ntfs.sys` validates the two against each other and
+    /// fails the mismatch with STATUS_FILE_CORRUPT_ERROR.
+    #[test]
+    fn promoting_an_empty_value_leaves_a_header_that_agrees_with_its_run_list() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "empty.txt").expect("create");
+        let rec = resolve_path_to_record_number_io(&mut dev, "/empty.txt").expect("resolve");
+
+        promote_resident_data_to_nonresident_io(&mut dev, "/empty.txt", &[]).expect("promote");
+
+        let (last_vcn, allocated, covered) = nonresident_data_header(&mut dev, rec);
+        assert!(
+            covered > 0,
+            "the promote allocated a cluster, so the run list covers one"
+        );
+        assert_eq!(
+            last_vcn + 1,
+            covered as i64,
+            "HighestVcn says the attribute maps {} clusters, the run list covers {covered}",
+            last_vcn + 1
+        );
+        assert_eq!(
+            allocated,
+            covered * 4096,
+            "AllocatedLength must match the clusters the run list covers"
+        );
+    }
+
+    /// THE SECOND PROMOTE ENTRY POINT, which carries an identical copy
+    /// of the same arithmetic. A fix applied to one and not the other
+    /// would leave named streams — alternate data streams — writing the
+    /// contradictory header while the unnamed `$DATA` stopped.
+    #[test]
+    fn the_named_stream_promote_agrees_with_its_run_list_too() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "ads.txt").expect("create");
+        let rec = resolve_path_to_record_number_io(&mut dev, "/ads.txt").expect("resolve");
+
+        promote_attribute_to_nonresident_io(
+            &mut dev,
+            "/ads.txt",
+            AttrType::Data,
+            Some("meta"),
+            &[],
+        )
+        .expect("promote the named stream");
+
+        let (last_vcn, allocated, covered) = nonresident_header(&mut dev, rec, Some("meta"));
+        assert!(covered > 0, "the promote allocated a cluster");
+        assert_eq!(
+            last_vcn + 1,
+            covered as i64,
+            "HighestVcn says the stream maps {} clusters, the run list covers {covered}",
+            last_vcn + 1
+        );
+        assert_eq!(allocated, covered * 4096);
+    }
+
+    /// The same invariant for a non-empty value, so the fix cannot be
+    /// "always say one cluster".
+    #[test]
+    fn promoting_a_multi_cluster_value_agrees_with_its_run_list_too() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "big.txt").expect("create");
+        let rec = resolve_path_to_record_number_io(&mut dev, "/big.txt").expect("resolve");
+
+        // Three clusters and a bit, so the run list covers four.
+        let data = vec![0xA5u8; 3 * 4096 + 17];
+        promote_resident_data_to_nonresident_io(&mut dev, "/big.txt", &data).expect("promote");
+
+        let (last_vcn, allocated, covered) = nonresident_data_header(&mut dev, rec);
+        assert_eq!(covered, 4, "3 clusters and 17 bytes needs four");
+        assert_eq!(
+            last_vcn + 1,
+            covered as i64,
+            "HighestVcn must equal the clusters the run list covers, minus one"
+        );
+        assert_eq!(allocated, covered * 4096);
+    }
 
     /// THE $I30 BITMAP DOES NOT SAY WHICH BLOCKS ARE LEAVES.
     ///
