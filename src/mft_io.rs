@@ -64,6 +64,15 @@ pub const NTFS_OEM_ID: &[u8; 8] = b"NTFS    ";
 const SECTOR_TAIL_BYTES: usize = 2;
 
 /// Returns true iff `n` is a non-zero power of two.
+/// The largest `sectors_per_cluster` written as a literal count:
+/// 128 sectors, which is 64 KiB at the usual 512-byte sector. Anything
+/// above this is the signed-exponent form.
+const MAX_LITERAL_SECTORS_PER_CLUSTER: u8 = 0x80;
+
+/// The largest exponent the signed form may name. 2^12 = 4096 sectors,
+/// which is the 2 MiB cluster that is Windows' maximum.
+const MAX_SECTORS_PER_CLUSTER_EXPONENT: i16 = 12;
+
 fn is_power_of_two(n: u16) -> bool {
     n != 0 && n & (n - 1) == 0
 }
@@ -130,17 +139,58 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
         ));
     }
 
-    // sectors_per_cluster: values 1–128 (0x01–0x80) are literal. 0x80 = 128
-    // sectors per cluster = 64 KiB with 512-byte sectors. No log2 encoding
-    // exists for this field (unlike clusters_per_mft_record which uses i8).
+    // sectors_per_cluster has two forms, and this used to say it had
+    // one. Values 0x01..=0x80 are the literal count -- 0x80 = 128
+    // sectors = 64 KiB with 512-byte sectors, which is where the
+    // literal range ends. ABOVE 0x80 the byte is a signed binary
+    // exponent: the count is `1 << -(spc as i8)`, which is how Windows
+    // writes the 128 KiB through 2 MiB cluster sizes it has formatted
+    // since Windows 10. So 0xF8 is -8 and means 256 sectors (128 KiB),
+    // and 0xF4 is -12 and means 4096 sectors (2 MiB), the largest
+    // Windows supports.
+    //
+    // Checked against the `ntfs` crate this repository already carries
+    // as its read-side oracle (`boot_sector.rs`, `sectors_per_cluster`),
+    // which decodes exactly this and caps the exponent at 12. That is
+    // also why no test caught it: the oracle handles the encoding, so a
+    // large-cluster volume compared equal to a reader that had it right.
+    //
+    // The comment that used to sit here denied the encoding outright.
+    // It is the residue of a real fix: an earlier version applied the
+    // exponent form at `spc >= 0x80` and panicked on `1 << 128` for an
+    // ordinary 64 KiB volume (see
+    // `parse_boot_spc_128_is_literal_not_log2`). The boundary is `>`,
+    // not `>=`; removing the whole encoding removed the panic and the
+    // large-cluster support together.
     let spc_raw = boot[BOOT_OFF_SECTORS_PER_CLUSTER];
-    let sectors_per_cluster: u64 = spc_raw as u64;
-    if sectors_per_cluster == 0 {
+    let sectors_per_cluster: u64 = if spc_raw > MAX_LITERAL_SECTORS_PER_CLUSTER {
+        let exponent = -(spc_raw as i8) as i16;
+        if exponent > MAX_SECTORS_PER_CLUSTER_EXPONENT {
+            return Err(format!(
+                "sectors_per_cluster {spc_raw:#04x} is a binary exponent of {exponent},                  past the {MAX_SECTORS_PER_CLUSTER_EXPONENT} NTFS defines"
+            ));
+        }
+        1u64 << exponent
+    } else {
+        if spc_raw == 0 || !spc_raw.is_power_of_two() {
+            return Err(format!(
+                "sectors_per_cluster {spc_raw:#04x} is not a power of two"
+            ));
+        }
+        spc_raw as u64
+    };
+    let cluster_size = bytes_per_sector as u64 * sectors_per_cluster;
+    // Both factors are powers of two above, so this is one too. Asserted
+    // rather than assumed, because every offset the driver computes is
+    // this number times something off the disk, and a cluster size that
+    // is not a power of two is a misread boot sector rather than a
+    // volume -- the reads that follow would not fail, they would land at
+    // consistently wrong offsets and return whatever is there.
+    if !cluster_size.is_power_of_two() {
         return Err(format!(
-            "sectors_per_cluster decoded to 0 (raw {spc_raw:#x})"
+            "cluster_size {cluster_size} ({bytes_per_sector} x {sectors_per_cluster})              is not a power of two"
         ));
     }
-    let cluster_size = bytes_per_sector as u64 * sectors_per_cluster;
 
     let mft_lcn = u64::from_le_bytes(
         boot[BOOT_OFF_MFT_LCN..BOOT_OFF_MFT_LCN + 8]
