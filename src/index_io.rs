@@ -13,7 +13,7 @@ use crate::mkfs::stream;
 /// Layout: `INDEX_ROOT_HEADER (16 bytes) + INDEX_HEADER (16 bytes) + entries…`.
 const IR_INDEX_HEADER_OFFSET: usize = 16;
 /// Flags byte within INDEX_HEADER.
-const IH_FLAGS_OFFSET: usize = 0x0C;
+pub const IH_FLAGS_OFFSET: usize = 0x0C;
 /// INDEX_HEADER bit: any of the entries has a subnode pointer (i.e.
 /// the index overflows into `$INDEX_ALLOCATION`).
 pub const IH_FLAG_HAS_SUBNODES: u8 = 0x01;
@@ -782,18 +782,7 @@ pub fn insert_entry_into_index_root_with_collation(
         ));
     }
 
-    // An interior node's entries each carry a child VCN in their tail,
-    // and `build_file_name_index_entry` makes a leaf entry with none.
-    // Splicing one in would leave the node's key ordering describing
-    // children that are not there. See the note in
-    // `remove_index_entry`.
-    if record[ih_start + IH_FLAGS_OFFSET] & IH_FLAG_HAS_SUBNODES != 0 {
-        return Err(
-            "$INDEX_ROOT:$I30 has sub-nodes; inserting into an interior node needs \
-             index B-tree maintenance, which is not implemented"
-                .to_string(),
-        );
-    }
+    refuse_if_interior(record[ih_start + IH_FLAGS_OFFSET], "$INDEX_ROOT:$I30")?;
 
     // Find sorted insertion position. Walk existing entries until we
     // find one whose name is >= new_name or hit the LAST sentinel.
@@ -905,6 +894,15 @@ pub fn insert_entry_into_indx_block_with_collation(
         block[ih_start + 10],
         block[ih_start + 11],
     ]) as usize;
+
+    // THE CHECK THIS FUNCTION WAS THE ONLY ONE WITHOUT. The $I30 bitmap
+    // marks interior and leaf blocks alike, so the block that reached
+    // here was chosen for having room, not for being a leaf.
+    let flags = *block
+        .get(ih_start + IH_FLAGS_OFFSET)
+        .ok_or_else(|| "INDX block too short to read the index header flags".to_string())?;
+    refuse_if_interior(flags, "this INDX block")?;
+
     let new_len = entry_bytes.len();
     if total_size + new_len > allocated_size {
         return Err(format!(
@@ -945,6 +943,40 @@ pub fn insert_entry_into_indx_block_with_collation(
     block[ih_start + IH_TOTAL_SIZE_OF_ENTRIES..ih_start + IH_TOTAL_SIZE_OF_ENTRIES + 4]
         .copy_from_slice(&new_total.to_le_bytes());
 
+    Ok(())
+}
+
+/// Refuse a splice into an interior node.
+///
+/// # THE ENTRY SHAPES DIFFER, SO THE NODE KIND IS NOT COSMETIC
+///
+/// Every entry in an interior node ends with the 8-byte VCN of the child
+/// holding every key below it. [`build_file_name_index_entry`] emits a
+/// leaf entry, which has no such tail. Splice one in and `ntfs.sys` reads
+/// the child VCN at `entry_end - 8`, which for the new entry lands inside
+/// its own UTF-16 filename, and descends to whatever VCN those bytes
+/// spell. The directory stops being readable on Windows and `chkdsk`
+/// reports index errors — from a plain file creation, with nothing
+/// reported at the time.
+///
+/// # WHY IT IS ONE FUNCTION
+///
+/// Three functions here handle index entries and there are two block
+/// kinds, so six combinations. The guard existed in four of them: both
+/// halves of `remove_index_entry` and the `$INDEX_ROOT` insert. The
+/// missing one was the INDX insert, and it was missing because each of
+/// the other guards had been written separately. Written once, the sixth
+/// cannot be forgotten.
+///
+/// `flags` is the INDEX_HEADER flags byte at [`IH_FLAGS_OFFSET`];
+/// `what` names the structure for the error message.
+pub fn refuse_if_interior(flags: u8, what: &str) -> Result<(), String> {
+    if flags & IH_FLAG_HAS_SUBNODES != 0 {
+        return Err(format!(
+            "{what} has sub-nodes; inserting into an interior node needs \
+             index B-tree maintenance, which is not implemented"
+        ));
+    }
     Ok(())
 }
 
