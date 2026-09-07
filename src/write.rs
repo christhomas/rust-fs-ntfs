@@ -1495,7 +1495,19 @@ fn insert_entry_in_parent_io<T: BlockIo + ?Sized>(
         if total_size + entry_bytes.len() > allocated_size {
             continue;
         }
-        // This block has room. RMW + insert.
+        // ROOM IS NOT THE ONLY THING THAT MAKES A BLOCK ELIGIBLE. The
+        // $I30 bitmap marks interior and leaf blocks alike, so this walk
+        // will otherwise hand an interior node to an insert that can only
+        // build leaf entries. `insert_entry_into_indx_block` refuses that
+        // now, but failing the create when a leaf further down the list
+        // would have taken the entry is a worse answer than looking on.
+        if block
+            .get(ih_start + index_io::IH_FLAGS_OFFSET)
+            .is_some_and(|f| f & index_io::IH_FLAG_HAS_SUBNODES != 0)
+        {
+            continue;
+        }
+        // This block is a leaf and has room. RMW + insert.
         return idx_block::update_indx_block_io(io, &ia, vcn, |block| {
             index_io::insert_entry_into_indx_block_with_collation(
                 block,
@@ -1506,7 +1518,8 @@ fn insert_entry_in_parent_io<T: BlockIo + ?Sized>(
         });
     }
     Err(
-        "no INDX block with room for new entry (would need B+ tree split / new block allocation)"
+        "no leaf INDX block with room for the new entry (would need B+ tree split / new block \
+         allocation)"
             .to_string(),
     )
 }
@@ -4134,6 +4147,172 @@ mod tests {
     }
 
     // --- create_file_io -------------------------------------------------------
+
+    /// THE $I30 BITMAP DOES NOT SAY WHICH BLOCKS ARE LEAVES.
+    ///
+    /// `insert_entry_in_parent_io` walks every allocated INDX block and
+    /// takes the first with room. An interior node has room like any
+    /// other, and the insert can only build leaf entries, so the walk has
+    /// to skip interior blocks rather than hand one over.
+    ///
+    /// The guard inside the insert makes that safe — it refuses — but a
+    /// refusal is a failed `create`, and there may be a leaf further down
+    /// the list that would have taken the entry. This is the test for the
+    /// skip, not for the guard: the create must SUCCEED, and the entry
+    /// must land in the leaf.
+    ///
+    /// A volume this driver formats never reaches the path at all, because
+    /// it cannot grow a directory past its `$INDEX_ROOT` — 24 files in the
+    /// root is the ceiling. So the directory is built here: two clusters
+    /// of `$INDEX_ALLOCATION`, a `$Bitmap:$I30` marking both blocks live,
+    /// the `HAS_SUBNODES` flag the overflow path is gated on, and two INDX
+    /// blocks written into those clusters, the interior one first in walk
+    /// order.
+    #[test]
+    fn a_create_skips_an_interior_indx_block_and_lands_in_a_leaf() {
+        const BS: usize = 4096;
+        const ROOT: u64 = 5;
+        let mut dev = fresh_vol();
+
+        // Two free clusters to hold the index blocks.
+        let bm = crate::bitmap::locate_bitmap_io(&mut dev).expect("volume bitmap");
+        let lcn = crate::bitmap::find_free_run_io(&mut dev, &bm, 2, 0)
+            .expect("scan")
+            .expect("two free clusters");
+        crate::bitmap::allocate_io(&mut dev, &bm, lcn, 2).expect("allocate");
+
+        // Turn the root into a directory with an overflowed index.
+        let mapping = crate::data_runs::encode_runs(&[DataRun {
+            starting_vcn: 0,
+            length: 2,
+            lcn: Some(lcn),
+        }])
+        .expect("encode runs");
+        update_mft_record_io(&mut dev, ROOT, |rec| {
+            let ir =
+                attr_io::find_attribute(rec, AttrType::IndexRoot, Some(crate::mkfs::stream::I30))
+                    .ok_or("no $INDEX_ROOT")?;
+            let voff = ir.resident_value_offset.ok_or("no value offset")? as usize;
+            // INDEX_HEADER sits 16 bytes into the $INDEX_ROOT value; its
+            // flags byte is 0x0C into that.
+            rec[ir.attr_offset + voff + 16 + 0x0C] |= index_io::IH_FLAG_HAS_SUBNODES;
+
+            let id = crate::attr_resize::allocate_attribute_id(rec);
+            let ia = crate::record_build::build_nonresident_attribute(
+                AttrType::IndexAllocation as u32,
+                Some(crate::mkfs::stream::I30),
+                id,
+                (2 * BS) as u64,
+                (2 * BS) as u64,
+                (2 * BS) as u64,
+                1,
+                &mapping,
+            )?;
+            crate::attr_resize::insert_attribute_sorted(rec, &ia)?;
+
+            let id = crate::attr_resize::allocate_attribute_id(rec);
+            let bitmap = named_resident_attribute(
+                AttrType::Bitmap as u32,
+                crate::mkfs::stream::I30,
+                id,
+                &[0b0000_0011],
+            );
+            crate::attr_resize::insert_attribute_sorted(rec, &bitmap)?;
+            Ok(())
+        })
+        .expect("give the root an $INDEX_ALLOCATION");
+
+        // Write the two blocks: VCN 0 interior, VCN 1 leaf. Both empty
+        // apart from their sentinel, so both have room.
+        let params = crate::mft_io::read_boot_params_io(&mut dev).expect("boot params");
+        for (i, interior) in [true, false].into_iter().enumerate() {
+            let mut block = empty_indx_block(BS, interior);
+            crate::mft_io::apply_fixup_on_write_magic(&mut block, params.bytes_per_sector, b"INDX")
+                .expect("fixup");
+            dev.write_all_at((lcn + i as u64) * BS as u64, &block)
+                .expect("write indx block");
+        }
+
+        create_file_io(&mut dev, "/", "target.txt")
+            .expect("the create must find the leaf block, not stop at the interior one");
+
+        let ia = crate::idx_block::load_for_directory_io(&mut dev, ROOT).expect("load $I30");
+        assert_eq!(
+            ia.allocated_block_vcns().len(),
+            2,
+            "the fixture must present two blocks for the walk to choose between"
+        );
+        let interior = crate::idx_block::read_indx_block_io(&mut dev, &ia, 0).expect("read vcn 0");
+        let leaf = crate::idx_block::read_indx_block_io(&mut dev, &ia, 1).expect("read vcn 1");
+
+        assert!(
+            index_io::find_entry_in_indx_block(&leaf, "target.txt", None)
+                .expect("search the leaf")
+                .is_some(),
+            "the entry must land in the leaf block"
+        );
+        assert!(
+            index_io::find_entry_in_indx_block(&interior, "target.txt", None)
+                .expect("search the interior block")
+                .is_none(),
+            "the entry must not be in the interior block"
+        );
+    }
+
+    /// A resident attribute of any type with a stream name.
+    /// `record_build::build_named_resident_data_attribute` is the same
+    /// shape but hard-codes `$DATA`.
+    fn named_resident_attribute(
+        attr_type: u32,
+        stream_name: &str,
+        attr_id: u16,
+        value: &[u8],
+    ) -> Vec<u8> {
+        let name: Vec<u16> = stream_name.encode_utf16().collect();
+        let header_size = 24usize;
+        let name_offset = header_size;
+        let value_offset = crate::record_build::align8(name_offset + name.len() * 2);
+        let attr_length = crate::record_build::align8(value_offset + value.len());
+        let mut buf = vec![0u8; attr_length];
+        buf[0..4].copy_from_slice(&attr_type.to_le_bytes());
+        buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+        buf[9] = name.len() as u8;
+        buf[10..12].copy_from_slice(&(name_offset as u16).to_le_bytes());
+        buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+        buf[16..20].copy_from_slice(&(value.len() as u32).to_le_bytes());
+        buf[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes());
+        for (i, c) in name.iter().enumerate() {
+            buf[name_offset + i * 2..name_offset + i * 2 + 2].copy_from_slice(&c.to_le_bytes());
+        }
+        buf[value_offset..value_offset + value.len()].copy_from_slice(value);
+        buf
+    }
+
+    /// An INDX block holding only its end-of-entries sentinel. An
+    /// interior node's entries are eight bytes longer, because each ends
+    /// in the VCN of the child below it.
+    fn empty_indx_block(block_size: usize, interior: bool) -> Vec<u8> {
+        const IH: usize = 0x18;
+        let mut b = vec![0u8; block_size];
+        b[0..4].copy_from_slice(b"INDX");
+        // Update sequence array: one entry per sector, plus the number.
+        let usa_count = (block_size / 512) as u16 + 1;
+        b[0x04..0x06].copy_from_slice(&0x28u16.to_le_bytes());
+        b[0x06..0x08].copy_from_slice(&usa_count.to_le_bytes());
+        b[0x28..0x2A].copy_from_slice(&1u16.to_le_bytes()); // sequence number
+                                                            // The sentinel is placed past the USA so the fixup array and the
+                                                            // entries do not overlap.
+        let first_entry_rel = 0x28usize;
+        let last_len = if interior { 0x18 } else { 0x10 };
+        b[IH..IH + 4].copy_from_slice(&(first_entry_rel as u32).to_le_bytes());
+        b[IH + 4..IH + 8].copy_from_slice(&((first_entry_rel + last_len) as u32).to_le_bytes());
+        b[IH + 8..IH + 12].copy_from_slice(&((block_size - IH) as u32).to_le_bytes());
+        b[IH + 0x0C] = u8::from(interior);
+        let last = IH + first_entry_rel;
+        b[last + 0x08..last + 0x0A].copy_from_slice(&(last_len as u16).to_le_bytes());
+        b[last + 0x0C..last + 0x0E].copy_from_slice(&0x02u16.to_le_bytes()); // LAST
+        b
+    }
 
     #[test]
     fn create_file_io_creates_findable_file() {
