@@ -20,6 +20,9 @@ pub const IH_FLAG_HAS_SUBNODES: u8 = 0x01;
 /// Offsets inside `INDEX_HEADER`:
 const IH_FIRST_ENTRY_OFFSET: usize = 0;
 const IH_TOTAL_SIZE_OF_ENTRIES: usize = 4;
+/// Size of an INDEX_HEADER. Entries begin at `first_entry_offset` bytes
+/// from the header's start, and that offset is measured past this.
+const INDEX_HEADER_SIZE: usize = 0x10;
 /// Offset of `allocated_size_of_entries` within `INDEX_HEADER`.
 /// Spec invariant: `allocated_size >= total_size`. When we grow the
 /// $INDEX_ROOT's resident value (insert path), both fields move
@@ -894,6 +897,69 @@ pub fn insert_entry_into_indx_block_with_collation(
         block[ih_start + 10],
         block[ih_start + 11],
     ]) as usize;
+
+    // ALL THREE OF THOSE ARE RAW u32s OFF THE DISK, AND ALL THREE BOUND
+    // THE `copy_within` BELOW.
+    //
+    // The only check this used to have compared two of them to each
+    // other — `total_size + new_len > allocated_size` — and tied neither
+    // to the block they describe. Its `$INDEX_ROOT` twin was hardened
+    // against exactly this and says why in a comment; the same three
+    // failures were reachable here:
+    //
+    //   * `first_entry_offset` past `total_size` left the sorted-position
+    //     walk unrun and `insertion_point` above `end`, so the shift was
+    //     asked for a range running backwards -- "slice index starts at
+    //     88 but ends at 56".
+    //   * a `total_size` of 0x100000 under an `allocated_size` of
+    //     0xFFFFFFFF passed the room check and made the shift read from
+    //     outside a 4096-byte block.
+    //   * a `first_entry_offset` inside the entries but not on an entry
+    //     boundary started the walk mid-entry and laid the new entry
+    //     across the one already there -- and that one SUCCEEDS, so the
+    //     block goes back to the disk and Windows finds it later.
+    //
+    // The alignment check catches the third only where the offset is
+    // misaligned, which is most of the time but not all of it: an
+    // 8-aligned offset that happens to fall inside an entry is not
+    // distinguishable from a legitimate one without another source of
+    // truth. The `$INDEX_ROOT` path has the same residual gap.
+    if ih_start
+        .checked_add(allocated_size)
+        .is_none_or(|end| end > block.len())
+    {
+        return Err(format!(
+            "the index says its entries are allocated {allocated_size} bytes, past the \
+             {} the block has",
+            block.len() - ih_start
+        ));
+    }
+    // THIS ONE CANNOT CURRENTLY CHANGE THE OUTCOME, and is kept
+    // deliberately. The room check below already refuses whenever
+    // `total_size >= allocated_size`, because `new_len` is never zero —
+    // removing this leaves every test green. It stays because the bound
+    // on `end` a few lines down, which is what keeps `copy_within` inside
+    // the block, would otherwise rest on a capacity test rather than on a
+    // bounds test, and a capacity test is the kind of thing a later edit
+    // reorders or relaxes without noticing what else depended on it.
+    if total_size > allocated_size {
+        return Err(format!(
+            "the index says it holds {total_size} bytes of entries in {allocated_size} \
+             bytes of space"
+        ));
+    }
+    if first_entry_rel > total_size {
+        return Err(format!(
+            "the index says its first entry is {first_entry_rel} bytes in, past the \
+             {total_size} bytes of entries it has"
+        ));
+    }
+    if first_entry_rel < INDEX_HEADER_SIZE || !first_entry_rel.is_multiple_of(8) {
+        return Err(format!(
+            "the index says its first entry is {first_entry_rel} bytes in, which is not \
+             an entry boundary"
+        ));
+    }
 
     // THE CHECK THIS FUNCTION WAS THE ONLY ONE WITHOUT. The $I30 bitmap
     // marks interior and leaf blocks alike, so the block that reached
