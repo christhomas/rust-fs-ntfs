@@ -468,6 +468,18 @@ pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
     let value_length = loc
         .non_resident_value_length
         .ok_or("missing non-resident value_length")?;
+    // Everything from initialized_length to data_length reads as zeros
+    // whatever is on the clusters -- `read.rs` clamps to
+    // `min(data_size, init_size)`, and so does Windows. A write that
+    // ends past this has to move it, or the bytes it just put on the
+    // disk are unreachable through every reader that obeys the field.
+    let init_off = loc.attr_offset + NONRES_INITIALIZED_LENGTH;
+    let initialized_length = u64::from_le_bytes(
+        record[init_off..init_off + 8]
+            .try_into()
+            .map_err(|_| "short record reading initialized_length")?,
+    )
+    .min(value_length);
     let end = offset
         .checked_add(data.len() as u64)
         .ok_or("offset + len overflow")?;
@@ -497,6 +509,15 @@ pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
              (vcn {vcn_first}..{}); W2 will handle allocation",
             vcn_first + n_clusters
         ));
+    }
+
+    // A write that starts past initialized_length leaves a gap, and
+    // raising the field over it would publish whatever the clusters held
+    // before -- the same bug as the one above, pointing the other way.
+    // Zero the gap on disk first. Unmapped VCNs are skipped: nothing
+    // reads them as anything but zeros either way.
+    if offset > initialized_length {
+        zero_fill_range_io(io, &params, &runs, initialized_length, offset)?;
     }
 
     // Walk the runs for the target range and write each contiguous span.
@@ -537,7 +558,73 @@ pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
     }
 
     io.sync()?;
+
+    // The data is on the platter before the field that publishes it
+    // moves, so a crash between the two leaves bytes unread rather than
+    // uninitialised clusters exposed as file content. Same ordering
+    // discipline `truncate` documents for its own.
+    if end > initialized_length {
+        update_mft_record_io(io, record_number, |record| {
+            let loc = attr_io::find_attribute(record, AttrType::Data, None)
+                .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+            record[loc.attr_offset + NONRES_INITIALIZED_LENGTH
+                ..loc.attr_offset + NONRES_INITIALIZED_LENGTH + 8]
+                .copy_from_slice(&end.to_le_bytes());
+            Ok(())
+        })?;
+    }
+
     Ok(data.len() as u64)
+}
+
+/// Write zeros over `[from, to)` of a non-resident value, cluster by
+/// cluster.
+///
+/// Used before `initialized_length` is raised over a region nothing
+/// wrote. A VCN with no run behind it is skipped rather than being an
+/// error: a sparse hole, and anything past the mapped runs, already
+/// reads as zeros.
+///
+/// One cluster's worth of zeros is allocated, not the whole span --
+/// the gap between a grow and a write at the far end of it can be
+/// gigabytes.
+fn zero_fill_range_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    params: &crate::mft_io::BootParams,
+    runs: &[DataRun],
+    from: u64,
+    to: u64,
+) -> Result<(), String> {
+    if to <= from {
+        return Ok(());
+    }
+    let cluster_size = params.cluster_size;
+    let zeros = vec![0u8; cluster_size as usize];
+    for vcn in (from / cluster_size)..=((to - 1) / cluster_size) {
+        let Some(run) = find_run_for_vcn(runs, vcn) else {
+            continue; // hole, or past the mapped runs: already zeros
+        };
+        let Some(lcn) = run.lcn else {
+            continue; // sparse hole: already zeros
+        };
+        let cluster_byte = vcn * cluster_size;
+        let start = from.max(cluster_byte);
+        let stop = to.min(cluster_byte + cluster_size);
+        let len = stop - start;
+        // Checked and bounded by the volume and the device; see
+        // `mft_io::cluster_span`.
+        let disk_offset = crate::mft_io::cluster_span(
+            params,
+            lcn,
+            vcn - run.starting_vcn,
+            start - cluster_byte,
+            len,
+            io.size(),
+        )?;
+        io.write_all_at(disk_offset, &zeros[..len as usize])
+            .map_err(|e| format!("zero-fill: {e}"))?;
+    }
+    Ok(())
 }
 
 fn find_run_for_vcn(runs: &[DataRun], vcn: u64) -> Option<&DataRun> {
