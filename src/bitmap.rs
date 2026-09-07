@@ -101,7 +101,35 @@ pub fn locate_bitmap_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BitmapLocatio
     }
     let runs = data_runs::decode_runs(&record[mapping_start..mapping_end])?;
     let value_length = loc.non_resident_value_length.ok_or("no value_length")?;
-    // total bits = value_length * 8; each bit covers one cluster.
+    // A bit covers a cluster, and the volume has only so many.
+    //
+    // The declared count is $Bitmap's own data_length times eight, off
+    // the disk, with nothing tying it to the boot sector. NTFS sets the
+    // padding bits past the last real cluster so a search cannot walk
+    // off the end -- but a truncated image, a wrong length field, or an
+    // image from another tool leaves them clear, and then
+    // `find_free_run_io` returns an LCN the volume does not have. The
+    // $MFT:$Bitmap sibling has clamped its own count by what the volume
+    // could hold since the same bug was found there; this is the
+    // equivalent.
+    let declared_bits = value_length.saturating_mul(8);
+    // Rounded UP, not down. `volume_bytes()` is `total_sectors x
+    // bytes_per_sector`, and NTFS's total_sectors is one sector short of
+    // the device -- the last sector holds the backup boot sector -- so
+    // the final cluster is only partly inside it. Dividing down would
+    // make that cluster unallocatable on every volume, which is a
+    // capacity bug in exchange for nothing: the ceiling only has to be
+    // tight enough to reject a bitmap that claims several times the
+    // volume, which is the failure being guarded.
+    let cluster_capacity = params.volume_bytes().div_ceil(params.cluster_size.max(1));
+    // A volume that does not say how big it is cannot judge the bitmap,
+    // and answering zero to every question would be worse than
+    // answering what the bitmap said.
+    let total_bits = if cluster_capacity == 0 {
+        declared_bits
+    } else {
+        declared_bits.min(cluster_capacity)
+    };
     // $MFT's own extent, so `free_io` can refuse to hand it out. Read
     // once here rather than on every free.
     let mft_clusters = crate::read::nonresident_contiguous_disk_range(io, 0, AttrType::Data, None)
@@ -110,7 +138,7 @@ pub fn locate_bitmap_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BitmapLocatio
     Ok(BitmapLocation {
         params,
         runs,
-        total_bits: value_length.saturating_mul(8),
+        total_bits,
         value_length,
         mft_clusters,
     })

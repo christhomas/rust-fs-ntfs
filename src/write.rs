@@ -2887,7 +2887,29 @@ pub fn promote_resident_data_to_nonresident_io<T: BlockIo + ?Sized>(
     // Write the data (zero-padded to cluster boundary).
     let allocated_length = n_clusters * cluster_size;
     {
-        let disk_offset = new_lcn * cluster_size;
+        // Checked and bounded by the volume and the device; see
+        // `mft_io::cluster_span`. The LCN comes from
+        // `bitmap::find_free_run_io`, which searches the range $Bitmap
+        // declares for itself -- so a bitmap whose length field says the
+        // volume is larger than it is hands back a cluster the volume
+        // does not have, and on a file-backed image `write_all_at`
+        // silently extends the file rather than failing. The allocation
+        // is given back before the refusal, so a rejected write does not
+        // leave the clusters marked in use.
+        let disk_offset = match crate::mft_io::cluster_span(
+            &params,
+            new_lcn,
+            0,
+            0,
+            allocated_length,
+            io.size(),
+        ) {
+            Ok(at) => at,
+            Err(e) => {
+                let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
+                return Err(format!("write data: {e}"));
+            }
+        };
         if let Err(e) = io.write_all_at(disk_offset, new_data) {
             let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
             return Err(format!("write data: {e}"));
@@ -3055,7 +3077,10 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
         data_lcns.push(lcn);
         hint = lcn + n;
 
-        let disk = lcn * cluster_size;
+        // Checked and bounded by the volume and the device; see
+        // `mft_io::cluster_span`. `?` here unwinds through the caller's
+        // rollback, which frees every cluster this call has taken.
+        let disk = crate::mft_io::cluster_span(params, lcn, 0, 0, n * cluster_size, io.size())?;
         io.write_all_at(disk, &data[*byte_start..*byte_start + *byte_len])
             .map_err(|e| format!("write data segment: {e}"))?;
         // Zero-pad the last (possibly partial) cluster of the run.
@@ -3193,7 +3218,29 @@ pub fn promote_attribute_to_nonresident_io<T: BlockIo + ?Sized>(
 
     let allocated_length = n_clusters * cluster_size;
     {
-        let disk_offset = new_lcn * cluster_size;
+        // Checked and bounded by the volume and the device; see
+        // `mft_io::cluster_span`. The LCN comes from
+        // `bitmap::find_free_run_io`, which searches the range $Bitmap
+        // declares for itself -- so a bitmap whose length field says the
+        // volume is larger than it is hands back a cluster the volume
+        // does not have, and on a file-backed image `write_all_at`
+        // silently extends the file rather than failing. The allocation
+        // is given back before the refusal, so a rejected write does not
+        // leave the clusters marked in use.
+        let disk_offset = match crate::mft_io::cluster_span(
+            &params,
+            new_lcn,
+            0,
+            0,
+            allocated_length,
+            io.size(),
+        ) {
+            Ok(at) => at,
+            Err(e) => {
+                let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
+                return Err(format!("write data: {e}"));
+            }
+        };
         if let Err(e) = io.write_all_at(disk_offset, new_data) {
             let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
             return Err(format!("write data: {e}"));
