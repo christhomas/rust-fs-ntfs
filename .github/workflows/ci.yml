@@ -138,6 +138,40 @@ jobs:
       - run: cargo test --release --locked --lib
       - run: cargo test --release --locked --test mkfs_roundtrip --test mkfs_bin_smoke
 
+      # AND ONCE IN DEBUG, BECAUSE `overflow-checks` IS OFF IN RELEASE.
+      #
+      # Every other `cargo test` in this repository is `--release`, and
+      # `[profile.release]` sets `lto`, `codegen-units`, `opt-level` and
+      # `panic` but not `overflow-checks`, so it defaults off. A defect
+      # whose only symptom is an arithmetic-overflow panic therefore
+      # cannot be observed by any of them: the guard and the gate live in
+      # different build profiles.
+      #
+      # This is narrower than "arithmetic is untested". The crate's 37
+      # `checked_add`/`checked_sub`/`checked_mul` sites return `None` or
+      # an error, and release observes those perfectly well. What it
+      # cannot observe is the case where the ONLY symptom is the panic —
+      # which is what `signed_bytes_needed` was before it was fixed:
+      # negating `i64::MIN` panicked in debug, wrapped in release, and
+      # the wrap happened to reach the right answer through the
+      # function's fallback. Its four tests ran in CI and could not fail
+      # there.
+      #
+      # Measured on this branch by reintroducing that defect:
+      #
+      #     cargo test --release --locked --lib   ->  EXIT=0,   615 passed
+      #     cargo test --locked --lib             ->  EXIT=101, 611 passed, 4 failed
+      #                                               "attempt to negate with overflow"
+      #
+      # With the defect fixed, both are EXIT=0 and 615 passed — so the
+      # difference is the defect, not the profile.
+      #
+      # `--lib` only: the unit tests need no fixtures, so this costs a
+      # second compile and nothing else. It is deliberately not
+      # `--release`'s twin in coverage — it exists for the profile, not
+      # for the breadth.
+      - run: cargo test --locked --lib
+
   # Full integration suite — every unit AND integration test, with the
   # read-path .img fixtures generated on the runner via ntfs-3g/mkntfs.
   # This is the SAME gate as release.yml's `crates-test`, run here on
