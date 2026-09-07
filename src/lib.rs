@@ -1425,20 +1425,11 @@ pub extern "C" fn fs_ntfs_read_file(
             Err(e) => return err_i64(e),
         };
 
-        // §3.8 WOF (Windows Overlay Filter): a WOF-compressed file's unnamed
-        // `$DATA` is empty + sparse; the real bytes live in a `WofCompressedData`
-        // ADS, and the file carries an `IO_REPARSE_TAG_WOF` (0x80000017)
-        // `$REPARSE_POINT`. A plain `$DATA` read would silently return zeros, so
-        // detect the tag and fail loudly until XPRESS/LZX lands
-        // (docs/future-features.md §3.8).
-        if let Ok(rp) = read::read_attribute_value(&mut io, rec, AttrType::ReparsePoint, None) {
-            if rp.len() >= 4 && u32::from_le_bytes([rp[0], rp[1], rp[2], rp[3]]) == 0x8000_0017 {
-                set_error(
-                    "file is WOF-compressed (IO_REPARSE_TAG_WOF); decompression not yet supported",
-                );
-                return -1;
-            }
-        }
+        // §3.8 WOF (Windows Overlay Filter) used to be detected here, and
+        // only here — so `facade::read_file`, the Rust-facing API of the
+        // same crate, returned a zero-filled buffer for the same file.
+        // The refusal lives in `read::read_attribute_range` now, which is
+        // the path both front doors share.
 
         // Ranged native read of the unnamed `$DATA` — reads only the clusters
         // overlapping the window, so a small read of a huge file doesn't

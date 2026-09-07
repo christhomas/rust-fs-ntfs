@@ -160,11 +160,65 @@ pub fn read_attribute_value<T: BlockIo + ?Sized>(
     name: Option<&str>,
 ) -> Result<Vec<u8>, String> {
     match locate_attribute(io, record_number, attr_type, name)? {
-        Some((params, _holder, record, loc)) => read_value_from_record(io, &params, &record, &loc),
+        Some((params, _holder, record, loc)) => {
+            if attr_type == AttrType::Data && name.is_none() {
+                refuse_wof_compressed(io, &params, &record, record_number)?;
+            }
+            read_value_from_record(io, &params, &record, &loc)
+        }
         None => Err(format!(
             "read_attribute_value: attribute {attr_type:?} (name {name:?}) not found in record {record_number}"
         )),
     }
+}
+
+/// Refuse the unnamed `$DATA` of a WOF-compressed file.
+///
+/// Windows Overlay Filter compression -- `compact /exe`, and "Compact
+/// OS" across a whole system partition -- leaves the file's unnamed
+/// `$DATA` empty and sparse, puts the real bytes in a
+/// `WofCompressedData` stream, and marks the file with an
+/// `IO_REPARSE_TAG_WOF` `$REPARSE_POINT`. A plain `$DATA` read of such
+/// a file succeeds and returns the right *number* of bytes, all zero:
+/// a copy-out produces a zero-filled file of the correct length that
+/// looks right until someone tries to use it.
+///
+/// The C ABI's `fs_ntfs_read` used to carry this check on its own, with
+/// the reasoning written out beside it, and `facade::read_file` did
+/// not -- so the two front doors of the same crate disagreed about
+/// whether the file was readable, and the one that said yes was wrong.
+/// It lives here now, on the path they share, so they cannot drift
+/// again.
+///
+/// Only the content reads refuse. `read_stat` and `read_dir_entries` go
+/// on working, because a WOF file is a regular file whose bytes this
+/// crate cannot decode yet -- refusing to list it or to size it would
+/// make a Windows system volume unusable rather than honest.
+///
+/// The record checked is the one holding `$DATA`. For the shape WOF
+/// produces that is the base record, which is also where the
+/// `$REPARSE_POINT` is: an empty sparse `$DATA` does not overflow into
+/// an extension record.
+fn refuse_wof_compressed<T: BlockIo + ?Sized>(
+    io: &mut T,
+    params: &crate::mft_io::BootParams,
+    record: &[u8],
+    record_number: u64,
+) -> Result<(), String> {
+    let Some(rp) = attr_io::find_attribute(record, AttrType::ReparsePoint, None) else {
+        return Ok(());
+    };
+    let value = read_value_from_record(io, params, record, &rp)?;
+    if value.len() >= 4
+        && u32::from_le_bytes([value[0], value[1], value[2], value[3]])
+            == crate::record_build::reparse_tag::WOF
+    {
+        return Err(format!(
+            "record {record_number} is WOF-compressed (IO_REPARSE_TAG_WOF); \
+             decompression not yet supported"
+        ));
+    }
+    Ok(())
 }
 
 /// Locate where an attribute physically lives: the MFT record bytes (base or,
@@ -364,6 +418,9 @@ pub fn read_attribute_range<T: BlockIo + ?Sized>(
         .ok_or_else(|| {
             format!("read_attribute_range: attribute {attr_type:?} (name {name:?}) not found in record {record_number}")
         })?;
+    if attr_type == AttrType::Data && name.is_none() {
+        refuse_wof_compressed(io, &params, &record, record_number)?;
+    }
 
     // Uncompressed, unencrypted, non-resident → true ranged read.
     if !loc.is_resident {
