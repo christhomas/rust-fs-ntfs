@@ -231,9 +231,10 @@ pub fn mft_record_offset(params: &BootParams, record_number: u64) -> u64 {
 /// read or a write somewhere else on the volume: file bytes over the
 /// boot sector, a bitmap read-modify-write over an MFT record.
 ///
-/// The one function in this crate that got this right is
-/// `read::nonresident_contiguous_disk_range`; every other site did the
-/// multiply raw.
+/// The one function in this crate that got this right on its own is
+/// `read::nonresident_contiguous_disk_range`, which does the same
+/// checks inline against `io.size()`. Every other site did the multiply
+/// raw; they all come through here now, reads included.
 pub fn cluster_span(
     params: &BootParams,
     lcn: u64,
