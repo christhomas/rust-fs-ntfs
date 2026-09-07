@@ -144,24 +144,72 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
 }
 
 /// Translate a VCN (relative to the start of `$INDEX_ALLOCATION`) to
-/// the on-disk byte offset.
-pub fn vcn_to_disk_offset(ia: &IndexAllocation, vcn: u64) -> Result<u64, String> {
+/// the on-disk byte offset of the whole index block that starts there.
+///
+/// THE WHOLE BLOCK HAS TO BE IN ONE RUN.
+///
+/// The run lookup below proves only that the block's FIRST cluster is
+/// mapped, and the transfer the callers then make is `block_size`
+/// bytes. An index block is 4096 bytes, so on a 512-byte-cluster volume
+/// it is eight clusters, on a 1 KiB volume four, on a 2 KiB volume two
+/// -- and `$INDEX_ALLOCATION` fragments as a directory grows, so a
+/// block landing across a run boundary is a normal outcome rather than
+/// a corrupt one.
+///
+/// Without this check the tail of the block is read from, and written
+/// to, whichever clusters happen to follow the run's last one, which
+/// belong to some other file. On read the borrowed sector tails usually
+/// fail the update-sequence check, so a healthy directory simply stops
+/// listing; that is the good case. `update_indx_block_io` writes
+/// `block_size` bytes at the same offset, so a directory edit -- a
+/// create, a delete -- silently overwrites unrelated file contents.
+///
+/// Reading and writing a straddling block in per-run pieces is the
+/// complete answer. Refusing is the correct and safe half, and it is
+/// what the read path already does by accident.
+///
+/// `device_bytes` is the size of the device the transfer will land on;
+/// this used to pass `u64::MAX`, which left `cluster_span` bounding
+/// against the volume alone -- the weaker of the two limits it applies.
+pub fn vcn_to_disk_offset(
+    ia: &IndexAllocation,
+    vcn: u64,
+    device_bytes: u64,
+) -> Result<u64, String> {
     let run = ia
         .runs
         .iter()
         .find(|r| vcn >= r.starting_vcn && vcn < r.starting_vcn + r.length)
         .ok_or_else(|| format!("VCN {vcn} not mapped in $INDEX_ALLOCATION"))?;
     let lcn = run.lcn.ok_or_else(|| format!("VCN {vcn} in sparse run"))?;
-    // Checked and bounded by the volume, for the whole index block --
-    // the run lookup above proves only that the block's FIRST cluster
-    // is in a run, and the transfer is `block_size` bytes.
+
+    let block_clusters = ia.block_size.div_ceil(ia.params.cluster_size.max(1));
+    let run_end_vcn = run.starting_vcn.checked_add(run.length).ok_or_else(|| {
+        format!(
+            "$INDEX_ALLOCATION run at VCN {} has no end",
+            run.starting_vcn
+        )
+    })?;
+    let block_end_vcn = vcn
+        .checked_add(block_clusters)
+        .ok_or_else(|| format!("an index block at VCN {vcn} has no end"))?;
+    if block_end_vcn > run_end_vcn {
+        return Err(format!(
+            "index block at VCN {vcn} spans {block_clusters} clusters, past the end of \
+             its run at VCN {run_end_vcn}; a block that straddles a run boundary is not \
+             read or written as one transfer"
+        ));
+    }
+
+    // Checked and bounded by the volume and the device, for the whole
+    // index block.
     crate::mft_io::cluster_span(
         &ia.params,
         lcn,
         vcn - run.starting_vcn,
         0,
         ia.block_size,
-        u64::MAX,
+        device_bytes,
     )
 }
 
@@ -178,7 +226,7 @@ pub fn read_indx_block_io<T: BlockIo + ?Sized>(
     ia: &IndexAllocation,
     vcn: u64,
 ) -> Result<Vec<u8>, String> {
-    let disk_offset = vcn_to_disk_offset(ia, vcn)?;
+    let disk_offset = vcn_to_disk_offset(ia, vcn, io.size())?;
     let mut buf = vec![0u8; ia.block_size as usize];
     io.read_exact_at(disk_offset, &mut buf)
         .map_err(|e| format!("read indx: {e}"))?;
@@ -222,7 +270,7 @@ where
     mutate(&mut block)?;
     apply_fixup_on_write_magic(&mut block, ia.params.bytes_per_sector, b"INDX")?;
 
-    let disk_offset = vcn_to_disk_offset(ia, vcn)?;
+    let disk_offset = vcn_to_disk_offset(ia, vcn, io.size())?;
     io.write_all_at(disk_offset, &block)
         .map_err(|e| format!("write indx: {e}"))?;
     io.sync()?;
@@ -310,9 +358,9 @@ mod tests {
         }];
         let ia = make_ia(4096, 4096, runs, vec![], 0);
         // VCN 0 → LCN 10 → byte offset 10 * 4096.
-        assert_eq!(vcn_to_disk_offset(&ia, 0).unwrap(), 10 * 4096);
+        assert_eq!(vcn_to_disk_offset(&ia, 0, u64::MAX).unwrap(), 10 * 4096);
         // VCN 3 → LCN 13 → byte offset 13 * 4096.
-        assert_eq!(vcn_to_disk_offset(&ia, 3).unwrap(), 13 * 4096);
+        assert_eq!(vcn_to_disk_offset(&ia, 3, u64::MAX).unwrap(), 13 * 4096);
     }
 
     #[test]
@@ -331,9 +379,9 @@ mod tests {
         ];
         let ia = make_ia(4096, 4096, runs, vec![], 0);
         // VCN 2 maps to LCN 20 + (2-2) = 20.
-        assert_eq!(vcn_to_disk_offset(&ia, 2).unwrap(), 20 * 4096);
+        assert_eq!(vcn_to_disk_offset(&ia, 2, u64::MAX).unwrap(), 20 * 4096);
         // VCN 4 → LCN 22.
-        assert_eq!(vcn_to_disk_offset(&ia, 4).unwrap(), 22 * 4096);
+        assert_eq!(vcn_to_disk_offset(&ia, 4, u64::MAX).unwrap(), 22 * 4096);
     }
 
     #[test]
@@ -344,7 +392,7 @@ mod tests {
             lcn: None,
         }];
         let ia = make_ia(4096, 4096, runs, vec![], 0);
-        let err = vcn_to_disk_offset(&ia, 1).unwrap_err();
+        let err = vcn_to_disk_offset(&ia, 1, u64::MAX).unwrap_err();
         assert!(err.contains("sparse"), "{err}");
     }
 
@@ -356,7 +404,7 @@ mod tests {
             lcn: Some(10),
         }];
         let ia = make_ia(4096, 4096, runs, vec![], 0);
-        let err = vcn_to_disk_offset(&ia, 99).unwrap_err();
+        let err = vcn_to_disk_offset(&ia, 99, u64::MAX).unwrap_err();
         assert!(err.contains("not mapped"), "{err}");
     }
 
@@ -390,14 +438,52 @@ mod tests {
     #[test]
     fn vcn_to_disk_offset_small_cluster_size() {
         // cluster_size=512: VCN 0 at LCN 100 → disk = 100*512.
+        // The run is 16 clusters so that the two VCNs addressed below
+        // each have a whole 8-cluster block behind them; this test is
+        // about the arithmetic, and the straddle check has its own.
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 16,
+            lcn: Some(100),
+        }];
+        let ia = make_ia(4096, 512, runs, vec![], 0);
+        assert_eq!(vcn_to_disk_offset(&ia, 0, u64::MAX).unwrap(), 100 * 512);
+        assert_eq!(vcn_to_disk_offset(&ia, 1, u64::MAX).unwrap(), 101 * 512);
+    }
+
+    #[test]
+    fn a_block_that_straddles_a_run_boundary_is_refused() {
+        // 4 KiB blocks on a 512-byte-cluster volume: a block is eight
+        // clusters. The first run holds four of them, so the block at
+        // VCN 0 runs off its end and the tail belongs to whatever
+        // follows LCN 103 -- not to LCN 500, where this attribute's
+        // next four clusters actually are.
+        let runs = vec![
+            DataRun {
+                starting_vcn: 0,
+                length: 4,
+                lcn: Some(100),
+            },
+            DataRun {
+                starting_vcn: 4,
+                length: 4,
+                lcn: Some(500),
+            },
+        ];
+        let ia = make_ia(4096, 512, runs, vec![0x01], 4096);
+        let err = vcn_to_disk_offset(&ia, 0, u64::MAX).unwrap_err();
+        assert!(err.contains("straddles"), "{err}");
+    }
+
+    #[test]
+    fn a_block_that_exactly_fills_its_run_is_allowed() {
         let runs = vec![DataRun {
             starting_vcn: 0,
             length: 8,
             lcn: Some(100),
         }];
-        let ia = make_ia(4096, 512, runs, vec![], 0);
-        assert_eq!(vcn_to_disk_offset(&ia, 0).unwrap(), 100 * 512);
-        assert_eq!(vcn_to_disk_offset(&ia, 1).unwrap(), 101 * 512);
+        let ia = make_ia(4096, 512, runs, vec![0x01], 4096);
+        assert_eq!(vcn_to_disk_offset(&ia, 0, u64::MAX).unwrap(), 100 * 512);
     }
 
     #[test]
@@ -409,8 +495,8 @@ mod tests {
             lcn: Some(10),
         }];
         let ia = make_ia(4096, 4096, runs, vec![], 0);
-        assert!(vcn_to_disk_offset(&ia, 3).is_ok());
-        assert!(vcn_to_disk_offset(&ia, 4).is_err());
+        assert!(vcn_to_disk_offset(&ia, 3, u64::MAX).is_ok());
+        assert!(vcn_to_disk_offset(&ia, 4, u64::MAX).is_err());
     }
 
     // --- read_indx_block_io / update_indx_block_io -------------------------
@@ -514,6 +600,66 @@ mod tests {
         // Read back and verify the byte survived the write-fixup round-trip.
         let readback = read_indx_block_io(&mut dev, &ia, 0).unwrap();
         assert_eq!(readback[0x40], 0xAB);
+    }
+
+    #[test]
+    fn a_straddling_block_is_neither_read_from_nor_written_over_the_neighbour() {
+        // A 4 KiB index block on a 512-byte-cluster volume is eight
+        // clusters. This attribute's run holds four of them, so the
+        // second half of the block's bytes belongs to the neighbouring
+        // file marked 0x4E below.
+        //
+        // The neighbour's sector tails are left carrying the same
+        // update-sequence number as the block, so the fixup check
+        // accepts the borrowed half. That is the coincidence the read
+        // path relies on NOT happening -- it is what makes a straddling
+        // block usually fail loudly instead of quietly -- and nothing
+        // guarantees it. When it does happen the read succeeds and the
+        // write that follows puts an index block over another file.
+        let cluster = 512usize;
+        let lcn = 100usize;
+        let mut storage = vec![0u8; (lcn + 16) * cluster];
+        storage[lcn * cluster..lcn * cluster + 4096].copy_from_slice(&valid_indx_block());
+        let neighbour_at = (lcn + 4) * cluster;
+        for b in &mut storage[neighbour_at..neighbour_at + 4 * cluster] {
+            *b = 0x4E;
+        }
+        for s in 0..4 {
+            let tail = neighbour_at + (s + 1) * cluster - 2;
+            storage[tail] = 0x01;
+            storage[tail + 1] = 0x00;
+        }
+        let neighbour_before = storage[neighbour_at..neighbour_at + 4 * cluster].to_vec();
+        let mut dev = MemDev(storage);
+        let ia = make_ia(
+            4096,
+            cluster as u64,
+            vec![DataRun {
+                starting_vcn: 0,
+                length: 4,
+                lcn: Some(lcn as u64),
+            }],
+            vec![0x01],
+            4096,
+        );
+
+        assert!(
+            read_indx_block_io(&mut dev, &ia, 0).is_err(),
+            "the read took its second half from the next file's clusters"
+        );
+        assert!(
+            update_indx_block_io(&mut dev, &ia, 0, |b| {
+                b[0x40] = 0xAB;
+                Ok(())
+            })
+            .is_err(),
+            "the write put an index block's tail over the next file's clusters"
+        );
+        assert_eq!(
+            &dev.0[neighbour_at..neighbour_at + 4 * cluster],
+            &neighbour_before[..],
+            "the neighbouring file's clusters were modified"
+        );
     }
 
     #[test]
