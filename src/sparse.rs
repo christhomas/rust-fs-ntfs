@@ -20,9 +20,20 @@
 use crate::data_runs::DataRun;
 
 /// Attribute-header data-flag (`+0x0C`, u16 LE) marking a non-resident
-/// attribute as sparse. Per MS-FSCC: 0x0001 = compressed, 0x4000 = encrypted,
-/// 0x8000 = sparse.
-pub const ATTR_FLAG_SPARSE: u16 = 0x8000;
+/// attribute as sparse.
+///
+/// RE-EXPORTED RATHER THAN REDECLARED. This was a second `0x8000`
+/// written out here, referenced nowhere in `src/`, while the reader and
+/// the three write guards used [`crate::attr_io::attr_flags::SPARSE`].
+/// Two spellings of one on-disk constant is exactly the arrangement
+/// that produced the defect fixed in #196, where three private copies
+/// of a mask drifted until none of them caught the bits they named.
+///
+/// The name is kept rather than deleted because it is `pub` and
+/// something outside this crate may be using it. What changes is that
+/// it is now the canonical value rather than a copy that happens to
+/// agree with it.
+pub use crate::attr_io::attr_flags::SPARSE as ATTR_FLAG_SPARSE;
 
 /// `$STANDARD_INFORMATION` / `$FILE_NAME` file-attribute bit marking the file
 /// as sparse (MS-FSCC §2.6 `FILE_ATTRIBUTE_SPARSE_FILE`).
