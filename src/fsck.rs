@@ -473,15 +473,27 @@ fn locate_volume_flags_io<T: FsckIo>(io: &mut T) -> Result<(u64, u16), String> {
 /// stops it leaving the volume; it does nothing about a run aimed at
 /// the volume's own structures.
 ///
-/// The two that matter are the boot sector, which is where a volume
-/// starts, and `$MFT`, which is where everything else is. `fsck_io`
-/// runs the reset FIRST, so filling either of them destroys the volume
-/// and then reports success, counting the bytes it destroyed.
-fn forbidden_fill_ranges(params: &crate::mft_io::BootParams, mft_bytes: u64) -> [(u64, u64); 2] {
+/// The boot sector is where a volume starts, and `$MFT` is where
+/// everything else is -- both were already forbidden. `other`
+/// (see rust-fs-ntfs#157) is what `$LogFile` reaching `$MFTMirr`,
+/// `$Bitmap`, `$AttrDef`, `$Secure` or `$UpCase` -- or, when any of
+/// those could not be located, the whole volume -- adds to the same
+/// check below. `fsck_io` runs the reset FIRST, so filling any of
+/// these destroys the volume and then reports success, counting the
+/// bytes it destroyed.
+fn forbidden_fill_ranges(
+    params: &crate::mft_io::BootParams,
+    mft_bytes: u64,
+    other: &[(u64, u64)],
+) -> Vec<(u64, u64)> {
     let boot = (0u64, u64::from(params.bytes_per_sector).max(512));
     let mft_start = params.mft_lcn.saturating_mul(params.cluster_size);
     let mft = (mft_start, mft_start.saturating_add(mft_bytes));
-    [boot, mft]
+    let mut ranges = Vec::with_capacity(2 + other.len());
+    ranges.push(boot);
+    ranges.push(mft);
+    ranges.extend_from_slice(other);
+    ranges
 }
 
 fn ranges_overlap(a: (u64, u64), b: (u64, u64)) -> bool {
@@ -510,8 +522,16 @@ fn locate_logfile_data_io<T: FsckIo>(io: &mut T) -> Result<(u64, u64), String> {
         // the record size times the records the volume could hold is the
         // fallback: a smaller guess would leave part of $MFT unguarded.
         .unwrap_or_else(|_| params.volume_bytes());
+    // The other five system metafiles, by the same shared helper
+    // `bitmap::locate_bitmap_io` uses -- fails closed to the whole
+    // volume if any of them cannot be located. `$LogFile` itself
+    // (record 2) is excluded: this is the reset that legitimately
+    // overwrites `$LogFile`'s own storage, so its own target must not
+    // "overlap" a list checking it against itself. See
+    // rust-fs-ntfs#157.
+    let other = crate::read::other_protected_metafile_ranges_io(io, Some(LOGFILE_RECORD_NUMBER));
     let fill = (offset, offset.saturating_add(length));
-    for forbidden in forbidden_fill_ranges(&params, mft_bytes) {
+    for forbidden in forbidden_fill_ranges(&params, mft_bytes, &other) {
         if ranges_overlap(fill, forbidden) {
             return Err(format!(
                 "$LogFile says its data is at [{}, {}), which overlaps [{}, {}) -- the \
@@ -828,6 +848,56 @@ mod tests {
         assert!(length > 0);
     }
 
+    /// THE WIRING between `locate_logfile_data_io` and the shared
+    /// helper, on a real device. `a_fill_over_another_system_metafile_is_also_refused`
+    /// and `a_whole_volume_fallback_range_refuses_a_fill_anywhere` prove
+    /// `forbidden_fill_ranges` uses whatever `other` it is given
+    /// correctly; neither would notice `locate_logfile_data_io` itself
+    /// no longer calling `other_protected_metafile_ranges_io` at all,
+    /// since they construct `other` by hand. This calls the real
+    /// function against a real formatted volume and checks it actually
+    /// finds something, with `$LogFile` (record 2) correctly excluded
+    /// from its own answer -- `$LogFile`'s own range must not appear,
+    /// or `locate_logfile_data_io` would refuse every volume, including
+    /// this one.
+    #[test]
+    fn other_protected_metafile_ranges_io_finds_real_metafiles_and_excludes_logfile_itself() {
+        let mut dev = fresh_dev();
+        let params = crate::mft_io::read_boot_params_io(&mut dev).unwrap();
+        let other =
+            crate::read::other_protected_metafile_ranges_io(&mut dev, Some(LOGFILE_RECORD_NUMBER));
+
+        // NON-EMPTINESS IS NOT ENOUGH -- see the matching test in
+        // `bitmap`. The whole-volume fallback this used to produce was
+        // one non-empty range, so `!is_empty()` passed on exactly the
+        // failure it was meant to catch.
+        assert!(
+            !other.is_empty(),
+            "a freshly formatted volume has real, locatable system metafiles to report"
+        );
+        let volume_bytes = params.volume_bytes();
+        assert!(
+            !other
+                .iter()
+                .any(|&(start, end)| start == 0 && end >= volume_bytes),
+            "no single range may span the whole volume ({volume_bytes} bytes) -- that shape \
+             refuses every fill anywhere. Got {other:?}"
+        );
+        assert!(
+            other.len() > 1,
+            "several metafiles are located separately, so several ranges are expected; one \
+             range is the signature of the old whole-volume fallback. Got {other:?}"
+        );
+
+        let (logfile_offset, logfile_length) = locate_logfile_data_io(&mut dev).unwrap();
+        let logfile_range = (logfile_offset, logfile_offset + logfile_length);
+        assert!(
+            !other.contains(&logfile_range),
+            "excluding $LogFile means its OWN range must not be in the answer, or \
+             locate_logfile_data_io would refuse to reset $LogFile on every volume"
+        );
+    }
+
     // --- IoReader (Read + Seek adapter) ------------------------------------
 
     #[test]
@@ -1091,7 +1161,7 @@ mod fill_range_tests {
         let p = params();
         let mft_at = 1024 * 4096;
         let mft_bytes = 16 * 1024 * 1024;
-        let forbidden = forbidden_fill_ranges(&p, mft_bytes);
+        let forbidden = forbidden_fill_ranges(&p, mft_bytes, &[]);
 
         // The boot sector, and $MFT.
         assert_eq!(forbidden[0], (0, 512));
@@ -1112,5 +1182,51 @@ mod fill_range_tests {
         assert!(!overlaps((512, 4096)), "between the two");
         assert!(!overlaps((mft_at + mft_bytes, mft_at + mft_bytes + 4096)));
         assert!(!overlaps((64 * 1024 * 1024, 64 * 1024 * 1024 + 4096)));
+    }
+
+    /// The other five system metafiles this issue names -- `$MFTMirr`,
+    /// `$LogFile` itself, `$AttrDef`, `$Bitmap`, `$Secure`, `$UpCase` --
+    /// are refused via the SAME mechanism as the boot sector and $MFT,
+    /// not a second hardcoded check. `other` here stands in for
+    /// whatever `other_protected_metafile_ranges_io` located.
+    #[test]
+    fn a_fill_over_another_system_metafile_is_also_refused() {
+        let p = params();
+        let mft_at = 1024 * 4096;
+        let mft_bytes = 16 * 1024 * 1024;
+        // $MFTMirr, well clear of the boot sector and $MFT.
+        let mftmirr = (64 * 1024 * 1024, 64 * 1024 * 1024 + 4 * 1024 * 1024);
+        let forbidden = forbidden_fill_ranges(&p, mft_bytes, &[mftmirr]);
+
+        let overlaps = |fill: (u64, u64)| forbidden.iter().any(|f| ranges_overlap(fill, *f));
+
+        assert!(overlaps(mftmirr), "$MFTMirr's own range");
+        assert!(
+            overlaps((mftmirr.0 - 4096, mftmirr.0 + 4096)),
+            "a fill straddling $MFTMirr's start"
+        );
+        // Still clear of everything, between $MFT and $MFTMirr.
+        assert!(!overlaps((mft_at + mft_bytes, mftmirr.0 - 4096)));
+    }
+
+    /// When any of the other five could not be located, the shared
+    /// helper's fallback is one range spanning the whole volume (see
+    /// `crate::read::other_protected_metafile_ranges_io`), and that
+    /// range refuses a fill anywhere on the volume through the same
+    /// overlap check -- no special case needed here either.
+    #[test]
+    fn a_whole_volume_fallback_range_refuses_a_fill_anywhere() {
+        let p = params();
+        let mft_at = 1024 * 4096;
+        let mft_bytes = 16 * 1024 * 1024;
+        let whole_volume = (0u64, p.volume_bytes());
+        let forbidden = forbidden_fill_ranges(&p, mft_bytes, &[whole_volume]);
+
+        let overlaps = |fill: (u64, u64)| forbidden.iter().any(|f| ranges_overlap(fill, *f));
+
+        assert!(
+            overlaps((mft_at + mft_bytes, mft_at + mft_bytes + 4096)),
+            "a range that was clear of the boot sector and $MFT alone must now be refused too"
+        );
     }
 }

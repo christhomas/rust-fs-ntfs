@@ -973,6 +973,250 @@ pub fn nonresident_contiguous_disk_range<T: BlockIo + ?Sized>(
     Ok((start, length))
 }
 
+/// Record numbers of every metafile whose on-disk storage must never be
+/// handed out by `$Bitmap`'s allocator, or overwritten by `fsck`'s
+/// `$LogFile` reset -- beyond `$MFT` (record 0), which every caller
+/// already locates by other means, because it needs `$MFT`'s length for
+/// its own purposes anyway.
+///
+/// See rust-fs-ntfs#157: `BitmapLocation::covers_the_volumes_own` and
+/// `fsck`'s `forbidden_fill_ranges` each protected only the boot sector
+/// and `$MFT`, so a file record whose run list happened to overlap
+/// `$MFTMirr`, `$Bitmap`'s own storage, `$LogFile`, `$AttrDef`,
+/// `$Secure` or `$UpCase` could free or overwrite live volume metadata
+/// with no refusal at all.
+pub const OTHER_PROTECTED_METAFILE_RECORDS: [(u64, Option<&str>, &str); 7] = [
+    // $MFT itself. It belongs in this list rather than being handled
+    // separately by `mft_clusters`, because that scalar is derived from
+    // `nonresident_contiguous_disk_range`, which REFUSES a fragmented
+    // attribute -- and a fragmented `$MFT` is ordinary. The image
+    // shipped as the `ntfs` crate's own `testdata/testfs1` has SIX runs
+    // at format time. See rust-fs-ntfs#157.
+    (0, None, "$MFT"),
+    (1, None, "$MFTMirr"),
+    (2, None, "$LogFile"),
+    (4, None, "$AttrDef"),
+    (6, None, "$Bitmap"),
+    // NOT the unnamed stream. `$Secure` keeps its security descriptors
+    // in the NAMED `$SDS` stream; its unnamed `$DATA` does not exist on
+    // a third-party-formatted volume at all, and is a small resident
+    // stub on one this crate formats itself. Asking for the unnamed
+    // stream therefore protected `$Secure` on NO volume, while also
+    // being the lookup whose failure triggered a whole-volume refusal.
+    // Measured on testfs1: unnamed $DATA "not found", `$SDS` at
+    // (289792, 262396).
+    (9, Some("$SDS"), "$Secure:$SDS"),
+    (10, None, "$UpCase"),
+];
+
+/// Every physical extent of record `record_number`'s unnamed `$DATA`,
+/// as byte ranges `[start, end)`, in run order. Sparse holes (`lcn ==
+/// None`) are skipped -- they hold no clusters to protect.
+///
+/// Unlike [`nonresident_contiguous_disk_range`], this does NOT refuse a
+/// fragmented attribute. Several of the files this backs -- `$Bitmap`
+/// itself, notably -- are legitimately laid out in more than one run on
+/// an ordinary volume (see `bitmap::make_fragmented_bm` in this crate's
+/// own tests), and refusing them here would make an unremarkable volume
+/// look too dangerous to ever free a cluster on. The single-extent
+/// restriction exists for callers that write a flat byte range over the
+/// result; this one only reports where the attribute's clusters already
+/// are.
+fn nonresident_disk_ranges_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    name: Option<&str>,
+) -> Result<Vec<(u64, u64)>, String> {
+    let (params, _holder, record, loc) = locate_attribute(io, record_number, AttrType::Data, name)?
+        .ok_or_else(|| format!("record {record_number}: no $DATA named {name:?}"))?;
+    if loc.is_resident {
+        // NOT A FAILURE. A resident attribute's bytes live inside the
+        // MFT record itself, not in clusters `$Bitmap` tracks -- there
+        // is nothing separate for a corrupted run list to be aimed at,
+        // so there is nothing to add here. `$AttrDef`, `$Secure` and
+        // `$UpCase` in particular are ordinarily small enough to be
+        // resident on a freshly formatted or otherwise modest volume;
+        // treating that as "could not determine, protect everything"
+        // made `fsck` refuse its own `$LogFile` reset on an entirely
+        // unremarkable volume the first time this was measured against
+        // a real one, which is the class of false positive this
+        // function exists to avoid causing.
+        return Ok(Vec::new());
+    }
+    let mpo = loc
+        .non_resident_mapping_pairs_offset
+        .ok_or("non-resident attribute has no mapping-pairs offset")? as usize;
+    let runs =
+        data_runs::decode_runs(&record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length])?;
+    runs.iter()
+        .filter_map(|r| {
+            let lcn = r.lcn?;
+            let start = match lcn.checked_mul(params.cluster_size) {
+                Some(v) => v,
+                None => return Some(Err(format!("record {record_number}: run start overflows"))),
+            };
+            let len_bytes = match r.length.checked_mul(params.cluster_size) {
+                Some(v) => v,
+                None => return Some(Err(format!("record {record_number}: run length overflows"))),
+            };
+            Some(Ok((start, start.saturating_add(len_bytes))))
+        })
+        .collect()
+}
+
+/// Byte ranges `[start, end)` that must never be freed or overwritten:
+/// the on-disk storage of every metafile in
+/// [`OTHER_PROTECTED_METAFILE_RECORDS`].
+///
+/// `$MFT`'s own extent, with a bounded fallback when record 0 will not
+/// decode.
+///
+/// `$MFT` is the one metafile whose absence from the protected set
+/// restores this issue's opening sentence: `unlink` freeing the
+/// clusters that hold every file record on the volume. Measured on a
+/// formatted volume with record 0 blanked, before this function
+/// existed: `(4, 68)` vanished from the protected set,
+/// `covers_the_volumes_own(mft_lcn, 1)` answered false, and
+/// `free_io` on `$MFT`'s own first cluster SUCCEEDED.
+///
+/// So this one fails closed, unlike the best-effort treatment the other
+/// metafiles get -- and BOUNDED, never to the whole volume, which is
+/// the distinction that makes it safe. The whole-volume fallback an
+/// earlier revision used refused 4095 of 4095 clusters on an ordinary
+/// third-party volume and broke `rm` on every file. That was caused by
+/// two lookup bugs, both since fixed: `$MFT` located by a
+/// single-extent-only helper that refuses an ordinary fragmented
+/// `$MFT`, and `$Secure` asked for an unnamed `$DATA` that does not
+/// exist. With those fixed, all seven records resolve on both a
+/// volume this crate formats and a third-party one -- twelve ranges on
+/// the latter, eight on the former -- so the tiers below fire on
+/// neither healthy volume.
+///
+/// Three tiers, narrowest first:
+///
+/// 1. record 0's own run list, via the multi-run helper;
+/// 2. `$MFTMirr`'s copy of record 0. The mirror holds records 0..3 and
+///    is independently locatable, so a `$MFT` whose own record is
+///    damaged can still say where it lives. This is the case `chkdsk`
+///    repairs from, and the reason `$MFTMirr` exists;
+/// 3. a bounded region from `params.mft_lcn` -- enough to hold the
+///    sixteen reserved system records. A FLOOR, not a claim about
+///    `$MFT`'s true length: a larger `$MFT` has its tail unprotected
+///    in this already-degraded case, which is strictly better than the
+///    nothing that was protected before and strictly better than the
+///    volume-wide refusal that broke ordinary use.
+fn mft_ranges_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    params: &crate::mft_io::BootParams,
+) -> Vec<(u64, u64)> {
+    // Tier 1: record 0 itself.
+    if let Ok(runs) = nonresident_disk_ranges_io(io, 0, None) {
+        if !runs.is_empty() {
+            return runs;
+        }
+    }
+
+    // Tier 2: the mirror's copy of record 0.
+    if let Ok(mirror) = nonresident_disk_ranges_io(io, 1, None) {
+        if let Some(&(mirror_start, _)) = mirror.first() {
+            let size = params.file_record_size.max(1) as usize;
+            let mut record = vec![0u8; size];
+            if io.read_exact_at(mirror_start, &mut record).is_ok()
+                && crate::mft_io::apply_fixup_on_read(&mut record, params.bytes_per_sector).is_ok()
+            {
+                if let Some(loc) = attr_io::find_attribute(&record, AttrType::Data, None) {
+                    if !loc.is_resident {
+                        if let Some(mpo) = loc.non_resident_mapping_pairs_offset {
+                            let start = loc.attr_offset + mpo as usize;
+                            let end = loc.attr_offset + loc.attr_length;
+                            if start < end && end <= record.len() {
+                                if let Ok(runs) = data_runs::decode_runs(&record[start..end]) {
+                                    let ranges: Vec<(u64, u64)> = runs
+                                        .iter()
+                                        .filter_map(|r| {
+                                            let lcn = r.lcn?;
+                                            let s = lcn.checked_mul(params.cluster_size)?;
+                                            let len = r.length.checked_mul(params.cluster_size)?;
+                                            Some((s, s.saturating_add(len)))
+                                        })
+                                        .collect();
+                                    if !ranges.is_empty() {
+                                        return ranges;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Tier 3: a bounded floor at $MFT's declared start.
+    const RESERVED_RECORDS: u64 = 16;
+    let start = params.mft_lcn.saturating_mul(params.cluster_size);
+    let floor = params
+        .file_record_size
+        .max(1)
+        .saturating_mul(RESERVED_RECORDS);
+    vec![(start, start.saturating_add(floor))]
+}
+
+/// BEST EFFORT PER METAFILE, and deliberately NOT fail-closed to the
+/// whole volume. A record that cannot be located contributes no ranges
+/// and the rest are still protected.
+///
+/// The first version of this did fail closed -- any lookup failure
+/// returned one range spanning the whole volume, on the reasoning that
+/// protecting too much costs a refused operation while protecting too
+/// little corrupts the volume. Measured against a volume this crate did
+/// not format (the `ntfs` crate's own `testdata/testfs1`, which this
+/// crate reads correctly), that reasoning was inverted by the numbers:
+/// `$Secure`'s unnamed `$DATA` does not exist there, the fallback fired,
+/// and `rm` on an ordinary file was refused with 4095 of 4095 clusters
+/// declared the volume's own. The defect this function closes needs a
+/// MALFORMED run list to fire and hurts almost nobody; a false positive
+/// here breaks every `unlink` on every volume, every time. The
+/// asymmetry runs the other way from how it first reads.
+///
+/// So a metafile whose storage cannot be located is simply not added.
+/// That is still strictly more than the boot sector and `$MFT` this
+/// crate protected before, which is what rust-fs-ntfs#157 is about.
+///
+/// `exclude_record` leaves one record out -- for a caller about to
+/// legitimately overwrite that record's own storage, so its own target
+/// does not "overlap" the very list checking it.
+pub fn other_protected_metafile_ranges_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    exclude_record: Option<u64>,
+) -> Vec<(u64, u64)> {
+    let mut ranges = Vec::with_capacity(OTHER_PROTECTED_METAFILE_RECORDS.len());
+    // `$MFT` is not best-effort: see `mft_ranges_io`. Its absence from
+    // the set is the defect this whole guard exists to close, so it
+    // fails closed -- bounded, never volume-wide.
+    if exclude_record != Some(0) {
+        if let Ok(params) = crate::mft_io::read_boot_params_io(io) {
+            ranges.extend(mft_ranges_io(io, &params));
+        }
+    }
+    for &(record_number, name, _label) in &OTHER_PROTECTED_METAFILE_RECORDS {
+        if record_number == 0 {
+            continue; // handled above, with its own fallback tiers
+        }
+        // A caller about to overwrite ITS OWN metafile's storage on
+        // purpose -- `fsck`'s `$LogFile` reset is the one case here --
+        // excludes that record, or its own target always "overlaps"
+        // the list it is being checked against.
+        if exclude_record == Some(record_number) {
+            continue;
+        }
+        if let Ok(runs) = nonresident_disk_ranges_io(io, record_number, name) {
+            ranges.extend(runs);
+        }
+    }
+    ranges
+}
+
 /// One entry in a directory listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
