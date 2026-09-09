@@ -82,7 +82,14 @@ fn entry_name(buf: &[u8], cursor: usize, length: usize) -> Result<Vec<u16>, Stri
 }
 
 /// One located index entry inside an `$INDEX_ROOT`.
+///
+/// `#[non_exhaustive]`: this type is returned, not built, by anyone
+/// outside the crate, and it gained a field once already. Sealing it
+/// against literal construction means the next field costs a minor
+/// version rather than a downstream compile error -- which is what
+/// adding `sequence` cost, and the reason the seal arrives with it.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct IndexEntryLocation {
     /// Byte offset within the MFT record where the entry starts.
     pub record_offset: usize,

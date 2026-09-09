@@ -23,29 +23,52 @@ use std::path::Path;
 const VOL_SIZE: u64 = 64 * 1024 * 1024;
 const CLUSTER: u32 = 4096;
 
-fn fresh_vol(tag: &str) -> String {
-    let dst = format!("test-disks/_seq_{tag}.img");
-    let f = std::fs::File::create(&dst).expect("create temp image");
-    f.set_len(VOL_SIZE).expect("set_len");
-    drop(f);
-    let mut io = PathIo::open_rw(Path::new(&dst)).expect("open_rw");
-    format_filesystem(
-        &mut io,
-        VOL_SIZE,
-        CLUSTER,
-        CLUSTER,
-        Some("SEQ"),
-        Some(0x5E_51_00_00),
-    )
-    .expect("format_filesystem");
-    <PathIo as BlockIo>::sync(&mut io).expect("sync");
-    drop(io);
-    dst
+/// A formatted volume that removes itself.
+///
+/// The path carries the process id, and the file is deleted on drop --
+/// the pattern `capi_zero_length_writes.rs` established here. A fixed
+/// name is two defects at once: two `cargo test` processes formatting
+/// the same image at the same time, and a 64 MiB file left behind by
+/// every run that fails, since a panicking test never reaches a
+/// cleanup line written after the assertions.
+struct TmpVol(std::path::PathBuf);
+
+impl TmpVol {
+    fn new(tag: &str) -> Self {
+        let dst =
+            std::path::PathBuf::from(format!("test-disks/_seq_{tag}_{}.img", std::process::id()));
+        let f = std::fs::File::create(&dst).expect("create temp image");
+        f.set_len(VOL_SIZE).expect("set_len");
+        drop(f);
+        let mut io = PathIo::open_rw(&dst).expect("open_rw");
+        format_filesystem(
+            &mut io,
+            VOL_SIZE,
+            CLUSTER,
+            CLUSTER,
+            Some("SEQ"),
+            Some(0x5E_51_00_00),
+        )
+        .expect("format_filesystem");
+        <PathIo as BlockIo>::sync(&mut io).expect("sync");
+        drop(io);
+        TmpVol(dst)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn sequence_of(&self, record: u64) -> u16 {
+        let (_, bytes) = mft_io::read_mft_record(&self.0, record).expect("read record");
+        mft_io::record_sequence(&bytes)
+    }
 }
 
-fn sequence_of(img: &str, record: u64) -> u16 {
-    let (_, bytes) = mft_io::read_mft_record(Path::new(img), record).expect("read record");
-    mft_io::record_sequence(&bytes)
+impl Drop for TmpVol {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// A FRESH SLOT STILL STARTS AT 1.
@@ -55,10 +78,10 @@ fn sequence_of(img: &str, record: u64) -> u16 {
 /// magic has never held a record, so there is no history to continue.
 #[test]
 fn a_slot_that_never_held_a_record_starts_at_one() {
-    let img = fresh_vol("virgin");
-    let rec = write::create_file(Path::new(&img), "/", "first.txt").expect("create");
+    let img = TmpVol::new("virgin");
+    let rec = write::create_file(img.path(), "/", "first.txt").expect("create");
     assert_eq!(
-        sequence_of(&img, rec),
+        img.sequence_of(rec),
         1,
         "record {rec} has never been used before, so its sequence starts at 1"
     );
@@ -67,18 +90,18 @@ fn a_slot_that_never_held_a_record_starts_at_one() {
 /// THE DEFECT, ON THE CREATE PATH.
 #[test]
 fn a_recycled_slot_does_not_repeat_its_predecessors_sequence() {
-    let img = fresh_vol("create");
-    let first = write::create_file(Path::new(&img), "/", "a.txt").expect("create a");
-    let before = sequence_of(&img, first);
-    write::unlink(Path::new(&img), "/a.txt").expect("unlink a");
+    let img = TmpVol::new("create");
+    let first = write::create_file(img.path(), "/", "a.txt").expect("create a");
+    let before = img.sequence_of(first);
+    write::unlink(img.path(), "/a.txt").expect("unlink a");
 
-    let second = write::create_file(Path::new(&img), "/", "b.txt").expect("create b");
+    let second = write::create_file(img.path(), "/", "b.txt").expect("create b");
     assert_eq!(
         first, second,
         "the allocator returns the first free record, so b.txt must land on \
          the slot a.txt just freed -- without that this test proves nothing"
     );
-    let after = sequence_of(&img, second);
+    let after = img.sequence_of(second);
     assert_ne!(
         before, after,
         "a reference to a.txt would still match b.txt: same record {first}, \
@@ -95,18 +118,18 @@ fn a_recycled_slot_does_not_repeat_its_predecessors_sequence() {
 /// second place and carried its own copy of the literal.
 #[test]
 fn a_recycled_slot_taken_by_a_directory_also_advances() {
-    let img = fresh_vol("mkdir");
-    let first = write::create_file(Path::new(&img), "/", "a.txt").expect("create a");
-    let before = sequence_of(&img, first);
-    write::unlink(Path::new(&img), "/a.txt").expect("unlink a");
+    let img = TmpVol::new("mkdir");
+    let first = write::create_file(img.path(), "/", "a.txt").expect("create a");
+    let before = img.sequence_of(first);
+    write::unlink(img.path(), "/a.txt").expect("unlink a");
 
-    let second = write::mkdir(Path::new(&img), "/", "d").expect("mkdir d");
+    let second = write::mkdir(img.path(), "/", "d").expect("mkdir d");
     assert_eq!(
         first, second,
         "the directory must land on the slot a.txt just freed"
     );
     assert_eq!(
-        sequence_of(&img, second),
+        img.sequence_of(second),
         before + 1,
         "mkdir continues the slot's history too"
     );
@@ -121,14 +144,14 @@ fn a_recycled_slot_taken_by_a_directory_also_advances() {
 /// checking.
 #[test]
 fn the_index_entry_carries_the_sequence_the_record_was_stamped_with() {
-    let img = fresh_vol("index");
-    let first = write::create_file(Path::new(&img), "/", "a.txt").expect("create a");
-    write::unlink(Path::new(&img), "/a.txt").expect("unlink a");
-    let second = write::create_file(Path::new(&img), "/", "b.txt").expect("create b");
+    let img = TmpVol::new("index");
+    let first = write::create_file(img.path(), "/", "a.txt").expect("create a");
+    write::unlink(img.path(), "/a.txt").expect("unlink a");
+    let second = write::create_file(img.path(), "/", "b.txt").expect("create b");
     assert_eq!(first, second, "b.txt must land on the freed slot");
 
-    let stamped = sequence_of(&img, second);
-    let (_, root) = mft_io::read_mft_record(Path::new(&img), 5).expect("read root record");
+    let stamped = img.sequence_of(second);
+    let (_, root) = mft_io::read_mft_record(img.path(), 5).expect("read root record");
     let entry = fs_ntfs::index_io::find_index_entry(&root, "b.txt", None)
         .expect("index search")
         .expect("b.txt is in the root index");

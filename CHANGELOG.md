@@ -57,6 +57,26 @@
 
 ### Changed
 
+- **BREAKING.** `index_io::IndexEntryLocation` gains a required public
+  field, `sequence: u16`, and is now `#[non_exhaustive]`. Code that
+  built one with a struct literal no longer compiles; code that reads
+  the fields is unaffected, which is every use inside this crate and
+  the only use the type was designed for -- it is returned by
+  `find_index_entry` and `find_entry_in_indx_block`, not constructed by
+  callers.
+
+  There is no version of this that is not a break. The field carries
+  the high 16 bits of the `$INDEX_ROOT` entry's file reference, which
+  the decode sites used to mask off and throw away; a reference's
+  sequence number is what distinguishes a live entry from one left
+  behind by an interrupted delete, and a value that is discarded before
+  anyone sees it cannot be checked by anything. Adding
+  `#[non_exhaustive]` on its own would have broken the same literals,
+  so it arrives in the same release rather than costing a second one.
+
+  Callers that constructed the type -- most likely in a test -- should
+  take one from `find_index_entry` instead.
+
 - The shared `am-fs-core` sibling checkout moves to v0.2.10, in
   `Cargo.toml`, `chores.yml` and both workflows' Windows clone.
 
