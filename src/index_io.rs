@@ -1528,6 +1528,75 @@ mod tests {
         assert_eq!(index_root_flags(&rec), None);
     }
 
+    /// THE `read.rs` `ok_or` RESTS ON THIS, SO THE INVARIANT IS TESTED
+    /// RATHER THAN ASSERTED IN A COMMENT.
+    ///
+    /// `read_dir_entries` calls `collect_index_root_entries` and then
+    /// reads the flags, and takes `None` from the second as an error.
+    /// That second check is unreachable only while every input making
+    /// `index_root_flags` answer `None` also makes
+    /// `collect_index_root_entries` answer `Err`. If a later change
+    /// loosens the collector, the `ok_or` stops being defensive and
+    /// starts being the thing that stops a short listing being
+    /// reported as a directory's contents -- and this test is what
+    /// says so, rather than a reader having to re-derive it.
+    ///
+    /// The sweep is every resident value length from nothing to well
+    /// past a populated root, plus the two shapes that are not a length
+    /// at all: no `$INDEX_ROOT:$I30` in the record, and one whose
+    /// header says non-resident.
+    #[test]
+    fn no_flags_means_no_listing() {
+        let mut cases: Vec<(String, Vec<u8>)> = Vec::new();
+
+        for len in 0u32..=80 {
+            let mut rec = index_root_record(&[make_entry(10, 5, "target")]);
+            shorten_index_root_value(&mut rec, len);
+            cases.push((format!("value_length = {len}"), rec));
+        }
+
+        // No $INDEX_ROOT at all: blank the type code so the iterator
+        // walks straight past it.
+        let mut absent = index_root_record(&[make_entry(10, 5, "target")]);
+        let ir = attr_io::find_attribute(&absent, AttrType::IndexRoot, Some(stream::I30)).unwrap();
+        let a = ir.attr_offset;
+        absent[a..a + 4].copy_from_slice(&(AttrType::Data as u32).to_le_bytes());
+        cases.push(("$INDEX_ROOT retyped to $DATA".to_string(), absent));
+
+        // The header says the value lives elsewhere.
+        let mut nonres = index_root_record(&[make_entry(10, 5, "target")]);
+        let ir = attr_io::find_attribute(&nonres, AttrType::IndexRoot, Some(stream::I30)).unwrap();
+        nonres[ir.attr_offset + attr_off::NON_RESIDENT] = 1;
+        cases.push(("$INDEX_ROOT marked non-resident".to_string(), nonres));
+
+        let mut refused = 0usize;
+        for (what, rec) in &cases {
+            if index_root_flags(rec).is_none() {
+                refused += 1;
+                let mut out = Vec::new();
+                assert!(
+                    collect_index_root_entries(rec, &mut out).is_err(),
+                    "{what}: index_root_flags answered None while the collector answered \
+                     Ok with {} entries. read.rs takes that None as an error, so this input \
+                     reaches a check that is supposed to be unreachable -- which means the \
+                     collector now lets something through that has no readable header.",
+                    out.len()
+                );
+            }
+        }
+        // An empty result is not an answer. The implication above is
+        // vacuous for any input the flags can be read from, so the
+        // count is asserted exactly rather than as a floor: the 32
+        // value lengths below 32, which is where the header stops
+        // fitting, plus the retyped attribute and the non-resident
+        // one. Measured, not counted by hand.
+        assert_eq!(
+            (refused, cases.len()),
+            (34, 83),
+            "the sweep no longer exercises the case it exists to test"
+        );
+    }
+
     /// The acceptance half, and it pins the comparison rather than the
     /// direction. The guard's subject is the 16-byte INDEX_HEADER at
     /// `IR_INDEX_HEADER_OFFSET`, so a value of exactly 32 bytes holds
