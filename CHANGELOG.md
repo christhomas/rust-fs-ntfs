@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- The index header is read inside the attribute value that holds it.
+  `find_index_entry` and `collect_entries` read `first_entry_offset`
+  and `total_size` bounded by the whole MFT record, so a resident
+  `$INDEX_ROOT` value shorter than 32 bytes took them from the next
+  attribute; the entry end then clamped below the entry start and the
+  walk answered `Ok(None)` / no entries. A directory with entries
+  listed as empty, and the four collision checks in `write.rs` read
+  that as "the name is free". `index_root_flags` had the same bound
+  and returned a flags byte belonging to another attribute; it now
+  answers `None`, and `read_dir_entries` treats that as an error
+  rather than as "no subnodes".
 - A read offset is checked against the volume before anything is read.
   The three per-cluster sites in `read.rs` multiplied a disk-supplied
   LCN by the cluster size raw; a run past the end of the filesystem but
