@@ -51,8 +51,17 @@ pub struct BitmapLocation {
     pub value_length: u64,
     /// How many clusters `$MFT` occupies, so a free can be refused
     /// before it hands them out. Zero when `$MFT`'s own length could
-    /// not be read, which leaves only the boot sector guarded.
+    /// not be read -- treated as fail-closed in `covers_the_volumes_own`,
+    /// not as "nothing to protect."
     pub mft_clusters: u64,
+    /// CLUSTER ranges `[start_lcn, end_lcn)` of every OTHER system
+    /// metafile's own storage -- `$MFTMirr`, `$LogFile`, `$AttrDef`,
+    /// `$Bitmap` itself, `$Secure`, `$UpCase` -- so
+    /// `covers_the_volumes_own` can refuse a free against any of them,
+    /// not only `$MFT`. Converted once, at locate time, from the BYTE
+    /// ranges `crate::read::other_protected_metafile_ranges_io` reports
+    /// -- that function is shared with `fsck`, which works in bytes.
+    pub other_protected: Vec<(u64, u64)>,
 }
 
 pub fn locate_bitmap(image: &Path) -> Result<BitmapLocation, String> {
@@ -69,18 +78,42 @@ impl BitmapLocation {
     /// `$MFT` therefore made `unlink` mark live system clusters free,
     /// and the next allocation handed them out.
     ///
-    /// The boot sector is cluster 0. `$MFT` is where everything else
-    /// is, and its length is read once when the bitmap is located.
+    /// `$MFT` is where everything else is, and its length is read once
+    /// when the bitmap is located. The `lcn == 0` case below is a floor
+    /// for the boot region, NOT its coverage: `$Boot`'s $DATA is 8192
+    /// bytes, which is two clusters at 4096 and sixteen at 512, and
+    /// measured before record 7 joined the protected list fifteen of
+    /// those sixteen were freeable on a third-party volume. `$Boot`'s
+    /// real extent is in `other_protected` with the rest.
     pub fn covers_the_volumes_own(&self, lcn: u64, n: u64) -> bool {
         let end = lcn.saturating_add(n);
         if lcn == 0 {
             return true;
         }
-        if self.mft_clusters == 0 {
-            return false;
+        // `$MFT`'s protection does NOT depend on this scalar any more.
+        // `mft_clusters` comes from `nonresident_contiguous_disk_range`,
+        // which refuses a fragmented attribute -- and a fragmented
+        // `$MFT` is ordinary, six runs on the `ntfs` crate's own
+        // testdata. So `$MFT` is in `other_protected` below, by its
+        // real runs, and this scalar is only a fast path for the
+        // contiguous case.
+        //
+        // IT MUST NOT SHORT-CIRCUIT TO `true` WHEN ZERO. It did, for
+        // one revision of rust-fs-ntfs#157, on the reasoning that an
+        // unverifiable `$MFT` should widen what is refused. Measured
+        // against a volume this crate did not format, that refused
+        // 4095 of 4095 clusters and broke `rm` on an ordinary file.
+        // Zero here means "not known from this scalar", which is a
+        // statement about the scalar, not about the volume.
+        if self.mft_clusters != 0 {
+            let mft_end = self.params.mft_lcn.saturating_add(self.mft_clusters);
+            if lcn < mft_end && self.params.mft_lcn < end {
+                return true;
+            }
         }
-        let mft_end = self.params.mft_lcn.saturating_add(self.mft_clusters);
-        lcn < mft_end && self.params.mft_lcn < end
+        self.other_protected
+            .iter()
+            .any(|&(start_lcn, end_lcn)| lcn < end_lcn && start_lcn < end)
     }
 }
 
@@ -131,16 +164,42 @@ pub fn locate_bitmap_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BitmapLocatio
         declared_bits.min(cluster_capacity)
     };
     // $MFT's own extent, so `free_io` can refuse to hand it out. Read
-    // once here rather than on every free.
+    // once here rather than on every free. `mft_clusters == 0` is the
+    // "could not be determined" sentinel `covers_the_volumes_own`
+    // treats as fail-closed. `other_protected` below covers the other
+    // five metafiles' own equivalent failure.
+    //
+    // BOUNDED BY THE VOLUME, like every run in `other_protected` is.
+    // This scalar is `$MFT`'s declared value length in clusters, and a
+    // damaged record 0 can declare almost the whole volume -- the
+    // helper only requires the extent to be on the DEVICE. Unbounded,
+    // `mft_end` below then refuses everything from `mft_lcn` upward,
+    // which is the outage direction rust-fs-ntfs#157 was returned for.
+    // Measured: 4 + 64 <= 16384 on this crate's own formatted volume,
+    // so the bound costs a healthy volume nothing.
     let mft_clusters = crate::read::nonresident_contiguous_disk_range(io, 0, AttrType::Data, None)
         .map(|(_, len)| len.div_ceil(params.cluster_size.max(1)))
+        .ok()
+        .filter(|&clusters| params.mft_lcn.saturating_add(clusters) <= cluster_capacity)
         .unwrap_or(0);
+
+    // The other system metafiles' own storage, converted from the
+    // BYTE ranges the shared helper reports to the CLUSTER ranges
+    // `covers_the_volumes_own` compares against. See rust-fs-ntfs#157.
+    let cluster_size = params.cluster_size.max(1);
+    let other_protected: Vec<(u64, u64)> =
+        crate::read::other_protected_metafile_ranges_io(io, None)
+            .into_iter()
+            .map(|(start, end)| (start / cluster_size, end.div_ceil(cluster_size)))
+            .collect();
+
     Ok(BitmapLocation {
         params,
         runs,
         total_bits,
         value_length,
         mft_clusters,
+        other_protected,
     })
 }
 
@@ -632,7 +691,18 @@ mod tests {
                 bytes_per_sector: 512,
                 sectors_per_cluster: cluster_size / 512,
                 cluster_size,
-                mft_lcn: 0,
+                // Placed far outside every cluster range these
+                // allocate/free tests exercise (0..n_bytes*8, always
+                // well under 1_000_000 here). $MFT IS modelled -- a
+                // NON-zero `mft_clusters` -- because zero now means
+                // "could not be determined," which fails closed and
+                // would refuse every free in this file. A disjoint
+                // placeholder keeps that fail-closed path untested here
+                // (see `a_files_runs_may_not_free_the_volumes_own_clusters`
+                // for where it IS tested) while leaving these ordinary
+                // allocate/free tests exercising exactly the clusters
+                // they always did.
+                mft_lcn: 1_000_000,
                 file_record_size: 1024,
                 // A real boot sector always says how big the volume is,
                 // and cluster_span judges every transfer against it. 512 MiB
@@ -651,9 +721,10 @@ mod tests {
             }],
             total_bits: n_bytes * 8,
             value_length: n_bytes,
-            // $MFT is not modelled in these fixtures, so nothing is guarded
-            // as its own; the guard is exercised in its own test.
-            mft_clusters: 0,
+            mft_clusters: 1,
+            // The other five system metafiles are not modelled here
+            // either; see the same reasoning above.
+            other_protected: Vec::new(),
         }
     }
 
@@ -1148,6 +1219,578 @@ mod tests {
         assert!(!bm.runs.is_empty());
     }
 
+    /// `$Boot` IS MORE THAN ONE CLUSTER. The `lcn == 0` special case
+    /// guards exactly one, and `$Boot`'s $DATA is 8192 bytes -- two
+    /// clusters at 4096, sixteen at 512.
+    ///
+    /// Measured before `$Boot` joined the protected list: on this
+    /// fixture LCN 1 answered false and `free_io` on it SUCCEEDED; on a
+    /// 512-byte-cluster volume fifteen of the sixteen boot-region
+    /// clusters were freeable.
+    #[test]
+    fn the_whole_boot_region_is_protected_not_just_its_first_cluster() {
+        let mut dev = formatted_dev();
+        let params = crate::mft_io::read_boot_params_io(&mut dev).unwrap();
+        let bm = locate_bitmap_io(&mut dev).unwrap();
+
+        // $Boot's $DATA is 8192 bytes; at this fixture's 4096-byte
+        // clusters that is clusters 0 and 1.
+        let boot_clusters = 8192u64.div_ceil(params.cluster_size.max(1));
+        assert!(
+            boot_clusters > 1,
+            "precondition: this fixture's clusters must be smaller than $Boot, or the \
+             test cannot distinguish the lcn==0 case from real $Boot coverage"
+        );
+        for lcn in 0..boot_clusters {
+            assert!(
+                bm.covers_the_volumes_own(lcn, 1),
+                "boot-region cluster {lcn} of {boot_clusters} must be refused"
+            );
+        }
+        assert!(
+            free_io(&mut dev, &bm, 1, 1).is_err(),
+            "and the refusal must reach free_io, which is the call unlink makes -- this \
+             succeeded before $Boot was protected"
+        );
+    }
+
+    /// Overwrite one metafile record's mapping pairs on `dev` and
+    /// report how many clusters the guard then refuses.
+    ///
+    /// `record_number` is written in place, fixups reapplied, so the
+    /// damage is exactly what an interrupted write to a mapping-pairs
+    /// list leaves behind -- the damage class rust-fs-ntfs#157 names.
+    fn refused_after_damaging_pairs(record_number: u64, pairs: &[u8]) -> (u64, u64, bool) {
+        let mut dev = formatted_dev();
+        let params = crate::mft_io::read_boot_params_io(&mut dev).unwrap();
+        let capacity = params.volume_bytes().div_ceil(params.cluster_size.max(1));
+        let record_size = params.file_record_size;
+        let at_off = params.mft_lcn * params.cluster_size + record_size * record_number;
+        let mut record = vec![0u8; record_size as usize];
+        dev.read_exact_at(at_off, &mut record).unwrap();
+        crate::mft_io::apply_fixup_on_read(&mut record, params.bytes_per_sector).unwrap();
+        let loc = crate::attr_io::find_attribute(&record, AttrType::Data, None)
+            .expect("record has an unnamed $DATA");
+        let mpo = loc.non_resident_mapping_pairs_offset.expect("non-resident") as usize;
+        let at = loc.attr_offset + mpo;
+        assert!(
+            at + pairs.len() <= loc.attr_offset + loc.attr_length,
+            "precondition: the replacement pairs must fit inside the attribute, or the \
+             record is malformed in a way this test did not intend"
+        );
+        record[at..at + pairs.len()].copy_from_slice(pairs);
+        crate::mft_io::apply_fixup_on_write(&mut record, params.bytes_per_sector).unwrap();
+        dev.write_all_at(at_off, &record).unwrap();
+
+        let bm = locate_bitmap_io(&mut dev).unwrap();
+        let refused = (0..capacity)
+            .filter(|&lcn| bm.covers_the_volumes_own(lcn, 1))
+            .count() as u64;
+        // An ordinary file's cluster, well clear of every metafile on
+        // this fixture. Whether the GUARD stops a free here is the
+        // property that matters to a user: `unlink` and `truncate`
+        // both route every run through `free_io`.
+        let guard_stops_ordinary = guard_refuses_free(&mut dev, &bm, 5000);
+        (refused, capacity, guard_stops_ordinary)
+    }
+
+    /// Whether `free_io` refuses `lcn` BECAUSE OF THE GUARD.
+    ///
+    /// `free_io` has two refusals and they are not the same evidence:
+    /// the guard's, and "cluster N already free" for a cluster no file
+    /// owns. An unallocated cluster on a freshly formatted volume gives
+    /// the second, so `is_ok()` cannot tell "the guard let it through"
+    /// from "there was nothing to free" -- measured on this fixture,
+    /// every ordinary cluster answers `Err("cluster N already free")`.
+    fn guard_refuses_free<T: BlockIo + ?Sized>(io: &mut T, bm: &BitmapLocation, lcn: u64) -> bool {
+        match free_io(io, bm, lcn, 1) {
+            Err(e) => e.contains("the volume's own structures"),
+            Ok(()) => false,
+        }
+    }
+
+    /// A RUN LENGTH COMES OFF THE SAME DAMAGED RECORD THESE GUARDS
+    /// DEFEND AGAINST, AND NOTHING USED TO BOUND IT. One absurd length
+    /// in any one metafile record turned the guard into a volume-wide
+    /// refusal -- `unlink`, `truncate` and `fsck`'s `$LogFile` reset
+    /// all stop working, which is revision one's outage reached from a
+    /// damaged record instead of a code bug.
+    ///
+    /// Two lengths, because the two bounds catch different ones and
+    /// EITHER BOUND ALONE IS EVADABLE:
+    ///
+    /// - 2^30 clusters, from mapping pairs
+    ///   `[0x14, 0x00, 0x00, 0x00, 0x40, 0x01, 0x00]`. `decode_runs`
+    ///   yields `length: 1073741824, lcn: Some(1)`, byte range
+    ///   `(4096, 4398046515200)`, clusters `(1, 1073741825)`; measured
+    ///   16384 of 16384 refused. NOTHING OVERFLOWS: `1073741824 *
+    ///   4096` fits in a `u64` with room to spare, so swapping a
+    ///   `saturating_add` for a `checked_add` changes nothing here.
+    /// - `capacity - 1` clusters at LCN 1, which FITS INSIDE THE
+    ///   VOLUME and therefore survives a volume-only bound, refusing
+    ///   16383 of 16384. It is caught only by the second bound: the
+    ///   attribute's own declared length, 4 clusters for `$MFTMirr`.
+    #[test]
+    fn a_damaged_run_length_does_not_turn_the_guard_into_a_volume_wide_refusal() {
+        let mut clean = formatted_dev();
+        let params = crate::mft_io::read_boot_params_io(&mut clean).unwrap();
+        let capacity = params.volume_bytes().div_ceil(params.cluster_size.max(1));
+        let healthy = locate_bitmap_io(&mut clean).unwrap();
+        let baseline = (0..capacity)
+            .filter(|&lcn| healthy.covers_the_volumes_own(lcn, 1))
+            .count() as u64;
+        assert!(
+            baseline > 0 && baseline * 4 < capacity,
+            "control: a healthy volume refuses its metadata and little else, got \
+             {baseline} of {capacity}"
+        );
+
+        // $MFTMirr (record 1), whose declared $DATA is 4 clusters here.
+        let absurd = [0x14u8, 0x00, 0x00, 0x00, 0x40, 0x01, 0x00, 0x00];
+        let fits_but_huge = {
+            let len = capacity - 1;
+            [
+                0x13u8,
+                (len & 0xff) as u8,
+                ((len >> 8) & 0xff) as u8,
+                ((len >> 16) & 0xff) as u8,
+                0x01,
+                0x00,
+                0x00,
+                0x00,
+            ]
+        };
+
+        for (label, pairs) in [
+            ("2^30 clusters", &absurd),
+            ("capacity-1 clusters", &fits_but_huge),
+        ] {
+            let (refused, cap, guard_stops_ordinary) = refused_after_damaging_pairs(1, pairs);
+            assert!(
+                refused <= baseline,
+                "{label}: {refused} of {cap} clusters refused against a healthy volume's \
+                 {baseline}. A damaged run must cost that record its own protection, not \
+                 widen the refusal -- that is the outage this fix was returned for twice."
+            );
+            assert!(
+                !guard_stops_ordinary,
+                "{label}: the guard refused an ordinary file's cluster 5000 through \
+                 free_io. That breaks `rm` on every file, which is worse than the defect \
+                 being guarded."
+            );
+        }
+    }
+
+    /// A RUN THAT STARTS INSIDE THE VOLUME AND ENDS PAST IT IS
+    /// DISCARDED, NOT CLAMPED -- and this is the one arm that the
+    /// declared-length bound cannot catch, because the length here is
+    /// exactly what the attribute declares.
+    ///
+    /// `$MFTMirr`'s declared $DATA is 4 clusters. Point its run at
+    /// `capacity - 2` and it still claims 4: plausible against its own
+    /// record, impossible against the volume. Clamping it to the
+    /// volume's end would protect the last two clusters -- ordinary
+    /// file storage, refused on the strength of a damaged pointer --
+    /// so the run is dropped instead. The cost either way is bounded;
+    /// the direction is chosen so a damaged record does not take
+    /// somebody's file with it.
+    #[test]
+    fn a_run_running_off_the_end_of_the_volume_is_discarded_not_clamped() {
+        let mut clean = formatted_dev();
+        let params = crate::mft_io::read_boot_params_io(&mut clean).unwrap();
+        let capacity = params.volume_bytes().div_ceil(params.cluster_size.max(1));
+        let healthy = locate_bitmap_io(&mut clean).unwrap();
+        for lcn in [capacity - 2, capacity - 1] {
+            assert!(
+                !healthy.covers_the_volumes_own(lcn, 1),
+                "control: cluster {lcn} at the end of a healthy volume is ordinary storage"
+            );
+        }
+
+        // header 0x31: one length byte, three offset bytes. Length 4 --
+        // exactly $MFTMirr's declared size -- at LCN capacity-2.
+        let lcn = capacity - 2;
+        let pairs = [
+            0x31u8,
+            0x04,
+            (lcn & 0xff) as u8,
+            ((lcn >> 8) & 0xff) as u8,
+            ((lcn >> 16) & 0xff) as u8,
+            0x00,
+            0x00,
+            0x00,
+        ];
+        let (refused, cap, guard_stops_ordinary) = refused_after_damaging_pairs(1, &pairs);
+        assert!(
+            !guard_stops_ordinary,
+            "{refused} of {cap}: cluster 5000 must stay a file's"
+        );
+
+        let mut dev = formatted_dev();
+        {
+            let p2 = crate::mft_io::read_boot_params_io(&mut dev).unwrap();
+            let record_size = p2.file_record_size;
+            let off = p2.mft_lcn * p2.cluster_size + record_size;
+            let mut record = vec![0u8; record_size as usize];
+            dev.read_exact_at(off, &mut record).unwrap();
+            crate::mft_io::apply_fixup_on_read(&mut record, p2.bytes_per_sector).unwrap();
+            let loc = crate::attr_io::find_attribute(&record, AttrType::Data, None).unwrap();
+            let at = loc.attr_offset + loc.non_resident_mapping_pairs_offset.unwrap() as usize;
+            record[at..at + pairs.len()].copy_from_slice(&pairs);
+            crate::mft_io::apply_fixup_on_write(&mut record, p2.bytes_per_sector).unwrap();
+            dev.write_all_at(off, &record).unwrap();
+        }
+        let bm = locate_bitmap_io(&mut dev).unwrap();
+        for lcn in [capacity - 2, capacity - 1] {
+            assert!(
+                !bm.covers_the_volumes_own(lcn, 1),
+                "cluster {lcn} must not be refused: the only thing claiming it is a run \
+                 that runs off the end of the volume, which is damage. Clamping that run \
+                 to the volume's end is what protects it, and that is the failure \
+                 direction this fix has been returned for twice. other_protected={:?}",
+                bm.other_protected
+            );
+        }
+    }
+
+    /// A GENUINELY FRAGMENTED `$MFT`, described as two runs in record 0
+    /// itself -- the property rust-fs-ntfs#246 was filed for, which the
+    /// mirror and floor tiers could not cover.
+    ///
+    /// `nonresident_contiguous_disk_range` refuses a fragmented
+    /// attribute, so `mft_clusters` is 0 here (asserted, so this test
+    /// fails rather than silently stops exercising the path), and only
+    /// the multi-run helper can report where `$MFT` lives. The
+    /// assertion is that BOTH runs appear SEPARATELY: the mirror tier
+    /// beneath this one holds the format-time single-run copy and would
+    /// answer one range covering the same clusters, so asserting only
+    /// that `$MFT`'s clusters are refused would pass with the multi-run
+    /// helper gone.
+    #[test]
+    fn a_two_run_mft_is_protected_by_its_own_record_not_only_by_the_mirror() {
+        let mut dev = formatted_dev();
+        let params = crate::mft_io::read_boot_params_io(&mut dev).unwrap();
+        let healthy = locate_bitmap_io(&mut dev).unwrap();
+        assert_eq!(
+            healthy.mft_clusters, 64,
+            "control: a contiguous $MFT is 64 clusters on this fixture"
+        );
+
+        // Re-encode record 0's own run list as TWO runs covering the
+        // same 64 clusters: 32 at LCN 4, then 32 at LCN 36. The
+        // physical layout does not move -- only the encoding
+        // fragments -- so the volume stays readable and the difference
+        // measured is the guard's, not the fixture's.
+        let record_size = params.file_record_size;
+        let mft_off = params.mft_lcn * params.cluster_size;
+        let mut record = vec![0u8; record_size as usize];
+        dev.read_exact_at(mft_off, &mut record).unwrap();
+        crate::mft_io::apply_fixup_on_read(&mut record, params.bytes_per_sector).unwrap();
+        let loc = crate::attr_io::find_attribute(&record, AttrType::Data, None)
+            .expect("$MFT has an unnamed $DATA");
+        let mpo = loc.non_resident_mapping_pairs_offset.expect("non-resident") as usize;
+        let at = loc.attr_offset + mpo;
+        // header 0x11 = one length byte, one offset byte; the second
+        // run's offset is a DELTA from the first's LCN.
+        let pairs = [0x11u8, 0x20, 0x04, 0x11, 0x20, 0x20, 0x00, 0x00];
+        assert!(
+            at + pairs.len() <= loc.attr_offset + loc.attr_length,
+            "precondition: two runs must fit in $MFT's mapping-pairs space"
+        );
+        record[at..at + pairs.len()].copy_from_slice(&pairs);
+        crate::mft_io::apply_fixup_on_write(&mut record, params.bytes_per_sector).unwrap();
+        dev.write_all_at(mft_off, &record).unwrap();
+
+        let bm = locate_bitmap_io(&mut dev).unwrap();
+        assert_eq!(
+            bm.mft_clusters, 0,
+            "precondition: the contiguous-only helper must refuse a two-run $MFT, or this \
+             test is no longer exercising the multi-run path it is named for"
+        );
+        assert!(
+            bm.other_protected.contains(&(4, 36)) && bm.other_protected.contains(&(36, 68)),
+            "both of record 0's runs must be protected SEPARATELY, got {:?}. One range \
+             (4, 68) means the answer came from the mirror's single-run copy, not from \
+             record 0's own fragmented list.",
+            bm.other_protected
+        );
+        for lcn in 4..68 {
+            assert!(
+                bm.covers_the_volumes_own(lcn, 1),
+                "$MFT's cluster {lcn} must be refused"
+            );
+        }
+        assert!(
+            guard_refuses_free(&mut dev, &bm, 4),
+            "and the refusal must reach free_io, the call unlink makes"
+        );
+        assert!(
+            !guard_refuses_free(&mut dev, &bm, 5000),
+            "while the guard leaves an ordinary file's cluster alone"
+        );
+    }
+
+    /// $MFT IS NOT BEST-EFFORT. Blanking record 0 used to take `$MFT`
+    /// out of the protected set entirely -- measured before the tiered
+    /// fallback existed: `(4, 68)` vanished, `covers_the_volumes_own`
+    /// answered false for `mft_lcn`, and `free_io` on `$MFT`'s own
+    /// first cluster SUCCEEDED. That is this issue's opening sentence
+    /// restored, so it fails closed, bounded, via `$MFTMirr`.
+    #[test]
+    fn a_damaged_mft_record_still_protects_the_mft_via_the_mirror() {
+        let mut dev = formatted_dev();
+        let params = crate::mft_io::read_boot_params_io(&mut dev).unwrap();
+        let healthy = locate_bitmap_io(&mut dev).unwrap();
+        assert!(
+            healthy.covers_the_volumes_own(params.mft_lcn, 1),
+            "control: $MFT is protected on an undamaged volume"
+        );
+
+        // Blank record 0 only. $MFTMirr still holds its copy.
+        let record_size = params.file_record_size;
+        let mft_start = params.mft_lcn * params.cluster_size;
+        dev.write_all_at(mft_start, &vec![0u8; record_size as usize])
+            .unwrap();
+
+        let bm = locate_bitmap_io(&mut dev).unwrap();
+        assert_eq!(
+            bm.mft_clusters, 0,
+            "precondition: record 0 no longer decodes, so the scalar is unset -- if this \
+             ever stops holding, this test is no longer exercising the fallback"
+        );
+        // THE MIRROR SPECIFICALLY, not merely "something protected it".
+        // The bounded floor (tier 3) also refuses `mft_lcn`, so
+        // asserting that alone passes whichever tier fired -- measured:
+        // deleting the mirror tier left this test green. `$MFT`'s real
+        // extent here is clusters 4..68, and only the mirror can
+        // recover the full 64 clusters; the floor covers the sixteen
+        // reserved records, which is 4..8.
+        assert!(
+            bm.other_protected
+                .contains(&(params.mft_lcn, params.mft_lcn + 64)),
+            "the mirror must recover $MFT's FULL extent ({}..{}), not just the bounded \
+             floor -- got {:?}. Asserting only that mft_lcn is refused cannot tell the \
+             mirror tier from the floor beneath it.",
+            params.mft_lcn,
+            params.mft_lcn + 64,
+            bm.other_protected
+        );
+        assert!(
+            bm.covers_the_volumes_own(params.mft_lcn + 63, 1),
+            "$MFT's LAST cluster must be refused too, which the floor alone does not reach"
+        );
+        assert!(
+            free_io(&mut dev, &bm, params.mft_lcn, 1).is_err(),
+            "and the refusal must reach free_io, which is the call unlink makes"
+        );
+    }
+
+    /// The bottom tier, and the reason it is a FLOOR rather than the
+    /// volume: blank record 0 AND `$MFTMirr`, so neither can speak.
+    /// `$MFT`'s declared start must still be refused, and an ordinary
+    /// cluster must still be free.
+    #[test]
+    fn with_both_the_mft_record_and_its_mirror_damaged_the_floor_is_bounded() {
+        let mut dev = formatted_dev();
+        let params = crate::mft_io::read_boot_params_io(&mut dev).unwrap();
+        let mirror_ranges = crate::read::other_protected_metafile_ranges_io(&mut dev, None);
+        assert!(
+            !mirror_ranges.is_empty(),
+            "control: something is locatable to begin with"
+        );
+
+        let record_size = params.file_record_size;
+        let mft_start = params.mft_lcn * params.cluster_size;
+        // Record 0 and record 1 ($MFTMirr) both blanked.
+        dev.write_all_at(mft_start, &vec![0u8; record_size as usize])
+            .unwrap();
+        dev.write_all_at(mft_start + record_size, &vec![0u8; record_size as usize])
+            .unwrap();
+
+        let bm = locate_bitmap_io(&mut dev).unwrap();
+        let cluster_capacity = params.volume_bytes().div_ceil(params.cluster_size.max(1));
+
+        assert!(
+            bm.covers_the_volumes_own(params.mft_lcn, 1),
+            "$MFT's declared start must still be refused from the bounded floor"
+        );
+        assert!(
+            !bm.covers_the_volumes_own(cluster_capacity - 1, 1),
+            "BOUNDED, not volume-wide: the last cluster is not $MFT's, and refusing it is \
+             the outage this fix exists to avoid re-creating"
+        );
+        let refused = (0..cluster_capacity)
+            .filter(|&lcn| bm.covers_the_volumes_own(lcn, 1))
+            .count() as u64;
+        assert!(
+            refused * 4 < cluster_capacity,
+            "{refused} of {cluster_capacity} refused on this 64 MiB fixture -- a floor that \
+             swallows the volume is the whole-volume fallback under a new name"
+        );
+    }
+
+    /// `$Secure` on the NAMED `$SDS` stream, pinned by the ranges it
+    /// actually contributes rather than left to a third-party probe.
+    ///
+    /// Its unnamed `$DATA` is a resident stub on a volume this crate
+    /// formats, so the unnamed spelling contributes nothing at all --
+    /// which is why `$Secure` was protected on no volume before this
+    /// fix, `main` included. These two ranges are what the `$SDS`
+    /// route adds, and reverting the spelling removes them.
+    #[test]
+    fn secures_sds_clusters_are_protected() {
+        let mut dev = formatted_dev();
+        let bm = locate_bitmap_io(&mut dev).unwrap();
+        for expected in [(1047u64, 1048u64), (1048, 1049)] {
+            assert!(
+                bm.other_protected.contains(&expected),
+                "$Secure's $SDS range {expected:?} must be in the protected set; got {:?}. \
+                 Its absence is the unnamed-$DATA spelling, which contributes nothing here.",
+                bm.other_protected
+            );
+        }
+        assert!(
+            bm.covers_the_volumes_own(1047, 2),
+            "and those clusters must be refused by the guard itself"
+        );
+    }
+
+    /// A METAFILE WHOSE LOOKUP GENUINELY FAILS -- the case no test in
+    /// this crate could reach, and the reason a guard that refused
+    /// 4095 of 4095 clusters on a real volume passed 626 tests.
+    ///
+    /// Every other fixture here is `mkfs` output, and on `mkfs` output
+    /// nothing fails: `$MFT` is contiguous, and `$Secure`'s unnamed
+    /// `$DATA` is a small resident stub, which the resident
+    /// short-circuit reports as `Ok(no ranges)` rather than `Err`. So
+    /// the failure path -- the one that used to manufacture a
+    /// whole-volume range and refuse the entire volume -- was never
+    /// executed by the suite at all. Reintroducing that fallback and
+    /// re-running every test was measured: 626 passed.
+    ///
+    /// This damages one metafile record on purpose, which is the only
+    /// way to reach it without shipping a third-party image into the
+    /// repository.
+    #[test]
+    fn a_metafile_whose_lookup_fails_costs_only_its_own_protection() {
+        let mut dev = formatted_dev();
+        let params = crate::mft_io::read_boot_params_io(&mut dev).unwrap();
+
+        // Blank $AttrDef's whole MFT record (record 4), so locating its
+        // $DATA fails outright rather than returning "resident, nothing
+        // to add".
+        let record_size = params.file_record_size;
+        let mft_start = params.mft_lcn * params.cluster_size;
+        let blank = vec![0u8; record_size as usize];
+        dev.write_all_at(mft_start + 4 * record_size, &blank)
+            .unwrap();
+
+        let bm = locate_bitmap_io(&mut dev).unwrap();
+        let cluster_capacity = params.volume_bytes().div_ceil(params.cluster_size.max(1));
+
+        assert!(
+            !bm.other_protected
+                .iter()
+                .any(|&(start, end)| start == 0 && end >= cluster_capacity),
+            "one unlocatable metafile must not produce a whole-volume range. Got {:?}",
+            bm.other_protected
+        );
+        assert!(
+            !bm.other_protected.is_empty(),
+            "the metafiles that ARE locatable must still be protected. Got {:?}",
+            bm.other_protected
+        );
+        assert!(
+            !bm.covers_the_volumes_own(cluster_capacity - 1, 1),
+            "an ordinary cluster must stay free when one metafile could not be located -- \
+             refusing it is what broke `rm` on every cluster of a real volume"
+        );
+        // AND THE VOLUME IS STILL USABLE. This is the assertion that
+        // catches the defect directly: count how much of the volume is
+        // refused. The revision this replaces refused 4095 of 4095
+        // clusters on a real volume; a correct guard refuses only what
+        // the metafiles occupy, which on THIS 64 MiB fixture is about
+        // 6%.
+        //
+        // The quarter-of-the-volume bound is a fact about this fixture,
+        // NOT a general property -- the same correct guard refuses
+        // 60.3% of a 2 MiB volume, where $LogFile, $UpCase and $SDS
+        // genuinely are most of it. Sound here because this test only
+        // ever runs against `formatted_dev()`; do not lift the bound
+        // into a test on a smaller volume.
+        //
+        // Not a mid-volume spot check: `mkfs` places $MFTMirr at
+        // `cluster_count / 2` (mkfs.rs), so the middle of the volume
+        // IS legitimately protected -- an earlier version of this test
+        // asserted otherwise and failed, correctly.
+        let refused = (0..cluster_capacity)
+            .filter(|&lcn| bm.covers_the_volumes_own(lcn, 1))
+            .count() as u64;
+        assert!(
+            refused * 4 < cluster_capacity,
+            "{refused} of {cluster_capacity} clusters refused -- a guard that refuses most of \
+             the volume has stopped being a guard and started being an outage. The metafiles \
+             on a 64 MiB volume do not occupy a quarter of it."
+        );
+    }
+
+    /// THE WIRING, not just the mechanism. Every test of
+    /// `covers_the_volumes_own` and `other_protected`'s effect
+    /// constructs a `BitmapLocation` by hand -- `located_with` sets
+    /// `other_protected` directly. None of them would notice
+    /// `locate_bitmap_io` itself failing to populate that field from a
+    /// real volume: a mutation that made it always return `Vec::new()`
+    /// survives every one of those tests, because they never call
+    /// `locate_bitmap_io` at all.
+    #[test]
+    fn locate_bitmap_io_actually_populates_other_protected_from_a_real_volume() {
+        let mut dev = formatted_dev();
+        let bm = locate_bitmap_io(&mut dev).unwrap();
+        let volume_bytes = bm.params.volume_bytes();
+        let cluster_size = bm.params.cluster_size.max(1);
+        let cluster_capacity = volume_bytes.div_ceil(cluster_size);
+
+        // NON-EMPTINESS IS NOT ENOUGH, and asserting only that is how
+        // the first revision of this shipped a guard that refused every
+        // cluster on a third-party volume: the whole-volume fallback it
+        // produced on any lookup failure was itself a non-empty list of
+        // exactly one range, so `!is_empty()` passed on the failure it
+        // was supposed to detect. These assertions fail on that shape.
+        assert!(
+            !bm.other_protected.is_empty(),
+            "a formatted volume has locatable system metafiles to report"
+        );
+        assert!(
+            !bm.other_protected
+                .iter()
+                .any(|&(start, end)| start == 0 && end >= cluster_capacity),
+            "no single range may span the whole volume ({cluster_capacity} clusters): that is \
+             the shape a failed lookup used to manufacture, and it refuses every cluster on \
+             the volume. Got {:?}",
+            bm.other_protected
+        );
+        assert!(
+            bm.other_protected.len() > 1,
+            "several metafiles are located separately, so several ranges are expected -- one \
+             range is the signature of the old whole-volume fallback. Got {:?}",
+            bm.other_protected
+        );
+        // And an ordinary data cluster past all the metadata must stay
+        // free, or `unlink` cannot free anything.
+        assert!(
+            !bm.covers_the_volumes_own(cluster_capacity - 1, 1),
+            "the last cluster on the volume is not any metafile's, and must not be refused"
+        );
+
+        for &(start, end) in &bm.other_protected {
+            assert!(start < end, "empty or inverted range ({start}, {end})");
+            assert!(
+                end <= cluster_capacity,
+                "range ({start}, {end}) exceeds the volume's {cluster_capacity} clusters"
+            );
+        }
+    }
+
     #[test]
     fn locate_bitmap_io_cluster_size_matches_format_params() {
         let mut dev = formatted_dev();
@@ -1201,9 +1844,13 @@ mod range_bound_tests {
             runs: Vec::new(),
             total_bits,
             value_length: total_bits / 8,
-            // $MFT is not modelled in these fixtures, so nothing is guarded
-            // as its own; the guard is exercised in its own test.
-            mft_clusters: 0,
+            // This fixture's own test calls `mutate_bits_io` directly,
+            // which never consults `covers_the_volumes_own` -- but
+            // `mft_clusters: 0` now means "protect everything," not
+            // "not modelled," so a non-zero placeholder keeps that true
+            // for any test added here later too.
+            mft_clusters: 1,
+            other_protected: Vec::new(),
         }
     }
 
@@ -1235,6 +1882,14 @@ mod volume_own_tests {
     use crate::mft_io::BootParams;
 
     fn located(mft_lcn: u64, mft_clusters: u64) -> BitmapLocation {
+        located_with(mft_lcn, mft_clusters, Vec::new())
+    }
+
+    fn located_with(
+        mft_lcn: u64,
+        mft_clusters: u64,
+        other_protected: Vec<(u64, u64)>,
+    ) -> BitmapLocation {
         BitmapLocation {
             params: BootParams {
                 bytes_per_sector: 512,
@@ -1250,6 +1905,7 @@ mod volume_own_tests {
             total_bits: 1 << 16,
             value_length: 1 << 13,
             mft_clusters,
+            other_protected,
         }
     }
 
@@ -1276,11 +1932,112 @@ mod volume_own_tests {
         // An ordinary file's clusters.
         assert!(!bm.covers_the_volumes_own(1, 63), "up to $MFT");
         assert!(!bm.covers_the_volumes_own(96, 100), "past $MFT");
+    }
 
-        // When $MFT's length could not be read there is nothing to
-        // compare it against, and only the boot sector is guarded.
-        let unknown = located(64, 0);
+    /// THIS ASSERTION WAS WRONG, and rust-fs-ntfs#157 is that it was
+    /// wrong: this exact case -- `located(64, 0)`, "$MFT's own extent
+    /// could not be determined" -- used to assert
+    /// `!unknown.covers_the_volumes_own(64, 32)`, declaring clusters
+    /// 64..96 (where `$MFT` actually lives on this fixture) UNPROTECTED
+    /// precisely because nothing could be verified about them. That is
+    /// backwards: not knowing whether a cluster is the volume's own is
+    /// a reason to refuse freeing it, not a reason to allow it. A
+    /// fragmented `$MFT` reaches this path in production --
+    /// `nonresident_contiguous_disk_range` refuses any `$MFT` that is
+    /// not a single extent, and `locate_bitmap_io` turns that `Err`
+    /// into `mft_clusters = 0` via `.unwrap_or(0)` -- so this was not a
+    /// hypothetical: an ordinary volume that has grown over time and
+    /// fragmented its own `$MFT` had NOTHING protected but the boot
+    /// sector, confirmed by execution against this crate's own
+    /// `make_bm` fixture before this fix landed.
+    ///
+    /// The old expectation is not preserved alongside a new one. A
+    /// passing test asserting the vulnerable behaviour, left beside a
+    /// new test asserting its opposite, is a suite nobody can read as
+    /// intentional; whichever a future change happens to break first is
+    /// the one that looks like the regression.
+    #[test]
+    fn a_zero_mft_clusters_scalar_does_not_blanket_refuse_the_volume() {
+        // $MFT's real runs, as `locate_bitmap_io` now supplies them --
+        // `other_protected` carries them, so protection no longer
+        // depends on the scalar at all.
+        let unknown = located_with(64, 0, vec![(64, 96)]);
+
+        // The boot sector, always.
         assert!(unknown.covers_the_volumes_own(0, 1));
-        assert!(!unknown.covers_the_volumes_own(64, 32));
+        // $MFT is STILL protected -- by its runs, not by the scalar.
+        assert!(
+            unknown.covers_the_volumes_own(64, 32),
+            "$MFT's own clusters must be refused even with mft_clusters == 0, because \
+             other_protected carries its real runs"
+        );
+        // AND an unrelated cluster is NOT refused. This is the assertion
+        // that matters, and it has now been wrong in two different
+        // directions -- see this test's history in the commit message.
+        assert!(
+            !unknown.covers_the_volumes_own(5000, 1),
+            "a zero mft_clusters scalar must NOT blanket-refuse the volume: measured on the \
+             `ntfs` crate's own testdata/testfs1 (a $MFT with six runs, so the single-extent \
+             helper feeding this scalar returns Err and it is 0), blanket-refusing declared \
+             4095 of 4095 clusters the volume's own and broke `rm` on an ordinary file"
+        );
+    }
+
+    /// The other five system metafiles this issue names -- `$MFTMirr`,
+    /// `$LogFile`, `$AttrDef`, `$Bitmap` itself, `$Secure`, `$UpCase` --
+    /// are refused exactly like `$MFT` is, via `other_protected`, not
+    /// via a second hardcoded pair. `located_with` supplies the cluster
+    /// range as `locate_bitmap_io` would, post byte-to-cluster
+    /// conversion.
+    #[test]
+    fn a_files_runs_may_not_free_any_other_system_metafiles_clusters_either() {
+        // $MFT at 64..96 (as above), $MFTMirr at 200..204.
+        let bm = located_with(64, 32, vec![(200, 204)]);
+
+        assert!(
+            bm.covers_the_volumes_own(200, 1),
+            "$MFTMirr's first cluster"
+        );
+        assert!(bm.covers_the_volumes_own(203, 1), "$MFTMirr's last cluster");
+        assert!(
+            bm.covers_the_volumes_own(198, 4),
+            "a run reaching into $MFTMirr"
+        );
+        assert!(bm.covers_the_volumes_own(202, 10), "a run leaving $MFTMirr");
+
+        // Still an ordinary, unrelated file's clusters.
+        assert!(
+            !bm.covers_the_volumes_own(100, 50),
+            "between $MFT and $MFTMirr"
+        );
+        assert!(!bm.covers_the_volumes_own(204, 100), "past $MFTMirr");
+
+        // $MFT protection is unaffected by $MFTMirr being tracked too.
+        assert!(bm.covers_the_volumes_own(64, 1));
+    }
+
+    /// `other_protected` carrying a single whole-volume range -- the
+    /// shape `read::other_protected_metafile_ranges_io` returns when
+    /// ANY of the five records it locates could not be determined --
+    /// refuses everything past the boot sector, with no special case
+    /// needed in `covers_the_volumes_own` to recognise it as such: the
+    /// ordinary overlap check already does the job. Exercises the
+    /// SAME fail-closed property as
+    /// `an_undetermined_mft_extent_fails_closed_rather_than_open`,
+    /// through the OTHER of the two mechanisms this fix adds.
+    #[test]
+    fn one_unlocatable_metafile_does_not_cost_the_whole_volume() {
+        // $MFT and $MFTMirr located; another metafile simply absent.
+        let bm = located_with(64, 32, vec![(64, 96), (200, 204)]);
+
+        assert!(bm.covers_the_volumes_own(0, 1), "the boot sector");
+        assert!(bm.covers_the_volumes_own(64, 1), "$MFT, from its runs");
+        assert!(bm.covers_the_volumes_own(200, 1), "$MFTMirr, from its runs");
+        assert!(
+            !bm.covers_the_volumes_own(1000, 1),
+            "a cluster no located metafile claims must stay free -- the guard protects what \
+             it can find, and a metafile it could not find costs only that metafile's own \
+             protection, not the volume's usability"
+        );
     }
 }
