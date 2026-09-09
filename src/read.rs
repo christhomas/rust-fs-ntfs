@@ -1029,10 +1029,12 @@ pub const OTHER_PROTECTED_METAFILE_RECORDS: [(u64, Option<&str>, &str); 8] = [
 /// from mapping pairs `[0x14, 0x00, 0x00, 0x00, 0x40, 0x01, 0x00]`
 /// written into one metafile record:
 ///
-///     decode_runs -> DataRun { length: 1073741824, lcn: Some(1) }
-///     -> byte range (4096, 4398046515200) -> clusters (1, 1073741825)
-///     -> 16384 of 16384 clusters refused, ordinary cluster 5000 among
-///        them, `free_io` refused for every file on the volume
+/// ```text
+/// decode_runs -> DataRun { length: 1073741824, lcn: Some(1) }
+/// -> byte range (4096, 4398046515200) -> clusters (1, 1073741825)
+/// -> 16384 of 16384 clusters refused, ordinary cluster 5000 among
+///    them, free_io refused for every file on the volume
+/// ```
 ///
 /// That is the volume-wide refusal an earlier revision of this fix was
 /// returned for, reached from one damaged record rather than from a
@@ -1051,12 +1053,14 @@ pub const OTHER_PROTECTED_METAFILE_RECORDS: [(u64, Option<&str>, &str); 8] = [
 ///    formatter -- the largest single run of each was never longer than
 ///    its own declared length:
 ///
-///        mkfs 64 MiB:  $MFT 64/64, $MFTMirr 4/4, $LogFile 944/944,
-///                      $AttrDef 1/1, $Bitmap 1/1, $Boot 2/2,
-///                      $Secure:$SDS 1/65, $UpCase 32/32
-///        third party:  $MFT 512/1162, $MFTMirr 8/8, $LogFile 512/512,
-///                      $AttrDef 5/5, $Bitmap 1/1, $Boot 16/16,
-///                      $Secure:$SDS 513/513, $UpCase 256/256
+///    ```text
+///    mkfs 64 MiB:  $MFT 64/64, $MFTMirr 4/4, $LogFile 944/944,
+///                  $AttrDef 1/1, $Bitmap 1/1, $Boot 2/2,
+///                  $Secure:$SDS 1/65, $UpCase 32/32
+///    third party:  $MFT 512/1162, $MFTMirr 8/8, $LogFile 512/512,
+///                  $AttrDef 5/5, $Bitmap 1/1, $Boot 16/16,
+///                  $Secure:$SDS 513/513, $UpCase 256/256
+///    ```
 ///
 ///    (biggest run / declared. `$MFT`'s runs there SUM to 1174 against
 ///    a declared 1162 -- allocation legitimately exceeds data length --
