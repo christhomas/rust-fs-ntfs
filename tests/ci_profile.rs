@@ -187,6 +187,78 @@ fn names_one_integration_target(arguments: &[&str]) -> bool {
         .any(|argument| *argument == "--test" || argument.starts_with("--test="))
 }
 
+/// Cargo's short options that CONSUME A VALUE. The rest of a merged
+/// cluster after one of these is that value, not more flags.
+const SHORT_OPTIONS_TAKING_A_VALUE: &[char] = &['p', 'j', 'F', 'Z'];
+
+/// Whether the run asks for a profile whose `overflow-checks` this file
+/// cannot vouch for.
+///
+/// # `-r` IS `--release`, AND THE SUBSTRING COULD NOT SEE IT
+///
+/// This was `command.contains("--release") || command.contains("--profile")`.
+/// Cargo's short form of `--release` is `-r`, so
+///
+/// ```text
+/// cargo test --locked -r --all-targets
+/// ```
+///
+/// contains neither string. A workflow whose only test run was that
+/// line satisfied every assertion in this file with `overflow-checks`
+/// OFF -- the one state the whole file exists to make impossible. The
+/// runtime probe in `src/lib.rs` does not catch it either: it asserts
+/// only when `EXPECT_OVERFLOW_CHECKS` is set, and this shape sets it,
+/// on a release run.
+///
+/// WIDENING THE SUBSTRING IS THE WRONG FIX, and it is worth saying out
+/// loud because this is the third time in this one file. `contains("-r")`
+/// matches `--release`, `--target-dir`, `--no-run` and any word carrying
+/// those two characters, so the guard would begin refusing correct
+/// workflows. Whole arguments are compared instead.
+///
+/// # THE SHORT CLUSTER IS PARSED, NOT SEARCHED FOR AN `r`
+///
+/// clap merges short flags, so `-qr` is `--quiet --release` and must be
+/// caught. But four of cargo's shorts take a value which may be glued
+/// to them: `-p rust-fs-ntfs` can be written `-prust-fs-ntfs`, whose
+/// second character is `r` and which selects a package, not a profile.
+/// So a cluster is read left to right and stops at the first
+/// value-taking short, which is how clap reads it.
+///
+/// Scanning stops at a bare `--`: what follows is the test binary's
+/// argument, not cargo's.
+///
+/// `--profile` disqualifies whatever it names, including `dev`. That is
+/// the pre-existing rule and it is deliberately over-strict: this file
+/// reads `Cargo.toml` for `dev` and `test` only, so a run under a third
+/// profile is one whose checks it has not established.
+fn selects_a_release_profile(arguments: &[&str]) -> bool {
+    for argument in arguments.iter().take_while(|argument| **argument != "--") {
+        if *argument == "--release"
+            || *argument == "--profile"
+            || argument.starts_with("--profile=")
+        {
+            return true;
+        }
+        let Some(cluster) = argument.strip_prefix('-') else {
+            continue;
+        };
+        // A long option, or a bare `-`; neither is a short cluster.
+        if cluster.starts_with('-') || cluster.is_empty() {
+            continue;
+        }
+        for flag in cluster.chars() {
+            if flag == 'r' {
+                return true;
+            }
+            if SHORT_OPTIONS_TAKING_A_VALUE.contains(&flag) {
+                break;
+            }
+        }
+    }
+    false
+}
+
 /// Every `cargo test` invocation in a shell script that would be
 /// compiled with overflow checks on.
 ///
@@ -205,7 +277,8 @@ fn names_one_integration_target(arguments: &[&str]) -> bool {
 ///
 /// - it is a shell comment;
 /// - it is an inline trailing comment on an otherwise-`--release` line;
-/// - it passes `--release`, or names a profile explicitly;
+/// - it passes `--release` in either spelling, or names a profile
+///   explicitly ([`selects_a_release_profile`]);
 /// - it sets a `CARGO_PROFILE_*` variable, which can turn overflow
 ///   checks off for the dev or test profile from outside the manifest.
 ///
@@ -216,9 +289,11 @@ fn names_one_integration_target(arguments: &[&str]) -> bool {
 ///
 /// The YAML is read properly now, and the two remaining defeats were
 /// substring matches applied to the parsed value — the predicate, not
-/// the parsing. Both are read as arguments instead: see
-/// [`cargo_test_arguments`] for the command, and
-/// [`names_one_integration_target`] for the option.
+/// the parsing. They are read as arguments instead: see
+/// [`cargo_test_arguments`] for the command,
+/// [`names_one_integration_target`] for the target selection, and
+/// [`selects_a_release_profile`] for the profile, which was the third
+/// and was found the same way as the first two.
 fn runs_with_overflow_checks(script: &str) -> Vec<String> {
     script
         .lines()
@@ -230,7 +305,7 @@ fn runs_with_overflow_checks(script: &str) -> Vec<String> {
             let command = line.split(" #").next().unwrap_or(line).trim();
             let tokens: Vec<&str> = command.split_whitespace().collect();
             let arguments = cargo_test_arguments(&tokens)?;
-            if command.contains("--release") || command.contains("--profile") {
+            if selects_a_release_profile(arguments) {
                 return None;
             }
             if command.contains("CARGO_PROFILE_") {
@@ -952,6 +1027,75 @@ EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib
         assert_eq!(
             lines.len(),
             3,
+            "the loop above must have examined every shape"
+        );
+    }
+
+    /// CARGO'S SHORT `-r` IS `--release`.
+    ///
+    /// The substring this replaces saw neither `--release` nor
+    /// `--profile` in any of these, so each one was counted as the
+    /// debug run the whole overflow gate rests on -- with the checks
+    /// off. The merged cluster is the one worth reading twice: clap
+    /// accepts `-qr` as `--quiet --release`.
+    #[test]
+    fn the_short_release_flag_does_not_count() {
+        let lines = [
+            "cargo test --locked -r --all-targets",
+            "cargo test --locked --all-targets -r",
+            "cargo test --locked -qr --all-targets",
+            "cargo test --locked -rq --all-targets",
+            "cargo test --locked -vr --lib",
+            "cargo test --locked -j4 -r --all-targets",
+            "EXPECT_OVERFLOW_CHECKS=1 cargo test --locked -r --lib",
+        ];
+        for line in lines {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line} builds the release profile, where overflow-checks are off"
+            );
+        }
+        assert_eq!(
+            lines.len(),
+            7,
+            "the loop above must have examined every shape"
+        );
+    }
+
+    /// THE ACCEPTANCE HALF, and the reason the fix is a parse rather
+    /// than a wider substring.
+    ///
+    /// Every line here contains the characters `-r` somewhere and none
+    /// of them selects the release profile. `-p rust-fs-ntfs` may be
+    /// written glued, and its second character is an `r`; four of
+    /// cargo's shorts take a value that way. A guard that refused these
+    /// would refuse correct workflows, which is the failure mode the
+    /// substring version of this rule was one edit away from.
+    #[test]
+    fn a_short_option_whose_value_begins_with_r_still_counts() {
+        let lines = [
+            "cargo test --locked -p rust-fs-ntfs --all-targets",
+            "cargo test --locked -prust-fs-ntfs --all-targets",
+            "cargo test --locked -Freparse --all-targets",
+            "cargo test --locked -j4 --all-targets",
+            "cargo test --locked --features release-checks --all-targets",
+            "cargo test --locked --features r --all-targets",
+            "cargo test --locked --features=r --all-targets",
+            "cargo test --locked --target-dir release-dir --all-targets",
+            // Past the separator the argument is the test binary's.
+            "cargo test --locked --all-targets -- -r",
+        ];
+        for line in lines {
+            assert_eq!(
+                runs_with_overflow_checks(line).len(),
+                1,
+                "{line} builds the dev profile and must still count"
+            );
+        }
+        assert_eq!(
+            lines.len(),
+            9,
             "the loop above must have examined every shape"
         );
     }
