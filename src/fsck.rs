@@ -46,6 +46,15 @@ use crate::block_io::BlockIo;
 /// `$Volume` / `$LogFile` MFT record numbers (fixed by the NTFS spec).
 const VOLUME_RECORD_NUMBER: u64 = 3;
 const LOGFILE_RECORD_NUMBER: u64 = 2;
+/// The boot region's size, as a FLOOR for the range `fsck` must never
+/// fill. `$Boot`'s $DATA is 8192 bytes on every ordinary volume --
+/// measured as 8192 on both a volume this crate formatted and a
+/// third-party one -- and the range here was one sector. A constant,
+/// not a length read off the volume: record 7's real extent comes
+/// through the shared protected list, and reading a declared length off
+/// a possibly-damaged record to decide what `fsck` may not touch is the
+/// failure direction rust-fs-ntfs#157 was returned for twice.
+const BOOT_REGION_BYTES: u64 = 8192;
 
 /// Offset of the 2-byte `flags` field within the `$VOLUME_INFORMATION` structure.
 /// Layout (MS-FSCC / Windows Internals 7th ed.): reserved(8) + major(1) + minor(1) + flags(2).
@@ -486,7 +495,29 @@ fn forbidden_fill_ranges(
     mft_bytes: u64,
     other: &[(u64, u64)],
 ) -> Vec<(u64, u64)> {
-    let boot = (0u64, u64::from(params.bytes_per_sector).max(512));
+    // $BOOT IS NOT ONE SECTOR, and this range used to be one. `$Boot`
+    // is record 7, its $DATA is 8192 bytes on an ordinary volume, and a
+    // one-sector forbidden range left a `$LogFile` reset anywhere in
+    // 512..8192 inside `$Boot` and unrefused. Measured on a
+    // 512-byte-cluster third-party volume: fifteen of the sixteen
+    // boot-region clusters were freeable, and only `lcn == 0` was
+    // refused on the bitmap side. See rust-fs-ntfs#157.
+    //
+    // `$Boot`'s REAL extent arrives through `other`, since record 7 is
+    // now in `read::OTHER_PROTECTED_METAFILE_RECORDS` -- bounded by
+    // `run_protected_range` like every other run. This is deliberately
+    // NOT a second read of record 7's declared length: an unbounded
+    // length read off a damaged record is the other half of what
+    // rust-fs-ntfs#157 was returned for, and here it would make the
+    // whole volume forbidden and refuse every `$LogFile` reset. So
+    // what stays here is a CONSTANT FLOOR for the case where record 7
+    // cannot be located at all.
+    let boot = (
+        0u64,
+        BOOT_REGION_BYTES
+            .max(u64::from(params.bytes_per_sector))
+            .max(512),
+    );
     let mft_start = params.mft_lcn.saturating_mul(params.cluster_size);
     let mft = (mft_start, mft_start.saturating_add(mft_bytes));
     let mut ranges = Vec::with_capacity(2 + other.len());
@@ -889,6 +920,17 @@ mod tests {
              range is the signature of the old whole-volume fallback. Got {other:?}"
         );
 
+        // $BOOT'S REAL EXTENT, which is how the boot region gets more
+        // than the constant floor here. Record 7's $DATA is 8192 bytes
+        // on this volume and on a third-party one, so the range starts
+        // at 0 and reaches at least 8192; the old forbidden range was
+        // ONE SECTOR, leaving a fill anywhere in 512..8192 inside
+        // `$Boot` and unrefused. See rust-fs-ntfs#157.
+        assert!(
+            other.iter().any(|&(start, end)| start == 0 && end >= 8192),
+            "$Boot (record 7) must contribute its own extent, got {other:?}"
+        );
+
         let (logfile_offset, logfile_length) = locate_logfile_data_io(&mut dev).unwrap();
         let logfile_range = (logfile_offset, logfile_offset + logfile_length);
         assert!(
@@ -1163,13 +1205,27 @@ mod fill_range_tests {
         let mft_bytes = 16 * 1024 * 1024;
         let forbidden = forbidden_fill_ranges(&p, mft_bytes, &[]);
 
-        // The boot sector, and $MFT.
-        assert_eq!(forbidden[0], (0, 512));
+        // $Boot, and $MFT. THIS EXPECTATION WAS (0, 512) AND THAT WAS
+        // THE DEFECT: one sector, where `$Boot`'s $DATA is 8192 bytes,
+        // so a fill anywhere in 512..8192 landed inside `$Boot` and was
+        // not refused. The test encoded the too-narrow range as
+        // correct. See rust-fs-ntfs#157.
+        assert_eq!(forbidden[0], (0, 8192));
         assert_eq!(forbidden[1], (mft_at, mft_at + mft_bytes));
 
         let overlaps = |fill: (u64, u64)| forbidden.iter().any(|f| ranges_overlap(fill, *f));
 
         assert!(overlaps((0, 4096)), "starting at the boot sector");
+        assert!(
+            overlaps((512, 1024)),
+            "a fill entirely INSIDE $Boot past its first sector must be refused -- this is \
+             the range a one-sector forbidden range left open"
+        );
+        assert!(overlaps((8191, 9000)), "and the last byte of $Boot");
+        assert!(
+            !overlaps((8192, 9000)),
+            "but not past $Boot's end, or the range has stopped being bounded"
+        );
         assert!(overlaps((511, 8192)), "one byte into the boot sector");
         assert!(overlaps((mft_at, mft_at + 4096)), "the start of $MFT");
         assert!(
@@ -1177,9 +1233,14 @@ mod fill_range_tests {
             "the last byte of $MFT"
         );
 
-        // Where a $LogFile actually lives: after the boot sector and
-        // clear of $MFT.
-        assert!(!overlaps((512, 4096)), "between the two");
+        // Where a $LogFile actually lives: past $Boot and clear of $MFT.
+        //
+        // THIS WAS `(512, 4096)` AND ASSERTED NOT-REFUSED, which is the
+        // other half of the same defect: 512..4096 is inside `$Boot`'s
+        // 8192-byte $DATA, so the old expectation required the boot
+        // region to be under-guarded in order to pass. The gap between
+        // `$Boot` and `$MFT` starts at 8192.
+        assert!(!overlaps((8192, 12288)), "between the two");
         assert!(!overlaps((mft_at + mft_bytes, mft_at + mft_bytes + 4096)));
         assert!(!overlaps((64 * 1024 * 1024, 64 * 1024 * 1024 + 4096)));
     }

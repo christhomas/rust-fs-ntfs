@@ -985,7 +985,7 @@ pub fn nonresident_contiguous_disk_range<T: BlockIo + ?Sized>(
 /// `$MFTMirr`, `$Bitmap`'s own storage, `$LogFile`, `$AttrDef`,
 /// `$Secure` or `$UpCase` could free or overwrite live volume metadata
 /// with no refusal at all.
-pub const OTHER_PROTECTED_METAFILE_RECORDS: [(u64, Option<&str>, &str); 7] = [
+pub const OTHER_PROTECTED_METAFILE_RECORDS: [(u64, Option<&str>, &str); 8] = [
     // $MFT itself. It belongs in this list rather than being handled
     // separately by `mft_clusters`, because that scalar is derived from
     // `nonresident_contiguous_disk_range`, which REFUSES a fragmented
@@ -997,6 +997,13 @@ pub const OTHER_PROTECTED_METAFILE_RECORDS: [(u64, Option<&str>, &str); 7] = [
     (2, None, "$LogFile"),
     (4, None, "$AttrDef"),
     (6, None, "$Bitmap"),
+    // $Boot. The `lcn == 0` special case in `covers_the_volumes_own`
+    // guards ONE cluster, and `$Boot`'s $DATA is 8192 bytes -- two
+    // clusters at 4096, sixteen at 512. Measured before this entry
+    // existed: on a 4096-byte-cluster volume LCN 1 was unprotected and
+    // `free_io` on it succeeded; on a 512-byte-cluster volume fifteen
+    // of the sixteen boot-region clusters were freeable.
+    (7, None, "$Boot"),
     // NOT the unnamed stream. `$Secure` keeps its security descriptors
     // in the NAMED `$SDS` stream; its unnamed `$DATA` does not exist on
     // a third-party-formatted volume at all, and is a small resident
@@ -1008,6 +1015,107 @@ pub const OTHER_PROTECTED_METAFILE_RECORDS: [(u64, Option<&str>, &str); 7] = [
     (9, Some("$SDS"), "$Secure:$SDS"),
     (10, None, "$UpCase"),
 ];
+
+/// The byte range one decoded run protects, or `None` if the run
+/// cannot describe real storage on this volume.
+///
+/// AN IMPOSSIBLE RUN IS EVIDENCE OF DAMAGE, NOT SOMETHING TO PROTECT.
+/// That distinction is what keeps a damaged record from turning these
+/// guards into an outage. A run's length comes off the same record the
+/// guards exist to defend against -- rust-fs-ntfs#157's own example of
+/// how one gets damaged is mapping pairs partially overwritten by an
+/// interrupted write -- and until this function existed nothing bounded
+/// it. Measured on a 64 MiB volume, 4096-byte clusters, 16384 clusters,
+/// from mapping pairs `[0x14, 0x00, 0x00, 0x00, 0x40, 0x01, 0x00]`
+/// written into one metafile record:
+///
+///     decode_runs -> DataRun { length: 1073741824, lcn: Some(1) }
+///     -> byte range (4096, 4398046515200) -> clusters (1, 1073741825)
+///     -> 16384 of 16384 clusters refused, ordinary cluster 5000 among
+///        them, `free_io` refused for every file on the volume
+///
+/// That is the volume-wide refusal an earlier revision of this fix was
+/// returned for, reached from one damaged record rather than from a
+/// code path. NOTHING OVERFLOWS ANYWHERE IN IT: `1073741824 * 4096`
+/// fits in a `u64` with room to spare, so swapping a `saturating_add`
+/// for a `checked_add` changes nothing measurable here. The length
+/// itself is the problem.
+///
+/// Two bounds, because either alone is evadable:
+///
+/// 1. **The run may not be longer than the attribute says it is.**
+///    `declared_clusters` is the attribute's own non-resident value
+///    length in clusters, a different field of the same record from the
+///    mapping pairs. Measured across every protected metafile of two
+///    volumes -- one this crate formatted, one from a third-party
+///    formatter -- the largest single run of each was never longer than
+///    its own declared length:
+///
+///        mkfs 64 MiB:  $MFT 64/64, $MFTMirr 4/4, $LogFile 944/944,
+///                      $AttrDef 1/1, $Bitmap 1/1, $Boot 2/2,
+///                      $Secure:$SDS 1/65, $UpCase 32/32
+///        third party:  $MFT 512/1162, $MFTMirr 8/8, $LogFile 512/512,
+///                      $AttrDef 5/5, $Bitmap 1/1, $Boot 16/16,
+///                      $Secure:$SDS 513/513, $UpCase 256/256
+///
+///    (biggest run / declared. `$MFT`'s runs there SUM to 1174 against
+///    a declared 1162 -- allocation legitimately exceeds data length --
+///    so this bounds each run, not their total.)
+///
+/// 2. **The run must fit inside the volume.** `[lcn, lcn + length)`
+///    within the cluster capacity, and the byte range intersected with
+///    `[0, volume_bytes())`.
+///
+/// Bound 2 alone is not enough, and this is the measurement that says
+/// so: a damaged length of `capacity - 1` clusters at LCN 1 FITS, so it
+/// survives a volume-only bound and refuses 16383 of 16384 clusters --
+/// revision one's outage, one arithmetic step away. Bound 1 refuses it
+/// against `$MFTMirr`'s declared 4 clusters. Bound 1 alone is not
+/// enough either, since a run of a plausible length can still start
+/// beyond the volume.
+///
+/// A run that fails either bound is DISCARDED, not clamped: clamping an
+/// absurd length to the volume's end protects almost every cluster,
+/// which is the same outage wearing a bound. Discarding costs that one
+/// run's protection and leaves the record's other runs intact.
+///
+/// The residual, stated rather than implied: value length and mapping
+/// pairs are separate fields, so a record damaged in BOTH -- an
+/// inflated value length AND a matching absurd run -- can still widen
+/// what is refused, up to the volume. No guard reading only that record
+/// can do better; it would need an independent witness of the truth.
+fn run_protected_range(
+    lcn: u64,
+    length: u64,
+    declared_clusters: u64,
+    params: &crate::mft_io::BootParams,
+) -> Option<(u64, u64)> {
+    let volume_bytes = params.volume_bytes();
+    if volume_bytes == 0 || length == 0 {
+        return None;
+    }
+    // Bound 1: the attribute's own declared size. `max(1)` because a
+    // declared length of zero with a real run is itself odd, and one
+    // cluster is the smallest thing worth protecting.
+    if length > declared_clusters.max(1) {
+        return None;
+    }
+    let cluster_size = params.cluster_size.max(1);
+    let capacity = volume_bytes.div_ceil(cluster_size);
+    // Bound 2: the run fits inside the volume.
+    if lcn.saturating_add(length) > capacity {
+        return None;
+    }
+    let start = lcn.checked_mul(cluster_size)?;
+    let end = length
+        .checked_mul(cluster_size)
+        .and_then(|len| start.checked_add(len))?
+        .min(volume_bytes);
+    if end <= start {
+        return None;
+    }
+    Some((start, end))
+}
 
 /// Every physical extent of record `record_number`'s unnamed `$DATA`,
 /// as byte ranges `[start, end)`, in run order. Sparse holes (`lcn ==
@@ -1048,20 +1156,23 @@ fn nonresident_disk_ranges_io<T: BlockIo + ?Sized>(
         .ok_or("non-resident attribute has no mapping-pairs offset")? as usize;
     let runs =
         data_runs::decode_runs(&record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length])?;
-    runs.iter()
+    // The attribute's own declared size, which `run_protected_range`
+    // bounds each run against. A different field of the same record
+    // from the mapping pairs, which is what makes it a cross-check.
+    let declared_clusters = loc
+        .non_resident_value_length
+        .unwrap_or(0)
+        .div_ceil(params.cluster_size.max(1));
+    Ok(runs
+        .iter()
         .filter_map(|r| {
-            let lcn = r.lcn?;
-            let start = match lcn.checked_mul(params.cluster_size) {
-                Some(v) => v,
-                None => return Some(Err(format!("record {record_number}: run start overflows"))),
-            };
-            let len_bytes = match r.length.checked_mul(params.cluster_size) {
-                Some(v) => v,
-                None => return Some(Err(format!("record {record_number}: run length overflows"))),
-            };
-            Some(Ok((start, start.saturating_add(len_bytes))))
+            // A DISCARDED RUN IS NOT AN ERROR. The rest of this
+            // record's runs may be perfectly good, and one impossible
+            // run must not cost the whole record its protection --
+            // still less turn into a volume-wide refusal.
+            run_protected_range(r.lcn?, r.length, declared_clusters, &params)
         })
-        .collect()
+        .collect())
 }
 
 /// Byte ranges `[start, end)` that must never be freed or overwritten:
@@ -1131,13 +1242,14 @@ fn mft_ranges_io<T: BlockIo + ?Sized>(
                             let end = loc.attr_offset + loc.attr_length;
                             if start < end && end <= record.len() {
                                 if let Ok(runs) = data_runs::decode_runs(&record[start..end]) {
+                                    let declared = loc
+                                        .non_resident_value_length
+                                        .unwrap_or(0)
+                                        .div_ceil(params.cluster_size.max(1));
                                     let ranges: Vec<(u64, u64)> = runs
                                         .iter()
                                         .filter_map(|r| {
-                                            let lcn = r.lcn?;
-                                            let s = lcn.checked_mul(params.cluster_size)?;
-                                            let len = r.length.checked_mul(params.cluster_size)?;
-                                            Some((s, s.saturating_add(len)))
+                                            run_protected_range(r.lcn?, r.length, declared, params)
                                         })
                                         .collect();
                                     if !ranges.is_empty() {
