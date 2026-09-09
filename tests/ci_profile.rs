@@ -84,6 +84,109 @@ fn read_or_panic(path: &Path) -> String {
     })
 }
 
+/// Whether a token is a leading `NAME=value` shell assignment.
+///
+/// This is how the handshake is passed —
+/// `EXPECT_OVERFLOW_CHECKS=1 cargo test ...` — so the command word is
+/// not always the first token. A name is the shell's: letters, digits
+/// and underscores, not starting with a digit. `--test=qemu` is not
+/// one of these, which is what keeps [`cargo_test_arguments`] from
+/// mistaking an option for an assignment.
+fn is_shell_assignment(token: &str) -> bool {
+    match token.split_once('=') {
+        Some((name, _)) => {
+            !name.is_empty()
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        None => false,
+    }
+}
+
+/// The arguments of a `cargo test` INVOCATION, or `None` if the line
+/// is not one.
+///
+/// # WHY THE COMMAND WORD AND NOT A SUBSTRING
+///
+/// The check here was `command.contains("cargo test")`, which counts a
+/// line that merely prints the command:
+///
+/// ```text
+/// - run: |
+///     echo "EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib"
+///     cargo test --release --locked --lib
+/// ```
+///
+/// That satisfied BOTH workflow assertions — the debug run and the
+/// handshake — with no debug run behind either, and this repository's
+/// `ci.yml` already prints quoted commands in its sibling-checkout
+/// step, so the shape is live rather than contrived. It is one of the
+/// four bypasses rust-fs-ntfs#248 names, and the only one the first
+/// fix left open.
+///
+/// So the line has to BE the invocation: leading `NAME=value`
+/// assignments, then `cargo` (however it is spelled on disk), then an
+/// optional `+toolchain`, then the `test` subcommand. Anything in
+/// front of `cargo` — `echo`, `printf`, `:` — means the text is being
+/// quoted rather than run.
+///
+/// The returned slice is the arguments after `test`, which is what
+/// [`names_one_integration_target`] reads.
+fn cargo_test_arguments<'a>(tokens: &'a [&'a str]) -> Option<&'a [&'a str]> {
+    let mut rest = tokens;
+    while rest.first().is_some_and(|token| is_shell_assignment(token)) {
+        rest = &rest[1..];
+    }
+    let (program, after_program) = rest.split_first()?;
+    if program.rsplit('/').next() != Some("cargo") {
+        return None;
+    }
+    rest = after_program;
+    while rest.first().is_some_and(|token| token.starts_with('+')) {
+        rest = &rest[1..];
+    }
+    let (subcommand, arguments) = rest.split_first()?;
+    if *subcommand != "test" {
+        return None;
+    }
+    Some(arguments)
+}
+
+/// Whether the run selects a single integration target.
+///
+/// `--test <name>` builds one integration target and no library unit
+/// tests, so it does not cover the crate's arithmetic. Several
+/// repositories here run a cross-validation suite that way, in its own
+/// job, beside the real one.
+///
+/// # WHY THIS READS THE OPTION INSTEAD OF MATCHING `"--test "`
+///
+/// The trailing space was there to protect `--tests`, which DOES build
+/// the library unit tests and must still count:
+///
+/// ```text
+/// "--test " in "--all-targets"  -> false
+/// "--test " in "--tests"        -> false   (so it counts)
+/// "--test"  in "--tests"        -> true    (so it would not)
+/// ```
+///
+/// But a space is not the only separator an option takes, so
+/// `--test=qemu_validation` matched neither and counted as a full
+/// debug run. WIDENING THE SUBSTRING IS THE WRONG FIX — dropping the
+/// space is exactly what the space is for, and that is how it became
+/// load-bearing in the first place. Comparing whole arguments answers
+/// both spellings at once and cannot be undone by the next separator.
+///
+/// Scanning stops at a bare `--`: what follows is handed to the test
+/// binary, and `cargo test --lib -- --test=x` still builds the
+/// library.
+fn names_one_integration_target(arguments: &[&str]) -> bool {
+    arguments
+        .iter()
+        .take_while(|argument| **argument != "--")
+        .any(|argument| *argument == "--test" || argument.starts_with("--test="))
+}
+
 /// Every `cargo test` invocation in a shell script that would be
 /// compiled with overflow checks on.
 ///
@@ -108,6 +211,14 @@ fn read_or_panic(path: &Path) -> String {
 ///
 /// A `cargo build` is not a `cargo test` and is not considered, nor is
 /// any step that invokes no cargo at all.
+///
+/// # PARSING THE WORKFLOW WAS NECESSARY AND NOT SUFFICIENT
+///
+/// The YAML is read properly now, and the two remaining defeats were
+/// substring matches applied to the parsed value — the predicate, not
+/// the parsing. Both are read as arguments instead: see
+/// [`cargo_test_arguments`] for the command, and
+/// [`names_one_integration_target`] for the option.
 fn runs_with_overflow_checks(script: &str) -> Vec<String> {
     script
         .lines()
@@ -117,29 +228,15 @@ fn runs_with_overflow_checks(script: &str) -> Vec<String> {
                 return None;
             }
             let command = line.split(" #").next().unwrap_or(line).trim();
-            if !command.contains("cargo test") {
-                return None;
-            }
+            let tokens: Vec<&str> = command.split_whitespace().collect();
+            let arguments = cargo_test_arguments(&tokens)?;
             if command.contains("--release") || command.contains("--profile") {
                 return None;
             }
             if command.contains("CARGO_PROFILE_") {
                 return None;
             }
-            // `--test <name>` builds one integration target and no
-            // library unit tests, so it does not cover the crate's
-            // arithmetic. Several repositories here run a
-            // cross-validation suite that way, in its own job, beside
-            // the real one.
-            //
-            // THE TRAILING SPACE PROTECTS `--tests`, NOT `--all-targets`.
-            // `--tests` DOES build the library unit tests and contains
-            // `--test` but not `--test `, so dropping the space would
-            // exclude a run that genuinely satisfies this guard:
-            //   "--test " in "--all-targets"  -> false
-            //   "--test " in "--tests"        -> false   (so it counts)
-            //   "--test"  in "--tests"        -> true    (so it would not)
-            if command.contains("--test ") {
+            if names_one_integration_target(arguments) {
                 return None;
             }
             Some(command.to_string())
@@ -894,11 +991,12 @@ cargo build --locked --release
         }
     }
 
-    /// The near miss that the trailing space protects: `--tests` DOES
-    /// build the library unit tests and must still count. Without the
-    /// space this is excluded and the guard refuses a correct workflow.
+    /// The near miss the whole-argument comparison protects: `--tests`
+    /// DOES build the library unit tests and must still count. The
+    /// substring this replaced needed a trailing space for exactly
+    /// this, and that space is what let `--test=<name>` through.
     #[test]
-    fn a_tests_flag_run_counts_which_is_what_the_trailing_space_protects() {
+    fn a_tests_flag_run_counts_which_is_what_the_trailing_space_protected() {
         assert_eq!(
             runs_with_overflow_checks("cargo test --locked --tests"),
             vec!["cargo test --locked --tests".to_string()],
@@ -907,6 +1005,101 @@ cargo build --locked --release
             runs_with_overflow_checks("cargo test --locked --all-targets").len(),
             1,
             "`--all-targets` builds the library too"
+        );
+    }
+
+    /// HOLE ONE: A PRINTED COMMAND IS NOT A RUN.
+    ///
+    /// `contains("cargo test")` counted the `echo`, so this block
+    /// satisfied both workflow assertions with no debug run in it at
+    /// all. `ci.yml` prints quoted commands in its sibling-checkout
+    /// step, so this is a shape the file already has.
+    #[test]
+    fn an_echoed_command_is_not_a_run() {
+        let block = "\
+echo \"EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\"
+cargo test --release --locked --lib
+";
+        assert_eq!(
+            runs_with_overflow_checks(block),
+            Vec::<String>::new(),
+            "the only debug command here is inside an echo; the run is --release"
+        );
+        assert_eq!(
+            super::debug_runs_that_prove_the_build_traps(block),
+            Vec::<String>::new(),
+            "and the handshake it prints does not arm anything either"
+        );
+    }
+
+    /// The same, in every spelling that puts something in front of the
+    /// command word.
+    #[test]
+    fn a_command_word_that_is_not_cargo_is_not_a_run() {
+        for line in [
+            "echo cargo test --locked --lib",
+            "printf '%s\\n' 'cargo test --locked --lib'",
+            ": cargo test --locked --lib",
+            "echo \"EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\"",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line} prints the command rather than running it"
+            );
+        }
+    }
+
+    /// ACCEPTANCE FOR HOLE ONE. The command word is not always the
+    /// first token, and every legal spelling must survive the change:
+    /// the handshake is passed as a leading assignment, and a
+    /// toolchain may be selected.
+    #[test]
+    fn the_ways_a_real_invocation_is_spelled_all_still_count() {
+        for line in [
+            "cargo test --locked --lib",
+            "EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib",
+            "EXPECT_OVERFLOW_CHECKS=1 RUST_BACKTRACE=1 cargo test --locked --lib",
+            "cargo +nightly test --locked --lib",
+            "/usr/local/bin/cargo test --locked --lib",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                vec![line.to_string()],
+                "{line} is a real debug run and must still count"
+            );
+        }
+    }
+
+    /// HOLE TWO: `--test=<name>` IS THE SAME OPTION AS `--test <name>`.
+    ///
+    /// The substring `"--test "` saw only the space-separated form, so
+    /// a cross-validation job written with an `=` counted as a full
+    /// debug run and the real one could be deleted with the guard
+    /// green.
+    #[test]
+    fn an_equals_separated_integration_target_does_not_count() {
+        for line in [
+            "cargo test --locked --features qemu-validation --test=qemu_validation",
+            "EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --test=some_oracle",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line} builds one integration target and no library unit tests"
+            );
+        }
+    }
+
+    /// ACCEPTANCE FOR HOLE TWO. An argument after a bare `--` goes to
+    /// the test binary, not to cargo, so it selects nothing: the
+    /// library is still built and the run still counts.
+    #[test]
+    fn an_argument_past_the_separator_does_not_select_a_target() {
+        assert_eq!(
+            runs_with_overflow_checks("cargo test --locked --lib -- --test=x"),
+            vec!["cargo test --locked --lib -- --test=x".to_string()],
+            "past `--` the option belongs to the harness; the library was built"
         );
     }
 }
