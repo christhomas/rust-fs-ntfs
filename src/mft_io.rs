@@ -316,6 +316,7 @@ pub fn cluster_span(
 const FILE_MAGIC: &[u8; 4] = b"FILE";
 const OFF_USA_OFFSET: usize = 0x04;
 const OFF_USA_COUNT: usize = 0x06;
+const OFF_SEQ: usize = 0x10;
 const OFF_FLAGS: usize = 0x16;
 
 /// Record flag: record is in use (allocated). Clear ⇒ record is free.
@@ -327,6 +328,76 @@ pub const MFT_FLAG_DIRECTORY: u16 = 0x0002;
 /// post-fixup buffer.
 pub fn record_flags(record: &[u8]) -> u16 {
     u16::from_le_bytes([record[OFF_FLAGS], record[OFF_FLAGS + 1]])
+}
+
+/// Returns the record's `sequence number` field (u16 LE at +0x10).
+///
+/// The sequence is what makes a file reference more than a record
+/// number: it is bumped every time the slot is reused, so a reference
+/// carrying the old value no longer matches the record it named.
+pub fn record_sequence(record: &[u8]) -> u16 {
+    u16::from_le_bytes([record[OFF_SEQ], record[OFF_SEQ + 1]])
+}
+
+/// The sequence to stamp on a slot about to be allocated, given the
+/// slot's current raw bytes.
+///
+/// # THE SLOT IS RECYCLED, AND THAT IS WHAT THE FIELD IS FOR
+///
+/// `mft_bitmap::find_free_record_io` returns the FIRST clear bit from
+/// its hint upward, so a create straight after a delete lands on the
+/// record just freed -- and deletion deliberately leaves the sequence
+/// where it is, which is the only reason the previous value is still
+/// there to read. Stamping a literal `1` made a reference to the
+/// previous occupant match the new file rather than fail, which is
+/// exactly what the sequence exists to prevent: create A, delete A,
+/// create B, and a reference to A was bit-identical to one to B.
+///
+/// # NO MAGIC MEANS NO HISTORY
+///
+/// A slot with no `FILE` magic has never held a record -- a never-used
+/// one inside the MFT's allocated extent is zeroed -- so there is no
+/// history to continue and the answer is `1`, which is the value this
+/// used to be unconditionally. That is why a fresh volume's records are
+/// unchanged by this.
+///
+/// # `0` IS SKIPPED ON WRAP
+///
+/// The format treats a zero sequence as "record never used", so it is
+/// not a value a live record may carry. `apply_fixup_on_write` skips
+/// `0` on the update sequence number for the same reason; this is a
+/// different field with the same rule.
+pub fn next_sequence_for_slot(slot: &[u8]) -> u16 {
+    if slot.len() < OFF_SEQ + 2 || &slot[0..4] != FILE_MAGIC {
+        return 1;
+    }
+    match record_sequence(slot).wrapping_add(1) {
+        0 => 1,
+        n => n,
+    }
+}
+
+/// Read the slot a record is about to be written into and return the
+/// sequence its replacement must carry.
+///
+/// # READ RAW, WITHOUT THE FIXUP OR THE HEADER CHECK
+///
+/// A free slot is not required to be a well-formed record, so
+/// [`read_mft_record_io`] is the wrong tool: it applies the fixup
+/// first, and a zeroed slot fails that on the magic before anything
+/// else gets a chance to read it. The sequence is at `0x10`, in the
+/// first sector and nowhere near the sector tail the fixup rewrites,
+/// so for THIS field the raw bytes are the true bytes.
+pub fn next_sequence_for_allocation_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    params: &BootParams,
+    record_number: u64,
+) -> Result<u16, String> {
+    let offset = mft_record_offset(params, record_number);
+    let mut slot = vec![0u8; params.file_record_size as usize];
+    io.read_exact_at(offset, &mut slot)
+        .map_err(|e| format!("read record {record_number} for its sequence: {e}"))?;
+    Ok(next_sequence_for_slot(&slot))
 }
 
 /// Apply the on-disk → in-memory fixup. Validates the FILE magic and
@@ -623,6 +694,48 @@ pub fn restore_mft_record_io<T: BlockIo + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A slot with no `FILE` magic has never held a record, so there is
+    /// no history to continue -- which is why a fresh volume is
+    /// unaffected by the bump.
+    #[test]
+    fn a_slot_with_no_record_in_it_starts_at_one() {
+        assert_eq!(next_sequence_for_slot(&[0u8; 1024]), 1);
+        assert_eq!(next_sequence_for_slot(&[0xffu8; 1024]), 1, "not FILE magic");
+        assert_eq!(next_sequence_for_slot(&[]), 1, "nothing to read");
+        assert_eq!(next_sequence_for_slot(b"FIL"), 1, "too short for the field");
+    }
+
+    /// The slot's own prior value is what the new record continues from.
+    #[test]
+    fn a_slot_that_held_a_record_continues_from_its_value() {
+        let mut slot = [0u8; 1024];
+        slot[0..4].copy_from_slice(FILE_MAGIC);
+        for prior in [1u16, 2, 7, 0xfffe] {
+            slot[OFF_SEQ..OFF_SEQ + 2].copy_from_slice(&prior.to_le_bytes());
+            assert_eq!(
+                next_sequence_for_slot(&slot),
+                prior + 1,
+                "a slot holding {prior} must hand out {}",
+                prior + 1
+            );
+        }
+    }
+
+    /// `0` means "never used", so it is not a value a live record may
+    /// carry. The wrap skips it, the same rule `apply_fixup_on_write`
+    /// applies to the update sequence number.
+    #[test]
+    fn the_wrap_skips_zero() {
+        let mut slot = [0u8; 1024];
+        slot[0..4].copy_from_slice(FILE_MAGIC);
+        slot[OFF_SEQ..OFF_SEQ + 2].copy_from_slice(&0xffffu16.to_le_bytes());
+        assert_eq!(
+            next_sequence_for_slot(&slot),
+            1,
+            "0xffff + 1 is 0, which is reserved"
+        );
+    }
     use crate::block_io::BlockIo;
     use crate::mkfs::format_filesystem;
 

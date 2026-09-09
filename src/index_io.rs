@@ -92,6 +92,17 @@ pub struct IndexEntryLocation {
     pub key_length: usize,
     /// File record number this entry points to (low 48 bits of file_reference).
     pub file_record_number: u64,
+    /// The reference's SEQUENCE NUMBER: the high 16 bits, which used to
+    /// be masked off here and discarded.
+    ///
+    /// It is carried, not yet checked. The record it names has a
+    /// sequence of its own at header offset `0x10`, and a mismatch
+    /// means the entry is stale -- it refers to a file that no longer
+    /// occupies the slot. Deciding what a mismatch DOES (skip the entry
+    /// or fail the call) is a behavioural choice on dirty volumes and
+    /// belongs to its own change; discarding the value made that choice
+    /// impossible to implement at all.
+    pub sequence: u16,
     /// Length of the filename in UTF-16 code units.
     pub name_length: u8,
 }
@@ -213,6 +224,7 @@ pub fn find_index_entry(
                         length,
                         key_length,
                         file_record_number,
+                        sequence: (file_ref >> 48) as u16,
                         name_length: name_length as u8,
                     }));
                 }
@@ -366,6 +378,7 @@ fn scan_entries_for_name(
                         length,
                         key_length,
                         file_record_number,
+                        sequence: (file_ref >> 48) as u16,
                         name_length: name_length as u8,
                     }));
                 }
@@ -1609,6 +1622,7 @@ mod tests {
             length: entry_len,
             key_length: key_len,
             file_record_number: 0,
+            sequence: 0,
             name_length: utf16.len() as u8,
         };
         (buf, loc)

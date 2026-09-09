@@ -1360,12 +1360,18 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
 
     // Get the parent's sequence number for the file-name attribute's
     // parent_reference. Sequence is at record header offset +0x10.
-    let parent_seq = u16::from_le_bytes([parent_record_bytes[0x10], parent_record_bytes[0x11]]);
+    let parent_seq = crate::mft_io::record_sequence(&parent_record_bytes);
     let parent_reference = crate::record_build::encode_file_reference(parent_rec, parent_seq);
 
     // Build the new record.
     let nt_time = crate::record_build::nt_time_now();
-    let new_seq: u16 = 1;
+    // CONTINUE THE SLOT'S HISTORY RATHER THAN RESTARTING IT. This was
+    // the literal `1`, on a slot the allocator hands back the moment its
+    // previous occupant is deleted -- so a reference to that occupant
+    // matched the new file instead of failing, which is the one thing
+    // the sequence number exists to prevent. See
+    // `mft_io::next_sequence_for_slot`.
+    let new_seq = crate::mft_io::next_sequence_for_allocation_io(io, &params, new_rec)?;
     let mut new_record = crate::record_build::build_regular_file_record(
         params.file_record_size as usize,
         new_rec as u32,
@@ -1576,11 +1582,17 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
     let new_rec = crate::mft_bitmap::find_free_record_io(io, &mbm, 24)?
         .ok_or_else(|| "MFT full — would need to grow $MFT (W2.6)".to_string())?;
 
-    let parent_seq = u16::from_le_bytes([parent_record_bytes[0x10], parent_record_bytes[0x11]]);
+    let parent_seq = crate::mft_io::record_sequence(&parent_record_bytes);
     let parent_reference = crate::record_build::encode_file_reference(parent_rec, parent_seq);
 
     let nt_time = crate::record_build::nt_time_now();
-    let new_seq: u16 = 1;
+    // CONTINUE THE SLOT'S HISTORY RATHER THAN RESTARTING IT. This was
+    // the literal `1`, on a slot the allocator hands back the moment its
+    // previous occupant is deleted -- so a reference to that occupant
+    // matched the new file instead of failing, which is the one thing
+    // the sequence number exists to prevent. See
+    // `mft_io::next_sequence_for_slot`.
+    let new_seq = crate::mft_io::next_sequence_for_allocation_io(io, &params, new_rec)?;
     // For a fresh directory, use cluster_size as the index block size —
     // matches what NTFS formatter does for small volumes.
     let index_block_size = params.cluster_size as u32;
@@ -2546,7 +2558,7 @@ pub fn link_io<T: BlockIo + ?Sized>(
         }
     }
 
-    let parent_seq = u16::from_le_bytes([parent_record_bytes[0x10], parent_record_bytes[0x11]]);
+    let parent_seq = crate::mft_io::record_sequence(&parent_record_bytes);
     let parent_reference = crate::record_build::encode_file_reference(new_parent_rec, parent_seq);
     let target_seq = u16::from_le_bytes([target_record_bytes[0x10], target_record_bytes[0x11]]);
     let target_reference = crate::record_build::encode_file_reference(target_rec, target_seq);
@@ -3599,7 +3611,7 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
 
     let (_, file_record_bytes) = read_mft_record_io(io, file_rec)?;
     let file_seq = u16::from_le_bytes([file_record_bytes[0x10], file_record_bytes[0x11]]);
-    let parent_seq = u16::from_le_bytes([parent_record_bytes[0x10], parent_record_bytes[0x11]]);
+    let parent_seq = crate::mft_io::record_sequence(&parent_record_bytes);
     let file_reference = crate::record_build::encode_file_reference(file_rec, file_seq);
     let parent_reference = crate::record_build::encode_file_reference(parent_rec, parent_seq);
 
@@ -3977,7 +3989,7 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
     // orphaned, chkdsk-flagged inconsistency). On the happy path this is a
     // pure read; on-disk behaviour is unchanged.
     let hard_link_count = u16::from_le_bytes([file_record_bytes[0x12], file_record_bytes[0x13]]);
-    let parent_seq = u16::from_le_bytes([parent_record_bytes[0x10], parent_record_bytes[0x11]]);
+    let parent_seq = crate::mft_io::record_sequence(&parent_record_bytes);
     let parent_reference = crate::record_build::encode_file_reference(parent_rec, parent_seq);
     if hard_link_count > 1
         && find_file_name_attr(&file_record_bytes, parent_reference, basename).is_none()
