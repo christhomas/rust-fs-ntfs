@@ -170,7 +170,32 @@ jobs:
       # second compile and nothing else. It is deliberately not
       # `--release`'s twin in coverage — it exists for the profile, not
       # for the breadth.
+      #
+      # EXPECT_OVERFLOW_CHECKS ARMS THE ONE CHECK A TEXT SCAN CANNOT DO.
+      # This run has no `--release`, so overflow-checks are on, and it is
+      # what makes every arithmetic test in this crate mean anything --
+      # `signed_bytes_needed` above is the case that proved it.
+      #
+      # The variable tells `overflow_checks::the_build_the_gate_asked_to
+      # _check_does_check` in src/lib.rs that THIS is the run that must
+      # trap an overflow -- asking the build directly rather than
+      # inferring it from which spellings of "disabled" happen to be
+      # absent from Cargo.toml.
+      #
+      # Declared as an `env:` mapping rather than inline as
+      # `VAR=1 cargo test`. This job's matrix is ubuntu + macos, so the
+      # inline form would work here; the mapping is what the
+      # cross-platform siblings require, because an inline prefix is a
+      # PowerShell syntax error on windows-latest. The guard reads both
+      # spellings, and the copies of it stay one answer rather than
+      # several.
+      #
+      # Do not add `--release` to this run, and do not drop the variable:
+      # tests/ci_profile.rs reads this file and fails if no `cargo test`
+      # in it runs without `--release` while setting this. See #248.
       - run: cargo test --locked --lib
+        env:
+          EXPECT_OVERFLOW_CHECKS: "1"
 
   # Full integration suite — every unit AND integration test, with the
   # read-path .img fixtures generated on the runner via ntfs-3g/mkntfs.
