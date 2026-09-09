@@ -4064,148 +4064,87 @@ mod ffi_guard_tests {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The debug test run guards itself
-// ---------------------------------------------------------------------------
+// DOES THIS BUILD ACTUALLY TRAP AN ARITHMETIC OVERFLOW?
 //
-// `ci.yml` runs the unit suite twice: once `--release`, once not. The
-// second run looks redundant and is not. Overflow checks are on in
-// debug and off in release, so a defect whose only symptom is an
-// arithmetic overflow panic cannot be observed by a release-only gate —
-// which is what this crate had until #216, and what let a `1i64 << 63`
-// negation in `signed_bytes_needed` pass every job CI ran.
-//
-// The comment above that step explains the reasoning, but a comment is
-// advice. Deleting the step leaves CI green, saves a compile, and puts
-// the blindness back. The failure mode is a well-intentioned tidy-up:
-// nobody removes a test job on purpose, they consolidate two lines that
-// appear to do the same thing.
-//
-// So the property gets a check of its own. It asserts that at least one
-// `cargo test` in the gate still runs without `--release`, rather than
-// that any particular line is present, so renaming or reformatting the
-// step does not defeat it while a deletion does.
+// Inline in `lib.rs` rather than a module of its own, for the reason
+// `tests/ci_profile.rs` explains at length: a separate file under `src/`
+// hangs off one `mod` line, and losing that line leaves the file present,
+// uncompiled, and asserting nothing, with no lint to say so. Inline,
+// there is no declaration to lose. It cannot live in `tests/` at all --
+// it has to be part of the library target that the debug step builds,
+// because the question it answers is about that build.
 #[cfg(test)]
-mod ci_profile_tests {
-    /// Every `cargo test` invocation in a workflow that would be
-    /// compiled with overflow checks on.
+mod overflow_checks {
+    /// Set by the debug step in `ci.yml`, and by nothing else.
     ///
-    /// Three things disqualify a line, and each one is a way the guard
-    /// could otherwise be satisfied by something that does not actually
-    /// build in debug:
+    /// The release step must NOT set it: overflow checks are off there
+    /// deliberately, because that is what ships.
+    const HANDSHAKE: &str = "EXPECT_OVERFLOW_CHECKS";
+
+    /// Perform an overflow and report whether the program was stopped.
     ///
-    /// - it is a YAML comment. `ci.yml` quotes the debug command inside
-    ///   the comment block that explains it, so a scan that ignored
-    ///   comments would still find `cargo test --locked --lib` after
-    ///   the step itself had been deleted;
-    /// - it passes `--release`, or names a profile explicitly;
-    /// - it sets a `CARGO_PROFILE_*` variable, which can turn overflow
-    ///   checks off for the dev profile from outside the manifest.
-    fn runs_with_overflow_checks(workflow: &str) -> Vec<String> {
-        workflow
-            .lines()
-            .filter_map(|raw| {
-                let line = raw.trim_start();
-                if line.starts_with('#') {
-                    return None;
-                }
-                let command = line.split(" #").next().unwrap_or(line).trim();
-                if !command.contains("cargo test") {
-                    return None;
-                }
-                if command.contains("--release")
-                    || command.contains("--profile")
-                    || command.contains("CARGO_PROFILE_")
-                {
-                    return None;
-                }
-                Some(command.to_string())
-            })
-            .collect()
+    /// This is the only question that matters and the only one that
+    /// cannot be answered by reading a file. `overflow-checks` can be
+    /// turned off by a manifest key in four spellings, by a
+    /// `CARGO_PROFILE_TEST_OVERFLOW_CHECKS` variable set at step or job
+    /// level, by `.cargo/config.toml`, and by whatever cargo adds next.
+    /// Each of those was found separately, all the same shape: a scanner
+    /// asking whether a known spelling of "disabled" appears in the text
+    /// it happens to read. This asks the build instead.
+    fn this_build_traps_an_overflow() -> bool {
+        // The hook is silenced so a deliberate panic does not print a
+        // scary backtrace into a passing job's log. `set_hook` is
+        // process-wide, so for the moment this is installed another
+        // thread's panic message would be swallowed too -- it would
+        // still fail, just less legibly. Narrow, and worth it against a
+        // log line that reads as a failure on every green run.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let trapped = std::panic::catch_unwind(|| {
+            // `black_box` keeps this out of const evaluation, where it
+            // would be a compile error rather than a runtime trap.
+            let big = std::hint::black_box(u64::MAX);
+            std::hint::black_box(big + 1);
+        })
+        .is_err();
+        std::panic::set_hook(previous);
+        trapped
     }
 
-    /// The guard. Reads the workflow this repository is gated by and
-    /// refuses if nothing in it compiles the overflow checks.
+    /// When the gate says it built a profile that traps, check that it
+    /// did.
     ///
-    /// It asserts rather than skips when the file cannot be read. A
-    /// `if !path.exists() { return }` here would reproduce the exact
-    /// class of blindness the test exists to prevent — an assertion
-    /// that is present, runs, and cannot report the thing it was
-    /// written for.
+    /// # What guards this test's own relevance
+    ///
+    /// With `HANDSHAKE` unset this asserts nothing, which is the shape
+    /// of a test that passes because its fixture is missing. It is not
+    /// guarded here, because it cannot be: a build cannot tell whether
+    /// it was supposed to be the checking one. It is guarded in
+    /// `tests/ci_profile.rs`, which reads `ci.yml` and refuses if no
+    /// `cargo test` there runs without `--release` while setting this
+    /// variable. Delete the step, or drop the variable from it, and that
+    /// test fails.
+    ///
+    /// The two are not redundant. A runtime check cannot notice its own
+    /// absence; a text scan cannot tell whether the build it describes
+    /// works. One proves the step is there, this proves it can see.
     #[test]
-    fn the_gate_still_tests_in_a_profile_that_can_see_an_overflow() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(".github")
-            .join("workflows")
-            .join("ci.yml");
-        let workflow = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            panic!(
-                "cannot read {}: {e}. This guard must fail rather than \
-                 skip: a version of it that returned early here would be \
-                 the same blindness it exists to prevent.",
-                path.display()
-            )
-        });
+    fn the_build_the_gate_asked_to_check_does_check() {
+        let asked = match std::env::var(HANDSHAKE) {
+            Ok(value) if !value.is_empty() => value,
+            _ => return,
+        };
 
-        let debug_runs = runs_with_overflow_checks(&workflow);
         assert!(
-            !debug_runs.is_empty(),
-            "no `cargo test` in {} runs without `--release`, so no defect \
-             whose only symptom is an arithmetic overflow panic can be \
-             observed by this repository's gate. Overflow checks are on in \
-             debug and off in release. If the debug step looked redundant \
-             beside the release one, it is not — see the comment above it.",
-            path.display()
+            this_build_traps_an_overflow(),
+            "{HANDSHAKE}={asked} was set, so this run is the one that is \
+             supposed to panic on arithmetic overflow -- and it did not. \
+             The checks are off in the profile the gate built. Something \
+             turned them off where nothing reading Cargo.toml can see it: \
+             a CARGO_PROFILE_TEST_OVERFLOW_CHECKS variable at step or job \
+             level, a .cargo/config.toml, or a cargo mechanism newer than \
+             this comment. The debug step is running and blind, which is \
+             the exact state it exists to rule out."
         );
-    }
-
-    /// The parser is the part of this that can rot, so it is checked
-    /// against both shapes it has to tell apart.
-    #[test]
-    fn a_commented_out_debug_run_does_not_count() {
-        let quoted_in_a_comment = "\
-jobs:
-  test:
-    steps:
-      # Measured on this branch:
-      #     cargo test --locked --lib   ->  EXIT=101
-      - run: cargo test --release --locked --lib
-";
-        assert_eq!(
-            runs_with_overflow_checks(quoted_in_a_comment),
-            Vec::<String>::new(),
-            "a debug command quoted inside a comment is documentation, not a run"
-        );
-    }
-
-    #[test]
-    fn a_real_debug_run_counts() {
-        let with_the_step = "\
-jobs:
-  test:
-    steps:
-      - run: cargo test --release --locked --lib
-      - run: cargo test --locked --lib
-";
-        assert_eq!(
-            runs_with_overflow_checks(with_the_step),
-            vec!["- run: cargo test --locked --lib".to_string()],
-        );
-    }
-
-    /// And the ways a run can carry no `--release` and still be built
-    /// without the checks.
-    #[test]
-    fn a_profile_named_another_way_does_not_count() {
-        for line in [
-            "      - run: cargo test --locked --profile release-with-debug --lib",
-            "      - run: CARGO_PROFILE_TEST_OVERFLOW_CHECKS=false cargo test --locked --lib",
-        ] {
-            assert_eq!(
-                runs_with_overflow_checks(line),
-                Vec::<String>::new(),
-                "{line} does not compile the overflow checks"
-            );
-        }
     }
 }
