@@ -179,6 +179,22 @@ pub fn find_index_entry(
     let value_end = index_root_value_end(record, &ir)?;
 
     let ih_start = ir_data_start + IR_INDEX_HEADER_OFFSET;
+    // THE HEADER MUST BE INSIDE THE VALUE, NOT MERELY INSIDE THE RECORD.
+    //
+    // `read_u32_le` is bounded by `record.len()`, so on a resident
+    // `$INDEX_ROOT` whose value is shorter than the two headers these
+    // reads came out of whatever attribute follows. `end` is then
+    // clamped to `value_end` and lands below `cursor`, the entry loop
+    // never runs, and a directory that has entries is answered
+    // `Ok(None)` -- which the four collision checks in `write.rs` read
+    // as "that name is free". `index_root_has_real_entries` was given
+    // this check by #172; these two walks were not.
+    if ih_start.saturating_add(INDEX_HEADER_SIZE) > value_end {
+        return Err(format!(
+            "$INDEX_ROOT value is too short for an index header: header at {ih_start}, \
+             value ends at {value_end}"
+        ));
+    }
     let first_entry_rel = read_u32_le(record, ih_start + IH_FIRST_ENTRY_OFFSET)
         .ok_or_else(|| "index header too short to read first_entry_offset".to_string())?
         as usize;
@@ -307,7 +323,20 @@ pub fn index_root_flags(record: &[u8]) -> Option<u8> {
     // $INDEX_ROOT as the last attribute with a short value put this
     // read past the end. It is the first call in every mutating path,
     // and the root directory's own record is enough to reach it.
-    record.get(ih_start(&ir)? + IH_FLAGS_OFFSET).copied()
+    //
+    // `record.len()` is the wrong bound even so: with another
+    // attribute after this one the read stays inside the record and
+    // returns that attribute's byte as the index's flags. The value is
+    // the bound, and a value too short for the header has no flags to
+    // report. Every caller must treat that `None` as an error rather
+    // than as "no subnodes" -- reporting no subnodes here is the same
+    // silent empty listing the header-bounds fix exists to remove.
+    let start = ih_start(&ir)?;
+    let value_end = index_root_value_end(record, &ir).ok()?;
+    if start.saturating_add(INDEX_HEADER_SIZE) > value_end {
+        return None;
+    }
+    record.get(start + IH_FLAGS_OFFSET).copied()
 }
 
 /// Scan a clean (post-fixup) INDX block buffer for the entry whose
@@ -428,6 +457,18 @@ fn collect_entries(
     limit: usize,
     out: &mut Vec<DirEntryRaw>,
 ) -> Result<(), String> {
+    // Same rule as `find_index_entry`: `read_u32_le` is bounded by
+    // `buf.len()` -- the whole MFT record for an `$INDEX_ROOT` -- while
+    // the node ends at `limit`. A value too short for the header read
+    // these two fields out of the next attribute, `end` clamped below
+    // `cursor`, and the walk appended nothing: `readdir` reported an
+    // empty directory for a directory that has entries.
+    if ih_start.saturating_add(INDEX_HEADER_SIZE) > limit {
+        return Err(format!(
+            "index node is too short for an index header: header at {ih_start}, \
+             node ends at {limit}"
+        ));
+    }
     let first_entry_rel = read_u32_le(buf, ih_start + IH_FIRST_ENTRY_OFFSET)
         .ok_or("index node too short to read first_entry_offset")?
         as usize;
@@ -491,6 +532,36 @@ fn collect_entries(
 pub fn collect_index_root_entries(record: &[u8], out: &mut Vec<DirEntryRaw>) -> Result<(), String> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
         .ok_or_else(|| "$INDEX_ROOT:$I30 not found".to_string())?;
+    // BY CHECK, NOT BY CONSEQUENCE.
+    //
+    // `find_index_entry` and `index_root_has_real_entries` both refuse
+    // a non-resident `$INDEX_ROOT` outright. This one used to refuse it
+    // without ever testing for it, by TWO different accidents depending
+    // on the record, and neither of them is a statement about
+    // non-residence:
+    //
+    //   * a non-resident attribute the iterator YIELDS fell through to
+    //     `resident_value_offset.ok_or("no value_offset")` below, which
+    //     holds solely because `AttrIter` fills that field inside
+    //     `if !non_resident` and nowhere else;
+    //   * a record whose header byte says non-resident while the rest
+    //     of it does not -- a `mapping_pairs_offset` still holding
+    //     value bytes, say -- is not yielded at all, and dies on the
+    //     `"$INDEX_ROOT:$I30 not found"` line ABOVE this comment.
+    //
+    // Nothing at either end recorded either coupling, so making
+    // `AttrIter` populate `resident_value_offset` unconditionally -- a
+    // reasonable-looking change -- would have left two of the three
+    // sites refusing and this one accepting.
+    //
+    // THAT SECOND PATH IS A TRAP FOR THE TEST, NOT ONLY FOR THE CODE.
+    // A test input that flips the header byte alone still ends in
+    // `Err`, so it reads as covering this check while never reaching
+    // it. `no_flags_means_no_listing` builds an input the iterator
+    // yields and asserts the REASON; see the note there.
+    if !ir.is_resident {
+        return Err("$INDEX_ROOT is non-resident (impossible per spec)".to_string());
+    }
     let ir_value_offset = ir.resident_value_offset.ok_or("no value_offset")? as usize;
     let value_end = index_root_value_end(record, &ir)?;
     let ih_start = ir.attr_offset + ir_value_offset + IR_INDEX_HEADER_OFFSET;
@@ -1400,6 +1471,249 @@ mod tests {
         let rec = index_root_record(&[]);
         let flags = index_root_flags(&rec).unwrap();
         assert_eq!(flags & IH_FLAG_HAS_SUBNODES, 0);
+    }
+
+    // --- the index header must be inside the attribute value ---
+
+    /// Shorten the resident `$INDEX_ROOT`'s `value_length` field to
+    /// `new_len`, leaving every other byte of the record where it was.
+    /// The index header and the entries stay physically present and
+    /// unchanged; only the attribute's own statement of how far its
+    /// value reaches moves. Returns the header offset and the new
+    /// value end so a test can say what the old reads picked up.
+    fn shorten_index_root_value(rec: &mut [u8], new_len: u32) -> (usize, usize) {
+        let ir = attr_io::find_attribute(rec, AttrType::IndexRoot, Some(stream::I30)).unwrap();
+        let val_start = ir.attr_offset + ir.resident_value_offset.unwrap() as usize;
+        let at = ir.attr_offset + attr_off::RESIDENT_VALUE_LENGTH;
+        rec[at..at + 4].copy_from_slice(&new_len.to_le_bytes());
+        (
+            val_start + IR_INDEX_HEADER_OFFSET,
+            val_start + new_len as usize,
+        )
+    }
+
+    /// A resident `$INDEX_ROOT` whose value is shorter than the root
+    /// header plus the index header. `read_u32_le` is bounded by the
+    /// MFT record, so `first_entry_offset` and `total_size` were read
+    /// from past the value -- here, from the very bytes the shortened
+    /// value abandoned. `end` was then clamped to the value and landed
+    /// below `cursor`, so the entry loop never ran and both walks
+    /// answered "nothing here" for a record that plainly holds an
+    /// entry. The four `write.rs` collision checks read that `Ok(None)`
+    /// as "the name is free".
+    #[test]
+    fn a_short_index_root_value_is_not_an_empty_directory() {
+        // The control: the record is well formed and all three
+        // readers agree there is one entry called `target`.
+        let good = index_root_record(&[make_entry(10, 5, "target")]);
+        assert!(
+            find_index_entry(&good, "target", None).unwrap().is_some(),
+            "the control record must hold `target`"
+        );
+        let mut listed = Vec::new();
+        collect_index_root_entries(&good, &mut listed).unwrap();
+        assert_eq!(
+            listed.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["target"]
+        );
+        assert_eq!(index_root_flags(&good), Some(0));
+
+        // Now say the value is 20 bytes: four bytes of index header,
+        // no more. Nothing else about the record changes.
+        let mut rec = good.clone();
+        let (ih, value_end) = shorten_index_root_value(&mut rec, 20);
+        assert_eq!(value_end, ih + 4, "20 bytes leaves 4 past the root header");
+
+        // What the unbounded reads found there: the real header, whole
+        // and plausible, sitting outside the value it was read for.
+        assert_eq!(
+            read_u32_le(&rec, ih + IH_FIRST_ENTRY_OFFSET),
+            Some(INDEX_HEADER_SIZE as u32),
+            "the bytes past the value still decode as a first_entry_offset"
+        );
+        assert!(
+            read_u32_le(&rec, ih + IH_TOTAL_SIZE_OF_ENTRIES).unwrap() as usize > INDEX_HEADER_SIZE,
+            "and as a total_size describing entries"
+        );
+
+        let why = find_index_entry(&rec, "target", None)
+            .expect_err("a header outside the value is not a lookup miss");
+        assert!(
+            why.contains("too short for an index header"),
+            "find_index_entry answered {why}"
+        );
+
+        let mut out = Vec::new();
+        let why = collect_index_root_entries(&rec, &mut out)
+            .expect_err("a header outside the value is not an empty directory");
+        assert!(
+            why.contains("too short for an index header"),
+            "collect_index_root_entries answered {why}"
+        );
+        assert!(out.is_empty(), "and it appended nothing");
+
+        // The flags byte is 12 bytes into a header that is not there.
+        // `None` is the only honest answer, and `read.rs` turns it into
+        // an error rather than into "no subnodes".
+        assert_eq!(index_root_flags(&rec), None);
+    }
+
+    /// THE `read.rs` `ok_or` RESTS ON THIS, SO THE INVARIANT IS TESTED
+    /// RATHER THAN ASSERTED IN A COMMENT.
+    ///
+    /// `read_dir_entries` calls `collect_index_root_entries` and then
+    /// reads the flags, and takes `None` from the second as an error.
+    /// That second check is unreachable only while every input making
+    /// `index_root_flags` answer `None` also makes
+    /// `collect_index_root_entries` answer `Err`. If a later change
+    /// loosens the collector, the `ok_or` stops being defensive and
+    /// starts being the thing that stops a short listing being
+    /// reported as a directory's contents -- and this test is what
+    /// says so, rather than a reader having to re-derive it.
+    ///
+    /// The sweep is every resident value length from nothing to well
+    /// past a populated root, plus the two shapes that are not a length
+    /// at all: no `$INDEX_ROOT:$I30` in the record, and one whose
+    /// header says non-resident.
+    #[test]
+    fn no_flags_means_no_listing() {
+        let mut cases: Vec<(String, Vec<u8>)> = Vec::new();
+
+        for len in 0u32..=80 {
+            let mut rec = index_root_record(&[make_entry(10, 5, "target")]);
+            shorten_index_root_value(&mut rec, len);
+            cases.push((format!("value_length = {len}"), rec));
+        }
+
+        // No $INDEX_ROOT at all: blank the type code so the iterator
+        // walks straight past it.
+        let mut absent = index_root_record(&[make_entry(10, 5, "target")]);
+        let ir = attr_io::find_attribute(&absent, AttrType::IndexRoot, Some(stream::I30)).unwrap();
+        let a = ir.attr_offset;
+        absent[a..a + 4].copy_from_slice(&(AttrType::Data as u32).to_le_bytes());
+        cases.push(("$INDEX_ROOT retyped to $DATA".to_string(), absent));
+
+        // The header says the value lives elsewhere.
+        //
+        // TWO BYTES, AND THE SECOND ONE IS NOT DECORATION. Flipping
+        // `NON_RESIDENT` alone does not produce a non-resident
+        // attribute -- it produces one `AttrIter` refuses to yield, and
+        // the difference is invisible from the verdict because both
+        // shapes end in `Err`.
+        //
+        // `AttrIter::next` (`attr_io.rs:387`) takes the flip as a
+        // header size of `0x40` rather than `0x18`, then reads
+        // `mapping_pairs_offset` from `attr_offset + 0x20`
+        // (`attr_io.rs:449`) -- which in this record is still
+        // `$INDEX_ROOT` value data and measures `0`. `0 < 0x40`, so
+        // `next` returns `None`, the iteration STOPS, `find_attribute`
+        // answers `None`, and `collect_index_root_entries` refuses with
+        // `"$INDEX_ROOT:$I30 not found"` from the line above the check
+        // this case exists to reach. Writing a `mapping_pairs_offset`
+        // the iterator accepts is what gets the attribute yielded with
+        // `is_resident == false`.
+        let mut nonres = index_root_record(&[make_entry(10, 5, "target")]);
+        let ir = attr_io::find_attribute(&nonres, AttrType::IndexRoot, Some(stream::I30)).unwrap();
+        nonres[ir.attr_offset + attr_off::NON_RESIDENT] = 1;
+        let mpo = ir.attr_offset + attr_off::NONRES_MAPPING_PAIRS_OFFSET;
+        nonres[mpo..mpo + 2].copy_from_slice(&0x40u16.to_le_bytes());
+        // Yielded at all, and yielded as non-resident -- asserted here
+        // so a future change to `AttrIter` that stops yielding it fails
+        // on the reason rather than on the consequence three lines down.
+        let yielded = attr_io::find_attribute(&nonres, AttrType::IndexRoot, Some(stream::I30))
+            .expect("the non-resident case must still be yielded, or it never reaches the check");
+        assert!(
+            !yielded.is_resident,
+            "the non-resident case must be yielded as non-resident"
+        );
+        cases.push((
+            "$INDEX_ROOT marked non-resident".to_string(),
+            nonres.clone(),
+        ));
+
+        // The non-resident input is refused BY CHECK, not by falling
+        // through to a missing `resident_value_offset`. Asserting the
+        // reason rather than the verdict is what makes the explicit
+        // check in `collect_index_root_entries` witnessed: without it
+        // this input is still an `Err`, but a different one --
+        // `"no value_offset"`, from `AttrIter` leaving that field unset
+        // outside its `if !non_resident` branch.
+        let mut out = Vec::new();
+        let why = collect_index_root_entries(&nonres, &mut out)
+            .expect_err("a non-resident $INDEX_ROOT is not a listing");
+        assert!(
+            why.contains("non-resident"),
+            "collect_index_root_entries refused a non-resident $INDEX_ROOT with {why}, \
+             which is the value_offset falling through rather than the check firing"
+        );
+
+        let mut refused = 0usize;
+        for (what, rec) in &cases {
+            if index_root_flags(rec).is_none() {
+                refused += 1;
+                let mut out = Vec::new();
+                assert!(
+                    collect_index_root_entries(rec, &mut out).is_err(),
+                    "{what}: index_root_flags answered None while the collector answered \
+                     Ok with {} entries. read.rs takes that None as an error, so this input \
+                     reaches a check that is supposed to be unreachable -- which means the \
+                     collector now lets something through that has no readable header.",
+                    out.len()
+                );
+            }
+        }
+        // An empty result is not an answer. The implication above is
+        // vacuous for any input the flags can be read from, so the
+        // count is asserted exactly rather than as a floor: the 32
+        // value lengths below 32, which is where the header stops
+        // fitting, plus the retyped attribute and the non-resident
+        // one. Measured, not counted by hand.
+        assert_eq!(
+            (refused, cases.len()),
+            (34, 83),
+            "the sweep no longer exercises the case it exists to test"
+        );
+    }
+
+    /// The acceptance half, and it pins the comparison rather than the
+    /// direction. The guard's subject is the 16-byte INDEX_HEADER at
+    /// `IR_INDEX_HEADER_OFFSET`, so a value of exactly 32 bytes holds
+    /// one and must reach the entry walk; 31 must not. An empty
+    /// directory's real value is 48 bytes -- root header, index header,
+    /// LAST sentinel -- and is well clear of both.
+    #[test]
+    fn a_value_that_holds_an_index_header_is_still_read() {
+        let smallest_legitimate = build_index_root_value(&[]).len();
+        assert_eq!(
+            smallest_legitimate,
+            IR_INDEX_HEADER_OFFSET + INDEX_HEADER_SIZE + 16,
+            "an empty directory's $INDEX_ROOT value"
+        );
+        let empty = index_root_record(&[]);
+        assert!(find_index_entry(&empty, "anything", None)
+            .unwrap()
+            .is_none());
+        let mut out = Vec::new();
+        collect_index_root_entries(&empty, &mut out).unwrap();
+        assert!(out.is_empty());
+        assert_eq!(index_root_flags(&empty), Some(0));
+
+        let exact = (IR_INDEX_HEADER_OFFSET + INDEX_HEADER_SIZE) as u32;
+        let mut at_the_boundary = index_root_record(&[make_entry(10, 5, "target")]);
+        shorten_index_root_value(&mut at_the_boundary, exact);
+        assert!(
+            find_index_entry(&at_the_boundary, "target", None).is_ok(),
+            "a value holding a whole index header is not refused by the header guard"
+        );
+        assert_eq!(index_root_flags(&at_the_boundary), Some(0));
+
+        let mut one_short = index_root_record(&[make_entry(10, 5, "target")]);
+        shorten_index_root_value(&mut one_short, exact - 1);
+        assert!(
+            find_index_entry(&one_short, "target", None).is_err(),
+            "one byte short of a header is refused"
+        );
+        assert_eq!(index_root_flags(&one_short), None);
     }
 
     // --- compare_names (case-insensitive, no upcase table) ---

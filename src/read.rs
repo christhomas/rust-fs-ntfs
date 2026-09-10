@@ -1360,7 +1360,27 @@ pub fn read_dir_entries<T: BlockIo + ?Sized>(
 
     let mut raw = Vec::new();
     index_io::collect_index_root_entries(&dir_bytes, &mut raw)?;
-    if index_io::index_root_flags(&dir_bytes).is_some_and(|f| f & IH_FLAG_HAS_SUBNODES != 0) {
+    // `.ok_or`, not `.is_some_and`. `None` here is "the $INDEX_ROOT
+    // header could not be read", and reading that as "no subnodes"
+    // skips the `$INDEX_ALLOCATION` walk and answers with whatever the
+    // resident root held -- an empty or short listing reported as the
+    // directory's contents. AN UNREADABLE INDEX IS NOT AN EMPTY ONE.
+    //
+    // THIS LINE IS UNREACHABLE TODAY AND IS KEPT ANYWAY. DO NOT
+    // SIMPLIFY IT BACK.
+    //
+    // `collect_index_root_entries` runs immediately above and rejects
+    // every input that would make `index_root_flags` answer `None`, so
+    // deleting the `ok_or` changes no test and a mutation of it
+    // survives. That is not evidence it is inert -- it is the shape of
+    // a check whose precondition another call currently guarantees.
+    // `index_io::tests::no_flags_means_no_listing` holds the invariant
+    // the unreachability depends on; the day that test has to change,
+    // this line is what stands between a short listing and a caller
+    // that believes it.
+    let ir_flags = index_io::index_root_flags(&dir_bytes)
+        .ok_or_else(|| format!("directory record {dir_record} has no readable $INDEX_ROOT"))?;
+    if ir_flags & IH_FLAG_HAS_SUBNODES != 0 {
         let ia = idx_block::load_for_directory_io(io, dir_record)?;
         for vcn in ia.allocated_block_vcns() {
             let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
