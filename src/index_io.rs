@@ -532,6 +532,36 @@ fn collect_entries(
 pub fn collect_index_root_entries(record: &[u8], out: &mut Vec<DirEntryRaw>) -> Result<(), String> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
         .ok_or_else(|| "$INDEX_ROOT:$I30 not found".to_string())?;
+    // BY CHECK, NOT BY CONSEQUENCE.
+    //
+    // `find_index_entry` and `index_root_has_real_entries` both refuse
+    // a non-resident `$INDEX_ROOT` outright. This one used to refuse it
+    // without ever testing for it, by TWO different accidents depending
+    // on the record, and neither of them is a statement about
+    // non-residence:
+    //
+    //   * a non-resident attribute the iterator YIELDS fell through to
+    //     `resident_value_offset.ok_or("no value_offset")` below, which
+    //     holds solely because `AttrIter` fills that field inside
+    //     `if !non_resident` and nowhere else;
+    //   * a record whose header byte says non-resident while the rest
+    //     of it does not -- a `mapping_pairs_offset` still holding
+    //     value bytes, say -- is not yielded at all, and dies on the
+    //     `"$INDEX_ROOT:$I30 not found"` line ABOVE this comment.
+    //
+    // Nothing at either end recorded either coupling, so making
+    // `AttrIter` populate `resident_value_offset` unconditionally -- a
+    // reasonable-looking change -- would have left two of the three
+    // sites refusing and this one accepting.
+    //
+    // THAT SECOND PATH IS A TRAP FOR THE TEST, NOT ONLY FOR THE CODE.
+    // A test input that flips the header byte alone still ends in
+    // `Err`, so it reads as covering this check while never reaching
+    // it. `no_flags_means_no_listing` builds an input the iterator
+    // yields and asserts the REASON; see the note there.
+    if !ir.is_resident {
+        return Err("$INDEX_ROOT is non-resident (impossible per spec)".to_string());
+    }
     let ir_value_offset = ir.resident_value_offset.ok_or("no value_offset")? as usize;
     let value_end = index_root_value_end(record, &ir)?;
     let ih_start = ir.attr_offset + ir_value_offset + IR_INDEX_HEADER_OFFSET;
@@ -1564,10 +1594,58 @@ mod tests {
         cases.push(("$INDEX_ROOT retyped to $DATA".to_string(), absent));
 
         // The header says the value lives elsewhere.
+        //
+        // TWO BYTES, AND THE SECOND ONE IS NOT DECORATION. Flipping
+        // `NON_RESIDENT` alone does not produce a non-resident
+        // attribute -- it produces one `AttrIter` refuses to yield, and
+        // the difference is invisible from the verdict because both
+        // shapes end in `Err`.
+        //
+        // `AttrIter::next` (`attr_io.rs:387`) takes the flip as a
+        // header size of `0x40` rather than `0x18`, then reads
+        // `mapping_pairs_offset` from `attr_offset + 0x20`
+        // (`attr_io.rs:449`) -- which in this record is still
+        // `$INDEX_ROOT` value data and measures `0`. `0 < 0x40`, so
+        // `next` returns `None`, the iteration STOPS, `find_attribute`
+        // answers `None`, and `collect_index_root_entries` refuses with
+        // `"$INDEX_ROOT:$I30 not found"` from the line above the check
+        // this case exists to reach. Writing a `mapping_pairs_offset`
+        // the iterator accepts is what gets the attribute yielded with
+        // `is_resident == false`.
         let mut nonres = index_root_record(&[make_entry(10, 5, "target")]);
         let ir = attr_io::find_attribute(&nonres, AttrType::IndexRoot, Some(stream::I30)).unwrap();
         nonres[ir.attr_offset + attr_off::NON_RESIDENT] = 1;
-        cases.push(("$INDEX_ROOT marked non-resident".to_string(), nonres));
+        let mpo = ir.attr_offset + attr_off::NONRES_MAPPING_PAIRS_OFFSET;
+        nonres[mpo..mpo + 2].copy_from_slice(&0x40u16.to_le_bytes());
+        // Yielded at all, and yielded as non-resident -- asserted here
+        // so a future change to `AttrIter` that stops yielding it fails
+        // on the reason rather than on the consequence three lines down.
+        let yielded = attr_io::find_attribute(&nonres, AttrType::IndexRoot, Some(stream::I30))
+            .expect("the non-resident case must still be yielded, or it never reaches the check");
+        assert!(
+            !yielded.is_resident,
+            "the non-resident case must be yielded as non-resident"
+        );
+        cases.push((
+            "$INDEX_ROOT marked non-resident".to_string(),
+            nonres.clone(),
+        ));
+
+        // The non-resident input is refused BY CHECK, not by falling
+        // through to a missing `resident_value_offset`. Asserting the
+        // reason rather than the verdict is what makes the explicit
+        // check in `collect_index_root_entries` witnessed: without it
+        // this input is still an `Err`, but a different one --
+        // `"no value_offset"`, from `AttrIter` leaving that field unset
+        // outside its `if !non_resident` branch.
+        let mut out = Vec::new();
+        let why = collect_index_root_entries(&nonres, &mut out)
+            .expect_err("a non-resident $INDEX_ROOT is not a listing");
+        assert!(
+            why.contains("non-resident"),
+            "collect_index_root_entries refused a non-resident $INDEX_ROOT with {why}, \
+             which is the value_offset falling through rather than the check firing"
+        );
 
         let mut refused = 0usize;
         for (what, rec) in &cases {

@@ -14,7 +14,10 @@
   that as "the name is free". `index_root_flags` had the same bound
   and returned a flags byte belonging to another attribute; it now
   answers `None`, and `read_dir_entries` treats that as an error
-  rather than as "no subnodes".
+  rather than as "no subnodes". `collect_index_root_entries` also names
+  a non-resident `$INDEX_ROOT` as the reason it refuses one, instead of
+  reporting `no value_offset` from a field the iterator happens to
+  leave unset — the other two `$INDEX_ROOT` readers already did.
 - A read offset is checked against the volume before anything is read.
   The three per-cluster sites in `read.rs` multiplied a disk-supplied
   LCN by the cluster size raw; a run past the end of the filesystem but
