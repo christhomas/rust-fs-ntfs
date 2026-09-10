@@ -295,8 +295,8 @@ fn selects_a_release_profile(arguments: &[&str]) -> bool {
 /// [`selects_a_release_profile`] for the profile, which was the third
 /// and was found the same way as the first two.
 fn runs_with_overflow_checks(script: &str) -> Vec<String> {
-    script
-        .lines()
+    logical_lines(script)
+        .into_iter()
         .filter_map(|raw| {
             let line = raw.trim_start();
             if line.starts_with('#') {
@@ -305,18 +305,157 @@ fn runs_with_overflow_checks(script: &str) -> Vec<String> {
             let command = line.split(" #").next().unwrap_or(line).trim();
             let tokens: Vec<&str> = command.split_whitespace().collect();
             let arguments = cargo_test_arguments(&tokens)?;
-            if selects_a_release_profile(arguments) {
+            // SHELL QUOTING IS REMOVAL, NOT DATA. See [`unquoted`].
+            let arguments: Vec<&str> = arguments.iter().map(|a| unquoted(a)).collect();
+            if selects_a_release_profile(&arguments) {
                 return None;
             }
             if command.contains("CARGO_PROFILE_") {
                 return None;
             }
-            if names_one_integration_target(arguments) {
+            if names_one_integration_target(&arguments) {
                 return None;
             }
             Some(command.to_string())
         })
         .collect()
+}
+
+/// Strip ONE matching pair of surrounding quotes from a token.
+///
+/// # WHY THE PREDICATES CANNOT COMPARE RAW TOKENS
+///
+/// The shell removes quotes before the program ever sees the argument,
+/// so `cargo test '--release'` and `cargo test --release` are the same
+/// invocation. The predicates compared whole raw tokens, so
+/// `'--release'` matched none of `== "--release"`, `== "--profile"`,
+/// `starts_with("--profile=")` — and `strip_prefix('-')` returned
+/// `None` because the token begins with a quote, so the branch that
+/// reads `-r` was never entered either. A release-only step counted as
+/// the debug run the whole file exists to require.
+///
+/// The same token reached [`names_one_integration_target`], so a
+/// quoted `'--test'` made a single-integration-target step count as a
+/// full debug run. One normalisation answers both, which is why it is
+/// here rather than inside either predicate.
+///
+/// This file already knew the shape: `normalise` inside
+/// [`profiles_disabling_overflow_checks`] trims the same two quote
+/// characters off TOML path segments. The two halves of this file
+/// disagreed about whether a quote is data.
+///
+/// # WHAT IS DELIBERATELY NOT NORMALISED
+///
+/// **The program word.** [`cargo_test_arguments`] still requires an
+/// unquoted `cargo` and `test`, so `"cargo" test --locked --lib` is
+/// not recognised as a cargo test at all. That is the safe direction
+/// and it is a choice, not an oversight: an unrecognised debug run
+/// makes the gate assertion FAIL LOUDLY, while an unrecognised release
+/// run is simply not counted as debug. Widening it would be a change
+/// in reach rather than in correctness, and
+/// [`quoting_the_command_word_is_not_recognised_at_all`] pins the
+/// decision so the next reader knows it was made.
+///
+/// **More than one pair.** `''--release''` strips to `'--release'` and
+/// is still not recognised. No shell writes that, and iterating to a
+/// fixed point would start unquoting things that are data.
+fn unquoted(token: &str) -> &str {
+    for quote in ['"', '\''] {
+        if let Some(inner) = token
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    token
+}
+
+/// Fold backslash-continued physical lines into the logical commands
+/// the shell actually runs.
+///
+/// # WHY A PRE-PASS AND NOT A FILTER
+///
+/// The scan above judged one physical line at a time, so
+///
+/// ```text
+/// cargo test --locked --lib \
+///   --release
+/// ```
+///
+/// was read as `cargo test --locked --lib` plus a stray `--release`.
+/// A release run counted as the debug run the overflow gate rests on.
+/// The same blindness defeated [`names_one_integration_target`]: a
+/// continued `--test <name>` — a form this repository already writes
+/// inline — also counted as a full debug run. Both are the same cause,
+/// so both are fixed by making the unit of judgement the logical line.
+///
+/// The trailing `\` is REMOVED, not just the newline. Leaving it in
+/// put a `\` token in the argument list and printed a command nobody
+/// wrote in the guard's failure messages.
+///
+/// # A COMMENT DOES NOT CONTINUE, AND THAT ORDERING IS THE WHOLE RISK
+///
+/// A `#` comment ends at the newline; a backslash inside it is comment
+/// text, not a continuation. So this folds only lines that are not
+/// whole-line comments, and it matters in the ACCEPTANCE direction —
+/// the direction a guard fix is most likely to break:
+///
+/// ```text
+/// # a note that happens to end in a backslash \
+/// cargo test --locked --lib
+/// ```
+///
+/// A fold that ignored the `#` would glue the real debug run onto the
+/// comment, drop the whole thing as a comment, and report that this
+/// workflow has no debug run — refusing a correct file. That is worse
+/// than the defect being fixed.
+///
+/// An inline trailing comment behaves the other way round, and also
+/// matches the shell: in `cargo test --lib \` followed by
+/// `# --release`, the backslash-newline is removed BEFORE `#` is seen,
+/// so the shell runs a debug build and so does this. The comment strip
+/// therefore has to happen after the fold, which is why it stays in
+/// the filter above rather than moving in here.
+///
+/// # NOT HANDLED, AND NOT PRETENDED
+///
+/// A line ending in `\\` is a literal backslash rather than a
+/// continuation. Nothing in this constellation's workflows writes one,
+/// and guessing at it would add an untested branch to a guard.
+fn logical_lines(script: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut pending: Option<String> = None;
+    for raw in script.lines() {
+        let continues = raw.ends_with('\\');
+        let body = raw.strip_suffix('\\').unwrap_or(raw);
+        let joined = match pending.take() {
+            // The continuation's leading whitespace is KEPT. The shell
+            // removes the backslash and the newline and nothing else,
+            // so `--lib\` + `  --release` is two arguments while
+            // `--lib\` + `--release` is one token, and trimming here
+            // would merge the first case into the second.
+            Some(head) => head + body,
+            None if raw.trim_start().starts_with('#') => {
+                // A comment: emit it whole, backslash and all, so the
+                // filter above sees a comment rather than a command.
+                lines.push(raw.to_string());
+                continue;
+            }
+            None => body.to_string(),
+        };
+        if continues {
+            pending = Some(joined);
+        } else {
+            lines.push(joined);
+        }
+    }
+    // A script whose last line ends in a backslash still ran that
+    // command.
+    if let Some(dangling) = pending {
+        lines.push(dangling);
+    }
+    lines
 }
 
 /// WHAT ELSE DECIDES WHETHER A STEP GATES.
@@ -1244,6 +1383,205 @@ cargo test --release --locked --lib
             runs_with_overflow_checks("cargo test --locked --lib -- --test=x"),
             vec!["cargo test --locked --lib -- --test=x".to_string()],
             "past `--` the option belongs to the harness; the library was built"
+        );
+    }
+
+    /// HOLE THREE: A QUOTED FLAG IS THE SAME FLAG.
+    ///
+    /// The shell removes quotes before cargo sees the argument, so
+    /// each of these is a release run. The predicates compared raw
+    /// tokens, so every one of them counted as the debug run the
+    /// overflow gate rests on.
+    #[test]
+    fn a_quoted_release_flag_does_not_count() {
+        for line in [
+            "cargo test --locked --lib '--release'",
+            "cargo test --locked --lib \"--release\"",
+            "cargo test --locked --lib '-r'",
+            "cargo test --locked --lib \"-r\"",
+            "cargo test --locked --lib '--profile' bench",
+            "cargo test --locked --lib '--profile=bench'",
+            "cargo test --locked --lib '-qr'",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line} selects a release profile; the quotes are the shell's, not cargo's"
+            );
+        }
+    }
+
+    /// The second predicate reads the same tokens, so it had the same
+    /// hole: a quoted `--test` made a single-integration-target step
+    /// count as a full debug run.
+    #[test]
+    fn a_quoted_integration_target_does_not_count() {
+        for line in [
+            "cargo test --locked '--test' qemu_validation",
+            "cargo test --locked \"--test\" qemu_validation",
+            "cargo test --locked '--test=qemu_validation'",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line} builds one integration target and no library unit tests"
+            );
+        }
+    }
+
+    /// ACCEPTANCE FOR HOLE THREE, and the near miss that decides
+    /// whether stripping went too far. `--tests` quoted is still
+    /// `--tests`, which builds the library and must still count; and a
+    /// lone quote character is not a pair, so it is left alone.
+    #[test]
+    fn quoted_flags_that_are_not_release_still_count() {
+        for line in [
+            "cargo test --locked '--tests'",
+            "cargo test --locked \"--all-targets\"",
+            "cargo test --locked --lib -- '--test=x'",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                vec![line.to_string()],
+                "{line} builds the library unit tests and must still count"
+            );
+        }
+    }
+
+    /// THE PROGRAM WORD IS DELIBERATELY LEFT QUOTED, AND THIS PINS IT.
+    ///
+    /// `cargo_test_arguments` still requires an unquoted `cargo` and
+    /// `test`, so this is not recognised as a cargo test at all. The
+    /// direction is what makes that acceptable: an unrecognised DEBUG
+    /// run makes the gate assertion fail loudly, which is visible,
+    /// while widening the command word would be a change in reach
+    /// rather than in correctness. If a future change normalises it,
+    /// this test is where the decision is recorded.
+    #[test]
+    fn quoting_the_command_word_is_not_recognised_at_all() {
+        assert_eq!(
+            runs_with_overflow_checks("\"cargo\" test --locked --lib"),
+            Vec::<String>::new(),
+            "a quoted command word is not recognised; the gate fails loudly rather than falsely"
+        );
+    }
+
+    /// HOLE FOUR: THE COMMAND IS THE LOGICAL LINE, NOT THE PHYSICAL ONE.
+    ///
+    /// `--release` on a backslash continuation was invisible, so a
+    /// release run counted as the debug run. `ci.yml` already writes a
+    /// continued `cargo test`, and it is judged correctly today only
+    /// because `--release` happens to sit on the first line.
+    #[test]
+    fn a_release_flag_on_a_continuation_does_not_count() {
+        for script in [
+            "cargo test --locked --lib \\\n  --release\n",
+            "cargo test --locked \\\n  --lib \\\n  --release\n",
+            "cargo +nightly test --locked --lib \\\n  --release --target x86_64-unknown-linux-gnu\n",
+            // No trailing newline: the last line still ran.
+            "cargo test --locked --lib \\\n  --release",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(script),
+                Vec::<String>::new(),
+                "the continuation is part of the command: {script:?}"
+            );
+        }
+    }
+
+    /// The same blindness defeated the target predicate, which the
+    /// issue body did not claim and a trace found: a continued
+    /// `--test <name>` also counted as a full debug run.
+    #[test]
+    fn an_integration_target_on_a_continuation_does_not_count() {
+        for script in [
+            "cargo test --locked \\\n  --test mkfs_roundtrip\n",
+            "cargo test --locked \\\n  --test=mkfs_roundtrip\n",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(script),
+                Vec::<String>::new(),
+                "the continuation names one integration target: {script:?}"
+            );
+        }
+    }
+
+    /// A CONTINUED COMMAND IS RETURNED AS THE COMMAND, NOT WITH A
+    /// STRAY BACKSLASH IN IT.
+    ///
+    /// The fold removes the `\`, not just the newline. Left in, it
+    /// became an argument token and printed a command nobody wrote in
+    /// the guard's failure messages.
+    #[test]
+    fn a_continued_debug_run_counts_once_and_reads_back_whole() {
+        assert_eq!(
+            runs_with_overflow_checks("cargo test --locked \\\n  --lib\n"),
+            vec!["cargo test --locked   --lib".to_string()],
+            "one command, no backslash token, and the continuation's own indent kept"
+        );
+    }
+
+    /// THE ORDER OF FOLDING AND COMMENT-STRIPPING, BOTH DIRECTIONS.
+    ///
+    /// These two look symmetrical and are not, and each one is a
+    /// different failure if the order is chosen by accident.
+    #[test]
+    fn folding_and_comments_are_ordered_the_way_the_shell_orders_them() {
+        // An INLINE trailing comment on a continued line: the shell
+        // removes the backslash-newline before it sees the `#`, so it
+        // runs a debug build. Fold first, strip second.
+        assert_eq!(
+            runs_with_overflow_checks("cargo test --locked --lib \\\n# --release\n").len(),
+            1,
+            "the `#` arrives after the fold, so this is a debug run and the `--release` \
+             is commented out"
+        );
+
+        // A WHOLE-LINE comment does NOT continue -- a `#` comment ends
+        // at the newline and a backslash inside it is comment text. If
+        // the fold ignored that, it would glue the real debug run onto
+        // the comment, drop both, and report a correct workflow as
+        // having no debug run. THIS IS THE ACCEPTANCE DIRECTION.
+        assert_eq!(
+            runs_with_overflow_checks(
+                "# a note ending in a backslash \\\ncargo test --locked --lib\n"
+            ),
+            vec!["cargo test --locked --lib".to_string()],
+            "a comment does not continue, so the run on the next line is still a run"
+        );
+
+        // And the commented-out command stays commented out even
+        // though it ends in a backslash.
+        assert_eq!(
+            runs_with_overflow_checks("# cargo test --locked --lib \\\n--release\n"),
+            Vec::<String>::new(),
+            "a commented command is not a run in either spelling"
+        );
+    }
+
+    /// ACCEPTANCE FOR HOLE FOUR, AGAINST THE REAL FILE'S OWN SHAPE.
+    ///
+    /// `ci.yml:378` is a continued `cargo test` that is correct today.
+    /// A guard that starts folding lines is a guard that can newly
+    /// refuse a workflow it used to accept, so the two shapes the file
+    /// actually contains are asserted directly: the release one still
+    /// does not count, and the debug one still does.
+    #[test]
+    fn the_continued_commands_this_repository_already_writes_are_unchanged() {
+        assert_eq!(
+            runs_with_overflow_checks(
+                "cargo +nightly test --release --locked --lib \\\n  --target x86_64-unknown-linux-gnu\n"
+            ),
+            Vec::<String>::new(),
+            "ci.yml:378 as written is a release run and was already read as one"
+        );
+        assert_eq!(
+            runs_with_overflow_checks(
+                "EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib \\\n  --features something\n"
+            )
+            .len(),
+            1,
+            "a continued debug run still counts, handshake and all"
         );
     }
 }
