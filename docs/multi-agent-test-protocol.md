@@ -55,10 +55,10 @@ Every agent instance MUST follow these three skills before starting work:
 - **`dev-loop`** — baseline test contract. Before any change,
   `cargo test --lib --tests` must be green; after every change, the
   same set must still be green. Tests **never** silently disappear or
-  get deleted to make the suite green. The pre-commit hook
-  (`.githooks/pre-commit`, installed via `bash scripts/install-hooks.sh`)
-  also enforces `cargo fmt --check` + `cargo clippy --all-targets --
-  -D warnings`.
+  get deleted to make the suite green. The pre-commit hook (installed
+  per clone with `~/.claude/skills/github-guard/install.sh .`, into
+  `.git/hooks` where no branch checkout can rewrite it) also enforces
+  `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`.
 
 - **`corroborated-debug`** — evidence-driven debug. No code change may
   be made from "this probably is the issue." Every change must cite
