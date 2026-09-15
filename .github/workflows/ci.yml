@@ -19,7 +19,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # ubuntu-24.04-arm is native ARM64, not a cross-check: `c_char` is
+        # `u8` on aarch64 Linux and `i8` on x86_64 and macOS, so a lint
+        # about a C-ABI pointer cast can fail on one and not the other (#268).
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - name: check out sibling repos
@@ -83,7 +86,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          # runner.arch: both Linux legs report runner.os == Linux, and a
+          # shared key would restore one architecture's target/ on the other.
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo fmt --check
 
       # cargo-deny — fail the build if any dep license drifts outside
@@ -110,10 +115,12 @@ jobs:
       # clippy gate. Pre-commit hook runs the same invocation locally
       # so this should never fail on a clean push; it's the second line
       # of defence against drift via merges or rebases that bypass the
-      # hook. Lint output is deterministic across OSes, so we only run
-      # on ubuntu — same rationale as cargo-deny above.
+      # hook. Lint output is NOT deterministic across architectures: the
+      # C-ABI `*mut c_char` casts are redundant exactly where `c_char` is
+      # `u8`, so ubuntu-latest alone passed while aarch64 failed (#268).
+      # Run it on both Linux architectures; macOS adds nothing x86 lacks.
       - name: cargo clippy
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm'
         run: cargo clippy --locked --all-targets -- -D warnings
 
       # Test scope is intentionally narrow: only tests that DON'T need

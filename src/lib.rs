@@ -1124,7 +1124,7 @@ pub extern "C" fn fs_ntfs_read_volume_label(
             Ok(label) => {
                 let bytes = label.as_bytes();
                 let n = std::cmp::min(bytes.len(), out_buf_len);
-                unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf as *mut u8, n) };
+                unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf.cast::<u8>(), n) };
                 n as c_int
             }
             Err(e) => {
@@ -1534,7 +1534,7 @@ pub extern "C" fn fs_ntfs_readlink(
             return -1;
         }
         unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, bytes.len());
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast::<u8>(), bytes.len());
             *(buf.add(bytes.len())) = 0; // NUL terminator
         }
         bytes.len() as c_int
@@ -2082,10 +2082,10 @@ pub extern "C" fn fs_ntfs_list_named_streams(
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             bytes.as_ptr(),
-                            (out_buf as *mut u8).add(cursor),
+                            out_buf.cast::<u8>().add(cursor),
                             bytes.len(),
                         );
-                        *(out_buf as *mut u8).add(cursor + bytes.len()) = 0;
+                        *out_buf.cast::<u8>().add(cursor + bytes.len()) = 0;
                     }
                     cursor += bytes.len() + 1;
                 }
