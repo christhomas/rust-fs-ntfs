@@ -20,6 +20,8 @@
 //! space first so that failure would be visible rather than a lucky
 //! screen of zeros.
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::facade::Filesystem;
 use fs_ntfs::mkfs::format_filesystem;
@@ -36,7 +38,7 @@ const STALE: u8 = 0xDE;
 
 fn fresh_volume(tag: &str) -> String {
     std::fs::create_dir_all("test-disks").expect("create test-disks dir");
-    let dst = format!("test-disks/_initlen_{tag}.img");
+    let dst = common::temp_image_path(format!("initlen_{tag}"));
     let f = std::fs::File::create(&dst).expect("create image");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

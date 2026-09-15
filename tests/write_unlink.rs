@@ -1,5 +1,7 @@
 //! Tests for `write::unlink`.
 
+mod common;
+
 use fs_ntfs::{bitmap, mft_bitmap, write};
 use ntfs::Ntfs;
 use std::io::BufReader;
@@ -9,7 +11,7 @@ const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 const LARGE_IMG: &str = "test-disks/ntfs-large-file.img";
 
 fn working_copy(base: &str, tag: &str) -> String {
-    let dst = format!("test-disks/_unlink_{tag}.img");
+    let dst = common::temp_image_path(format!("unlink_{tag}"));
     std::fs::copy(base, &dst).expect("copy");
     dst
 }

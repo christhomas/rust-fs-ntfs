@@ -1,5 +1,7 @@
 //! Integration tests for `write::truncate` (W2.5 shrink).
 
+mod common;
+
 use fs_ntfs::bitmap;
 use fs_ntfs::write;
 use ntfs::{Ntfs, NtfsAttributeType};
@@ -9,7 +11,7 @@ use std::path::Path;
 const LARGE_IMG: &str = "test-disks/ntfs-large-file.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_truncate_{tag}.img");
+    let dst = common::temp_image_path(format!("truncate_{tag}"));
     std::fs::copy(LARGE_IMG, &dst).expect("copy");
     dst
 }

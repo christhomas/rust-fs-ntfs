@@ -3,6 +3,8 @@
 
 #![allow(unused_unsafe)]
 
+mod common;
+
 use fs_ntfs::{fs_ntfs_mount, fs_ntfs_readlink, fs_ntfs_stat, fs_ntfs_umount, write};
 use std::ffi::CString;
 use std::os::raw::c_char;
@@ -30,7 +32,7 @@ struct FsNtfsAttr {
 }
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_readlink_{tag}.img");
+    let dst = common::temp_image_path(format!("readlink_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }

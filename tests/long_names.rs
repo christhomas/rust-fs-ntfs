@@ -11,6 +11,8 @@
 //!   * paths long enough to exceed Windows' classic 260-char MAX_PATH
 //!     even though NTFS itself has no path-length cap
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::facade::Filesystem;
 use fs_ntfs::mkfs::format_filesystem;
@@ -19,7 +21,7 @@ use std::path::Path;
 const VOL_SIZE: u64 = 32 * 1024 * 1024;
 
 fn fresh_volume(tag: &str) -> String {
-    let dst = format!("test-disks/_longname_{tag}.img");
+    let dst = common::temp_image_path(format!("longname_{tag}"));
     let f = std::fs::File::create(&dst).expect("create");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

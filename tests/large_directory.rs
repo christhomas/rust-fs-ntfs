@@ -20,6 +20,8 @@
 //!   * hitting the ceiling fails gracefully (clear error, no panic) and
 //!     leaves the directory readable and consistent.
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::write;
@@ -32,7 +34,7 @@ const VOL_SIZE: u64 = 64 * 1024 * 1024;
 const CLUSTER: u32 = 4096;
 
 fn fresh_vol(tag: &str) -> String {
-    let dst = format!("test-disks/_ld_{tag}.img");
+    let dst = common::temp_image_path(format!("ld_{tag}"));
     let f = std::fs::File::create(&dst).expect("create");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

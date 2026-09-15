@@ -1,5 +1,7 @@
 //! Hard-link creation tests (§3.1).
 
+mod common;
+
 use fs_ntfs::write;
 use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::{Ntfs, NtfsAttributeType, NtfsReadSeek};
@@ -9,7 +11,7 @@ use std::path::Path;
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_link_{tag}.img");
+    let dst = common::temp_image_path(format!("link_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }

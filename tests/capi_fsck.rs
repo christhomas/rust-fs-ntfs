@@ -28,7 +28,7 @@ use fs_ntfs::{fs_ntfs_clear_dirty, fs_ntfs_fsck, fs_ntfs_last_error, fs_ntfs_res
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn dirty_copy(tag: &str, dirty_flag: bool, corrupt_log: bool) -> String {
-    let dst = format!("test-disks/_capi_fsck_{tag}.img");
+    let dst = common::temp_image_path(format!("capi_fsck_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy fixture");
 
     if dirty_flag {

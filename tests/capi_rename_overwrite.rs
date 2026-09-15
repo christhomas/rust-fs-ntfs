@@ -22,10 +22,11 @@
 
 #![allow(unused_unsafe)]
 
+mod common;
+
 use std::ffi::{c_int, c_void, CStr, CString};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
 use fs_ntfs::block_io::{BlockIo, PathIo};
@@ -49,10 +50,8 @@ const ENOTEMPTY: c_int = 66;
 
 // --- image generation -----------------------------------------------------
 
-fn fresh_volume(tag: &str) -> ImgGuard {
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dst = format!("test-disks/_capi_rename_overwrite_{tag}_{n}.img");
+fn fresh_volume(tag: &str) -> String {
+    let dst = common::temp_image_path(format!("capi_rename_overwrite_{tag}"));
     let f = std::fs::File::create(&dst).expect("create image");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);
@@ -68,7 +67,7 @@ fn fresh_volume(tag: &str) -> ImgGuard {
     .expect("mkfs");
     io.sync().expect("sync");
     drop(io);
-    ImgGuard(dst)
+    dst
 }
 
 // --- callback block device (read/write over a host File) ------------------
@@ -227,25 +226,6 @@ fn read_all(img: &str, path: &str) -> Vec<u8> {
 fn record_in_use(img: &str, rec: u64) -> bool {
     let bm = fs_ntfs::mft_bitmap::locate(Path::new(img)).expect("locate mft bitmap");
     fs_ntfs::mft_bitmap::is_allocated(Path::new(img), &bm, rec).expect("is_allocated")
-}
-
-/// Panic-safe cleanup: removes the backing image file when the test
-/// scope unwinds, so a failed `assert!` doesn't litter `test-disks/`.
-/// Derefs to `str` so it drops in anywhere an `&str` image path is
-/// expected.
-struct ImgGuard(String);
-
-impl Drop for ImgGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-impl std::ops::Deref for ImgGuard {
-    type Target = str;
-    fn deref(&self) -> &str {
-        &self.0
-    }
 }
 
 // ===========================================================================

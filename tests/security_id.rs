@@ -2,6 +2,8 @@
 
 #![allow(unused_unsafe)]
 
+mod common;
+
 use fs_ntfs::facade::Filesystem;
 use fs_ntfs::write::{create_file, read_security_id, set_security_id};
 use fs_ntfs::{fs_ntfs_last_error, fs_ntfs_read_security_id, fs_ntfs_set_security_id};
@@ -26,7 +28,7 @@ fn last_error() -> String {
 /// uses the 48-byte v1.x form so it doesn't have a `security_id`
 /// field at all.
 fn working_copy(tag: &str) -> (String, &'static str) {
-    let dst = format!("test-disks/_secid_{tag}.img");
+    let dst = common::temp_image_path(format!("secid_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     create_file(std::path::Path::new(&dst), "/", "runtime.bin").expect("runtime create_file");
     (dst, "/runtime.bin")

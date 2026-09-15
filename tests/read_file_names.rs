@@ -2,12 +2,14 @@
 //! file's MFT record. Complements `read_attributes` from the
 //! diagnostic-helper family.
 
+mod common;
+
 use fs_ntfs::write::{create_file, read_file_names};
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_rfnames_{tag}.img");
+    let dst = common::temp_image_path(format!("rfnames_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }

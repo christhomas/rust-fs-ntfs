@@ -1,5 +1,7 @@
 //! Round-trip tests for `write::set_file_attributes`.
 
+mod common;
+
 use fs_ntfs::write::{self, file_attr, FileAttributesChange};
 use ntfs::structured_values::NtfsStandardInformation;
 use ntfs::{Ntfs, NtfsAttributeType};
@@ -8,7 +10,7 @@ use std::io::BufReader;
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_write_attrs_{tag}.img");
+    let dst = common::temp_image_path(format!("write_attrs_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }

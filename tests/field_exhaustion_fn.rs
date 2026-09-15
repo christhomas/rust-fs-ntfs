@@ -6,6 +6,8 @@
 //! write API, then read back via the upstream `ntfs` crate (independent of
 //! our own parsers) using raw attribute value bytes.
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::write;
@@ -19,7 +21,7 @@ const CLUSTER: u32 = 4096;
 
 /// Format a fresh NTFS volume into a temp image file and return its path.
 fn fresh_vol(tag: &str) -> String {
-    let dst = format!("test-disks/_fex_fn_{tag}.img");
+    let dst = common::temp_image_path(format!("fex_fn_{tag}"));
     let f = std::fs::File::create(&dst).expect("create temp image");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

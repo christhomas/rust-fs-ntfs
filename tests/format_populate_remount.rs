@@ -12,6 +12,8 @@
 //! together, or where the in-memory write path produces output that
 //! the read path can't parse back.
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::facade::{FileType, Filesystem};
 use fs_ntfs::mkfs::format_filesystem;
@@ -20,7 +22,7 @@ use std::path::Path;
 const VOL_SIZE: u64 = 64 * 1024 * 1024;
 
 fn fresh_volume(tag: &str) -> String {
-    let dst = format!("test-disks/_fpr_{tag}.img");
+    let dst = common::temp_image_path(format!("fpr_{tag}"));
     let f = std::fs::File::create(&dst).expect("create");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

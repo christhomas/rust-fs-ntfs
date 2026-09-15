@@ -7,6 +7,8 @@
 //! reads back with `birth_ids = None`. Every test formats its own
 //! in-memory volume — no fixture images required.
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::write;
@@ -17,7 +19,7 @@ const CLUSTER: u32 = 4096;
 
 /// Format a fresh volume into a temp image and return its path.
 fn fresh_vol(tag: &str) -> String {
-    let dst = format!("test-disks/_fex_oid_{tag}.img");
+    let dst = common::temp_image_path(format!("fex_oid_{tag}"));
     let f = std::fs::File::create(&dst).expect("create");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

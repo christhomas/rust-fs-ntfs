@@ -14,6 +14,8 @@
 //!   (`read::resolve_path`, which has always been collation-aware) had
 //!   just found the file.
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::facade::Filesystem;
 use fs_ntfs::mkfs::format_filesystem;
@@ -24,7 +26,7 @@ const CLUSTER: u32 = 4096;
 
 fn fresh_volume(tag: &str) -> String {
     std::fs::create_dir_all("test-disks").expect("create test-disks dir");
-    let dst = format!("test-disks/_collate_{tag}.img");
+    let dst = common::temp_image_path(format!("collate_{tag}"));
     let f = std::fs::File::create(&dst).expect("create image");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

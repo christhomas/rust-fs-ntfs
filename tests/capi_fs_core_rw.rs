@@ -21,6 +21,8 @@
 
 #![allow(unused_unsafe)]
 
+mod common;
+
 use std::ffi::{c_char, c_void, CString};
 
 use fs_ntfs::{
@@ -32,7 +34,7 @@ use fs_ntfs::{
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn copy_fixture(tag: &str) -> String {
-    let dst = format!("test-disks/_capi_fs_core_rw_{tag}.img");
+    let dst = common::temp_image_path(format!("capi_fs_core_rw_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy fixture");
     dst
 }

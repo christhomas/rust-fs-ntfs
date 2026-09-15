@@ -1,11 +1,13 @@
 //! Tests for the Rust-native facade (§4.2).
 
+mod common;
+
 use fs_ntfs::facade::{FileType, Filesystem};
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_facade_{tag}.img");
+    let dst = common::temp_image_path(format!("facade_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }

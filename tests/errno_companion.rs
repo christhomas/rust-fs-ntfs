@@ -2,6 +2,8 @@
 
 #![allow(unused_unsafe)]
 
+mod common;
+
 use fs_ntfs::{
     fs_ntfs_clear_dirty, fs_ntfs_clear_last_error, fs_ntfs_last_errno, fs_ntfs_unlink,
     fs_ntfs_write_resident_contents,
@@ -14,7 +16,7 @@ const EINVAL: i32 = 22;
 const EIO: i32 = 5;
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_errno_{tag}.img");
+    let dst = common::temp_image_path(format!("errno_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }

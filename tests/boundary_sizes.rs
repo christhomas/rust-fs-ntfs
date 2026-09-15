@@ -12,6 +12,8 @@
 //! largest size `write_resident_contents` accepts. One byte over must be
 //! rejected by the resident path and require promotion.
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::write;
@@ -28,7 +30,7 @@ const MFT_RECORD_SIZE: usize = 4096;
 
 /// Format a fresh NTFS volume into a temp image file and return its path.
 fn fresh_vol(tag: &str) -> String {
-    let dst = format!("test-disks/_bnd_{tag}.img");
+    let dst = common::temp_image_path(format!("bnd_{tag}"));
     let f = std::fs::File::create(&dst).expect("create temp image");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

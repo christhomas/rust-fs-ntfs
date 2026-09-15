@@ -7,6 +7,8 @@
 //! trees, and last-name removal — each verified by reading back through the
 //! upstream `ntfs` crate (independent of our own parsers).
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::write;
@@ -19,7 +21,7 @@ const VOL_SIZE: u64 = 64 * 1024 * 1024;
 const CLUSTER: u32 = 4096;
 
 fn fresh_vol(tag: &str) -> String {
-    let dst = format!("test-disks/_hl_{tag}.img");
+    let dst = common::temp_image_path(format!("hl_{tag}"));
     let f = std::fs::File::create(&dst).expect("create temp image");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

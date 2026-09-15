@@ -2,6 +2,8 @@
 //! overflowed to `$INDEX_ALLOCATION` — specifically the root
 //! directory, which NTFS formatter always lays out that way.
 
+mod common;
+
 use fs_ntfs::write;
 use ntfs::Ntfs;
 use std::io::BufReader;
@@ -10,7 +12,7 @@ use std::path::Path;
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_root_ops_{tag}.img");
+    let dst = common::temp_image_path(format!("root_ops_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }

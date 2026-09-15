@@ -5,6 +5,8 @@
 //! not corrupt record contents, (c) upstream `ntfs` still parses a volume
 //! we've touched with an identity RMW.
 
+mod common;
+
 use fs_ntfs::mft_io::{
     apply_fixup_on_read, apply_fixup_on_write, read_boot_params, read_mft_record,
     update_mft_record, MFT_FLAG_IN_USE,
@@ -15,7 +17,7 @@ use std::io::{Read, Seek, SeekFrom};
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_mft_io_{tag}.img");
+    let dst = common::temp_image_path(format!("mft_io_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy basic fixture");
     dst
 }

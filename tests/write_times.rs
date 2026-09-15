@@ -2,6 +2,8 @@
 //! back via upstream `ntfs` (independent of our attr/mft_io parsers) and
 //! confirm the value matches.
 
+mod common;
+
 use fs_ntfs::write::{self, FileTimes};
 use ntfs::structured_values::NtfsStandardInformation;
 use ntfs::{Ntfs, NtfsAttributeType};
@@ -10,7 +12,7 @@ use std::io::BufReader;
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_write_times_{tag}.img");
+    let dst = common::temp_image_path(format!("write_times_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy basic fixture");
     dst
 }

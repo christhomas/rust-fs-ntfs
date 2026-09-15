@@ -18,6 +18,8 @@
 //! declared length and the records actually written agree, which holds
 //! whichever of the two the formatter is later decided to be right.
 
+mod common;
+
 use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
@@ -48,7 +50,7 @@ fn cases() -> Vec<(u32, u64)> {
 /// Format a volume at this cluster size and return the image path.
 fn formatted(cluster_size: u32, size: u64) -> String {
     std::fs::create_dir_all("test-disks").expect("create test-disks dir");
-    let dst = format!("test-disks/_mirror_c{cluster_size}.img");
+    let dst = common::temp_image_path(format!("mirror_c{cluster_size}"));
     let f = std::fs::File::create(&dst).expect("create image");
     f.set_len(size).expect("set_len");
     drop(f);

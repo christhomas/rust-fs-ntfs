@@ -1,5 +1,7 @@
 //! Tests for W4.3 Extended Attributes.
 
+mod common;
+
 use fs_ntfs::{ea_io, write};
 use ntfs::Ntfs;
 use std::io::BufReader;
@@ -8,7 +10,7 @@ use std::path::Path;
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_ea_{tag}.img");
+    let dst = common::temp_image_path(format!("ea_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }

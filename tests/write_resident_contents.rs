@@ -1,6 +1,8 @@
 //! Tests for `write::write_resident_contents` + round-trip with
 //! create_file so newly-created files are immediately useful.
 
+mod common;
+
 use fs_ntfs::write;
 use ntfs::{Ntfs, NtfsAttributeType, NtfsReadSeek};
 use std::io::BufReader;
@@ -9,7 +11,7 @@ use std::path::Path;
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_write_res_{tag}.img");
+    let dst = common::temp_image_path(format!("write_res_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }
@@ -95,7 +97,7 @@ fn write_resident_can_expand_up_to_record_capacity() {
 fn write_resident_rejects_nonresident_file() {
     // ntfs-large-file.img has a non-resident /big.bin. Resident write
     // should refuse.
-    let img = "test-disks/_write_res_nonres.img".to_string();
+    let img = common::temp_image_path("write_res_nonres");
     std::fs::copy("test-disks/ntfs-large-file.img", &img).unwrap();
     let err = write::write_resident_contents(Path::new(&img), "/big.bin", b"x").unwrap_err();
     assert!(

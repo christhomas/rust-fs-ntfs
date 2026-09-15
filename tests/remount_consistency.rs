@@ -8,6 +8,8 @@
 //! path produces on-disk bytes that our own read path accepts (masking the
 //! bug) but the canonical ntfs parser does not.
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::write::{self, read_si_full, FileTimes};
@@ -21,7 +23,7 @@ const CLUSTER: u32 = 4096;
 const T_SENTINEL: u64 = 133_000_000_000_000_000u64; // 2022-era NT timestamp
 
 fn fresh_vol(tag: &str) -> String {
-    let dst = format!("test-disks/_rmc_{tag}.img");
+    let dst = common::temp_image_path(format!("rmc_{tag}"));
     let f = std::fs::File::create(&dst).expect("create");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

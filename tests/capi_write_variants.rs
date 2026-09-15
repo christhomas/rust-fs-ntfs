@@ -3,6 +3,8 @@
 
 #![allow(unused_unsafe)]
 
+mod common;
+
 use fs_ntfs::{
     fs_ntfs_grow, fs_ntfs_last_error, fs_ntfs_write_file_contents, fs_ntfs_write_resident_contents,
 };
@@ -15,7 +17,7 @@ const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 const LARGE_IMG: &str = "test-disks/ntfs-large-file.img";
 
 fn working_copy(tag: &str, src: &str) -> String {
-    let dst = format!("test-disks/_capi_writev_{tag}.img");
+    let dst = common::temp_image_path(format!("capi_writev_{tag}"));
     std::fs::copy(src, &dst).expect("copy");
     dst
 }

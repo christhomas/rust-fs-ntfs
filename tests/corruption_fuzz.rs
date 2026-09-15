@@ -8,6 +8,8 @@
 //! the same runs each time. For unbounded fuzzing, see the §5.2
 //! `cargo-fuzz` targets.
 
+mod common;
+
 use fs_ntfs::facade::Filesystem;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -31,7 +33,7 @@ impl Lcg {
 }
 
 fn corrupt_copy(tag: &str, seed: u64, flips: usize) -> String {
-    let dst = format!("test-disks/_corrupt_{tag}.img");
+    let dst = common::temp_image_path(format!("corrupt_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     let mut bytes = std::fs::read(&dst).unwrap();
     let mut rng = Lcg::new(seed);
@@ -107,22 +109,22 @@ fn random_flips_500_do_not_panic() {
 #[test]
 fn wiped_first_sector_does_not_panic() {
     // Deliberately destroy the boot sector entirely.
-    let dst = "test-disks/_corrupt_wiped_boot.img";
-    std::fs::copy(BASIC_IMG, dst).unwrap();
-    let mut bytes = std::fs::read(dst).unwrap();
+    let dst = common::temp_image_path("corrupt_wiped_boot");
+    std::fs::copy(BASIC_IMG, &dst).unwrap();
+    let mut bytes = std::fs::read(&dst).unwrap();
     for byte in bytes.iter_mut().take(512) {
         *byte = 0;
     }
-    std::fs::write(dst, &bytes).unwrap();
-    assert_no_panic(dst);
+    std::fs::write(&dst, &bytes).unwrap();
+    assert_no_panic(&dst);
 }
 
 #[test]
 fn truncated_image_does_not_panic() {
-    let dst = "test-disks/_corrupt_truncated.img";
-    std::fs::copy(BASIC_IMG, dst).unwrap();
-    let bytes = std::fs::read(dst).unwrap();
+    let dst = common::temp_image_path("corrupt_truncated");
+    std::fs::copy(BASIC_IMG, &dst).unwrap();
+    let bytes = std::fs::read(&dst).unwrap();
     // Truncate to 64 KiB.
-    std::fs::write(dst, &bytes[..65536]).unwrap();
-    assert_no_panic(dst);
+    std::fs::write(&dst, &bytes[..65536]).unwrap();
+    assert_no_panic(&dst);
 }

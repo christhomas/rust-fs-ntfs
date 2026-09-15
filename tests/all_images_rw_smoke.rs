@@ -8,6 +8,8 @@
 
 #![allow(unused_unsafe)]
 
+mod common;
+
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -82,11 +84,7 @@ fn run_round_trip(image_basename: &str) {
         eprintln!("SKIP {image_basename}: fixture missing at {src}");
         return;
     }
-    let scratch = format!(
-        "{}/test-disks/_smoke_{}.img",
-        env!("CARGO_MANIFEST_DIR"),
-        image_basename
-    );
+    let scratch = common::temp_image_path(format!("smoke_{image_basename}"));
     std::fs::copy(&src, &scratch).expect("copy fixture to scratch");
 
     let result = std::panic::catch_unwind(|| {
@@ -265,8 +263,6 @@ fn run_round_trip(image_basename: &str) {
             entries, first_existing_read_bytes
         );
     });
-
-    let _ = std::fs::remove_file(&scratch);
 
     if let Err(e) = result {
         std::panic::resume_unwind(e);

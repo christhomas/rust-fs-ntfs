@@ -19,6 +19,8 @@
 //! Both the whole-value read (`read_attribute_value`) and the ranged read
 //! (`read_attribute_range`, which the file-read API uses) are covered.
 
+mod common;
+
 use fs_ntfs::attr_io::{self, attr_off, AttrType};
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::data_runs;
@@ -46,7 +48,7 @@ const FILE_SIZE: usize = 8192;
 /// mark the off-volume tail, and put one non-resident file in the root.
 fn volume_with_a_file(tag: &str) -> String {
     std::fs::create_dir_all("test-disks").expect("create test-disks dir");
-    let dst = format!("test-disks/_runbounds_{tag}.img");
+    let dst = common::temp_image_path(format!("runbounds_{tag}"));
     let f = std::fs::File::create(&dst).expect("create image");
     f.set_len(DEVICE_SIZE).expect("set_len");
     drop(f);

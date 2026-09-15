@@ -17,6 +17,8 @@
 //! `cluster_size` at 65536, so its `sectors_per_cluster` never leaves
 //! the literal range. These are volumes Windows formatted.
 
+mod common;
+
 use fs_ntfs::mft_io::read_boot_params;
 use std::path::Path;
 
@@ -25,7 +27,7 @@ use std::path::Path;
 /// parse it.
 fn boot_image(tag: &str, bytes_per_sector: u16, spc_raw: u8) -> String {
     std::fs::create_dir_all("test-disks").expect("create test-disks dir");
-    let path = format!("test-disks/_bootgeom_{tag}.img");
+    let path = common::temp_image_path(format!("bootgeom_{tag}"));
     let mut b = vec![0u8; 512];
     b[3..11].copy_from_slice(b"NTFS    ");
     b[0x0B..0x0D].copy_from_slice(&bytes_per_sector.to_le_bytes());
