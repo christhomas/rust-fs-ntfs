@@ -2,6 +2,8 @@
 //! attribute to mutate safely is `$VOLUME_NAME` on record 3 — changing
 //! its value renames the volume label, which upstream reads back.
 
+mod common;
+
 use fs_ntfs::attr_io::{self, AttrType};
 use fs_ntfs::attr_resize::{resize_resident_value, set_resident_value};
 use fs_ntfs::mft_io::{read_mft_record, update_mft_record};
@@ -12,7 +14,7 @@ use std::path::Path;
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_attr_resize_{tag}.img");
+    let dst = common::temp_image_path(format!("attr_resize_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }

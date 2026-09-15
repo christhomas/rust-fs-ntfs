@@ -20,6 +20,8 @@
 //! could hold since the same class of bug was found there. `$Bitmap`
 //! had no equivalent.
 
+mod common;
+
 use fs_ntfs::attr_io::{self, attr_off, AttrType};
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
@@ -38,7 +40,7 @@ const BITMAP_RECORD: u64 = 6;
 /// past the end of the volume.
 fn volume_with_an_overlong_bitmap(tag: &str) -> String {
     std::fs::create_dir_all("test-disks").expect("create test-disks dir");
-    let dst = format!("test-disks/_allocbounds_{tag}.img");
+    let dst = common::temp_image_path(format!("allocbounds_{tag}"));
     let f = std::fs::File::create(&dst).expect("create image");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

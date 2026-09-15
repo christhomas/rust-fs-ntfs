@@ -20,25 +20,20 @@
 
 #![allow(unused_unsafe)]
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::{fs_ntfs_write_file, fs_ntfs_write_file_contents};
 use std::ffi::{c_void, CString};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 
-/// A freshly formatted image, removed when the test ends.
+/// A freshly formatted image owned by the shared test-image registry.
 struct TmpImage(PathBuf);
 
 impl TmpImage {
     fn new(tag: &str) -> Self {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "fs_ntfs_zerolen_{tag}_{}_{n}.img",
-            std::process::id()
-        ));
+        let path = PathBuf::from(common::temp_image_path(format!("zerolen_{tag}")));
 
         // 16 MiB: mkfs puts $MFTMirr at the halfway point and the
         // primary metadata region has to end before it.
@@ -67,12 +62,6 @@ impl TmpImage {
 
     fn c_path(&self) -> CString {
         CString::new(self.0.to_str().unwrap()).unwrap()
-    }
-}
-
-impl Drop for TmpImage {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
     }
 }
 

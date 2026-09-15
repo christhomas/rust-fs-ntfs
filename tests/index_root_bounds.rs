@@ -19,6 +19,8 @@
 //!   a directory on that answer. An unreadable index is the one input
 //!   where reporting emptiness is destructive.
 
+mod common;
+
 use fs_ntfs::attr_io::{self, AttrType};
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::facade::Filesystem;
@@ -47,7 +49,7 @@ const FN_NAME_OFFSET: usize = 0x42;
 
 fn fresh_volume(tag: &str) -> String {
     std::fs::create_dir_all("test-disks").expect("create test-disks dir");
-    let dst = format!("test-disks/_irbounds_{tag}.img");
+    let dst = common::temp_image_path(format!("irbounds_{tag}"));
     let f = std::fs::File::create(&dst).expect("create image");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

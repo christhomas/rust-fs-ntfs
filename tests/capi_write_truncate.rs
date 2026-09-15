@@ -2,6 +2,8 @@
 
 #![allow(unused_unsafe)]
 
+mod common;
+
 use fs_ntfs::{fs_ntfs_last_error, fs_ntfs_truncate};
 use ntfs::{Ntfs, NtfsAttributeType};
 use std::ffi::{CStr, CString};
@@ -10,7 +12,7 @@ use std::io::BufReader;
 const LARGE_IMG: &str = "test-disks/ntfs-large-file.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_capi_trunc_{tag}.img");
+    let dst = common::temp_image_path(format!("capi_trunc_{tag}"));
     std::fs::copy(LARGE_IMG, &dst).expect("copy");
     dst
 }

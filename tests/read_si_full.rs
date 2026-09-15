@@ -2,13 +2,15 @@
 //! `$STANDARD_INFORMATION` (both the common 48-byte header and the
 //! optional 24-byte NTFS 3.x trailer).
 
+mod common;
+
 use fs_ntfs::write::{create_file, read_si_full, set_security_id, set_times, FileTimes};
 use std::path::Path;
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> (String, &'static str) {
-    let dst = format!("test-disks/_rsf_{tag}.img");
+    let dst = common::temp_image_path(format!("rsf_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     create_file(Path::new(&dst), "/", "runtime.bin").expect("runtime create_file");
     (dst, "/runtime.bin")

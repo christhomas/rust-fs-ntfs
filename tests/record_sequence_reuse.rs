@@ -15,6 +15,8 @@
 //! slot was recycled at all -- a test that cannot observe the defect it
 //! is written for.
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::{mft_io, write};
@@ -23,20 +25,12 @@ use std::path::Path;
 const VOL_SIZE: u64 = 64 * 1024 * 1024;
 const CLUSTER: u32 = 4096;
 
-/// A formatted volume that removes itself.
-///
-/// The path carries the process id, and the file is deleted on drop --
-/// the pattern `capi_zero_length_writes.rs` established here. A fixed
-/// name is two defects at once: two `cargo test` processes formatting
-/// the same image at the same time, and a 64 MiB file left behind by
-/// every run that fails, since a panicking test never reaches a
-/// cleanup line written after the assertions.
+/// A formatted volume backed by the shared temporary-image registry.
 struct TmpVol(std::path::PathBuf);
 
 impl TmpVol {
     fn new(tag: &str) -> Self {
-        let dst =
-            std::path::PathBuf::from(format!("test-disks/_seq_{tag}_{}.img", std::process::id()));
+        let dst = std::path::PathBuf::from(common::temp_image_path(format!("seq_{tag}")));
         let f = std::fs::File::create(&dst).expect("create temp image");
         f.set_len(VOL_SIZE).expect("set_len");
         drop(f);
@@ -62,12 +56,6 @@ impl TmpVol {
     fn sequence_of(&self, record: u64) -> u16 {
         let (_, bytes) = mft_io::read_mft_record(&self.0, record).expect("read record");
         mft_io::record_sequence(&bytes)
-    }
-}
-
-impl Drop for TmpVol {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
     }
 }
 

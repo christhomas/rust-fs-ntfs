@@ -2,6 +2,8 @@
 
 #![allow(unused_unsafe)]
 
+mod common;
+
 use fs_ntfs::{
     fs_ntfs_create_symlink, fs_ntfs_last_error, fs_ntfs_remove_reparse_point,
     fs_ntfs_write_reparse_point,
@@ -13,7 +15,7 @@ const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
 const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_capi_reparse_{tag}.img");
+    let dst = common::temp_image_path(format!("capi_reparse_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }

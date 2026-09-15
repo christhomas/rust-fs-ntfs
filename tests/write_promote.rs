@@ -1,6 +1,8 @@
 //! Tests for W2.2 promotion (resident → non-resident) and the
 //! high-level `write_file_contents` dispatcher.
 
+mod common;
+
 use fs_ntfs::write;
 use ntfs::{Ntfs, NtfsAttributeType, NtfsReadSeek};
 use std::io::BufReader;
@@ -9,7 +11,7 @@ use std::path::Path;
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_promote_{tag}.img");
+    let dst = common::temp_image_path(format!("promote_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }
@@ -122,10 +124,10 @@ fn promote_with_large_content() {
 #[test]
 fn promote_rejects_already_nonresident() {
     let img = working_copy("already_nonres");
-    let lg = "test-disks/_promote_already_nonres_src.img";
-    std::fs::copy("test-disks/ntfs-large-file.img", lg).unwrap();
+    let lg = common::temp_image_path("promote_already_nonres_src");
+    std::fs::copy("test-disks/ntfs-large-file.img", &lg).unwrap();
     let err =
-        write::promote_resident_data_to_nonresident(Path::new(lg), "/big.bin", b"xx").unwrap_err();
+        write::promote_resident_data_to_nonresident(Path::new(&lg), "/big.bin", b"xx").unwrap_err();
     assert!(err.contains("non-resident"), "{err:?}");
     // Silence unused-var in case test dir wasn't setup.
     let _ = img;

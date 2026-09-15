@@ -13,6 +13,8 @@
 //! of the same crate disagreed about whether the file was readable, and
 //! the one that said yes was wrong.
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::facade::{FileType, Filesystem};
 use fs_ntfs::mkfs::format_filesystem;
@@ -26,7 +28,7 @@ const SIZE: u64 = 8192;
 
 fn fresh_volume(tag: &str) -> String {
     std::fs::create_dir_all("test-disks").expect("create test-disks dir");
-    let dst = format!("test-disks/_wof_{tag}.img");
+    let dst = common::temp_image_path(format!("wof_{tag}"));
     let f = std::fs::File::create(&dst).expect("create image");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

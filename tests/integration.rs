@@ -1,5 +1,5 @@
 //! Basic end-to-end: mount ntfs-basic.img, list root, stat + read files.
-//! Matches fixture content produced by test-disks/_vm-builder.sh::build_basic.
+//! Matches fixture content produced by the VM builder's `build_basic` task.
 
 mod common;
 

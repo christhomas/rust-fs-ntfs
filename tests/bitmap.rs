@@ -1,12 +1,14 @@
 //! Integration tests for the `$Bitmap` cluster allocator.
 
+mod common;
+
 use fs_ntfs::bitmap::{self, BitmapLocation};
 use std::path::Path;
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_bitmap_{tag}.img");
+    let dst = common::temp_image_path(format!("bitmap_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }

@@ -13,6 +13,8 @@
 //! this crate writes them itself (`write::write_sparse_file`). An
 //! encrypted one is a checkbox in the Windows file-properties dialog.
 
+mod common;
+
 use fs_ntfs::attr_io::{self, attr_off, AttrType};
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
@@ -29,7 +31,7 @@ const ATTR_FLAG_SPARSE: u16 = 0x8000;
 
 fn fresh_volume(tag: &str) -> String {
     std::fs::create_dir_all("test-disks").expect("create test-disks dir");
-    let dst = format!("test-disks/_xform_{tag}.img");
+    let dst = common::temp_image_path(format!("xform_{tag}"));
     let f = std::fs::File::create(&dst).expect("create image");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

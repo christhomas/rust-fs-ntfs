@@ -2,6 +2,8 @@
 
 #![allow(unused_unsafe)]
 
+mod common;
+
 use fs_ntfs::facade::Filesystem;
 use fs_ntfs::write::{
     read_object_id, read_object_id_extended, remove_object_id, write_object_id,
@@ -16,7 +18,7 @@ use std::ffi::{CStr, CString};
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_objid_{tag}.img");
+    let dst = common::temp_image_path(format!("objid_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }

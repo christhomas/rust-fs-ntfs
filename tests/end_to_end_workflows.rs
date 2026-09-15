@@ -11,6 +11,8 @@
 //! (formatted in-test via `format_filesystem`) and verifies the final
 //! state. No shared fixtures — every test owns its own image.
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::facade::{FileType, Filesystem};
 use fs_ntfs::mkfs::format_filesystem;
@@ -19,7 +21,7 @@ use std::path::Path;
 const VOL_SIZE: u64 = 64 * 1024 * 1024;
 
 fn fresh_volume(tag: &str, label: &str) -> String {
-    let dst = format!("test-disks/_e2e_{tag}.img");
+    let dst = common::temp_image_path(format!("e2e_{tag}"));
     let f = std::fs::File::create(&dst).expect("create");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

@@ -5,6 +5,8 @@
 
 #![allow(unused_unsafe)]
 
+mod common;
+
 use fs_ntfs::write::read_object_id_extended;
 use fs_ntfs::{
     fs_ntfs_last_error, fs_ntfs_mount, fs_ntfs_set_object_id_extended_h, fs_ntfs_umount,
@@ -14,7 +16,7 @@ use std::ffi::{CStr, CString};
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_soeh_{tag}.img");
+    let dst = common::temp_image_path(format!("soeh_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }

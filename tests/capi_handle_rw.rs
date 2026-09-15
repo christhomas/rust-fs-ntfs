@@ -14,6 +14,8 @@
 
 #![allow(unused_unsafe)]
 
+mod common;
+
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
@@ -67,7 +69,7 @@ unsafe extern "C" fn write_cb(
 }
 
 fn copy_fixture(tag: &str) -> String {
-    let dst = format!("test-disks/_capi_handle_rw_{tag}.img");
+    let dst = common::temp_image_path(format!("capi_handle_rw_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy fixture");
     dst
 }

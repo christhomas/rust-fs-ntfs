@@ -13,6 +13,8 @@
 //! This sweep proves format + create + write + read + remount works
 //! at every supported cluster size.
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::facade::Filesystem;
 use fs_ntfs::mkfs::format_filesystem;
@@ -39,7 +41,7 @@ fn cases() -> Vec<(u32, u64, &'static str)> {
 }
 
 fn fresh_volume(cluster: u32, size: u64, label: &str) -> String {
-    let dst = format!("test-disks/_csize_{}.img", label.to_lowercase());
+    let dst = common::temp_image_path(format!("csize_{}", label.to_lowercase()));
     let f = std::fs::File::create(&dst).expect("create");
     f.set_len(size).expect("set_len");
     drop(f);
@@ -170,13 +172,13 @@ fn round_trip_64k() {
 /// mkfs must reject power-of-two cluster sizes outside [512, 65536].
 #[test]
 fn mkfs_rejects_invalid_cluster_sizes() {
-    let dst = "test-disks/_csize_invalid.img";
-    let f = std::fs::File::create(dst).unwrap();
+    let dst = common::temp_image_path("csize_invalid");
+    let f = std::fs::File::create(&dst).unwrap();
     f.set_len(8 * 1024 * 1024).unwrap();
     drop(f);
 
     for bad in &[256u32, 128, 131072, 262144, 4097, 6144] {
-        let mut io = PathIo::open_rw(Path::new(dst)).unwrap();
+        let mut io = PathIo::open_rw(Path::new(&dst)).unwrap();
         let err = format_filesystem(&mut io, 8 * 1024 * 1024, *bad, 4096, Some("X"), Some(0))
             .unwrap_err();
         assert!(
@@ -189,12 +191,12 @@ fn mkfs_rejects_invalid_cluster_sizes() {
 /// mkfs must reject volumes too small for a viable layout.
 #[test]
 fn mkfs_rejects_tiny_volumes() {
-    let dst = "test-disks/_csize_too_small.img";
-    let f = std::fs::File::create(dst).unwrap();
+    let dst = common::temp_image_path("csize_too_small");
+    let f = std::fs::File::create(&dst).unwrap();
     f.set_len(64 * 1024).unwrap(); // 64 KiB — well under mkfs's floor
     drop(f);
 
-    let mut io = PathIo::open_rw(Path::new(dst)).unwrap();
+    let mut io = PathIo::open_rw(Path::new(&dst)).unwrap();
     let err = format_filesystem(&mut io, 64 * 1024, 4096, 4096, Some("X"), Some(0)).unwrap_err();
     assert!(
         err.contains("too small") || err.contains("clusters"),

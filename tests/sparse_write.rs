@@ -5,6 +5,8 @@
 //! (2) sparseness is real — a hole consumes NO clusters, measured directly
 //! against `$Bitmap` free-count before/after.
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::{bitmap, write};
@@ -17,7 +19,7 @@ const VOL_SIZE: u64 = 64 * 1024 * 1024;
 const CLUSTER: u32 = 4096;
 
 fn fresh_vol(tag: &str) -> String {
-    let dst = format!("test-disks/_sparsew_{tag}.img");
+    let dst = common::temp_image_path(format!("sparsew_{tag}"));
     let f = std::fs::File::create(&dst).expect("create temp image");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

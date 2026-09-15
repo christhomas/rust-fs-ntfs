@@ -1,5 +1,7 @@
 //! Tests for W4.2 reparse points + symlinks.
 
+mod common;
+
 use fs_ntfs::write;
 use ntfs::structured_values::{NtfsFileAttributeFlags, NtfsStandardInformation};
 use ntfs::{Ntfs, NtfsAttributeType};
@@ -9,7 +11,7 @@ use std::path::Path;
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_reparse_{tag}.img");
+    let dst = common::temp_image_path(format!("reparse_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }

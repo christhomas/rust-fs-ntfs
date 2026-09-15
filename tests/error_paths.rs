@@ -5,6 +5,8 @@
 //! over-long names, rmdir on non-empty/non-dir, unlink of missing/dir, etc.
 //! Self-generating volumes; each op is checked on a fresh format.
 
+mod common;
+
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::write;
@@ -14,7 +16,7 @@ const VOL_SIZE: u64 = 64 * 1024 * 1024;
 const CLUSTER: u32 = 4096;
 
 fn fresh_vol(tag: &str) -> String {
-    let dst = format!("test-disks/_err_{tag}.img");
+    let dst = common::temp_image_path(format!("err_{tag}"));
     let f = std::fs::File::create(&dst).expect("create temp image");
     f.set_len(VOL_SIZE).expect("set_len");
     drop(f);

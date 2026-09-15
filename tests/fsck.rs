@@ -19,7 +19,7 @@ const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 /// Copy basic.img into a unique working file so destructive tests don't
 /// race with each other, then patch in the requested dirty state.
 fn dirty_copy(tag: &str, dirty_flag: bool, corrupt_logfile: bool) -> String {
-    let dst = format!("test-disks/_fsck_test_{tag}.img");
+    let dst = common::temp_image_path(format!("fsck_test_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy basic fixture");
 
     if dirty_flag {

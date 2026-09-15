@@ -1,6 +1,8 @@
 //! Tests for `write::mkdir` (W3 MVP — parent must have resident-only
 //! `$INDEX_ROOT`).
 
+mod common;
+
 use fs_ntfs::write;
 use ntfs::Ntfs;
 use std::io::BufReader;
@@ -9,7 +11,7 @@ use std::path::Path;
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_mkdir_{tag}.img");
+    let dst = common::temp_image_path(format!("mkdir_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }

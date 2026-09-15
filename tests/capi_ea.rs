@@ -2,13 +2,15 @@
 
 #![allow(unused_unsafe)]
 
+mod common;
+
 use fs_ntfs::{fs_ntfs_last_error, fs_ntfs_remove_ea, fs_ntfs_write_ea};
 use std::ffi::{c_void, CStr, CString};
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
 fn working_copy(tag: &str) -> String {
-    let dst = format!("test-disks/_capi_ea_{tag}.img");
+    let dst = common::temp_image_path(format!("capi_ea_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
     dst
 }
