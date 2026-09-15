@@ -84,6 +84,71 @@ fn read_or_panic(path: &Path) -> String {
     })
 }
 
+#[test]
+fn ci_runs_strict_clippy_on_native_arm64() {
+    let path = ci_yml();
+    let source = read_or_panic(&path);
+    let documents = Yaml::load_from_str(&source).expect("ci.yml must parse as YAML");
+    let workflow = documents.first().expect("ci.yml must contain a document");
+    let test_job = field(field(workflow, "jobs").expect("jobs"), "test").expect("test job");
+    let operating_systems = field(
+        field(
+            field(test_job, "strategy").expect("test strategy"),
+            "matrix",
+        )
+        .expect("test matrix"),
+        "os",
+    )
+    .and_then(Yaml::as_sequence)
+    .expect("test matrix os sequence");
+    assert!(
+        operating_systems
+            .iter()
+            .any(|os| os.as_str() == Some("ubuntu-24.04-arm")),
+        "{} does not compile and lint on GitHub's native ARM64 runner",
+        path.display()
+    );
+
+    let clippy = field(test_job, "steps")
+        .and_then(Yaml::as_sequence)
+        .into_iter()
+        .flatten()
+        .find(|step| {
+            field(step, "run")
+                .and_then(Yaml::as_str)
+                .is_some_and(|run| run.contains("cargo clippy") && run.contains("-D warnings"))
+        })
+        .expect("strict cargo clippy step");
+    let condition = field(clippy, "if")
+        .and_then(Yaml::as_str)
+        .expect("strict cargo clippy architecture condition");
+    // Only a disjunction of plain `matrix.os == '<leg>'` equalities is
+    // accepted, because a substring cannot tell an enabled branch from a
+    // disabled one: `matrix.os != 'ubuntu-24.04-arm'` and
+    // `matrix.os == 'ubuntu-24.04-arm' && false` both name the leg and
+    // both skip it. Anything else is refused rather than interpreted.
+    let legs: Vec<&str> = condition
+        .split("||")
+        .map(|term| {
+            term.trim()
+                .strip_prefix("matrix.os == '")
+                .and_then(|rest| rest.strip_suffix('\''))
+                .filter(|leg| !leg.contains('\''))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "strict Clippy condition is not a disjunction of \
+                         `matrix.os == '<leg>'` equalities, so this guard cannot \
+                         tell which legs it enables: {condition}"
+                    )
+                })
+        })
+        .collect();
+    assert!(
+        legs.contains(&"ubuntu-24.04-arm"),
+        "strict Clippy is present but excludes the ARM64 matrix leg: {condition}"
+    );
+}
+
 /// Whether a token is a leading `NAME=value` shell assignment.
 ///
 /// This is how the handshake is passed —
