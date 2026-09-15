@@ -6,27 +6,60 @@ use std::fs;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Barrier};
 
+fn rust_sources_below(directory: &Path, paths: &mut Vec<std::path::PathBuf>) {
+    for entry in fs::read_dir(directory).expect("read test source directory") {
+        let path = entry.expect("read test source entry").path();
+        if path.is_dir() {
+            rust_sources_below(&path, paths);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            paths.push(path);
+        }
+    }
+}
+
+fn bypasses_temp_image_primitive(source: &str) -> bool {
+    // Remove line comments and whitespace so a continued or multiline string
+    // cannot hide the fixed-path convention from the scan.
+    let code: String = source
+        .lines()
+        .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+        .collect();
+    let compact: String = code
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace() && *character != '\\')
+        .collect();
+    let compact = compact.replace("test-disks/_does_not_exist.img", "");
+
+    if compact.contains("test-disks/_") {
+        return true;
+    }
+
+    // Also catch a generated filename joined to a dynamically supplied
+    // directory, for example `format!("{TEST_DIR}/_scratch.img")`.
+    code.split('"').skip(1).step_by(2).any(|literal| {
+        let literal: String = literal
+            .chars()
+            .filter(|character| !character.is_ascii_whitespace() && *character != '\\')
+            .collect();
+        let filename = literal.rsplit('/').next().unwrap_or(&literal);
+        filename.starts_with('_') && filename.ends_with(".img") && filename != "_does_not_exist.img"
+    })
+}
+
 #[test]
 fn generated_images_use_the_shared_temp_image_primitive() {
     let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     let mut violations = Vec::new();
 
-    for entry in fs::read_dir(&tests).expect("read tests directory") {
-        let path = entry.expect("read tests entry").path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("rs")
-            || path.file_name().and_then(|name| name.to_str()) == Some("temp_image_policy.rs")
-        {
+    let mut sources = Vec::new();
+    rust_sources_below(&tests, &mut sources);
+    for path in sources {
+        if path == tests.join("temp_image_policy.rs") || path == tests.join("common/mod.rs") {
             continue;
         }
         let source = fs::read_to_string(&path).expect("read integration test source");
-        for (index, line) in source.lines().enumerate() {
-            let trimmed = line.trim_start();
-            if line.contains("test-disks/_")
-                && !trimmed.starts_with("//")
-                && !line.contains("_does_not_exist.img")
-            {
-                violations.push(format!("{}:{}: {}", path.display(), index + 1, line.trim()));
-            }
+        if bypasses_temp_image_primitive(&source) {
+            violations.push(path.display().to_string());
         }
     }
 
@@ -35,6 +68,32 @@ fn generated_images_use_the_shared_temp_image_primitive() {
         "generated images bypass the shared temporary-image primitive:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn policy_scan_covers_nested_multiline_and_dynamic_paths() {
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut sources = Vec::new();
+    rust_sources_below(&tests, &mut sources);
+    assert!(
+        sources.contains(&tests.join("common/mod.rs")),
+        "recursive scan did not descend into tests/common"
+    );
+
+    assert!(bypasses_temp_image_primitive(
+        r#"let path = format!("test-disks/\
+             _multiline.img");"#
+    ));
+    assert!(bypasses_temp_image_primitive(
+        r#"let path = format!("{TEST_DIR}/_dynamic.img");"#
+    ));
+    assert!(bypasses_temp_image_primitive(
+        r#"let missing = "test-disks/_does_not_exist.img";
+           let generated = "test-disks/_fixed.img";"#
+    ));
+    assert!(!bypasses_temp_image_primitive(
+        r#"let path = common::temp_image_path("safe");"#
+    ));
 }
 
 #[test]
