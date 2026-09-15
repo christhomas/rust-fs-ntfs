@@ -122,10 +122,29 @@ fn ci_runs_strict_clippy_on_native_arm64() {
     let condition = field(clippy, "if")
         .and_then(Yaml::as_str)
         .expect("strict cargo clippy architecture condition");
-    // An equality, not a substring: `matrix.os != 'ubuntu-24.04-arm'`
-    // names the leg too, and excludes exactly it.
+    // Only a disjunction of plain `matrix.os == '<leg>'` equalities is
+    // accepted, because a substring cannot tell an enabled branch from a
+    // disabled one: `matrix.os != 'ubuntu-24.04-arm'` and
+    // `matrix.os == 'ubuntu-24.04-arm' && false` both name the leg and
+    // both skip it. Anything else is refused rather than interpreted.
+    let legs: Vec<&str> = condition
+        .split("||")
+        .map(|term| {
+            term.trim()
+                .strip_prefix("matrix.os == '")
+                .and_then(|rest| rest.strip_suffix('\''))
+                .filter(|leg| !leg.contains('\''))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "strict Clippy condition is not a disjunction of \
+                         `matrix.os == '<leg>'` equalities, so this guard cannot \
+                         tell which legs it enables: {condition}"
+                    )
+                })
+        })
+        .collect();
     assert!(
-        condition.contains("matrix.os == 'ubuntu-24.04-arm'"),
+        legs.contains(&"ubuntu-24.04-arm"),
         "strict Clippy is present but excludes the ARM64 matrix leg: {condition}"
     );
 }
