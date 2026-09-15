@@ -17,48 +17,11 @@ fn rust_sources_below(directory: &Path, paths: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-fn without_line_comments(source: &str) -> String {
-    let mut code = String::with_capacity(source.len());
-    let mut characters = source.chars().peekable();
-    let mut in_string = false;
-    let mut escaped = false;
-
-    while let Some(character) = characters.next() {
-        if in_string {
-            code.push(character);
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        if character == '"' {
-            in_string = true;
-            code.push(character);
-        } else if character == '/' && characters.peek() == Some(&'/') {
-            characters.next();
-            for comment_character in characters.by_ref() {
-                if comment_character == '\n' {
-                    code.push('\n');
-                    break;
-                }
-            }
-        } else {
-            code.push(character);
-        }
-    }
-    code
-}
-
 fn bypasses_temp_image_primitive(source: &str) -> bool {
-    // Remove line comments and whitespace so a continued or multiline string
-    // cannot hide the fixed-path convention from the scan.
-    let code = without_line_comments(source);
-    let compact: String = code
+    // Scan raw source, including comments, so there is no Rust comment or
+    // string grammar to misparse. Documentation examples should not normalize
+    // the unsafe convention either.
+    let compact: String = source
         .chars()
         .filter(|character| !character.is_ascii_whitespace() && *character != '\\')
         .collect();
@@ -70,7 +33,7 @@ fn bypasses_temp_image_primitive(source: &str) -> bool {
 
     // Also catch a generated filename joined to a dynamically supplied
     // directory, for example `format!("{TEST_DIR}/_scratch.img")`.
-    code.split('"').skip(1).step_by(2).any(|literal| {
+    source.split('"').skip(1).step_by(2).any(|literal| {
         let literal: String = literal
             .chars()
             .filter(|character| !character.is_ascii_whitespace() && *character != '\\')
@@ -132,7 +95,10 @@ fn policy_scan_covers_nested_multiline_and_dynamic_paths() {
         r#"let path = common::temp_image_path("safe");"#
     ));
     assert!(!bypasses_temp_image_primitive(
-        r#"let url = "https://example.test/path"; // test-disks/_comment.img"#
+        r#"let url = "https://example.test/path"; // benign comment"#
+    ));
+    assert!(bypasses_temp_image_primitive(
+        r#"// Do not create test-disks/_documented_but_unsafe.img"#
     ));
 }
 
