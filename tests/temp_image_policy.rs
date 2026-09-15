@@ -17,13 +17,47 @@ fn rust_sources_below(directory: &Path, paths: &mut Vec<std::path::PathBuf>) {
     }
 }
 
+fn without_line_comments(source: &str) -> String {
+    let mut code = String::with_capacity(source.len());
+    let mut characters = source.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while let Some(character) = characters.next() {
+        if in_string {
+            code.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if character == '"' {
+            in_string = true;
+            code.push(character);
+        } else if character == '/' && characters.peek() == Some(&'/') {
+            characters.next();
+            for comment_character in characters.by_ref() {
+                if comment_character == '\n' {
+                    code.push('\n');
+                    break;
+                }
+            }
+        } else {
+            code.push(character);
+        }
+    }
+    code
+}
+
 fn bypasses_temp_image_primitive(source: &str) -> bool {
     // Remove line comments and whitespace so a continued or multiline string
     // cannot hide the fixed-path convention from the scan.
-    let code: String = source
-        .lines()
-        .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
-        .collect();
+    let code = without_line_comments(source);
     let compact: String = code
         .chars()
         .filter(|character| !character.is_ascii_whitespace() && *character != '\\')
@@ -88,11 +122,17 @@ fn policy_scan_covers_nested_multiline_and_dynamic_paths() {
         r#"let path = format!("{TEST_DIR}/_dynamic.img");"#
     ));
     assert!(bypasses_temp_image_primitive(
+        r#"let path = "test-disks//_double_slash.img";"#
+    ));
+    assert!(bypasses_temp_image_primitive(
         r#"let missing = "test-disks/_does_not_exist.img";
            let generated = "test-disks/_fixed.img";"#
     ));
     assert!(!bypasses_temp_image_primitive(
         r#"let path = common::temp_image_path("safe");"#
+    ));
+    assert!(!bypasses_temp_image_primitive(
+        r#"let url = "https://example.test/path"; // test-disks/_comment.img"#
     ));
 }
 
