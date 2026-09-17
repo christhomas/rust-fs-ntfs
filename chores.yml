@@ -106,8 +106,8 @@ tasks:
     # WHY THIS EXISTS, AND WHY IT IS NOT `git submodule update`.
     #
     # This crate needs two other repos: am-fs-core (a cargo path dep at
-    # `../rust-fs-core`) and fs-test-harness (a tool the matrix scripts
-    # invoke). Both were git submodules under vendor/, and submodules
+    # `../rust-fs-core`) and fs-windows-test-harness (a tool the matrix
+    # scripts invoke). Both were git submodules under vendor/, and submodules
     # turned out to be the wrong shape for a constellation of crates
     # that depend on each other.
     #
@@ -135,8 +135,8 @@ tasks:
         set -eu
         # name<TAB>url<TAB>ref
         printf '%s\t%s\t%s\n' \
-          rust-fs-core    https://github.com/antimatter-studios/rust-fs-core.git    '{{.FS_CORE_REF}}' \
-          fs-test-harness https://github.com/antimatter-studios/fs-test-harness.git '{{.HARNESS_REF}}' \
+          rust-fs-core            https://github.com/antimatter-studios/rust-fs-core.git            '{{.FS_CORE_REF}}' \
+          fs-windows-test-harness https://github.com/antimatter-studios/fs-windows-test-harness.git '{{.HARNESS_REF}}' \
         | while IFS="$(printf '\t')" read -r name url ref; do
             dir="../$name"
 
@@ -180,12 +180,12 @@ tasks:
         # does.
         flag="$(mktemp)"
         printf '%s\t%s\n' \
-          rust-fs-core    '{{.FS_CORE_REF}}' \
-          fs-test-harness '{{.HARNESS_REF}}' \
+          rust-fs-core            '{{.FS_CORE_REF}}' \
+          fs-windows-test-harness '{{.HARNESS_REF}}' \
         | while IFS="$(printf '\t')" read -r name ref; do
             dir="../$name"
             if [ ! -d "$dir/.git" ]; then
-              printf '  %-16s MISSING (want %s)\n' "$name" "$ref"
+              printf '  %-23s MISSING (want %s)\n' "$name" "$ref"
               echo drift >> "$flag"
               continue
             fi
@@ -193,9 +193,9 @@ tasks:
             dirty=""
             [ -n "$(git -C "$dir" status --porcelain)" ] && dirty=" [dirty]"
             if [ "$(git -C "$dir" rev-parse HEAD)" = "$(git -C "$dir" rev-parse "$ref^{commit}" 2>/dev/null || echo x)" ]; then
-              printf '  %-16s ok   %s%s\n' "$name" "$have" "$dirty"
+              printf '  %-23s ok   %s%s\n' "$name" "$have" "$dirty"
             else
-              printf '  %-16s DRIFT have=%s want=%s%s\n' "$name" "$have" "$ref" "$dirty"
+              printf '  %-23s DRIFT have=%s want=%s%s\n' "$name" "$have" "$ref" "$dirty"
               echo drift >> "$flag"
             fi
           done
