@@ -173,10 +173,11 @@
 - The Windows test harness is `fs-windows-test-harness` now
   (<https://github.com/antimatter-studios/fs-windows-test-harness>).
   `chore siblings` and both workflows' Windows clone check it out at
-  `../fs-windows-test-harness`, still at v3.11.0; an existing checkout
-  at the old sibling path is not moved, so re-run `chore siblings`.
-  The consumer config keeps its `fs-test-harness.toml` name until a
-  harness release that reads the new one is pinned.
+  `../fs-windows-test-harness`, pinned to v4.0.0, the release that
+  reads only the new names. In lockstep, the consumer config is
+  `fs-windows-test-harness.toml` and the VM-side PowerShell ops live in
+  `scripts/fs-windows-test-harness/`. An existing checkout at the old
+  sibling path is not moved, so re-run `chore siblings`.
 
 ## [0.4.0] — 2026-09-06
 

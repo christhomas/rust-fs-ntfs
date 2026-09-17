@@ -57,11 +57,11 @@ exist* — catching a volume that is technically valid but lost a file.
 ## The harness
 
 The orchestration lives in two places: filesystem-specific PowerShell operations
-in `scripts/fs-test-harness/`, and a reusable, filesystem-agnostic runner
+in `scripts/fs-windows-test-harness/`, and a reusable, filesystem-agnostic runner
 checked out as a sibling at `../fs-windows-test-harness/` (its own MIT-licensed
 project, pinned by `HARNESS_REF` in `chores.yml`).
 
-**Windows-side operations** (`scripts/fs-test-harness/*.ps1`), each invoked over
+**Windows-side operations** (`scripts/fs-windows-test-harness/*.ps1`), each invoked over
 SSH against a freshly mounted volume:
 
 | Script | Operation |

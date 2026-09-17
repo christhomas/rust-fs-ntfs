@@ -1,9 +1,9 @@
-# scripts/fs-test-harness/
+# scripts/fs-windows-test-harness/
 
 PowerShell scripts that run on the Windows test VM. Shipped once during
 the bootstrap phase by `run-tests.sh` via the `scripts_dir` key in
-`fs-test-harness.toml`. Once shipped, all harness operations and result
-collection use the copies at `{vm.workdir}/scripts/fs-test-harness/`.
+`fs-windows-test-harness.toml`. Once shipped, all harness operations and result
+collection use the copies at `{vm.workdir}/scripts/fs-windows-test-harness/`.
 
 ## Files
 
@@ -14,7 +14,7 @@ collection use the copies at `{vm.workdir}/scripts/fs-test-harness/`.
 
 ### Test operation scripts
 Invoked per scenario step by the harness runner (via SSH). Each maps
-to one `[ops.win-*]` entry in `fs-test-harness.toml`.
+to one `[ops.win-*]` entry in `fs-windows-test-harness.toml`.
 
 - `win-chkdsk.ps1` — wrap `.img` in a VHD, mount, run chkdsk, dismount
 - `win-enumerate.ps1` — mount and walk the volume root recursively

@@ -73,7 +73,7 @@ trap 'rm -f "$matrix_log"' EXIT
 
 run_exit=0
 if [ "$mode" = "smoke" ]; then
-    # Smoke set defined in fs-test-harness.toml [groups].smoke.
+    # Smoke set defined in fs-windows-test-harness.toml [groups].smoke.
     # The harness runner expands the group and runs all 5 scenarios in
     # parallel (same drive-letter semaphore as the full matrix).
     echo "[matrix-baseline] smoke (parallel via harness group)"
