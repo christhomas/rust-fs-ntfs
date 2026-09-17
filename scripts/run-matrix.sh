@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# scripts/run-matrix.sh — wrapper around the fs-test-harness matrix
+# scripts/run-matrix.sh — wrapper around the fs-windows-test-harness matrix
 # runner that cleans up disk images on exit (success, failure, Ctrl-C,
 # or any signal).
 #
 # Why a wrapper instead of fixing the harness directly:
-# * The harness lives in `../fs-test-harness/` (a sibling checkout,
+# * The harness lives in `../fs-windows-test-harness/` (a sibling checkout,
 #   pinned by `chore siblings`);
 #   we don't own its lifecycle. Cleanup belongs in consumer code.
 # * `init-image` (and ship-to-host) create .img files under HOST_IMAGE_DIR
@@ -20,7 +20,7 @@
 #   Stale locks (from killed processes) can be removed with:
 #     rm -rf /tmp/ntfs-matrix-lock-*
 #
-# Usage: same as `../fs-test-harness/scripts/run-tests.sh`. All
+# Usage: same as `../fs-windows-test-harness/scripts/run-tests.sh`. All
 # arguments pass straight through. Examples:
 #
 #   bash scripts/run-matrix.sh                  # full matrix
@@ -92,7 +92,7 @@ fi
 mkdir -p "$host_image_dir"
 
 # ── Orphaned staging dirs from prior KILLED runs ─────────────────────────────
-# The harness runner (fs-test-harness >= v3.11.0) reaps these mechanically at
+# The harness runner (fs-windows-test-harness >= v3.11.0) reaps these mechanically at
 # startup: every run stamps `{image_dir}/{run_id}/owner.pid` with its pid and,
 # before staging, removes any run dir whose owner pid is provably no longer
 # alive. That supersedes the old 2-hour-mtime sweep this wrapper used to do —
@@ -268,4 +268,4 @@ start_ssh_mux
 ensure_vm_workdir
 
 # Forward to the real runner.
-bash "$repo_root/../fs-test-harness/scripts/run-tests.sh" "${forwarded_args[@]+"${forwarded_args[@]}"}"
+bash "$repo_root/../fs-windows-test-harness/scripts/run-tests.sh" "${forwarded_args[@]+"${forwarded_args[@]}"}"

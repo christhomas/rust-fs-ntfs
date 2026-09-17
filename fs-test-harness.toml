@@ -1,8 +1,8 @@
-# harness.toml — fs-test-harness consumer config for rust-fs-ntfs.
+# harness.toml — fs-windows-test-harness consumer config for rust-fs-ntfs.
 #
-# The harness scripts + Rust runner live at ./../fs-test-harness/, vendored from
-# https://github.com/antimatter-studios/fs-test-harness. Run
-# `git submodule update --init --recursive` after cloning.
+# The harness scripts + Rust runner live at ../fs-windows-test-harness/, a
+# sibling checkout of https://github.com/antimatter-studios/fs-windows-test-harness
+# pinned by HARNESS_REF in chores.yml. Run `chore siblings` after cloning.
 #
 # All scenarios in test-matrix.json are recipe-shaped and dispatched
 # through the runner; mac-side (host) ops live in this file alongside
@@ -47,7 +47,7 @@ matrix_path = "test-matrix.json"
 #   VM_WORKDIR     = C:/path/on/windows/vm
 #   HOST_IMAGE_DIR = /path/for/disk/images  (default: diskimages/)
 #
-# Run `bash ../fs-test-harness/scripts/setup-local.sh` to generate
+# Run `bash ../fs-windows-test-harness/scripts/setup-local.sh` to generate
 # `.test-env` interactively.
 host           = "${VM_HOST}"
 ssh_key        = "${SSH_KEY}"
@@ -217,7 +217,7 @@ expect_exit = 0
 #
 # Step fields:
 #
-# Script path uses `{vm.workdir}` (added in fs-test-harness v3.1.0)
+# Script path uses `{vm.workdir}` (added in fs-windows-test-harness v3.1.0)
 # so the matrix workdir on the VM can be relocated without editing
 # every op command — single source of truth at `[vm].workdir` above.
 host = "vm"

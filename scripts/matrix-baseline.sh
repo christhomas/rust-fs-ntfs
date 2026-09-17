@@ -6,7 +6,7 @@
 #   * tested_at_sha          — git HEAD at run time
 #   * binary_sha256          — sha256 of target/release/rust-ntfs
 #   * VM metadata            — Windows + ntfs.sys + chkdsk versions
-#   * harness_submodule_sha  — exact vendored harness commit
+#   * harness_submodule_sha  — exact harness commit (sibling checkout)
 #   * test_matrix_json_sha256— hash of the scenarios definition
 #   * per-scenario status, verdict_shape, chkdsk exit codes
 #
