@@ -1121,6 +1121,16 @@ jobs:
         # I/O — a malformed $Bitmap or attribute table can pass /scan
         # but blow up on the first write. If this step fails, our mkfs
         # produced a "looks valid but isn't usable" volume.
+        #
+        # `continue-on-error` STAYS, AND THE `id` IS WHY IT CAN (#207/#276).
+        # The deferral is deliberate: a throw here must not stop the
+        # post-round-trip scan or the diagnostics upload, because the
+        # state of the volume AFTER the failed I/O is the evidence. What
+        # was missing is the other half of the deferral — the verdict has
+        # to be collected. `id: roundtrip` is what lets the final gate
+        # read `steps.roundtrip.outcome`; without it this step's `throw`
+        # was swallowed and nothing could ever see it.
+        id: roundtrip
         if: steps.chkdsk.outputs.scan_exit == '0'
         shell: pwsh
         continue-on-error: true
@@ -1148,6 +1158,14 @@ jobs:
           if ($remaining) { throw "files still present after delete" }
           "round-trip OK" | Out-File diag/round-trip.txt
       - name: chkdsk /scan (post round-trip)
+        # THE SCAN THAT ACTUALLY SEES A WRITE-PATH REGRESSION (#207/#276).
+        # The first scan reads a freshly formatted volume nothing has
+        # written to yet; this one reads it after real file I/O, so it is
+        # the one that notices a $Bitmap or attribute table that only
+        # corrupts itself under use. It reports its exit code the same way
+        # the first scan does — `scan_exit` on this step's outputs — so
+        # the final gate can name which scan failed rather than inferring.
+        id: chkdsk_after
         if: steps.chkdsk.outputs.scan_exit == '0'
         shell: pwsh
         continue-on-error: true
@@ -1159,7 +1177,14 @@ jobs:
             -NoNewWindow -PassThru -Wait `
             -RedirectStandardOutput $log
           Get-Content $log
-          "chkdsk-after-roundtrip exit: $($proc.ExitCode)" | Out-File diag/chkdsk-exit-after.txt
+          $exit = $proc.ExitCode
+          "chkdsk-after-roundtrip exit: $exit" | Out-File diag/chkdsk-exit-after.txt
+          if ($exit -ne 0) {
+            Write-Host "::error::chkdsk /scan after the round-trip reported issues (exit $exit) — the volume was well-formed at creation and is not now"
+            "post-round-trip chkdsk /scan failed (exit $exit) — see diag/chkdsk-scan-after-roundtrip.txt" `
+              | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }
+          "scan_exit=$exit" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
       - name: Dismount
         if: always()
         shell: pwsh
@@ -1174,13 +1199,46 @@ jobs:
           name: ntfs-windows-diag-${{ github.run_id }}
           path: diag/
           if-no-files-found: warn
-      - name: Fail the job if chkdsk found issues
+      - name: Fail the job if chkdsk or the round-trip found issues
         # We deferred failure earlier (continue-on-error) so the
         # artifact upload always fires. Fail the job here once
         # everything is captured.
-        if: steps.chkdsk.outputs.scan_exit != '0'
+        #
+        # THE DEFERRAL HAS TO COLLECT EVERY VERDICT, NOT ONE (#207/#276).
+        # This read `steps.chkdsk.outputs.scan_exit` alone — the scan
+        # taken BEFORE any I/O. The round-trip's `throw` and the
+        # post-round-trip scan's exit code were written to diag/ and
+        # discarded, so a volume that is well-formed at creation and then
+        # returns wrong bytes, refuses a delete, or corrupts itself under
+        # file I/O produced a green tick. In release.yml that tick is the
+        # last thing between a tag and crates.io.
+        #
+        # A skipped step's `outcome` is `skipped`, not `success`, so when
+        # the first scan fails and the two later steps do not run, the
+        # clauses below all fire and the first one names the real cause.
+        # That is why the body reports each verdict rather than throwing
+        # a single message.
+        if: >-
+          steps.chkdsk.outputs.scan_exit != '0' ||
+          steps.roundtrip.outcome != 'success' ||
+          steps.chkdsk_after.outcome != 'success' ||
+          steps.chkdsk_after.outputs.scan_exit != '0'
         shell: pwsh
         run: |
-          throw "chkdsk /scan exit code was $($env:scan_exit) — see uploaded diag/ artifact"
+          $failures = @()
+          if ($env:scan_exit -ne '0') {
+            $failures += "chkdsk /scan (pre round-trip) exit code was $($env:scan_exit)"
+          }
+          if ($env:roundtrip_outcome -ne 'success') {
+            $failures += "round-trip stress outcome was $($env:roundtrip_outcome) (create + read + delete on the mounted volume)"
+          }
+          if ($env:chkdsk_after_outcome -ne 'success' -or $env:chkdsk_after_exit -ne '0') {
+            $failures += "chkdsk /scan (post round-trip) outcome was $($env:chkdsk_after_outcome), exit code '$($env:chkdsk_after_exit)'"
+          }
+          $failures | ForEach-Object { Write-Host "::error::$_" }
+          throw "Windows validation failed: $($failures -join '; ') — see uploaded diag/ artifact"
         env:
           scan_exit: ${{ steps.chkdsk.outputs.scan_exit }}
+          roundtrip_outcome: ${{ steps.roundtrip.outcome }}
+          chkdsk_after_outcome: ${{ steps.chkdsk_after.outcome }}
+          chkdsk_after_exit: ${{ steps.chkdsk_after.outputs.scan_exit }}

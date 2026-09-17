@@ -631,6 +631,22 @@ fn logical_lines(script: &str) -> Vec<String> {
 struct Step {
     keys: Vec<String>,
     run: String,
+    /// The step's `name:`, as written. What a reader of the job sees,
+    /// and the only handle on a step whose body is PowerShell rather
+    /// than a `cargo` command.
+    name: Option<String>,
+    /// The step's `id:`. A step without one cannot be referred to by
+    /// `steps.<id>.outcome` or `steps.<id>.outputs.*` AT ALL, which is
+    /// precisely how two deferred failures went uncollected (#207/#276).
+    id: Option<String>,
+    /// The step's `if:` expression, as written. Read whole, because
+    /// what the deferred-verdict guard asks of it is whether it names
+    /// a given step id anywhere in the condition.
+    if_expr: Option<String>,
+    /// Whether the step declares `continue-on-error: true` — the key
+    /// that turns a step's own failure into something only a later
+    /// step can act on.
+    continue_on_error: bool,
     /// The step's `env:` mapping, as `KEY=VALUE`.
     ///
     /// The handshake is an environment variable, and an inline
@@ -750,6 +766,12 @@ fn parse_workflow(text: &str) -> Workflow {
                 .flatten()
                 .map(|step| Step {
                     keys: keys_of(step),
+                    name: field(step, "name").and_then(scalar_text),
+                    id: field(step, "id").and_then(scalar_text),
+                    if_expr: field(step, "if").and_then(scalar_text),
+                    continue_on_error: field(step, "continue-on-error")
+                        .and_then(scalar_text)
+                        .is_some_and(|value| value == "true"),
                     env: field(step, "env")
                         .and_then(Yaml::as_mapping)
                         .map(|m| {
@@ -2374,6 +2396,290 @@ jobs:
             gating_runs_that_prove_the_build_traps(&yaml).len(),
             1,
             "`env:` says nothing about whether the step's result is read"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The Windows validation job's deferred verdicts (#207, #276).
+// ---------------------------------------------------------------------------
+
+/// Which workflow file `release.yml` is.
+fn release_yml() -> PathBuf {
+    manifest_dir().join(".github/workflows/release.yml")
+}
+
+/// Step names whose verdict the Windows validation job exists to
+/// report. Matched case-insensitively against the START of the name,
+/// because the steps are named for humans
+/// (`chkdsk /scan (post round-trip)`) and their bodies are PowerShell
+/// that no scan of ours should be reading.
+///
+/// THE PREFIX, NOT A SUBSTRING, AND THE STEP THAT SETTLES IT.
+/// `Mount VHD and capture pre-chkdsk diagnostics` also defers, also
+/// says "chkdsk", and its `id: mount` is read by later `run:` bodies
+/// rather than by any `if:`. It is not a verdict and must not be
+/// treated as one: its failure IS collected, one step later, where
+/// `chkdsk passes` turns a missing drive letter into `scan_exit=99`
+/// and the gate reads that. A substring match flagged it and would
+/// have been "fixed" by wiring a mount outcome into the gate that the
+/// gate already covers — the rule has to name the verdicts, and a
+/// verdict step leads with the tool whose verdict it is.
+const VALIDATION_STEP_MARKERS: [&str; 2] = ["chkdsk", "round-trip"];
+
+fn is_a_validation_step(step: &Step) -> bool {
+    let Some(name) = step.name.as_deref() else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    VALIDATION_STEP_MARKERS
+        .iter()
+        .any(|marker| name.starts_with(marker))
+}
+
+/// Complaints about verdicts a job defers and then never reads.
+///
+/// # The defect this refuses, in the shape it actually had
+///
+/// `validate-mkfs-windows` runs three things against the mounted
+/// volume: a chkdsk scan, a round-trip stress (create + read + delete),
+/// and a second chkdsk scan after that I/O. All three carried
+/// `continue-on-error: true`, which is right — the point of the
+/// deferral is that every diagnostic runs and the artifact uploads
+/// before anything fails. Only the FIRST had an `id`, and the job's
+/// final gate read only that one.
+///
+/// So the two steps that can see a write-path regression — the
+/// round-trip's own `throw "round-trip read mismatch"`, and the scan
+/// taken after the volume had been written to — could not fail the job,
+/// and in `release.yml` that job is the last thing before
+/// `cargo publish`. A volume that is well-formed at creation and then
+/// returns wrong bytes shipped green.
+///
+/// # The rule, and why it is this rule
+///
+/// A step that is part of the validation (its name says chkdsk or
+/// round-trip) and that defers its own failure MUST be referable —
+/// `continue-on-error` without an `id` is a verdict no expression in
+/// Actions can reach — and its id MUST appear in some step's `if:` in
+/// the same job, which is where a deferred-failure job puts its gate.
+///
+/// Scoped to the validation steps rather than to every deferred step on
+/// purpose. Several steps in the same job defer legitimately and are
+/// pure diagnostics — mounting, and the format.com reference-volume
+/// diff — and demanding that their outcome fail the job would be
+/// wrong: their failure is information, not a verdict. Name-scoping
+/// keeps the rule where the verdicts are.
+fn deferred_verdicts_the_gate_never_reads(workflow: &str) -> Vec<String> {
+    let mut complaints = Vec::new();
+    for job in parse_workflow(workflow).jobs {
+        let conditions: Vec<&str> = job
+            .steps
+            .iter()
+            .filter_map(|step| step.if_expr.as_deref())
+            .collect();
+        for step in job.steps.iter().filter(|s| is_a_validation_step(s)) {
+            if !step.continue_on_error {
+                // The step's own exit code fails the job. Nothing to collect.
+                continue;
+            }
+            let name = step.name.as_deref().unwrap_or("<unnamed>");
+            let Some(id) = step.id.as_deref() else {
+                complaints.push(format!(
+                    "step '{name}' defers its failure with continue-on-error and has no `id:`, \
+                     so no expression can read its outcome and its verdict is discarded"
+                ));
+                continue;
+            };
+            let referenced = conditions
+                .iter()
+                .any(|condition| condition.contains(&format!("steps.{id}.")));
+            if !referenced {
+                complaints.push(format!(
+                    "step '{name}' (id: {id}) defers its failure with continue-on-error, but no \
+                     step's `if:` in this job reads `steps.{id}.`, so its verdict is discarded"
+                ));
+            }
+        }
+    }
+    complaints
+}
+
+/// Both copies of the Windows validation job collect every verdict they
+/// defer.
+///
+/// Both files, in one test, because the two jobs are copies of each
+/// other and #276 is #207 in the file that publishes. A fix to one that
+/// left the other is the failure mode the issues explicitly name.
+#[test]
+fn the_windows_validation_gate_reads_every_verdict_it_defers() {
+    for path in [ci_yml(), release_yml()] {
+        let workflow = read_or_panic(&path);
+        let complaints = deferred_verdicts_the_gate_never_reads(&workflow);
+        assert!(
+            complaints.is_empty(),
+            "{}: {}\nA `continue-on-error` step whose result nothing reads is a step that \
+             cannot fail. chkdsk is the only authoritative validator of an NTFS volume this \
+             project has; a round-trip that returns wrong bytes, or a post-I/O scan that finds \
+             corruption, has to be able to turn the job red. See #207 and #276.",
+            path.display(),
+            complaints.join("\n  ")
+        );
+    }
+}
+
+/// The deferred-verdict rule, one fixture per way it can be defeated.
+mod deferred_verdicts {
+    use super::deferred_verdicts_the_gate_never_reads;
+
+    /// The shape the two workflows now carry: three validation steps,
+    /// each deferring, each collected by the gate.
+    const COLLECTED: &str = "\
+jobs:
+  validate:
+    steps:
+      - name: chkdsk passes
+        id: chkdsk
+        continue-on-error: true
+        run: chkdsk.exe
+      - name: Round-trip stress (create + read + delete)
+        id: roundtrip
+        continue-on-error: true
+        run: write-read-delete
+      - name: chkdsk /scan (post round-trip)
+        id: chkdsk_after
+        continue-on-error: true
+        run: chkdsk.exe /scan
+      - name: Fail the job if chkdsk or the round-trip found issues
+        if: >-
+          steps.chkdsk.outputs.scan_exit != '0' ||
+          steps.roundtrip.outcome != 'success' ||
+          steps.chkdsk_after.outcome != 'success'
+        run: throw
+";
+
+    #[test]
+    fn the_collected_shape_has_nothing_to_complain_about() {
+        assert!(
+            deferred_verdicts_the_gate_never_reads(COLLECTED).is_empty(),
+            "the control must pass, or every test below passes for the wrong reason"
+        );
+    }
+
+    /// The defect exactly as #276 describes it: the two later steps
+    /// carry no `id`, so nothing can name them.
+    #[test]
+    fn a_deferred_validation_step_without_an_id_is_caught() {
+        let yaml = COLLECTED
+            .replace("        id: roundtrip\n", "")
+            .replace("        id: chkdsk_after\n", "")
+            .replace("          steps.roundtrip.outcome != 'success' ||\n", "")
+            .replace(
+                "          steps.chkdsk_after.outcome != 'success'\n",
+                "          false\n",
+            );
+        let complaints = deferred_verdicts_the_gate_never_reads(&yaml);
+        assert_eq!(
+            complaints.len(),
+            2,
+            "both un-referable steps must be named, got: {complaints:?}"
+        );
+        assert!(
+            complaints.iter().all(|c| c.contains("no `id:`")),
+            "{complaints:?}"
+        );
+    }
+
+    /// The subtler half: the id is there, and the gate still does not
+    /// read it. This is what a partial fix looks like.
+    #[test]
+    fn an_id_the_gate_does_not_read_is_caught() {
+        let yaml = COLLECTED.replace(
+            "          steps.chkdsk_after.outcome != 'success'\n",
+            "          false\n",
+        );
+        let complaints = deferred_verdicts_the_gate_never_reads(&yaml);
+        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert!(
+            complaints[0].contains("steps.chkdsk_after."),
+            "{complaints:?}"
+        );
+    }
+
+    /// A validation step whose own exit code fails the job needs no
+    /// collecting — dropping `continue-on-error` is the other correct
+    /// fix, and the rule must accept it.
+    #[test]
+    fn a_validation_step_that_does_not_defer_needs_no_gate_entry() {
+        let yaml = COLLECTED
+            .replace(
+                "        id: chkdsk_after\n        continue-on-error: true\n",
+                "",
+            )
+            .replace(
+                "          steps.chkdsk_after.outcome != 'success'\n",
+                "          false\n",
+            );
+        assert!(
+            deferred_verdicts_the_gate_never_reads(&yaml).is_empty(),
+            "a step without continue-on-error already fails the job on its own exit code"
+        );
+    }
+
+    /// Diagnostics defer legitimately. The rule is scoped to the steps
+    /// that carry a verdict, and must stay off the ones that do not.
+    #[test]
+    fn a_deferred_diagnostic_step_is_not_a_verdict() {
+        let yaml = COLLECTED.replace(
+            "      - name: Fail the job",
+            "      - name: Build a reference Microsoft-formatted NTFS volume + diff against ours\n\
+             \x20       continue-on-error: true\n\
+             \x20       run: format.com\n\
+             \x20     - name: Fail the job",
+        );
+        assert!(
+            deferred_verdicts_the_gate_never_reads(&yaml).is_empty(),
+            "a diagnostic step's failure is information, not a verdict"
+        );
+    }
+
+    /// The real step that forced the rule to read a prefix rather than
+    /// a substring, in the shape `ci.yml` actually carries it.
+    #[test]
+    fn the_mount_step_is_not_a_verdict_even_though_it_says_chkdsk() {
+        let yaml = COLLECTED.replace(
+            "      - name: chkdsk passes",
+            "      - name: Mount VHD and capture pre-chkdsk diagnostics\n\
+             \x20       id: mount\n\
+             \x20       continue-on-error: true\n\
+             \x20       run: Mount-DiskImage\n\
+             \x20     - name: chkdsk passes",
+        );
+        assert!(
+            deferred_verdicts_the_gate_never_reads(&yaml).is_empty(),
+            "the mount step's failure is collected by `chkdsk passes` writing scan_exit=99, \
+             and the gate reads that — flagging it here would ask for a second gate on the \
+             same fact"
+        );
+    }
+
+    /// The names are read case-insensitively: the steps are named for
+    /// humans, and `chkdsk /scan` and `Chkdsk /Scan` are one step.
+    #[test]
+    fn the_step_name_is_matched_whatever_its_case() {
+        let yaml = COLLECTED
+            .replace(
+                "      - name: chkdsk /scan (post round-trip)",
+                "      - name: CHKDSK /Scan (Post Round-Trip)",
+            )
+            .replace(
+                "          steps.chkdsk_after.outcome != 'success'\n",
+                "          false\n",
+            );
+        assert_eq!(
+            deferred_verdicts_the_gate_never_reads(&yaml).len(),
+            1,
+            "case must not be a way past the rule"
         );
     }
 }
