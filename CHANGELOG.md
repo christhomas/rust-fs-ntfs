@@ -68,6 +68,32 @@
   anyway. On a volume with clusters smaller than the 4096-byte index
   block, a block landing across a run boundary took its tail from — and
   wrote its tail over — the next file's clusters.
+- A run's end is computed with checked arithmetic, so a long run is
+  refused instead of unbounding the write. The non-resident write chopped
+  the caller's data at `starting_vcn + length` times the cluster size,
+  all three operations bare. `decode_runs` bounds the accumulated VCN it
+  emits but not a single run's length, so one run of 2^52 clusters at a
+  4 KiB cluster size made the product exactly 2^64: a panic in debug, and
+  in the shipped release profile a wrap to zero that left the loop
+  writing nothing and never advancing — a hang on a volume that mounts.
+  One cluster further out it wrapped to a value below the write position
+  instead, and the underflowed count stopped bounding the write to the
+  run at all.
+- A write of no bytes is a no-op at every entry point. `write_at` and
+  `write_at_io` guarded `data.is_empty()` and documented it; the two
+  by-record-number entry points did not, and everything converges on the
+  deepest of them. An empty write above `initialized_length` zero-filled
+  the clusters below it and then advanced the field, so a write of
+  nothing rewrote metadata and could zero gigabytes. It also removes two
+  underflows that need exactly that precondition: `(end - 1) /
+  cluster_size` for an empty write at offset 0, and `vcn_last -
+  vcn_first` for one at any cluster-aligned offset.
+- `data_runs::range_has_hole_or_past_end` answers rather than wrapping.
+  The function is `pub` and added `vcn_start + n_clusters` bare, so a
+  consumer calling it with `u64::MAX` panicked in debug and in release
+  got an answer about a range the walk never examined. A range whose end
+  does not fit in a `u64` is now answered "not fully mapped", and the
+  per-run end saturates.
 
 ### Changed
 

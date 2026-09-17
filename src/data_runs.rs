@@ -247,15 +247,40 @@ fn signed_bytes_needed(n: i64) -> usize {
 
 /// True if any VCN in `[vcn_start, vcn_start+n)` lies in a sparse hole
 /// or past the end of the run list.
+///
+/// THE ARITHMETIC IS CHECKED BECAUSE THE FUNCTION IS `pub`.
+///
+/// The only caller inside this crate is `write.rs`'s non-resident write,
+/// and its operands provably cannot overflow: it derives `n_clusters` as
+/// `vcn_last - vcn_first + 1` from an offset+length pair that a
+/// `checked_add` and an `end > value_length` refusal have already
+/// bounded, so `vcn_start + n_clusters` is `vcn_last + 1` with
+/// `vcn_last <= (u64::MAX - 1) / 512`. The proof needs `data` to be
+/// non-empty, and the empty-data guard on every `write_at` entry point
+/// is what supplies that — one of the four was missing it (#218), so the
+/// proof was not standing when this function's own arithmetic was
+/// written. That proof is internal to this
+/// crate and does not travel across the API boundary: a consumer can
+/// call this with `u64::MAX` and `1`, which used to panic in debug and
+/// wrap in release, returning an answer about a range the loop never
+/// examined (the wrapped `end` breaks out on the first run).
+///
+/// A range whose end cannot be expressed as a `u64` is answered `true` —
+/// "not fully mapped" — because no run list can cover it. The per-run
+/// `starting_vcn + length` inside the loop saturates for the same
+/// reason: it is disk-supplied, and `.min(end)` clamps it back to a
+/// meaningful bound either way. See #215.
 pub fn range_has_hole_or_past_end(runs: &[DataRun], vcn_start: u64, n_clusters: u64) -> bool {
-    let end = vcn_start + n_clusters;
+    let Some(end) = vcn_start.checked_add(n_clusters) else {
+        return true;
+    };
     let mut covered_to = vcn_start;
     for r in runs {
         if r.starting_vcn >= end {
             break;
         }
         let overlap_start = r.starting_vcn.max(vcn_start);
-        let overlap_end = (r.starting_vcn + r.length).min(end);
+        let overlap_end = r.starting_vcn.saturating_add(r.length).min(end);
         if overlap_end <= overlap_start {
             continue;
         }
@@ -634,6 +659,56 @@ mod tests {
             lcn: Some(100),
         }];
         assert!(range_has_hole_or_past_end(&runs, 2, 5));
+    }
+
+    /// `vcn_start + n_clusters` used to be a bare `u64` add, and the
+    /// function is `pub` — so this call, which no code inside the crate
+    /// makes, panicked in debug and wrapped in release. On the wrap
+    /// `end` became 0, the `r.starting_vcn >= end` test broke out of the
+    /// loop on the first run, and `covered_to < end` answered `false`:
+    /// "fully mapped", about a range the loop never looked at.
+    ///
+    /// These run in debug like every other `cargo test`, so the panic is
+    /// the symptom they catch — see the debug `--lib` job in ci.yml. The
+    /// answer is `true`: a range whose end does not fit in a `u64`
+    /// cannot be covered by any run list. See #215.
+    #[test]
+    fn range_whose_end_overflows_is_a_hole_and_does_not_panic() {
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: u64::MAX,
+            lcn: Some(100),
+        }];
+        assert!(range_has_hole_or_past_end(&runs, u64::MAX, 1));
+        assert!(range_has_hole_or_past_end(&runs, 1, u64::MAX));
+        assert!(range_has_hole_or_past_end(&runs, u64::MAX, u64::MAX));
+        // ...and with no runs at all, where the old code's wrapped `end`
+        // took the same exit.
+        assert!(range_has_hole_or_past_end(&[], u64::MAX, 1));
+    }
+
+    /// The per-run `starting_vcn + length` inside the loop was the same
+    /// bare add, reachable with a run list decoded off disk: `decode_runs`
+    /// bounds the *accumulated* VCN of each run it emits, but a caller
+    /// holding a hand-built `DataRun` (this type is `pub` too) has no such
+    /// guarantee. It saturates now, and `.min(end)` makes the saturated
+    /// value mean exactly what the un-overflowed one would have.
+    #[test]
+    fn a_run_whose_own_end_overflows_still_answers_for_the_range() {
+        let runs = vec![DataRun {
+            starting_vcn: u64::MAX - 2,
+            length: u64::MAX,
+            lcn: Some(100),
+        }];
+        // The range is inside the run's saturated extent, and mapped.
+        assert!(!range_has_hole_or_past_end(&runs, u64::MAX - 2, 2));
+        // A sparse run of the same shape is still a hole.
+        let sparse = vec![DataRun {
+            starting_vcn: u64::MAX - 2,
+            length: u64::MAX,
+            lcn: None,
+        }];
+        assert!(range_has_hole_or_past_end(&sparse, u64::MAX - 2, 2));
     }
 
     // --- additional encode/decode edge cases (Phase 2.4) -------------------
