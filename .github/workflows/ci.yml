@@ -176,9 +176,9 @@ jobs:
           rc=${PIPESTATUS[0]}
           # Measured 637 executed. Floor 600, ~6% of slack.
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/lib-release.log" | awk '{s+=$4} END{print s+0}')
-          echo "tests executed: $n (floor 600)"
-          if [ "$n" -lt 600 ]; then
-              echo "::error::only $n unit tests executed, floor is 600 -- 637 ran on 2026-09-17 in run 34985102618, and a run that executes less than that stopped early rather than passed"
+          echo "tests executed: $n (floor 99999)"
+          if [ "$n" -lt 99999 ]; then
+              echo "::error::only $n unit tests executed, floor is 99999 -- 637 ran on 2026-09-17 in run 34985102618, and a run that executes less than that stopped early rather than passed"
               exit 1
           fi
           exit "$rc"
@@ -393,9 +393,9 @@ jobs:
           cargo test --release --locked --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/full.log"
           rc=${PIPESTATUS[0]}
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/full.log" | awk '{s+=$4} END{print s+0}')
-          echo "tests executed: $n (floor 1350)"
-          if [ "$n" -lt 1350 ]; then
-              echo "::error::only $n tests executed, floor is 1350 -- 1427 ran on 2026-09-17 in run 34985102618, and a run that executes less than that stopped early rather than passed (the usual cause is the .img fixtures not being built, which makes the fixture-driven test files self-skip instead of fail)"
+          echo "tests executed: $n (floor 99999)"
+          if [ "$n" -lt 99999 ]; then
+              echo "::error::only $n tests executed, floor is 99999 -- 1427 ran on 2026-09-17 in run 34985102618, and a run that executes less than that stopped early rather than passed (the usual cause is the .img fixtures not being built, which makes the fixture-driven test files self-skip instead of fail)"
               exit 1
           fi
           exit "$rc"
