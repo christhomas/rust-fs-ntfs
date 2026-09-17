@@ -1,4 +1,4 @@
-# harness.toml — fs-windows-test-harness consumer config for rust-fs-ntfs.
+# fs-windows-test-harness.toml — fs-windows-test-harness consumer config for rust-fs-ntfs.
 #
 # The harness scripts + Rust runner live at ../fs-windows-test-harness/, a
 # sibling checkout of https://github.com/antimatter-studios/fs-windows-test-harness
@@ -54,7 +54,7 @@ ssh_key        = "${SSH_KEY}"
 workdir        = "${VM_WORKDIR}"
 image_dir      = "${HOST_IMAGE_DIR:-diskimages}"
 rust_toolchain = "stable-aarch64-pc-windows-gnullvm"
-scripts_dir    = "scripts/fs-test-harness"
+scripts_dir    = "scripts/fs-windows-test-harness"
 # The wrapper toolchain (vhd_tool from antimatter-studios/rust-img-vhd)
 # is installed by scripts/setup-windows-vm.ps1 directly. Consumers don't
 # declare additional packages here.
@@ -204,7 +204,7 @@ expect_exit = 0
 # ============================================================
 #
 # These dispatch via SSH to the Windows VM. Each step invokes a
-# focused PowerShell helper under `scripts/fs-test-harness/` — the dispatcher
+# focused PowerShell helper under `scripts/fs-windows-test-harness/` — the dispatcher
 # gives per-step granularity, so each op gets its own small script.
 #
 # The VHD-wrap path inside `win-chkdsk.ps1` (and every other op
@@ -221,7 +221,7 @@ expect_exit = 0
 # so the matrix workdir on the VM can be relocated without editing
 # every op command — single source of truth at `[vm].workdir` above.
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-chkdsk.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Modes '{step.modes?}' -VerdictShape '{step.verdict_shape?}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-chkdsk.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Modes '{step.modes?}' -VerdictShape '{step.verdict_shape?}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-enumerate]
@@ -236,7 +236,7 @@ expect_exit = 0
 #                 multi-op recipe should omit this so cleanup runs.
 #   diag        — vm-side directory for enumerate.txt + wrapper-create.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-enumerate.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-enumerate.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-write-content]
@@ -257,7 +257,7 @@ expect_exit = 0
 # `'` in the content; matrix payloads today are simple ASCII so this
 # is safe. When write content needs `'`, swap to a file-based transport.
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-write.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -Content '{step.content}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -Content '{step.content}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-write-size]
@@ -271,7 +271,7 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for write-result.txt + wrapper-create.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-write.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-delete]
@@ -284,7 +284,7 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for delete-result.txt + delete-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-delete.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-delete.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-repeat-mount]
@@ -299,7 +299,7 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for repeat-mount-result.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-repeat-mount.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Cycles '{step.cycles}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-repeat-mount.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Cycles '{step.cycles}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-rename]
@@ -315,7 +315,7 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for rename-result.txt + rename-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-rename.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -FromPath '{step.from_path}' -ToPath '{step.to_path}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-rename.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -FromPath '{step.from_path}' -ToPath '{step.to_path}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-mkdir]
@@ -331,7 +331,7 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for mkdir-result.txt + mkdir-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-mkdir.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-mkdir.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-modify]
@@ -353,7 +353,7 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for modify-result.txt + modify-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-modify.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-modify.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-read]
@@ -371,7 +371,7 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         — vm-side directory for read-bytes.bin + read-bytes.txt + read-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-read.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-read.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -Offset '{step.offset}' -Length '{step.len}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-write-many-size]
@@ -394,7 +394,7 @@ expect_exit = 0
 # separate `win-write-many-content` op (same cmd-shell empty-arg
 # rationale as `win-write-content` vs `win-write-size`).
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-write-many.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Count '{step.count}' -NamePattern '{step.name_pattern}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write-many.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Count '{step.count}' -NamePattern '{step.name_pattern}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-delete-many]
@@ -416,7 +416,7 @@ expect_exit = 0
 #   keep_image?    — `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag           — vm-side directory for delete-many-result.txt + delete-many-error.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-delete-many.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Start '{step.start}' -End '{step.end}' -Step '{step.step}' -NamePattern '{step.name_pattern}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-delete-many.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Start '{step.start}' -End '{step.end}' -Step '{step.step}' -NamePattern '{step.name_pattern}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-format]
@@ -446,7 +446,7 @@ expect_exit = 0
 #   keep_image?  -- `true` keeps .img + .vhd for a follow-on op (default `false`)
 #   diag         -- vm-side directory for format-result.txt + wrapper-create.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-test-harness/win-format.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Label '{step.label}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-format.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Label '{step.label}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 # Other win-side ops (win-mount/win-unmount as separate ops,

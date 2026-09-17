@@ -197,7 +197,7 @@ are documented there.
   the pure-Rust write API) and Windows-side ops (mount, chkdsk,
   enumerate, write, repeat-mount stability cycles) through a single
   declarative JSON contract; results from a Windows VM stream back
-  over SSH. See `harness.toml` for the op declarations and
+  over SSH. See `fs-windows-test-harness.toml` for the op declarations and
   `../fs-windows-test-harness/` for the runner.
 - **Fuzz:** `fuzz/` carries cargo-fuzz harnesses for the three
   byte-decoders most likely to regress (data-runs, attribute headers,
