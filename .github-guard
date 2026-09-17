@@ -1,0 +1,89 @@
+# .github-guard — the declarations github-guard reads (see the github-guard skill:
+# https://github.com/antimatter-studios/agent-skills/blob/main/.claude/skills/github-guard/README.md).
+#
+# git-config format: check it with `git config -f .github-guard --list`, and
+# double-quote any value containing # or ; before you trust it.
+#
+# github-guard's `github-protect-main` pre-commit hook reads THIS FILE FROM THE
+# DEFAULT BRANCH ON THE SERVER — never the working tree — and reconciles
+# `main`'s branch protection with it. Reading the server copy is what stops a
+# contributor's branch from unprotecting the branch merely by being checked out
+# while someone commits.
+
+# Required status checks for main. A declaration beats discovery exactly.
+#
+# WHAT THIS REPLACES, AND THE THREE THINGS THAT WERE WRONG WITH IT (#278).
+#
+# Until this file existed the required list was whatever had been typed into
+# the settings page, and nothing in the repository knew what it said. It had
+# drifted into all three failure modes at once:
+#
+#   1. `unit tests` was required and is NOT the unit tests. It is the job id
+#      `asan` in ci.yml — an AddressSanitizer smoke build on the NIGHTLY
+#      toolchain — wearing `name: unit tests`. The unit tests are the `test`
+#      matrix, below. A reviewer reading a green `unit tests` tick was reading
+#      a tick that says nothing about `cargo test --lib`.
+#
+#      It is also declared NON-GATING by its own YAML: `continue-on-error:
+#      true`. That key exists so nightly toolchain breakage cannot block a PR
+#      against stable, which is a defensible decision — and it is flatly
+#      contradicted by naming the job in branch protection, which re-arms the
+#      gate the key disclaims. tests/ci_profile.rs already encodes the same
+#      rule for its own scan: `NON_GATING_KEYS = ["if", "continue-on-error"]`,
+#      and `a_job_carrying_continue_on_error_does_not_gate` pins it. A job the
+#      test suite refuses to count as a gate must not be one here either.
+#
+#      So `unit tests` is deliberately ABSENT from the list below, and the
+#      job's `name:` says what it is instead. Declaring the set is the ONLY
+#      way to remove a required check — discovery is additive by construction
+#      and would keep re-adding it — which is why this file, and not a click
+#      in the settings page, is the fix.
+#
+#   2. `test-ubuntu-24.04-arm` is produced on EVERY run and was required on
+#      none of them. It is not a cross-check of the other legs: `c_char` is
+#      `u8` on aarch64 Linux and `i8` on x86_64 and macOS, so a lint about a
+#      C-ABI pointer cast fails on one architecture and passes on the other
+#      (#268, ci.yml:22-24). That is precisely a failure the other two legs
+#      cannot see, and until now it could be merged past. It is required here.
+#
+#   3. Nothing was checked against the workflow at all. Discovery requires
+#      checks BY JOB NAME, which is only ever a guess at the PR gate, and it
+#      drifts silently: a renamed job, an added workflow, or any future check
+#      reporting under the github-actions app changes what is required without
+#      anyone deciding to. Pinning it costs nothing and makes the intent
+#      reviewable in a diff.
+#
+# WHY NOT AN AGGREGATE `ci-ok` JOB. That is the better end state — one always-run
+# job that `needs:` every gating job, so the matrix can be renamed or resharded
+# without ever touching this file. This repository does not have one yet, and
+# adding it is a separate change with its own failure mode to get right (it must
+# fail on failure/cancelled AND skipped, or it launders a skipped gate into a
+# green tick). The real job names are declared meanwhile.
+#
+# `validate rust-ntfs format (Windows chkdsk)` IS DECLARED EVEN THOUGH IT DOES
+# NOT RUN ON PULL REQUESTS TODAY. Its job-level `if:` restricts it to tag
+# pushes and `workflow_dispatch` (ci.yml, job `validate-mkfs-windows`), so on a pull request it reports
+# with conclusion `skipped` — and a `skipped` conclusion SATISFIES branch
+# protection. Declaring it therefore neither blocks nor gates anything right
+# now. It stays in the list because chkdsk is the ONLY authoritative validator
+# of an NTFS volume we have, and #266 is the open issue to make it run on pull
+# requests; dropping it here would quietly delete the Windows gate at the
+# moment #266 lands, and nobody would notice the tick that stopped mattering.
+#
+# The distinction that makes this safe: a job SKIPPED by a job-level `if:` still
+# reports, so protection is satisfied. A WORKFLOW that never starts (an `on:`
+# with `paths:` filters that match nothing) reports nothing at all, GitHub reads
+# the absent required check as pending, and with enforce_admins on nobody can
+# merge and there is no failure to point at. Verified before declaring it: check
+# suite 95386854742 (a pull_request run) reports this context with conclusion
+# `skipped`. Never declare a check you have not seen report.
+#
+# Names must match the check-run names GitHub reports, which are the jobs'
+# `name:` values, not their ids — `test-${{ matrix.os }}` renders one name per
+# leg, and `integration` reports as `full test suite (fixtures + integration)`.
+[checks]
+	required = test-ubuntu-latest
+	required = test-ubuntu-24.04-arm
+	required = test-macos-latest
+	required = full test suite (fixtures + integration)
+	required = validate rust-ntfs format (Windows chkdsk)
