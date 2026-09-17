@@ -414,10 +414,28 @@ jobs:
   # AddressSanitizer smoke test (§5.5). Catches OOB reads/writes in
   # the raw-byte buffer manipulations (mft_io / data_runs / attr_io /
   # ea_io) that the regular test suite would otherwise let through
-  # silently. Nightly-only; non-blocking via continue-on-error so
-  # nightly toolchain breakage doesn't block PRs against stable.
+  # silently. Nightly toolchain (ASan needs -Zsanitizer=address);
+  # non-blocking via continue-on-error so nightly toolchain breakage
+  # doesn't block PRs against stable.
+  #
+  # THE NAME SAYS WHAT THE JOB IS, WHICH IT DID NOT USED TO (#278).
+  #
+  # This was `name: unit tests`, and a job's `name:` IS its check-run
+  # name, so `unit tests` was what branch protection required and what a
+  # reviewer read. It is not the unit tests -- those are the `test`
+  # matrix above, reporting as test-ubuntu-latest, test-ubuntu-24.04-arm
+  # and test-macos-latest. A green `unit tests` tick here would have
+  # stayed green with the cargo invocation below deleted.
+  #
+  # `(advisory)` is in the name on purpose, and it is the part to keep.
+  # `continue-on-error: true` below is a declaration that this job must
+  # not gate anything; naming it in branch protection re-arms the gate
+  # that key disclaims, which is exactly what had happened. The required
+  # set now lives in .github-guard and deliberately does not name this
+  # job -- but the next person to edit that file reads this name first,
+  # and the name should be the one that stops them.
   asan:
-    name: unit tests
+    name: unit tests under ASan (nightly toolchain, advisory)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
