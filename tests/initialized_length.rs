@@ -196,3 +196,58 @@ fn a_write_that_leaves_a_gap_does_not_publish_the_old_cluster_contents() {
         }
     }
 }
+
+/// A WRITE OF NOTHING IS A NO-OP AT EVERY ENTRY POINT, INCLUDING THE
+/// DEEPEST.
+///
+/// `write_at` and `write_at_io` guard `data.is_empty()` and document it;
+/// the two by-record-number entry points did not, and everything
+/// converges on `write_at_by_record_number_io`. An empty write there is
+/// not inert: `end` becomes `offset`, the past-EOF check passes, and for
+/// an `offset` above `initialized_length` the zero-fill runs and the
+/// field is advanced to `offset` — so a write of nothing zero-fills
+/// clusters and republishes the file's readable extent.
+///
+/// This uses the grown file, whose `initialized_length` is 4096 with
+/// allocated space to 8192, and asks for an empty write at 8192: the
+/// largest gap the file can express. It must report `Ok(0)` and leave the
+/// field at 4096, which also means the tail still reads as zeros rather
+/// than as the 0xDE the clusters were painted with. See #218.
+#[test]
+fn an_empty_write_by_record_number_is_a_no_op() {
+    let img = grown_file("empty_write");
+    let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
+    let rec = read::resolve_path(&mut io, "/grown.bin").expect("resolve");
+
+    for offset in [8192u64, 4096, 0] {
+        let n = write::write_at_by_record_number_io(&mut io, rec, offset, &[])
+            .unwrap_or_else(|e| panic!("an empty write at {offset} must be Ok(0), got {e}"));
+        assert_eq!(
+            n, 0,
+            "an empty write at {offset} reported {n} bytes written"
+        );
+    }
+    drop(io);
+
+    assert_eq!(
+        initialized_length(&img, "/grown.bin"),
+        4096,
+        "a write of no bytes must not move initialized_length"
+    );
+    let tail = read_window(&img, "/grown.bin", 4096, 4096);
+    assert!(
+        tail.iter().all(|&b| b == 0),
+        "the uninitialised tail must still read as zeros, got {:02x?}...",
+        &tail[..8]
+    );
+
+    // The path-taking sibling, which guards before it opens the image.
+    let n = write::write_at_by_record_number(Path::new(&img), rec, 8192, &[])
+        .expect("an empty write through the path entry point");
+    assert_eq!(n, 0);
+    assert_eq!(
+        initialized_length(&img, "/grown.bin"),
+        4096,
+        "still 4096 after the path-taking entry point"
+    );
+}

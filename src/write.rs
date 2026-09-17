@@ -430,6 +430,11 @@ pub fn write_at_by_record_number(
     offset: u64,
     data: &[u8],
 ) -> Result<u64, String> {
+    // Before the open, as `write_at` does it: a write of nothing has no
+    // reason to take the image read-write. See #218.
+    if data.is_empty() {
+        return Ok(0);
+    }
     let mut io = PathIo::open_rw(image)?;
     write_at_by_record_number_io(&mut io, record_number, offset, data)
 }
@@ -440,6 +445,34 @@ pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
     offset: u64,
     data: &[u8],
 ) -> Result<u64, String> {
+    // THE GUARD THE OTHER TWO ENTRY POINTS HAVE, AND THIS ONE IS THE
+    // DEEPEST OF THE FOUR.
+    //
+    // `write_at` and `write_at_io` both open with this and document it
+    // ("a zero-length write is a no-op"); the two by-record-number
+    // entry points did not, and this is the one all four converge on.
+    // An empty write is not inert down here. `end` becomes `offset`, the
+    // past-EOF check passes, and for any `initialized_length < offset`
+    // the zero-fill below runs and the field is then advanced to
+    // `offset` -- so a write of nothing rewrites metadata and can zero
+    // gigabytes of clusters, where the contract says `Ok(0)`.
+    //
+    // It also removes an underflow rather than merely a surprise:
+    // `vcn_last = (end - 1) / cluster_size` a few lines down underflows
+    // for `end == 0`, i.e. an empty write at offset 0, and
+    // `vcn_last - vcn_first` underflows for an empty write at any
+    // cluster-aligned non-zero offset. Both need `data.is_empty()`:
+    // with one byte or more, `end > offset` gives `vcn_last >=
+    // vcn_first`, so neither subtraction can go below zero and the
+    // guard here is what makes that true for every caller.
+    //
+    // That is also what keeps `data_runs::range_has_hole_or_past_end`'s
+    // in-crate overflow proof standing -- the proof assumes at least one
+    // byte, and this is the only entry point that could have broken it.
+    // See #218.
+    if data.is_empty() {
+        return Ok(0);
+    }
     let (params, record) = read_mft_record_io(io, record_number)?;
     let cluster_size = params.cluster_size;
 
@@ -519,9 +552,7 @@ pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
         let run = find_run_for_vcn(&runs, vcn).ok_or_else(|| format!("no run for VCN {vcn}"))?;
         let lcn = run.lcn.expect("hole already rejected");
         // bytes we can write without crossing this run's end:
-        let run_end_vcn = run.starting_vcn + run.length;
-        let run_end_offset = run_end_vcn * cluster_size;
-        let max_in_this_run = run_end_offset - file_offset;
+        let max_in_this_run = bytes_to_run_end(run, cluster_size, file_offset)?;
         let remaining = (data.len() - cursor_in_data) as u64;
         let chunk = remaining.min(max_in_this_run) as usize;
 
@@ -658,6 +689,65 @@ fn refuse_transformed_data(
 fn find_run_for_vcn(runs: &[DataRun], vcn: u64) -> Option<&DataRun> {
     runs.iter()
         .find(|r| vcn >= r.starting_vcn && vcn < r.starting_vcn + r.length)
+}
+
+/// How many bytes can be written at `file_offset` before the write
+/// crosses out of `run`.
+///
+/// EVERY OPERAND HERE IS DISK-SUPPLIED, SO EVERY STEP IS CHECKED.
+///
+/// This is the bound the non-resident write loop chops its data into, and
+/// it used to be three bare operations inline:
+///
+/// ```text
+/// let run_end_vcn = run.starting_vcn + run.length;
+/// let run_end_offset = run_end_vcn * cluster_size;
+/// let max_in_this_run = run_end_offset - file_offset;
+/// ```
+///
+/// `starting_vcn` and `length` come from a `$DATA` mapping-pair list and
+/// `cluster_size` from the boot sector, so a corrupt or hostile volume
+/// chooses all three. The multiply is the one a real volume can reach:
+/// `decode_runs` bounds the accumulated VCN it hands out, so the add
+/// cannot carry for a decoded list, but `length` itself is unbounded —
+/// one run of `2^52` clusters at a 4 KiB cluster size overflows the
+/// product. In debug that panicked (a corrupt volume taking the process
+/// down); in release, with `overflow-checks` off, it wrapped
+/// `run_end_offset` to a *low* value, and since `file_offset` is a real
+/// in-flight write position the subtraction then underflowed to a huge
+/// `u64` — leaving `remaining.min(max_in_this_run)` no longer bounded by
+/// the run at all.
+///
+/// The surrounding comment at the call site — "Checked and bounded by the
+/// volume and the device; see `mft_io::cluster_span`" — is about the
+/// destination offset computed a few lines later, not about this bound.
+/// See #243.
+///
+/// A zero-byte answer is refused rather than returned: `chunk` would be
+/// 0, the loop would neither advance `cursor_in_data` nor return, and a
+/// `file_offset` sitting exactly on the run's end byte would spin
+/// forever. It cannot happen for a run `find_run_for_vcn` selected, which
+/// is why it is an error and not a special case.
+fn bytes_to_run_end(run: &DataRun, cluster_size: u64, file_offset: u64) -> Result<u64, String> {
+    let run_end_vcn = run.starting_vcn.checked_add(run.length).ok_or_else(|| {
+        format!(
+            "run at VCN {} has no end: length {} overflows the VCN space",
+            run.starting_vcn, run.length
+        )
+    })?;
+    let run_end_offset = run_end_vcn.checked_mul(cluster_size).ok_or_else(|| {
+        format!(
+            "run ending at VCN {run_end_vcn} is past the addressable end of the \
+             volume at a cluster size of {cluster_size}"
+        )
+    })?;
+    match run_end_offset.checked_sub(file_offset) {
+        Some(0) | None => Err(format!(
+            "write offset {file_offset} is not inside the run that maps it, \
+             which ends at byte {run_end_offset}"
+        )),
+        Some(n) => Ok(n),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5058,6 +5148,66 @@ mod tests {
     #[test]
     fn find_run_for_vcn_returns_none_on_empty_list() {
         assert!(find_run_for_vcn(&[], 0).is_none());
+    }
+
+    // --- bytes_to_run_end -----------------------------------------------------
+
+    #[test]
+    fn bytes_to_run_end_measures_from_the_offset_to_the_run_end() {
+        // Run covers VCN 0..4 at 4 KiB clusters: 16384 bytes. A write
+        // sitting 100 bytes in has 16284 left before it leaves the run.
+        assert_eq!(bytes_to_run_end(&run(0, 4, 100), 4096, 100), Ok(16284));
+        // A run that does not start at VCN 0 is bounded by its own end,
+        // not by its length.
+        assert_eq!(bytes_to_run_end(&run(4, 4, 100), 4096, 16384), Ok(16384));
+    }
+
+    /// The multiply is the one a decoded run list can actually reach:
+    /// `decode_runs` bounds the accumulated `starting_vcn` but not
+    /// `length`, so a single run of 2^52 clusters at a 4 KiB cluster size
+    /// leaves the 64-bit byte space. Inline and unchecked this panicked
+    /// in debug and wrapped to a low `run_end_offset` in release, where
+    /// the following subtraction underflowed to a huge bound and stopped
+    /// constraining the write to the run. See #243.
+    #[test]
+    fn a_run_too_long_to_address_is_refused_not_wrapped() {
+        let err = bytes_to_run_end(&run(0, 1 << 52, 100), 4096, 0).unwrap_err();
+        assert!(
+            err.contains("past the addressable end"),
+            "expected the byte-space refusal, got: {err}"
+        );
+        // 64 KiB clusters make it reachable from a much shorter run.
+        assert!(bytes_to_run_end(&run(0, 1 << 48, 100), 65536, 0).is_err());
+        // The same product one cluster below the limit is fine, so the
+        // refusal is the overflow and not a blanket ceiling.
+        assert!(bytes_to_run_end(&run(0, (u64::MAX / 4096) - 1, 100), 4096, 0).is_ok());
+    }
+
+    #[test]
+    fn a_run_whose_vcn_range_overflows_is_refused() {
+        let err = bytes_to_run_end(&run(u64::MAX - 1, 4, 100), 4096, 0).unwrap_err();
+        assert!(
+            err.contains("overflows the VCN space"),
+            "expected the VCN-space refusal, got: {err}"
+        );
+    }
+
+    /// `run_end_offset - file_offset` was bare too. A `file_offset` at or
+    /// past the run's end byte is not a run the loop should have picked,
+    /// and both answers are wrong in a way the loop cannot survive:
+    /// underflow gives an unbounded chunk, and an exact zero gives a
+    /// `chunk` of 0 that never advances the cursor.
+    #[test]
+    fn an_offset_outside_the_run_is_refused_rather_than_underflowing() {
+        // Exactly on the run's end byte: a chunk of zero, which would spin.
+        let err = bytes_to_run_end(&run(0, 4, 100), 4096, 16384).unwrap_err();
+        assert!(
+            err.contains("not inside the run"),
+            "expected the offset refusal, got: {err}"
+        );
+        // Past it: the subtraction that used to underflow.
+        assert!(bytes_to_run_end(&run(0, 4, 100), 4096, 16385).is_err());
+        assert!(bytes_to_run_end(&run(0, 4, 100), 4096, u64::MAX).is_err());
     }
 
     // --- split_runs_for_shrink ------------------------------------------------
