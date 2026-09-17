@@ -259,3 +259,240 @@ fn an_empty_directory_can_still_be_removed() {
     let err = write::rmdir(Path::new(&img), "/busy").expect_err("busy dir");
     assert!(err.contains("not empty"), "{err}");
 }
+
+// ---------------------------------------------------------------------------
+// The splice point has to be an entry boundary, and the value has to hold
+// both headers (#271); a name that does not parse is a finding, not an
+// entry named "" (#244).
+// ---------------------------------------------------------------------------
+
+/// Where the index header's `first_entry_offset` lives in a directory
+/// record, and its current value.
+fn first_entry_offset_field(record: &[u8]) -> (usize, u32) {
+    let (value_start, _) = index_root_value(record);
+    let at = value_start + IR_INDEX_HEADER_OFFSET + IH_FIRST_ENTRY_OFFSET;
+    (
+        at,
+        u32::from_le_bytes(record[at..at + 4].try_into().unwrap()),
+    )
+}
+
+/// A directory record, read out of a fresh volume, holding one file.
+///
+/// Returned as bytes so each test can corrupt its own copy in memory and
+/// hand it straight to the `pub` function under test. Both of #271's
+/// functions take a buffer, which is exactly the surface a consumer of
+/// this crate has, and the issue's reachability argument rests on that.
+fn directory_record(tag: &str) -> Vec<u8> {
+    let img = fresh_volume(tag);
+    let fs = Filesystem::mount_rw(&img).expect("mount_rw");
+    fs.mkdir("/", "dir").expect("mkdir");
+    fs.create_file("/dir", "real.txt").expect("create real.txt");
+    drop(fs);
+    let mut io = PathIo::open_ro(Path::new(&img)).expect("open_ro");
+    let dir_rec = read::resolve_path(&mut io, "/dir").expect("resolve /dir");
+    let (_, record) = mft_io::read_mft_record_io(&mut io, dir_rec).expect("read dir record");
+    record
+}
+
+/// An entry to splice in, so an insert that is refused is refused by the
+/// bound under test rather than by its input.
+fn an_entry_to_insert() -> Vec<u8> {
+    index_io::build_file_name_index_entry(0x2A, 0x05, "new.txt", 0, false)
+        .expect("build a $FILE_NAME index entry")
+}
+
+/// Every `first_entry_offset` that cannot begin an entry: inside the
+/// 16-byte index header, and every misalignment of a plausible value.
+///
+/// 0x18 is the real one on a directory mkfs wrote, so the list below is
+/// what a torn write or a hostile image can put there *instead* — the
+/// walk started at `ih_start + this` and the new entry was spliced where
+/// the walk stopped.
+const NOT_ENTRY_BOUNDARIES: [u32; 6] = [0, 8, 15, 0x11, 0x17, 0x1F];
+
+#[test]
+fn an_insert_whose_first_entry_offset_is_not_an_entry_boundary_is_refused() {
+    let pristine = directory_record("splice_insert");
+    let entry = an_entry_to_insert();
+    for bad in NOT_ENTRY_BOUNDARIES {
+        let mut record = pristine.clone();
+        let (at, real) = first_entry_offset_field(&record);
+        assert_ne!(real, bad, "the fixture must not already hold {bad}");
+        record[at..at + 4].copy_from_slice(&bad.to_le_bytes());
+        let before = record.clone();
+
+        let err = index_io::insert_entry_into_index_root_with_collation(
+            &mut record,
+            &entry,
+            "new.txt",
+            None,
+        )
+        .expect_err(&format!(
+            "a first_entry_offset of {bad} is not the start of an entry; the insert \
+             must refuse it rather than splice at whatever the walk reaches"
+        ));
+        assert!(
+            err.contains("not an entry boundary") || err.contains("past the"),
+            "expected the boundary refusal for {bad}, got: {err}"
+        );
+        assert_eq!(
+            record, before,
+            "a refused insert must not have written into the record (first_entry_offset {bad})"
+        );
+    }
+}
+
+#[test]
+fn a_lookup_whose_first_entry_offset_is_not_an_entry_boundary_is_refused() {
+    // The write paths run this as their collision check and act on its
+    // answer, so a walk that starts mid-entry is not merely a bad read.
+    let pristine = directory_record("splice_lookup");
+    for bad in NOT_ENTRY_BOUNDARIES {
+        let mut record = pristine.clone();
+        let (at, _) = first_entry_offset_field(&record);
+        record[at..at + 4].copy_from_slice(&bad.to_le_bytes());
+        let got = index_io::find_index_entry(&record, "real.txt", None);
+        assert!(
+            got.is_err(),
+            "find_index_entry walked from a first_entry_offset of {bad} and answered \
+             {got:?} instead of refusing"
+        );
+    }
+    // The untouched record still resolves, so the refusals above are
+    // about the planted offset and not about the check refusing
+    // everything.
+    let record = pristine.clone();
+    assert!(
+        index_io::find_index_entry(&record, "real.txt", None)
+            .expect("a well-formed index root")
+            .is_some(),
+        "real.txt is in this directory"
+    );
+}
+
+#[test]
+fn an_index_root_value_too_short_for_both_headers_is_refused_by_both_mutators() {
+    // `IR_INDEX_HEADER_OFFSET` is 16 and the INDEX_HEADER that starts
+    // there is another 16, so 16..=31 used to pass and then read
+    // `first_entry_offset` and `total_size` out of the next attribute.
+    let pristine = directory_record("short_value");
+    let entry = an_entry_to_insert();
+    let located = index_io::find_index_entry(&pristine, "real.txt", None)
+        .expect("a well-formed index root")
+        .expect("real.txt is there");
+
+    for short in [16u16, 20, 24, 31] {
+        let mut record = pristine.clone();
+        let ir = attr_io::find_attribute(&record, AttrType::IndexRoot, Some("$I30"))
+            .expect("$INDEX_ROOT:$I30");
+        let len_at = ir.attr_offset + 0x10; // resident value_length
+        record[len_at..len_at + 4].copy_from_slice(&u32::from(short).to_le_bytes());
+        let before = record.clone();
+
+        let insert_err = index_io::insert_entry_into_index_root_with_collation(
+            &mut record.clone(),
+            &entry,
+            "new.txt",
+            None,
+        )
+        .expect_err(&format!(
+            "a {short}-byte value cannot hold both headers; the insert must refuse it"
+        ));
+        assert!(
+            insert_err.contains("too short"),
+            "expected the short-value refusal for {short}, got: {insert_err}"
+        );
+
+        let remove_err =
+            index_io::remove_index_entry(&mut record, &located, index_io::BlockKind::IndexRoot)
+                .expect_err(&format!(
+                    "a {short}-byte value cannot hold both headers; the removal must \
+                     refuse it"
+                ));
+        assert!(
+            remove_err.contains("too short"),
+            "expected the short-value refusal for {short}, got: {remove_err}"
+        );
+        assert_eq!(
+            record, before,
+            "a refused removal must not have shifted bytes (value_length {short})"
+        );
+    }
+}
+
+#[test]
+fn a_name_that_runs_past_its_entry_is_a_finding_not_an_empty_name() {
+    // `entry_name(...).unwrap_or_default()` turned a name field that
+    // overruns its own entry into `[]`, and then compared that against
+    // the wanted name as if the entry were legitimately unnamed — so a
+    // lookup for "" would have matched it, and the corruption was never
+    // reported. See #244.
+    let mut record = directory_record("bad_name");
+    let located = index_io::find_index_entry(&record, "real.txt", None)
+        .expect("a well-formed index root")
+        .expect("real.txt is there");
+
+    // Say the name is 255 UTF-16 units long: 510 bytes of name in an
+    // entry that is nowhere near that big.
+    let key = located.record_offset + 0x10;
+    record[key + FN_NAME_LENGTH_OFFSET] = 255;
+
+    let err = index_io::find_index_entry(&record, "real.txt", None)
+        .expect_err("a name that runs past its entry must be reported");
+    assert!(
+        err.contains("runs past"),
+        "expected the name-overrun refusal, got: {err}"
+    );
+    // And the fabricated empty name is not matchable either.
+    assert!(
+        index_io::find_index_entry(&record, "", None).is_err(),
+        "a lookup for the empty name must not match an entry whose name failed to parse"
+    );
+}
+
+/// The short-value half of #271, with the outcome rather than the
+/// message: a value too short to hold the index header made the mutators
+/// read `first_entry_offset` and `total_size` from *past* the value, and
+/// with those bytes saying "no entries, starting at zero" the insert
+/// spliced a new entry outside the value it was told it had.
+///
+/// The declared `value_length` is cut to 16 while the attribute itself is
+/// left its real size, which is what a torn write to the attribute header
+/// produces, and the two header fields at `ih_start` — now outside the
+/// declared value — are set so the old code's own bounds tests pass.
+#[test]
+fn an_insert_into_a_value_too_short_for_the_header_stays_out_of_the_record() {
+    let mut record = directory_record("short_value_outcome");
+    let (value_start, _) = index_root_value(&record);
+    let ih = value_start + IR_INDEX_HEADER_OFFSET;
+
+    // "First entry at 0, zero bytes of entries" — past the 16-byte value
+    // the attribute header is about to claim.
+    record[ih + IH_FIRST_ENTRY_OFFSET..ih + IH_FIRST_ENTRY_OFFSET + 4]
+        .copy_from_slice(&0u32.to_le_bytes());
+    record[ih + IH_TOTAL_SIZE_OF_ENTRIES..ih + IH_TOTAL_SIZE_OF_ENTRIES + 4]
+        .copy_from_slice(&0u32.to_le_bytes());
+
+    let ir = attr_io::find_attribute(&record, AttrType::IndexRoot, Some("$I30"))
+        .expect("$INDEX_ROOT:$I30");
+    let len_at = ir.attr_offset + 0x10; // resident value_length
+    record[len_at..len_at + 4].copy_from_slice(&16u32.to_le_bytes());
+
+    let before = record.clone();
+    let entry = an_entry_to_insert();
+    let err =
+        index_io::insert_entry_into_index_root_with_collation(&mut record, &entry, "new.txt", None)
+            .expect_err(
+                "a 16-byte value cannot hold the index header, so there is nowhere inside it \
+         to splice an entry; the insert must refuse rather than write past the value",
+            );
+    assert!(
+        err.contains("too short"),
+        "expected the short-value refusal, got: {err}"
+    );
+    assert_eq!(
+        record, before,
+        "a refused insert must not have written into the record"
+    );
+}

@@ -201,6 +201,20 @@ pub fn find_index_entry(
     let total_size = read_u32_le(record, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
         .ok_or_else(|| "index header too short to read total_size".to_string())?
         as usize;
+    // THE LOOKUP MUST NOT WALK FROM A FALSE ENTRY EITHER.
+    //
+    // The write paths run this first as their collision check, so an
+    // answer from a walk that started mid-entry is what an insert then
+    // acts on -- which is why the rule belongs here as well as on the
+    // mutators. An offset below the index header points into the header,
+    // and entries are 8-byte aligned, so neither can begin an entry.
+    // See #271.
+    if first_entry_rel < INDEX_HEADER_SIZE || !first_entry_rel.is_multiple_of(8) {
+        return Err(format!(
+            "$INDEX_ROOT says its first entry is {first_entry_rel} bytes into the index \
+             header, which is not an entry boundary"
+        ));
+    }
 
     let mut cursor = ih_start + first_entry_rel;
     // Whichever the header says, the entries stop at the value.
@@ -232,7 +246,18 @@ pub fn find_index_entry(
             // entry's own `length` may not reach, and a name bounded
             // only by the buffer reads the next entry's bytes as this
             // one's name.
-            let name_u16 = entry_name(record, cursor, length).unwrap_or_default();
+            //
+            // A FAILED PARSE IS NOT AN EMPTY NAME.
+            //
+            // This was `.unwrap_or_default()`, which turned a name field
+            // that runs past its own entry -- corrupt or hostile index
+            // bytes -- into `[]`, and then compared that against the
+            // wanted name as though the entry legitimately had no name.
+            // Two distinguishable things became one: "this entry's name
+            // does not parse" and "this entry's name is the empty
+            // string". The first is a finding about the volume; the
+            // second is an ordinary miss. See #244.
+            let name_u16 = entry_name(record, cursor, length)?;
             let name_length = name_u16.len();
             if compare_names(&name_u16, &wanted_utf16, upcase) == std::cmp::Ordering::Equal {
                 {
@@ -399,7 +424,14 @@ fn scan_entries_for_name(
             // entry's own `length` may not reach, and a name bounded
             // only by the buffer reads the next entry's bytes as this
             // one's name.
-            let name_u16 = entry_name(buf, *cursor, length).unwrap_or_default();
+            //
+            // Propagated rather than defaulted, for the reason written
+            // out at the `$INDEX_ROOT` walk's copy of this: a name that
+            // does not parse is a finding, not an entry named "". The
+            // two walks must agree, or a name refused inside
+            // `$INDEX_ROOT` is silently matchable once the directory
+            // overflows into `$INDEX_ALLOCATION`. See #244.
+            let name_u16 = entry_name(buf, *cursor, length)?;
             let name_length = name_u16.len();
             if compare_names(&name_u16, &wanted_utf16, upcase) == std::cmp::Ordering::Equal {
                 {
@@ -641,9 +673,14 @@ pub fn remove_index_entry(
                 .ok_or_else(|| "$INDEX_ROOT:$I30 missing".to_string())?;
             let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
             let val_len = ir.resident_value_length.ok_or("no value_length")? as usize;
-            if val_len < IR_INDEX_HEADER_OFFSET {
+            // Both headers, for the reason written out on the insert's
+            // copy of this check: `total_size` is read from `ih_start`
+            // with raw indexing a few lines down, and a 16..31 byte value
+            // put that read past the value's own end. See #271.
+            if val_len < IR_INDEX_HEADER_OFFSET + INDEX_HEADER_SIZE {
                 return Err(format!(
-                    "$INDEX_ROOT:$I30 value is {val_len} bytes, too short to hold an index"
+                    "$INDEX_ROOT:$I30 value is {val_len} bytes, too short to hold an index \
+                     header at {IR_INDEX_HEADER_OFFSET} plus its {INDEX_HEADER_SIZE} bytes"
                 ));
             }
             (
@@ -836,9 +873,19 @@ pub fn insert_entry_into_index_root_with_collation(
         .ok_or_else(|| "$INDEX_ROOT:$I30 missing".to_string())?;
     let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
     let old_val_len = ir.resident_value_length.ok_or("no value_length")? as usize;
-    if old_val_len < IR_INDEX_HEADER_OFFSET {
+    // THE VALUE HAS TO HOLD BOTH HEADERS, NOT JUST THE FIRST.
+    //
+    // This refused only `old_val_len < IR_INDEX_HEADER_OFFSET` (16), and
+    // the `INDEX_HEADER` that starts there is another 16 bytes -- so a
+    // value of 16..31 bytes passed, and `first_entry_rel` and
+    // `total_size` below were then read with raw `record[...]` indexing
+    // from past the value's end, out of whatever attribute follows.
+    // `find_index_entry` grew this check in #222 and both readers have
+    // it; the two root mutators were left at 16. See #271.
+    if old_val_len < IR_INDEX_HEADER_OFFSET + INDEX_HEADER_SIZE {
         return Err(format!(
-            "$INDEX_ROOT:$I30 value is {old_val_len} bytes, too short to hold an index"
+            "$INDEX_ROOT:$I30 value is {old_val_len} bytes, too short to hold an index \
+             header at {IR_INDEX_HEADER_OFFSET} plus its {INDEX_HEADER_SIZE} bytes"
         ));
     }
     let ih_start = ir.attr_offset + val_off + IR_INDEX_HEADER_OFFSET;
@@ -873,6 +920,26 @@ pub fn insert_entry_into_index_root_with_collation(
         return Err(format!(
             "the index says its first entry is {first_entry_rel} bytes in, past the \
              {total_size} bytes of entries it has"
+        ));
+    }
+    // AND IT HAS TO BE AN ENTRY BOUNDARY, NOT MERELY INSIDE THE VALUE.
+    //
+    // The comment above says an offset "inside the value but not at an
+    // entry boundary spliced the new entry into the middle of an existing
+    // one -- and THAT record was written back". The check that prevents
+    // it was not here: the walk below starts at `ih_start +
+    // first_entry_rel` and the splice happens where the walk stops, so
+    // any 0..=total_size offset was accepted as the start of an entry.
+    //
+    // This is the INDX twin's rule, verbatim (see
+    // `insert_entry_into_indx_block`): entries begin after the index
+    // header and are 8-byte aligned, so an offset below
+    // `INDEX_HEADER_SIZE` points into the header itself and an unaligned
+    // one cannot be the start of any entry. See #271.
+    if first_entry_rel < INDEX_HEADER_SIZE || !first_entry_rel.is_multiple_of(8) {
+        return Err(format!(
+            "the index says its first entry is {first_entry_rel} bytes in, which is not \
+             an entry boundary"
         ));
     }
 
