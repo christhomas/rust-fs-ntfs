@@ -3264,7 +3264,6 @@ pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
     let attr_id = loc.attribute_id;
 
     let segments = crate::sparse::plan_sparse_segments(data, cluster_size);
-    let total_clusters = (data.len() as u64).div_ceil(cluster_size);
 
     let bm = crate::bitmap::locate_bitmap_io(io)?;
 
@@ -3291,7 +3290,6 @@ pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
         data,
         &segments,
         attr_id,
-        total_clusters,
         &mut allocated,
     );
     match outcome {
@@ -3318,7 +3316,6 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
     data: &[u8],
     segments: &[crate::sparse::SparseSegment],
     attr_id: u16,
-    total_clusters: u64,
     allocated: &mut Vec<(u64, u64)>,
 ) -> Result<(), String> {
     let cluster_size = params.cluster_size;
@@ -3371,14 +3368,36 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
     // (0x28) is the FULL VCN-span (holes included); `total_allocated`
     // (0x40) is only the real (non-hole) cluster bytes — the on-disk
     // footprint. See build_sparse_nonresident_data_attribute.
-    let full_allocated_length = total_clusters * cluster_size;
+    //
+    // AND BOTH OF THIS ONE'S VCN-SPAN FIELDS COME FROM `runs`, NOT FROM A
+    // COUNT.
+    //
+    // This is the third site of the defect #211 fixed at the two promote
+    // paths: `HighestVcn` was `total_clusters - 1` while the mapping
+    // pairs came from `runs`, four lines apart -- two expressions for one
+    // fact, which is the shape that PR argued against. `full_allocated_length`
+    // had the identical shape, `total_clusters * cluster_size` where the
+    // VCN span is what `runs` covers.
+    //
+    // It was correct, and correct by coincidence: `plan_sparse_segments`
+    // loops `while vcn < total_clusters` and emits a segment for every
+    // cluster including trailing holes, so `sum(runs.length) ==
+    // total_clusters` -- and both the segmenter and this call site derive
+    // `total_clusters` from `data.len()` the same way. Two independent
+    // derivations agreeing is exactly the standing the promote sites had
+    // before the empty-value case made them disagree.
+    //
+    // The undefended direction was measured on #211 and is why this
+    // matters: with the same off-by-one injected at the fixed sites a
+    // test fails immediately, and injected here the entire library suite
+    // stayed green while the record being written is one `ntfs.sys`
+    // rejects with STATUS_FILE_CORRUPT_ERROR and chkdsk reports as a
+    // corrupt attribute record. See #239.
+    let clusters_covered: u64 = runs.iter().map(|r| r.length).sum();
+    let full_allocated_length = clusters_covered * cluster_size;
     let total_allocated_length = crate::sparse::allocated_clusters(segments) * cluster_size;
     let data_size = data.len() as u64;
-    let last_vcn = if total_clusters == 0 {
-        -1i64
-    } else {
-        (total_clusters - 1) as i64
-    };
+    let last_vcn = clusters_covered as i64 - 1;
 
     let new_attr_bytes = crate::record_build::build_sparse_nonresident_data_attribute(
         attr_id,
@@ -4539,6 +4558,88 @@ mod tests {
             "HighestVcn must equal the clusters the run list covers, minus one"
         );
         assert_eq!(allocated, covered * 4096);
+    }
+
+    /// `(HighestVcn, AllocatedLength, clusters covered)` for a SPARSE
+    /// `$DATA`, whose `AllocatedLength` is the full VCN span including
+    /// holes — which is why it is the field the run list has to agree
+    /// with, and `total_allocated` (0x40) is not.
+    fn sparse_data_header(dev: &mut MemDev, rec: u64) -> (i64, u64, u64) {
+        nonresident_data_header(dev, rec)
+    }
+
+    /// THE THIRD SITE, and the one the suite could not see.
+    ///
+    /// `write_sparse_file_inner` built the same non-resident header the
+    /// two promote paths do, and derived `HighestVcn` the way they used
+    /// to: `total_clusters - 1`, four lines below mapping pairs that came
+    /// from `runs`. `full_allocated_length` had the identical shape.
+    ///
+    /// It was correct, and correct by coincidence of two independent
+    /// derivations agreeing — `plan_sparse_segments` emits a segment per
+    /// cluster including trailing holes, and both it and the call site
+    /// computed the count from `data.len()`. That is the standing the
+    /// promote sites had before the empty-value case made them disagree,
+    /// and it was measured on #211 that the same off-by-one injected here
+    /// left the whole library suite green.
+    ///
+    /// Three shapes, because a sparse file's run list is where a count
+    /// and a span are most likely to part company: a leading hole, a
+    /// trailing hole, and a hole in the middle. See #239.
+    #[test]
+    fn a_sparse_write_leaves_a_header_that_agrees_with_its_run_list() {
+        let cs = 4096usize;
+        for (what, data) in [
+            ("a trailing hole", {
+                let mut d = vec![0u8; 4 * cs];
+                d[..cs].fill(0xAA);
+                d
+            }),
+            ("a leading hole", {
+                let mut d = vec![0u8; 4 * cs];
+                d[3 * cs..].fill(0xBB);
+                d
+            }),
+            ("a hole in the middle", {
+                let mut d = vec![0u8; 5 * cs];
+                d[..cs].fill(0xCC);
+                d[4 * cs..].fill(0xDD);
+                d
+            }),
+            ("a partial last cluster", {
+                let mut d = vec![0u8; 3 * cs + 17];
+                d[..cs].fill(0xEE);
+                d[3 * cs..].fill(0xFF);
+                d
+            }),
+        ] {
+            let mut dev = fresh_vol();
+            create_file_io(&mut dev, "/", "s.bin").expect("create");
+            let rec = resolve_path_to_record_number_io(&mut dev, "/s.bin").expect("resolve");
+            write_sparse_file_io(&mut dev, "/s.bin", &data)
+                .unwrap_or_else(|e| panic!("sparse write with {what}: {e}"));
+
+            let (last_vcn, allocated, covered) = sparse_data_header(&mut dev, rec);
+            let expected = (data.len() as u64).div_ceil(cs as u64);
+            assert_eq!(
+                covered, expected,
+                "{what}: the run list must cover every cluster of the file, holes \
+                 included"
+            );
+            assert_eq!(
+                last_vcn + 1,
+                covered as i64,
+                "{what}: HighestVcn says the attribute maps {} clusters, the run list \
+                 covers {covered}",
+                last_vcn + 1
+            );
+            assert_eq!(
+                allocated,
+                covered * cs as u64,
+                "{what}: AllocatedLength is the full VCN span, so it must match the \
+                 clusters the run list covers"
+            );
+        }
     }
 
     /// THE $I30 BITMAP DOES NOT SAY WHICH BLOCKS ARE LEAVES.

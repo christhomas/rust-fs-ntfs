@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- The sparse writer's header comes from its run list, like the two
+  promotion paths. `write_sparse_file` wrote `HighestVcn` as
+  `total_clusters - 1` and `AllocatedLength` as `total_clusters *
+  cluster_size` while the mapping pairs four lines above came from the
+  runs — the third site of the defect fixed at the other two, and correct
+  only by coincidence of two independent derivations agreeing. The count
+  is gone rather than corrected, so there is one expression behind both
+  fields; a record whose `HighestVcn` disagrees with its mapping pairs is
+  one `ntfs.sys` rejects with STATUS_FILE_CORRUPT_ERROR.
 - The index header is read inside the attribute value that holds it.
   `find_index_entry` and `collect_entries` read `first_entry_offset`
   and `total_size` bounded by the whole MFT record, so a resident
