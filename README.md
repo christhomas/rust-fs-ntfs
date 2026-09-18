@@ -185,14 +185,14 @@ are documented there.
   live under `test-disks/`. Most tests assemble their NTFS image at
   runtime.
 - **chkdsk validation:** the `test-matrix.json` matrix runs through
-  the `fs-windows-test-harness` runner (see
-  `../fs-windows-test-harness/scripts/test-windows-matrix.sh`), which on Windows
+  the `fs-windows-test-harness` runner (`scripts/run-matrix.sh`, see
+  [Test matrix](#test-matrix-windows--macos-vm-coordination)), which on Windows
   shells out to `rust-ntfs format`, Microsoft's `format.com`, and
   Microsoft's `chkdsk` to validate every formatted image. On non-
   Windows hosts the matrix tests are reported as ignored. Microsoft's
   `chkdsk` is the authoritative validator — not byte-equivalence with
   any third-party formatter.
-- **Test matrix:** `test-matrix.json` at repo root carries 42
+- **Test matrix:** `test-matrix.json` at repo root carries the
   scenarios. The harness drives mac-side ops (format, populate via
   the pure-Rust write API) and Windows-side ops (mount, chkdsk,
   enumerate, write, repeat-mount stability cycles) through a single
@@ -519,26 +519,48 @@ missing.
 ### Test matrix (Windows + macOS VM coordination)
 
 The chkdsk-validated matrix lives in `test-matrix.json` at the repo
-root. The matrix runs through the `fs-windows-test-harness` runner, a
-sibling checkout at `../fs-windows-test-harness/` pinned by `chore siblings`.
-Drivers:
+root and runs through
+[`fs-windows-test-harness`](https://github.com/antimatter-studios/fs-windows-test-harness),
+a sibling checkout at `../fs-windows-test-harness/` pinned in
+`chores.yml` (`chore siblings` fetches it). The ops this crate declares
+are in `fs-windows-test-harness.toml`; the Windows-side PowerShell they
+run is in `scripts/fs-windows-test-harness/`.
 
-- `scripts/setup-windows-vm.sh` / `.ps1` — bootstrap a Windows VM
-  with the toolchain needed to run `format.com` / `chkdsk` plus
-  `vhd_tool` for the wrapper-image lifecycle.
-- `../fs-windows-test-harness/scripts/test-windows-matrix.sh` — orchestrator that
-  tars the consumer source, SSHes to the VM, invokes the harness's
-  `run-matrix` runner, and pulls per-scenario diag back to the Mac.
-- `../fs-windows-test-harness/scripts/claim-scenario.sh`,
-  `../fs-windows-test-harness/scripts/update-scenario-status.sh`,
-  `../fs-windows-test-harness/scripts/reset-non-passed.sh` — generic, FS-agnostic
-  state-machine over `test-matrix.json`. Part of
-  `antimatter-studios/fs-windows-test-harness`.
+**Setting up the Windows VM is the harness's documentation, not this
+crate's:** follow
+[`docs/vm-setup.md`](https://github.com/antimatter-studios/fs-windows-test-harness/blob/main/docs/vm-setup.md)
+in the harness. It covers the VMware network (a host-only adapter with a
+static address, so `VM_HOST` never moves), OpenSSH and key login, the
+firewall profile, and the encrypted VM's password. Then
+`scripts/setup-windows-vm.sh` provisions what this crate needs on it
+(`format.com` / `chkdsk` tooling and `vhd_tool`).
+
+This machine's VM settings go in a gitignored `.test-env` at the repo
+root:
+
+```sh
+VM_HOST=chris@10.254.254.253           # the VM's host-only address
+SSH_KEY=/Users/<you>/.ssh/fs-windows-vm.pub
+VM_WORKDIR=C:/Users/chris/dev/rust-fs-ntfs-matrix
+HOST_IMAGE_DIR=/tmp
+VM_VMX=/Users/<you>/Virtual Machines.localized/<name>.vmwarevm/<name>.vmx
+```
+
+The VM is started and stopped by chore, reading its encryption password
+from trove (`antimatter-studios/windows-test-vm`) — unlock trove in the
+shell first:
+
+```sh
+chore vm:status   # running or not, and whether SSH answers
+chore vm:up       # start headless if needed, wait for SSH
+chore vm:down     # clean shutdown
+bash scripts/run-matrix.sh [smoke|<scenario filter>]
+```
 
 Agent coordination rules: see
 [`docs/multi-agent-test-protocol.md`](docs/multi-agent-test-protocol.md)
-(historical — describes the v1 matrix flow; some script names have
-moved into `../fs-windows-test-harness/scripts/`).
+(historical — describes the v1 matrix flow; the claim / update / reset
+state machine it describes now lives in `../fs-windows-test-harness/scripts/`).
 
 ### Pre-commit hooks
 
