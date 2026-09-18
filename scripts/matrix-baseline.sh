@@ -6,7 +6,7 @@
 #   * tested_at_sha          — git HEAD at run time
 #   * binary_sha256          — sha256 of target/release/rust-ntfs
 #   * VM metadata            — Windows + ntfs.sys + chkdsk versions
-#   * harness_submodule_sha  — exact vendored harness commit
+#   * harness_submodule_sha  — exact harness commit (sibling checkout)
 #   * test_matrix_json_sha256— hash of the scenarios definition
 #   * per-scenario status, verdict_shape, chkdsk exit codes
 #
@@ -73,7 +73,7 @@ trap 'rm -f "$matrix_log"' EXIT
 
 run_exit=0
 if [ "$mode" = "smoke" ]; then
-    # Smoke set defined in fs-test-harness.toml [groups].smoke.
+    # Smoke set defined in fs-windows-test-harness.toml [groups].smoke.
     # The harness runner expands the group and runs all 5 scenarios in
     # parallel (same drive-letter semaphore as the full matrix).
     echo "[matrix-baseline] smoke (parallel via harness group)"

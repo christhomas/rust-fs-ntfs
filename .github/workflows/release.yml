@@ -82,12 +82,12 @@ jobs:
             core_ref="$(pin FS_CORE_REF)"
             harness_ref="$(pin HARNESS_REF)"
             echo "chore has no build for $(uname -s); cloning siblings directly"
-            echo "  am-fs-core      $core_ref"
-            echo "  fs-test-harness $harness_ref"
+            echo "  am-fs-core              $core_ref"
+            echo "  fs-windows-test-harness $harness_ref"
             git clone --quiet --depth 1 --branch "$core_ref" \
               https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
             git clone --quiet --depth 1 --branch "$harness_ref" \
-              https://github.com/antimatter-studios/fs-test-harness.git ../fs-test-harness
+              https://github.com/antimatter-studios/fs-windows-test-harness.git ../fs-windows-test-harness
           fi
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -185,12 +185,12 @@ jobs:
             core_ref="$(pin FS_CORE_REF)"
             harness_ref="$(pin HARNESS_REF)"
             echo "chore has no build for $(uname -s); cloning siblings directly"
-            echo "  am-fs-core      $core_ref"
-            echo "  fs-test-harness $harness_ref"
+            echo "  am-fs-core              $core_ref"
+            echo "  fs-windows-test-harness $harness_ref"
             git clone --quiet --depth 1 --branch "$core_ref" \
               https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
             git clone --quiet --depth 1 --branch "$harness_ref" \
-              https://github.com/antimatter-studios/fs-test-harness.git ../fs-test-harness
+              https://github.com/antimatter-studios/fs-windows-test-harness.git ../fs-windows-test-harness
           fi
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -806,12 +806,12 @@ jobs:
             core_ref="$(pin FS_CORE_REF)"
             harness_ref="$(pin HARNESS_REF)"
             echo "chore has no build for $(uname -s); cloning siblings directly"
-            echo "  am-fs-core      $core_ref"
-            echo "  fs-test-harness $harness_ref"
+            echo "  am-fs-core              $core_ref"
+            echo "  fs-windows-test-harness $harness_ref"
             git clone --quiet --depth 1 --branch "$core_ref" \
               https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
             git clone --quiet --depth 1 --branch "$harness_ref" \
-              https://github.com/antimatter-studios/fs-test-harness.git ../fs-test-harness
+              https://github.com/antimatter-studios/fs-windows-test-harness.git ../fs-windows-test-harness
           fi
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master

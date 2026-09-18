@@ -170,6 +170,15 @@
 - The shared `am-fs-core` sibling checkout moves to v0.2.10, in
   `Cargo.toml`, `chores.yml` and both workflows' Windows clone.
 
+- The Windows test harness is `fs-windows-test-harness` now
+  (<https://github.com/antimatter-studios/fs-windows-test-harness>).
+  `chore siblings` and both workflows' Windows clone check it out at
+  `../fs-windows-test-harness`, pinned to v4.1.0 (v4.0.0 is the release that
+  reads only the new names; v4.1.0 adds `scripts/output-budget.sh`). In lockstep, the consumer config is
+  `fs-windows-test-harness.toml` and the VM-side PowerShell ops live in
+  `scripts/fs-windows-test-harness/`. An existing checkout at the old
+  sibling path is not moved, so re-run `chore siblings`.
+
 ## [0.4.0] — 2026-09-06
 
 ### Fixed

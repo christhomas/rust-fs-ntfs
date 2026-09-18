@@ -24,9 +24,9 @@ cd "$repo_root"
 source .test-env
 
 # vm-info.ps1 and verdict-collect.ps1 are shipped to the VM by the
-# harness runner (via scripts_dir = "scripts/fs-test-harness" in
-# fs-test-harness.toml) before the matrix run starts — no scp needed here.
-scripts_vm="$VM_WORKDIR/scripts/fs-test-harness"
+# harness runner (via scripts_dir = "scripts/fs-windows-test-harness" in
+# fs-windows-test-harness.toml) before the matrix run starts — no scp needed here.
+scripts_vm="$VM_WORKDIR/scripts/fs-windows-test-harness"
 
 # Gather VM info
 vm_info_json="$(mktemp -t vm-info.XXXXXX.json)"
