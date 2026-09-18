@@ -64,6 +64,24 @@
   detected `IO_REPARSE_TAG_WOF` and failed loudly; the Rust API did not,
   and returned the right number of zero bytes for every file `compact
   /exe` or Compact OS had touched.
+- The `$INDEX_ROOT` insert splices at an entry boundary, and both root
+  mutators require a value long enough for the header they read. The
+  insert accepted any `first_entry_offset` up to `total_size` as the
+  start of its entry walk, so an offset inside an existing entry became
+  the splice point and that record was written back — the defect its own
+  comment describes. Its INDX twin has had the rule since it was
+  written; `find_index_entry`, which the write paths run first as their
+  collision check, now has it too. Separately, both mutators refused only
+  a value shorter than the 16 bytes before the index header, so a 16-to-31
+  byte value passed and `first_entry_offset` and `total_size` were read
+  from the attribute that follows: with those bytes saying "no entries",
+  the insert spliced a new entry outside the value it was given.
+- A name that does not parse is reported rather than matched as an empty
+  one. Both index walks read an entry's name with
+  `entry_name(...).unwrap_or_default()`, so a name field running past its
+  own entry became `[]` and was then compared against the wanted name as
+  though the entry were legitimately unnamed — a lookup for the empty
+  name matched it, and the corrupt entry was never reported.
 - An index block that leaves its run is refused rather than transferred
   anyway. On a volume with clusters smaller than the 4096-byte index
   block, a block landing across a run boundary took its tail from — and
