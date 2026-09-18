@@ -91,6 +91,81 @@ fn volume_with_an_overlong_bitmap(tag: &str) -> String {
     dst
 }
 
+/// A volume whose `$Bitmap` is the right length but says the last
+/// `tail_free` clusters are free — so a search *succeeds*, and the run it
+/// returns runs past the end of the volume.
+///
+/// THIS IS THE FIXTURE THE THREE WRITE TESTS BELOW NEEDED.
+///
+/// `volume_with_an_overlong_bitmap` marks every real cluster allocated,
+/// which makes `find_free_run_io` return `None` — so the three tests that
+/// exist to verify the `cluster_span` guards were failing at the
+/// allocator and never reaching a single one of them. Deleting every
+/// guard PR #200 added left all three green. See #224.
+///
+/// The bound the run crosses is real and not contrived: mkfs writes
+/// `number_sectors = volume_sectors - 1`, so `volume_bytes()` is
+/// `cluster_count * cluster_size - bytes_per_sector` and the last
+/// cluster is **inside** the allocator's capacity and **outside** every
+/// transfer bound. Measured on a 16 MiB volume at 4 KiB clusters:
+/// `total_bits` is 4096, `cluster_span` accepts LCN 4094 and refuses
+/// 4095 with "a transfer spans [16773120, 16777216) on a volume of
+/// 16776704 bytes". mkfs marks 4095 in use, which is why this has to
+/// clear it: the trigger is a foreign, truncated or corrupt `$Bitmap`,
+/// exactly the class the guards were written for. See #223.
+fn volume_with_only_the_tail_free(tag: &str, tail_free: u64) -> String {
+    std::fs::create_dir_all("test-disks").expect("create test-disks dir");
+    let dst = common::temp_image_path(format!("allocbounds_{tag}"));
+    let f = std::fs::File::create(&dst).expect("create image");
+    f.set_len(VOL_SIZE).expect("set_len");
+    drop(f);
+    let mut io = PathIo::open_rw(Path::new(&dst)).expect("open_rw");
+    format_filesystem(&mut io, VOL_SIZE, CLUSTER, CLUSTER, Some("ALOC"), Some(7))
+        .expect("format_filesystem");
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
+
+    let (start, declared) =
+        read::nonresident_contiguous_disk_range(&mut io, BITMAP_RECORD, AttrType::Data, None)
+            .expect("$Bitmap is one extent");
+    assert_eq!(
+        declared * 8,
+        CLUSTER_COUNT,
+        "mkfs should declare exactly one bit per cluster"
+    );
+
+    // Everything allocated, then the tail bits cleared. The declared
+    // length is left exactly as mkfs wrote it, so this is a volume whose
+    // geometry is correct and whose free-space map is not -- which is the
+    // shape a foreign formatter or an interrupted write produces.
+    let real_bytes = (CLUSTER_COUNT / 8) as usize;
+    io.write_all_at(start, &vec![0xFFu8; real_bytes])
+        .expect("mark every cluster allocated");
+    let bm = bitmap::locate_bitmap_io(&mut io).expect("locate $Bitmap");
+    for lcn in (CLUSTER_COUNT - tail_free)..CLUSTER_COUNT {
+        bitmap::free_io(&mut io, &bm, lcn, 1).expect("clear a tail bit");
+    }
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
+
+    // The search must now succeed, or the test below it is measuring the
+    // allocator again rather than the guard.
+    let found = bitmap::find_free_run_io(&mut io, &bm, tail_free, 0)
+        .expect("search")
+        .expect("the tail run must be findable, or the guard is never reached");
+    assert_eq!(
+        found,
+        CLUSTER_COUNT - tail_free,
+        "the only free run is the tail one"
+    );
+    drop(io);
+    dst
+}
+
+/// Free clusters as a consumer sees them through `volume_stats`.
+fn free_clusters(img: &str) -> u64 {
+    let bm = bitmap::locate_bitmap(Path::new(img)).expect("locate_bitmap");
+    bitmap::count_free(Path::new(img), &bm).expect("count_free")
+}
+
 fn image_len(img: &str) -> u64 {
     std::fs::metadata(img).expect("stat image").len()
 }
@@ -120,28 +195,38 @@ fn the_free_search_is_bounded_by_the_volume() {
 /// raw.
 #[test]
 fn promotion_refuses_rather_than_writing_off_the_volume() {
-    let img = volume_with_an_overlong_bitmap("promote");
+    let img = volume_with_only_the_tail_free("promote", 2);
     write::create_file(Path::new(&img), "/", "f.bin").expect("create");
     let before = image_len(&img);
+    let free_before = free_clusters(&img);
 
     let wrote = write::write_file_contents(Path::new(&img), "/f.bin", &vec![b'x'; 8192]);
     assert!(
         wrote.is_err(),
-        "the volume has no free cluster, yet the promotion reported {wrote:?}"
+        "the only free run ends past the volume, yet the promotion reported {wrote:?}"
     );
     assert_eq!(
         image_len(&img),
         before,
         "the write extended the image past the volume it was formatted on"
     );
+    // And the clusters it took before the refusal are back. Until the
+    // fixture above reached the guard, no test in this file could see
+    // this either. See #251.
+    assert_eq!(
+        free_clusters(&img),
+        free_before,
+        "a refused promotion left its allocation marked in use"
+    );
 }
 
 /// The sparse writer takes the same LCN from the same search.
 #[test]
 fn a_sparse_write_refuses_rather_than_writing_off_the_volume() {
-    let img = volume_with_an_overlong_bitmap("sparse");
+    let img = volume_with_only_the_tail_free("sparse", 2);
     write::create_file(Path::new(&img), "/", "s.bin").expect("create");
     let before = image_len(&img);
+    let free_before = free_clusters(&img);
 
     let cs = CLUSTER as usize;
     let mut data = vec![0u8; 3 * cs];
@@ -150,21 +235,27 @@ fn a_sparse_write_refuses_rather_than_writing_off_the_volume() {
     let wrote = write::write_sparse_file(Path::new(&img), "/s.bin", &data);
     assert!(
         wrote.is_err(),
-        "the volume has no free cluster, yet the sparse write reported {wrote:?}"
+        "the only free run ends past the volume, yet the sparse write reported {wrote:?}"
     );
     assert_eq!(
         image_len(&img),
         before,
         "the sparse write extended the image past the volume"
     );
+    assert_eq!(
+        free_clusters(&img),
+        free_before,
+        "a refused sparse write left its allocation marked in use"
+    );
 }
 
 /// The named-stream promotion path is the third site.
 #[test]
 fn attribute_promotion_refuses_rather_than_writing_off_the_volume() {
-    let img = volume_with_an_overlong_bitmap("attr");
+    let img = volume_with_only_the_tail_free("attr", 2);
     write::create_file(Path::new(&img), "/", "a.bin").expect("create");
     let before = image_len(&img);
+    let free_before = free_clusters(&img);
 
     let wrote = write::promote_attribute_to_nonresident(
         Path::new(&img),
@@ -175,11 +266,69 @@ fn attribute_promotion_refuses_rather_than_writing_off_the_volume() {
     );
     assert!(
         wrote.is_err(),
-        "the volume has no free cluster, yet the promotion reported {wrote:?}"
+        "the only free run ends past the volume, yet the promotion reported {wrote:?}"
     );
     assert_eq!(
         image_len(&img),
         before,
         "the write extended the image past the volume"
+    );
+    assert_eq!(
+        free_clusters(&img),
+        free_before,
+        "a refused attribute promotion left its allocation marked in use"
+    );
+}
+
+/// THE GROW PATH COMMITTED WITH NO BOUNDS CHECK AT ALL.
+///
+/// PR #200 gave the two promotion paths and the sparse writer a
+/// `cluster_span` call before their writes. `grow` has no data write —
+/// the clusters it takes are uninitialised by design — so it wrote no
+/// bytes to check, and it committed the run list naming them with no
+/// check anywhere. A free bit on a cluster the volume cannot address
+/// therefore produced a **committed, permanently allocated, unreadable
+/// extent, reported as a successful grow**: the file grows, the
+/// allocation persists, and nothing can ever read or write those bytes.
+///
+/// One cluster free, and it is the tail one — inside the allocator's
+/// capacity, outside every transfer bound. See #223.
+#[test]
+fn a_grow_onto_a_cluster_the_volume_cannot_address_is_refused_and_rolled_back() {
+    // Two clusters free at the tail. The first, LCN 4094, is one every
+    // bound accepts, and it is what makes the file non-resident so there
+    // is something to grow. The second, LCN 4095, is the one no transfer
+    // can land on.
+    let img = volume_with_only_the_tail_free("grow", 2);
+    write::create_file(Path::new(&img), "/", "g.bin").expect("create");
+    write::write_file_contents(Path::new(&img), "/g.bin", &vec![b'g'; CLUSTER as usize])
+        .expect("promote onto the first tail cluster");
+
+    let free_before = free_clusters(&img);
+    assert_eq!(
+        free_before,
+        1,
+        "exactly LCN {} should be left free",
+        CLUSTER_COUNT - 1
+    );
+
+    let last = CLUSTER_COUNT - 1;
+    let grew = write::grow_nonresident(Path::new(&img), "/g.bin", CLUSTER as u64 * 2);
+    let err = match grew {
+        Err(e) => e,
+        Ok(n) => panic!(
+            "LCN {last} is the only free cluster and no transfer on it can land on \
+             the volume, yet the grow reported {n} bytes"
+        ),
+    };
+    assert!(
+        err.contains("not on the volume"),
+        "expected the grow's own bounds refusal, got: {err}"
+    );
+    assert_eq!(
+        free_clusters(&img),
+        free_before,
+        "a refused grow left LCN {last} marked in use -- allocated, unreadable, and \
+         referenced by nothing"
     );
 }
