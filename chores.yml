@@ -50,7 +50,7 @@ vars:
   # The Windows-VM test harness. Not a cargo dependency — a tool this
   # repo's scripts invoke — so nothing but this pin governs which
   # version runs the matrix.
-  HARNESS_REF: v4.0.0
+  HARNESS_REF: v4.1.0
 
 tasks:
   staticlib:
