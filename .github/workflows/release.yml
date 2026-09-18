@@ -132,8 +132,17 @@ jobs:
       # submodule, fail HERE (the gate runs before publish) with a clear
       # "lock needs updating" error, rather than letting `cargo publish`
       # regenerate the lock and abort on a dirty tree after the gates pass.
-      - run: cargo test --release --locked --no-fail-fast
-      - run: cargo clippy --locked --all-targets -- -D warnings
+      # Quiet tiers, as in ci.yml: a verdict line per run, the whole run in
+      # tmp/logs/, the tail on failure, exit 65 over budget (scripts/tier.sh).
+      - run: scripts/tier.sh suite -- cargo test --release --locked --no-fail-fast
+      - run: scripts/tier.sh clippy -- cargo clippy --locked --all-targets -- -D warnings
+      - name: upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-release
+          path: tmp/logs/
+          if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
   # Windows chkdsk validation — the canonical NTFS functional oracle.
