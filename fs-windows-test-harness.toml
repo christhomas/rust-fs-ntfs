@@ -17,7 +17,17 @@
 # and the libtest-mimic --test-threads pool. "drive-letters" queries
 # the VM at startup; an integer sets an explicit cap (clamped 1..=24).
 # Default 1 = sequential (safe for any consumer).
-max_parallel = "drive-letters"
+#
+# Drive letters are NOT the binding constraint here, and using them as the
+# cap took the VM down: on 2026-09-18 the runner read 24 free letters, ran
+# 24 scenarios at once on a 2-vCPU / 4-GiB VM, and Windows stopped
+# responding 20 minutes in (System log 6008 "previous system shutdown was
+# unexpected", Kernel-Power 41). The 10 scenarios in flight failed their
+# five retries against a machine that was rebooting, and the run left
+# 30 GiB of orphaned .img/.vhd behind. The real ceiling is the VM's
+# memory and its disk: every concurrent scenario holds a disk image plus
+# its VHD wrapper, and the largest scenario is 16 GiB.
+max_parallel = 4
 
 [groups]
 # smoke — 5 representative scenarios for a quick sanity check (~15 min).
