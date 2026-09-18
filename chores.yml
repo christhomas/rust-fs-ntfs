@@ -58,10 +58,15 @@ vars:
 
 # .test-env is this machine's VM config: VM_HOST, SSH_KEY, VM_WORKDIR,
 # HOST_IMAGE_DIR, and VM_VMX for the vm:* tasks. Gitignored and per machine;
-# the harness's run-tests.sh writes the first four on its first run. A
-# missing file is skipped, so every task that does not touch the VM (and CI)
-# is unaffected.
-dotenv: ['.test-env']
+# the harness's run-tests.sh writes the first four on its first run.
+#
+# THE `?` MAKES ITS ABSENCE NORMAL. chore treats a missing dotenv file as an
+# error, which is right for a file that decides which stack a command acts on
+# -- but this one only configures the VM, and CI has no VM. Without the `?`
+# every CI job died at its first chore call with `siblings: no environment
+# loaded`, before a test ran. A machine with no VM config runs everything
+# that does not need one.
+dotenv: ['?.test-env']
 
 tasks:
   staticlib:
