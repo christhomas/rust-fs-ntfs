@@ -123,6 +123,13 @@ jobs:
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm'
         run: scripts/tier.sh clippy -- cargo clippy --locked --all-targets -- -D warnings
 
+      # The shell tests (tests/scripts/*.sh): the scripts that turn the
+      # Windows VM's output into verdicts. By glob, like `chore test:scripts`.
+      - name: shell tests
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: for t in tests/scripts/*.sh; do bash "$t"; done
+
       # Test scope is intentionally narrow: only tests that DON'T need
       # the out-of-tree `test-disks/*.img` fixtures. The fixture-driven
       # integration tests (tests/ads.rs, tests/file_data.rs, etc.)

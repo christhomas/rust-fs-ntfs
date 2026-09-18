@@ -270,6 +270,9 @@ tasks:
     # scenario at step 1 -- five retries each of `rust-ntfs: No such file`.
     deps: [build:cli, vm:up]
     cmds:
+      # After the run, pass or fail: bring the VM's per-scenario evidence
+      # (chkdsk's report, what Windows enumerated) home and say what it shows.
+      - defer: scripts/matrix-fetch-diag.sh
       - bash scripts/run-matrix.sh {{.CLI_ARGS}}
 
   # THE VM TASKS. The Windows VM is a thing a task depends on, not a thing a
@@ -383,6 +386,16 @@ tasks:
       - task: test:suite
       # THE LAST LINE: one number across the tiers, and where the detail is.
       - scripts/test-verdict.sh unit unit-debug mkfs suite
+
+  test:scripts:
+    desc: The shell tests (tests/scripts/*.sh), every one by glob
+    # By glob, so a test added later needs no edit here -- a test that has to
+    # be registered somewhere else is a test that gets silently skipped.
+    cmds:
+      - |
+        set -eu
+        for t in tests/scripts/*.sh; do bash "$t" >/dev/null || { echo "test:scripts: $t failed -- run it directly to see which case" >&2; exit 1; }; done
+        echo "test:scripts: $(ls tests/scripts/*.sh | wc -l | tr -d ' ') file(s) passed"
 
   clean:
     desc: Remove this crate's cargo output
