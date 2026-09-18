@@ -52,6 +52,22 @@ vars:
   # version runs the matrix.
   HARNESS_REF: v4.1.0
 
+  # THE WINDOWS TEST VM. vmrun ships inside VMware Fusion; the VM itself is
+  # named per machine by VM_VMX in .test-env (below), beside VM_HOST and
+  # SSH_KEY. The VM is encrypted (Fusion encrypts the files that hold its
+  # vTPM), so every vmrun call that opens it needs the encryption password,
+  # which lives in trove under this entry and nowhere else -- not in this
+  # repository, not in .test-env, not in a log.
+  VMRUN: /Applications/VMware Fusion.app/Contents/Public/vmrun
+  VM_PASSWORD_ENTRY: antimatter-studios/windows-test-vm
+
+# .test-env is this machine's VM config: VM_HOST, SSH_KEY, VM_WORKDIR,
+# HOST_IMAGE_DIR, and VM_VMX for the vm:* tasks. Gitignored and per machine;
+# the harness's run-tests.sh writes the first four on its first run. A
+# missing file is skipped, so every task that does not touch the VM (and CI)
+# is unaffected.
+dotenv: ['.test-env']
+
 tasks:
   staticlib:
     desc: Build the static library and its headers into this crate's dist/
@@ -226,6 +242,120 @@ tasks:
           printf '%s\n' "$out" >&2
           exit 1
         fi
+
+  # THE VM TASKS. The Windows VM is a thing a task depends on, not a thing a
+  # person remembers to start: a matrix task declares `deps: [vm:up]`, and
+  # vm:up is idempotent -- already running and answering SSH costs one
+  # `vmrun list` and one SSH round trip.
+  #
+  # THE PASSWORD. `trove get password` reads it from the unlocked vault at
+  # the moment it is needed and it is passed to vmrun as `-vp`, the only way
+  # vmrun takes it. That puts it on vmrun's command line for as long as that
+  # call runs, where `ps` on this machine can see it; vmrun has no stdin or
+  # file option, so that is the whole of the exposure and it is accepted.
+  # It is never echoed: chore prints a failing step as its TEMPLATE text, in
+  # which the password is still the literal `$pw`.
+  vm:status:
+    desc: Is the Windows test VM running, and does it answer SSH? One line.
+    silent: true
+    cmds:
+      - |
+        set -eu
+        vmx="${VM_VMX:-}"
+        [ -n "$vmx" ] || { echo "vm: VM_VMX is not set -- add the .vmx path to .test-env" >&2; exit 1; }
+        if "{{.VMRUN}}" list | grep -qxF "$vmx"; then state=running; else state=stopped; fi
+        ssh_state=down
+        if [ -n "${VM_HOST:-}" ] && ssh -n -o BatchMode=yes -o ConnectTimeout=5 \
+             ${SSH_KEY:+-i "$SSH_KEY" -o IdentitiesOnly=yes} "$VM_HOST" "echo ok" >/dev/null 2>&1; then
+          ssh_state=up
+        fi
+        echo "vm: $state, ssh $ssh_state (${VM_HOST:-VM_HOST unset})"
+
+  vm:up:
+    desc: Start the Windows test VM headless (if it is not running) and wait until SSH answers at VM_HOST
+    silent: true
+    # Windows boots in well under two minutes here; the SSH wait below allows
+    # five more for a boot that stops to install an update.
+    timeout: 10m
+    cmds:
+      - |
+        set -eu
+        vmx="${VM_VMX:-}"
+        [ -n "$vmx" ] || { echo "vm:up: VM_VMX is not set -- add the .vmx path to .test-env" >&2; exit 1; }
+        [ -f "$vmx" ] || { echo "vm:up: $vmx does not exist" >&2; exit 1; }
+        [ -n "${VM_HOST:-}" ] || { echo "vm:up: VM_HOST is not set in .test-env" >&2; exit 1; }
+        [ -x "{{.VMRUN}}" ] || { echo "vm:up: vmrun not found at {{.VMRUN}} -- is VMware Fusion installed?" >&2; exit 1; }
+
+        started=0
+        if ! "{{.VMRUN}}" list | grep -qxF "$vmx"; then
+          # The password is read only when there is a VM to start: an
+          # already-running VM needs no unlocked vault.
+          if ! pw="$(trove get password '{{.VM_PASSWORD_ENTRY}}' 2>/dev/null)" || [ -z "$pw" ]; then
+            echo "vm:up: cannot read the VM password from trove entry {{.VM_PASSWORD_ENTRY}}." >&2
+            echo "       Unlock trove in this shell first: eval \"\$(trove unlock <vault> --export)\"" >&2
+            exit 1
+          fi
+          # vmrun prints its own start-up chatter (ServiceImpl_Opener,
+          # LocationGetRoot) even when it succeeds; it is shown only if the
+          # start fails.
+          if ! out="$("{{.VMRUN}}" -T fusion -vp "$pw" start "$vmx" nogui 2>&1)"; then
+            printf '%s\n' "$out" >&2
+            echo "vm:up: vmrun could not start $vmx" >&2
+            exit 1
+          fi
+          pw=""
+          started=1
+        fi
+        host="$VM_HOST"
+
+        # SSH, not ping: the VM can block ICMP while sshd is up, and SSH is
+        # what every matrix step uses.
+        waited=0
+        until ssh -n -o BatchMode=yes -o ConnectTimeout=5 \
+                ${SSH_KEY:+-i "$SSH_KEY" -o IdentitiesOnly=yes} "$host" "echo ok" >/dev/null 2>&1; do
+          if [ "$waited" -ge 300 ]; then
+            echo "vm:up: $host did not answer SSH within 300s." >&2
+            echo "       VM_HOST must be the VM's fixed host-only address, not the NAT one (which" >&2
+            echo "       moves): see docs/vm-setup.md in fs-windows-test-harness. A VM catching up" >&2
+            echo "       on Windows Update can also take longer -- open it in Fusion to see." >&2
+            exit 1
+          fi
+          sleep 5
+          waited=$((waited + 5))
+        done
+        if [ "$started" = 1 ]; then
+          echo "vm: started, ssh up after ${waited}s ($host)"
+        else
+          echo "vm: already running, ssh up ($host)"
+        fi
+
+  vm:down:
+    desc: Shut the Windows test VM down cleanly (a no-op if it is not running)
+    silent: true
+    timeout: 5m
+    cmds:
+      - |
+        set -eu
+        vmx="${VM_VMX:-}"
+        [ -n "$vmx" ] || { echo "vm:down: VM_VMX is not set -- add the .vmx path to .test-env" >&2; exit 1; }
+        if ! "{{.VMRUN}}" list | grep -qxF "$vmx"; then
+          echo "vm: already stopped"
+          exit 0
+        fi
+        if ! pw="$(trove get password '{{.VM_PASSWORD_ENTRY}}' 2>/dev/null)" || [ -z "$pw" ]; then
+          echo "vm:down: cannot read the VM password from trove entry {{.VM_PASSWORD_ENTRY}}." >&2
+          echo "         Unlock trove in this shell first: eval \"\$(trove unlock <vault> --export)\"" >&2
+          exit 1
+        fi
+        # `soft` asks Windows to shut down, as the Start menu would; a hard
+        # stop is pulling the plug on a guest that may be mid-write.
+        if ! out="$("{{.VMRUN}}" -T fusion -vp "$pw" stop "$vmx" soft 2>&1)"; then
+          printf '%s\n' "$out" >&2
+          echo "vm:down: vmrun could not stop $vmx" >&2
+          exit 1
+        fi
+        pw=""
+        echo "vm: stopped"
 
   lint:
     desc: Formatting and clippy, exactly as CI runs them
