@@ -16,8 +16,22 @@
 set -uo pipefail
 
 # chkdsk's verdict, in words, from one chkdsk-<mode>.txt (UTF-16 or ASCII).
+#
+# EVERY STEP HERE IS BYTE-ORIENTED, hence LC_ALL=C throughout. chkdsk prints
+# the volume label, and a label like "Disk eclipse" with an e-acute arrives as
+# one 0xE9 byte -- Windows' ANSI codepage, not UTF-8. In a UTF-8 locale that
+# byte is an illegal sequence: `tr` fails outright ("tr: Illegal byte
+# sequence") and the text it should have cleaned is lost, so a volume chkdsk
+# called clean was reported as `unrecognised: Volume label is Disk ` --
+# truncated at the very byte that broke it (mac-format-label-latin1, every run
+# until 2026-09-18). Reading bytes as bytes cannot fail this way; the cost is
+# that the quoted tail of an unrecognised report may cut a multi-byte
+# character in half, which is cosmetic.
 chkdsk_says() {
     local f="$1" text
+    # -x, because `local LC_ALL=C` alone would set a shell variable the
+    # commands below never see: they need it in their environment.
+    local -x LC_ALL=C
     # PowerShell's redirect writes ASCII; some tools write UTF-16. iconv
     # "succeeds" on ASCII read as UTF-16 and returns noise, so decode as
     # UTF-16 only when the file has the NUL bytes UTF-16 text is full of.

@@ -9,9 +9,11 @@
 # first fix, `grep $'\x00'`, matched EVERY file because bash turns $'\x00'
 # into an empty pattern. Each has a case below that fails on it.
 #
-# Fixtures are written here, in both encodings chkdsk's report can arrive in:
-# ASCII (PowerShell's -RedirectStandardOutput) and UTF-16LE with and without
-# a BOM (what Out-File and some consoles write).
+# Fixtures are written here, in every encoding chkdsk's report can arrive in:
+# ASCII (PowerShell's -RedirectStandardOutput), UTF-16LE with and without a
+# BOM (what Out-File and some consoles write), and ANSI -- a single 0xE9 byte
+# for an e-acute, which is how a report names a volume whose label is not
+# ASCII, and which is not valid UTF-8.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -22,7 +24,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 pass=0; fail=0
 
-# check NAME ENCODING TEXT WANT -- ENCODING: ascii | utf16 | utf16bom
+# check NAME ENCODING TEXT WANT -- ENCODING: ascii | utf16 | utf16bom | ansi
 check() {
     local name="$1" enc="$2" text="$3" want="$4" f got
     f="$tmp/$name.txt"
@@ -30,6 +32,7 @@ check() {
         ascii)    printf '%s' "$text" > "$f" ;;
         utf16)    printf '%s' "$text" | iconv -f UTF-8 -t UTF-16LE > "$f" ;;
         utf16bom) { printf '\xff\xfe'; printf '%s' "$text" | iconv -f UTF-8 -t UTF-16LE; } > "$f" ;;
+        ansi)     printf '%s' "$text" | iconv -f UTF-8 -t ISO-8859-1 > "$f" ;;
     esac
     got="$(chkdsk_says "$f")"
     if [ "$got" = "$want" ]; then
@@ -44,6 +47,9 @@ SNAPSHOT=$'The type of the file system is NTFS.\r\nInsufficient storage availabl
 PROBLEMS=$'The type of the file system is NTFS.\r\nWindows has scanned the file system and found problems.\r\nRun CHKDSK with the /F (fix) option to correct these.\r\n'
 REPAIRED=$'The type of the file system is NTFS.\r\nWindows has made corrections to the file system.\r\n'
 ODD=$'The type of the file system is NTFS.\r\nSomething chkdsk has never said before.\r\n'
+# What chkdsk printed for mac-format-label-latin1, whose label is "Disk éclipse".
+CLEAN_LABEL=$'The type of the file system is NTFS.\r\nVolume label is Disk \u00e9clipse.\r\nWindows has scanned the file system and found no problems.\r\nNo further action is required.\r\n'
+PROBLEMS_LABEL=$'The type of the file system is NTFS.\r\nVolume label is Disk \u00e9clipse.\r\nWindows has scanned the file system and found problems.\r\n'
 
 printf 'chkdsk_says\n'
 # The report as the matrix actually receives it (the case that came back as noise).
@@ -60,6 +66,15 @@ check problems-utf16-bom  utf16bom "$PROBLEMS" "PROBLEMS FOUND"
 check unrecognised-ascii  ascii    "$ODD"      "unrecognised: Something chkdsk has never said before."
 check unrecognised-utf16  utf16    "$ODD"      "unrecognised: Something chkdsk has never said before."
 check empty               ascii    ""          "empty report"
+# A label that is not ASCII must not cost the verdict. The byte 0xE9 is an
+# illegal sequence in a UTF-8 locale, `tr` refused the whole report, and a
+# clean volume was reported as `unrecognised: Volume label is Disk `.
+check clean-ansi-label    ansi     "$CLEAN_LABEL"    "no problems"
+check problems-ansi-label ansi     "$PROBLEMS_LABEL" "PROBLEMS FOUND"
+# The same label as UTF-8 and as UTF-16, which are the encodings the same
+# report arrives in from a different Windows console.
+check clean-utf8-label    ascii    "$CLEAN_LABEL"    "no problems"
+check clean-utf16-label   utf16    "$CLEAN_LABEL"    "no problems"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
