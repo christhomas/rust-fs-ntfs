@@ -536,14 +536,15 @@ firewall profile, and the encrypted VM's password. Then
 (`format.com` / `chkdsk` tooling and `vhd_tool`).
 
 This machine's VM settings go in a gitignored `.test-env` at the repo
-root:
+root. The harness reads it as shell, so **quote any value with a space**:
 
 ```sh
-VM_HOST=chris@10.254.254.253           # the VM's host-only address
+VM_HOST=chris@                         # the user; `chore vm:up` adds the address it finds
+VM_STATIC_IP=172.16.18.253             # the fixed address `chore vm:network` gives the VM
 SSH_KEY=/Users/<you>/.ssh/fs-windows-vm.pub
 VM_WORKDIR=C:/Users/chris/dev/rust-fs-ntfs-matrix
 HOST_IMAGE_DIR=/tmp
-VM_VMX=/Users/<you>/Virtual Machines.localized/<name>.vmwarevm/<name>.vmx
+VM_VMX="/Users/<you>/Virtual Machines.localized/<name>.vmwarevm/<name>.vmx"
 ```
 
 The VM is started and stopped by chore, reading its encryption password
@@ -551,11 +552,16 @@ from trove (`antimatter-studios/windows-test-vm`) — unlock trove in the
 shell first:
 
 ```sh
-chore vm:status   # running or not, and whether SSH answers
-chore vm:up       # start headless if needed, wait for SSH
-chore vm:down     # clean shutdown
-bash scripts/run-matrix.sh [smoke|<scenario filter>]
+chore matrix -- smoke            # build the CLI if it changed, start the VM, run, fetch evidence
+chore matrix -- <scenario filter>
+chore vm:status                  # running or not, and whether SSH answers
+chore vm:up / vm:down            # start (and find its address) / clean shutdown
+chore vm:network                 # give the VM its fixed address, or say what is missing
 ```
+
+After a run, `test-diagnostics/matrix/<scenario>/vm/` holds what Windows
+wrote (chkdsk's reports, enumerations), and `summary.txt` says per
+scenario what chkdsk found.
 
 Agent coordination rules: see
 [`docs/multi-agent-test-protocol.md`](docs/multi-agent-test-protocol.md)
