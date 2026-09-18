@@ -237,6 +237,40 @@ tasks:
           printf '%s\n' "$out" >&2
           exit 1
         fi
+  build:cli:
+    desc: Build the rust-ntfs CLI the matrix drives (target/release/rust-ntfs) -- skipped when up to date
+    # UP TO DATE MEANS THE SOURCES HAVE NOT CHANGED, by content: chore hashes
+    # these files and skips the task while the hashes match and the binary
+    # exists. cargo would also notice nothing changed, but only after
+    # starting up, resolving the workspace and checking every crate --
+    # measured at about a second and a screen of output per run; this is
+    # neither. Patterns are LITERAL for the reason given on staticlib.
+    #
+    # ../rust-fs-core is here because it is a path dependency: its source
+    # is compiled into the binary, so a change there must rebuild it too.
+    # rust-toolchain.toml because a toolchain bump changes the output.
+    sources:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - 'src/**/*.rs'
+      - '../rust-fs-core/Cargo.toml'
+      - '../rust-fs-core/src/**/*.rs'
+    generates:
+      - target/release/rust-ntfs
+    deps: [siblings:check]
+    cmds:
+      - cargo build --release --locked --bin rust-ntfs --quiet
+
+  matrix:
+    desc: 'Run matrix scenarios on the Windows VM: `chore matrix -- <group|filter>` (e.g. smoke, mac-format-tiny-32mib)'
+    # Everything a scenario needs, declared rather than remembered: the CLI
+    # it formats with (rebuilt only if its sources changed) and a running VM
+    # whose address is in .test-env. Missing either used to fail every
+    # scenario at step 1 -- five retries each of `rust-ntfs: No such file`.
+    deps: [build:cli, vm:up]
+    cmds:
+      - bash scripts/run-matrix.sh {{.CLI_ARGS}}
 
   # THE VM TASKS. The Windows VM is a thing a task depends on, not a thing a
   # person remembers to start: a matrix task declares `deps: [vm:up]`, and
