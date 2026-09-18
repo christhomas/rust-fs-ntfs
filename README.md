@@ -574,11 +574,13 @@ state machine it describes now lives in `../fs-windows-test-harness/scripts/`).
 
 ### Pre-commit hooks
 
-One-time per clone — runs the same `cargo fmt --check` and
-`cargo clippy --all-targets -- -D warnings` checks CI runs:
+One-time per clone — formats with `cargo fmt` and runs the same
+`cargo clippy --all-targets -- -D warnings` check CI runs. The hooks are
+[github-guard](https://github.com/antimatter-studios/agent-skills)'s, installed
+into `.git/hooks`, where a branch checkout cannot replace them:
 
 ```sh
-./scripts/install-hooks.sh
+~/.claude/skills/github-guard/install.sh .
 ```
 
 Bypass a single commit with `git commit --no-verify`.
