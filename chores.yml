@@ -274,10 +274,17 @@ tasks:
     # whose address is in .test-env. Missing either used to fail every
     # scenario at step 1 -- five retries each of `rust-ntfs: No such file`.
     deps: [build:cli, vm:up]
+    # Sweep the VM's disk images twice, and the FIRST sweep is the one that
+    # matters: a run that dies (the VM stopped responding on 2026-09-18)
+    # never reaches its own cleanup, and its 30 GiB of leftovers are what
+    # makes the NEXT run fail to ship a 4 GiB image. `after` runs on failure
+    # as well as success, so the normal path leaves nothing either.
+    after: [bash scripts/vm-clean-images.sh]
     cmds:
       # After the run, pass or fail: bring the VM's per-scenario evidence
       # (chkdsk's report, what Windows enumerated) home and say what it shows.
       - defer: scripts/matrix-fetch-diag.sh
+      - bash scripts/vm-clean-images.sh
       - bash scripts/run-matrix.sh {{.CLI_ARGS}}
 
   # THE VM TASKS. The Windows VM is a thing a task depends on, not a thing a
@@ -285,6 +292,12 @@ tasks:
   # vm:up is idempotent. The work is in scripts/vm.sh; each task is one line
   # so a failure prints the script's one-line reason, not a screen of shell.
   # Opening the encrypted VM needs trove unlocked in the calling shell.
+  vm:clean:
+    desc: Delete the disk images a matrix run left on the VM, and say how much space that gave back
+    silent: true
+    timeout: 5m
+    cmds: [bash scripts/vm-clean-images.sh]
+
   vm:status:
     desc: Is the Windows test VM running, and does it answer SSH at VM_HOST? One line.
     silent: true
