@@ -493,10 +493,28 @@ it up automatically.
 ### Tests
 
 ```sh
-cargo test                     # unit + integration (skips matrix on non-Windows)
-cargo test --test capi_fsck_callbacks
-cargo test --lib               # unit only
+chore test                     # every tier CI runs, quietly, then one total
+chore test:unit                # one tier: unit | unit:debug | mkfs | suite
+chore test -- --verbose        # the same run, streamed as it happens
+cargo test --test capi_fsck_callbacks   # one file, straight through cargo
 ```
+
+**Quiet by default.** Each tier prints one verdict line naming its log,
+and the whole run goes to `tmp/logs/<tier>.log`:
+
+```text
+unit: ok (653 lines, 44377 bytes) — …/tmp/logs/unit.log
+```
+
+A failure prints the last 40 lines of the log instead. A tier that passed
+but printed more than its budget fails with exit status 65, apart from a
+failing suite: the budgets are measured, they live in one table in
+`scripts/tier.sh`, and CI runs every `cargo test` through the same script.
+The work is done by `scripts/output-budget.sh` in the
+`../fs-windows-test-harness` sibling (`chore siblings`). `test:suite`
+needs the `test-disks/ntfs-*.img` fixtures (built on Linux by
+`test-disks/build-ntfs-feature-images.sh`) and says so if they are
+missing.
 
 ### Test matrix (Windows + macOS VM coordination)
 

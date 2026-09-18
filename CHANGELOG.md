@@ -147,6 +147,18 @@
 
 ### Changed
 
+- The test tiers print a verdict, not a transcript. `chore test` runs
+  every `cargo test` selection CI runs (`test:unit`, `test:unit:debug`,
+  `test:mkfs`, `test:suite`) and `chore lint` runs clippy, each through
+  `scripts/tier.sh`: one line per tier naming its log in `tmp/logs/`, the
+  log's tail on a failure, and exit status 65 when a passing tier printed
+  more than its measured budget. `-- --verbose` or `FWTH_VERBOSE=1`
+  streams the run as well. CI runs the same lines, keeps its
+  executed-test floors (they now read the tier logs), and uploads the logs
+  as `test-logs-*` artifacts. `tests/ci_profile.rs` reads a run through
+  `scripts/tier.sh TIER --` and still refuses every other prefix.
+  `test:suite` checks for the `test-disks/ntfs-*.img` fixtures first.
+
 - **BREAKING.** `index_io::IndexEntryLocation` gains a required public
   field, `sequence: u16`, and is now `#[non_exhaustive]`. Code that
   built one with a struct literal no longer compiles; code that reads
