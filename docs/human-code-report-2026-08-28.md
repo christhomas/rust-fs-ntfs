@@ -20,7 +20,7 @@
 
 **Excluded entirely, and read at no point:**
 
-- **`vendor/`** — contains a submodule (the Windows test harness, `fs-windows-test-harness`) that is currently
+- **`vendor/`** — contains a submodule (`vendor/fs-test-harness`) that is currently
   modified as part of another agent's work in progress. Reading it would have meant
   reporting on a half-finished change set that is not this crate's code.
 - **`docs/testing/`** — two untracked files there (`01-strategy-and-the-contract.html`,
@@ -409,7 +409,7 @@ and are the model the allocators should be brought up to.
 
 Unchanged apart from this file. Still present and untouched:
 
-- the `vendor/` harness submodule (`fs-windows-test-harness`) — modified submodule, another agent's work
+- `vendor/fs-test-harness` — modified submodule, another agent's work
 - `docs/testing/01-strategy-and-the-contract.html` — untracked, someone else's
 - `docs/testing/_style-comparison.md` — untracked, someone else's
 - `stash@{0}` — untouched
