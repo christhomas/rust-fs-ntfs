@@ -542,7 +542,8 @@ of the run.
    git worktree add ".claude/worktrees/${AGENT_SESSION}" \
        -b "agent/${AGENT_SESSION}" staging-2  # or current integration tip
    cd ".claude/worktrees/${AGENT_SESSION}"
-   bash scripts/install-hooks.sh             # pre-commit guards
+   # pre-commit guards: nothing to do. A worktree shares the clone's
+   # .git/hooks, where github-guard's installer put them once per clone.
    chore siblings                            # harness + fs-core siblings
    ```
 

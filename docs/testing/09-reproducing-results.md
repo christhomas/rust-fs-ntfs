@@ -145,10 +145,10 @@ echo "scenarios:   $(python3 -c "import json;print(len(json.load(open('test-matr
 ## Local hygiene gates (what a contributor's machine enforces)
 
 ```bash
-bash scripts/install-hooks.sh   # installs the pre-commit hook (local-only config)
+~/.claude/skills/github-guard/install.sh .   # installs the hooks into .git/hooks (once per clone)
 # thereafter, every commit must pass:
 cargo fmt --check
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 ```
 
 These are not part of the test counts above, but they keep the suite honest:
