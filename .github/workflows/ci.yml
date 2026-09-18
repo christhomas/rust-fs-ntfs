@@ -48,15 +48,15 @@ jobs:
           pin() { sed -n "s/^  $1: *//p" chores.yml | tr -d '\r'; }
 
           case "$(uname -s)-$(uname -m)" in
-            Linux-x86_64)   asset="chore-0.9.0-linux-x86_64.tar.gz" ;;
-            Linux-aarch64)  asset="chore-0.9.0-linux-arm64.tar.gz" ;;
-            Darwin-arm64)   asset="chore-0.9.0-darwin-arm64.tar.gz" ;;
-            Darwin-x86_64)  asset="chore-0.9.0-darwin-x86_64.tar.gz" ;;
+            Linux-x86_64)   asset="chore-0.11.0-linux-x86_64.tar.gz" ;;
+            Linux-aarch64)  asset="chore-0.11.0-linux-arm64.tar.gz" ;;
+            Darwin-arm64)   asset="chore-0.11.0-darwin-arm64.tar.gz" ;;
+            Darwin-x86_64)  asset="chore-0.11.0-darwin-x86_64.tar.gz" ;;
             *)              asset="" ;;   # Windows: no chore build
           esac
 
           if [ -n "$asset" ]; then
-            curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v0.9.0/$asset" \
+            curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v0.11.0/$asset" \
               | sudo tar xz -C /usr/local/bin chore
             chore siblings
           else
@@ -335,15 +335,15 @@ jobs:
           pin() { sed -n "s/^  $1: *//p" chores.yml | tr -d '\r'; }
 
           case "$(uname -s)-$(uname -m)" in
-            Linux-x86_64)   asset="chore-0.9.0-linux-x86_64.tar.gz" ;;
-            Linux-aarch64)  asset="chore-0.9.0-linux-arm64.tar.gz" ;;
-            Darwin-arm64)   asset="chore-0.9.0-darwin-arm64.tar.gz" ;;
-            Darwin-x86_64)  asset="chore-0.9.0-darwin-x86_64.tar.gz" ;;
+            Linux-x86_64)   asset="chore-0.11.0-linux-x86_64.tar.gz" ;;
+            Linux-aarch64)  asset="chore-0.11.0-linux-arm64.tar.gz" ;;
+            Darwin-arm64)   asset="chore-0.11.0-darwin-arm64.tar.gz" ;;
+            Darwin-x86_64)  asset="chore-0.11.0-darwin-x86_64.tar.gz" ;;
             *)              asset="" ;;   # Windows: no chore build
           esac
 
           if [ -n "$asset" ]; then
-            curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v0.9.0/$asset" \
+            curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v0.11.0/$asset" \
               | sudo tar xz -C /usr/local/bin chore
             chore siblings
           else
@@ -489,15 +489,15 @@ jobs:
           pin() { sed -n "s/^  $1: *//p" chores.yml | tr -d '\r'; }
 
           case "$(uname -s)-$(uname -m)" in
-            Linux-x86_64)   asset="chore-0.9.0-linux-x86_64.tar.gz" ;;
-            Linux-aarch64)  asset="chore-0.9.0-linux-arm64.tar.gz" ;;
-            Darwin-arm64)   asset="chore-0.9.0-darwin-arm64.tar.gz" ;;
-            Darwin-x86_64)  asset="chore-0.9.0-darwin-x86_64.tar.gz" ;;
+            Linux-x86_64)   asset="chore-0.11.0-linux-x86_64.tar.gz" ;;
+            Linux-aarch64)  asset="chore-0.11.0-linux-arm64.tar.gz" ;;
+            Darwin-arm64)   asset="chore-0.11.0-darwin-arm64.tar.gz" ;;
+            Darwin-x86_64)  asset="chore-0.11.0-darwin-x86_64.tar.gz" ;;
             *)              asset="" ;;   # Windows: no chore build
           esac
 
           if [ -n "$asset" ]; then
-            curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v0.9.0/$asset" \
+            curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v0.11.0/$asset" \
               | sudo tar xz -C /usr/local/bin chore
             chore siblings
           else
@@ -603,15 +603,15 @@ jobs:
           pin() { sed -n "s/^  $1: *//p" chores.yml | tr -d '\r'; }
 
           case "$(uname -s)-$(uname -m)" in
-            Linux-x86_64)   asset="chore-0.9.0-linux-x86_64.tar.gz" ;;
-            Linux-aarch64)  asset="chore-0.9.0-linux-arm64.tar.gz" ;;
-            Darwin-arm64)   asset="chore-0.9.0-darwin-arm64.tar.gz" ;;
-            Darwin-x86_64)  asset="chore-0.9.0-darwin-x86_64.tar.gz" ;;
+            Linux-x86_64)   asset="chore-0.11.0-linux-x86_64.tar.gz" ;;
+            Linux-aarch64)  asset="chore-0.11.0-linux-arm64.tar.gz" ;;
+            Darwin-arm64)   asset="chore-0.11.0-darwin-arm64.tar.gz" ;;
+            Darwin-x86_64)  asset="chore-0.11.0-darwin-x86_64.tar.gz" ;;
             *)              asset="" ;;   # Windows: no chore build
           esac
 
           if [ -n "$asset" ]; then
-            curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v0.9.0/$asset" \
+            curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v0.11.0/$asset" \
               | sudo tar xz -C /usr/local/bin chore
             chore siblings
           else
