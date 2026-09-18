@@ -1004,9 +1004,80 @@ pub fn grow_nonresident_by_record_number_io<T: BlockIo + ?Sized>(
         .ok_or_else(|| format!("no contiguous free run of {need_clusters} clusters available"))?;
     bitmap::allocate_io(io, &bm, new_lcn, need_clusters)?;
 
+    // EVERYTHING BELOW THE ALLOCATION IS FALLIBLE AND ROLLED BACK ONCE.
+    //
+    // The mapping-capacity branch inside `grow_commit_io` used to be the
+    // only error path here that gave the clusters back. `encode_runs`
+    // above it and the record commit below it both returned through `?`,
+    // and each one leaves `need_clusters` marked in use with no record
+    // naming them -- permanently, because nothing allocates them again
+    // and no `unlink` will ever free them. Only `chkdsk /f` reclaims
+    // them, and a driver retrying a grow against a flaky device burns
+    // the free space on every attempt. See #146 and #251.
+    match grow_commit_io(
+        io,
+        &params,
+        record_number,
+        &runs,
+        new_lcn,
+        need_clusters,
+        current_last_vcn,
+        new_size,
+        new_allocated,
+        new_last_vcn,
+        mapping_capacity,
+    ) {
+        Ok(size) => Ok(size),
+        Err(e) => Err(undo_cluster_allocation_io(
+            io,
+            &bm,
+            &[(new_lcn, need_clusters)],
+            e,
+        )),
+    }
+}
+
+/// The part of [`grow_nonresident_by_record_number_io`] that runs after
+/// the allocation, with every failure as a `?`.
+///
+/// Split out so the rollback has exactly one site; see
+/// `undo_cluster_allocation_io`.
+#[allow(clippy::too_many_arguments)]
+fn grow_commit_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    params: &crate::mft_io::BootParams,
+    record_number: u64,
+    runs: &[DataRun],
+    new_lcn: u64,
+    need_clusters: u64,
+    current_last_vcn: u64,
+    new_size: u64,
+    new_allocated: u64,
+    new_last_vcn: u64,
+    mapping_capacity: usize,
+) -> Result<u64, String> {
+    // THE ALLOCATED EXTENT HAS TO BE ONE THE VOLUME CAN ADDRESS.
+    //
+    // This path committed with no `cluster_span` call anywhere, unlike
+    // the three sites PR #200 fixed. `find_free_run_io` searches the
+    // range `$Bitmap` declares for itself, and the allocator's capacity
+    // is `volume_bytes().div_ceil(cluster_size)` -- which, on the
+    // volumes this mkfs writes, includes a final partial cluster that
+    // every transfer bound rejects. A free bit there produced a
+    // committed, permanently allocated extent that nothing can ever read
+    // or write, reported as a successful grow. Checked here, before the
+    // record names the clusters, so the refusal rolls the allocation
+    // back instead of persisting it. See #223.
+    let span_bytes = need_clusters
+        .checked_mul(params.cluster_size)
+        .ok_or_else(|| format!("grow: {need_clusters} clusters is not an addressable span"))?;
+    crate::mft_io::cluster_span(params, new_lcn, 0, 0, span_bytes, io.size()).map_err(|e| {
+        format!("grow: the {need_clusters} clusters at LCN {new_lcn} are not on the volume: {e}")
+    })?;
+
     // Build new run list. If the new allocation is contiguous with the
     // last dense run, extend that run; otherwise append a new run.
-    let mut new_runs = runs.clone();
+    let mut new_runs = runs.to_vec();
     let extend_last = new_runs
         .last()
         .and_then(|r| r.lcn.map(|lcn| lcn + r.length == new_lcn))
@@ -1024,9 +1095,6 @@ pub fn grow_nonresident_by_record_number_io<T: BlockIo + ?Sized>(
 
     let new_mapping = data_runs::encode_runs(&new_runs)?;
     if new_mapping.len() > mapping_capacity {
-        // Need attribute resize (W2.1) — undo the bitmap allocation so we
-        // don't leak clusters.
-        bitmap::free_io(io, &bm, new_lcn, need_clusters)?;
         return Err(format!(
             "new mapping_pairs ({} bytes) exceed attr capacity ({}). Attribute resize (W2.1) required.",
             new_mapping.len(),
@@ -1375,6 +1443,50 @@ enum NewRecordState {
 /// would understate what is on disk.
 ///
 /// See [`NewRecordState`] for why "how much to undo" is not a boolean.
+/// Give back every cluster an operation took before it failed, and say so
+/// in the error when the giving back itself fails.
+///
+/// THE ROLLBACK HAPPENS ONCE, AT ONE SITE PER OPERATION.
+///
+/// The shape this replaces was a `crate::bitmap::free_io(...)` written
+/// out at each error path after the allocation, and `?` at the ones
+/// nobody thought of as error paths -- `encode_runs`, the record commit.
+/// Each hand-written rollback was correct and none of them had a test:
+/// deleting any single one left the whole suite green (#251, #146).
+/// `write_sparse_file_io` already moved to this shape and its comment
+/// makes the argument -- the fallible work uses `?` throughout and the
+/// caller undoes the allocation once -- so one test of one failure path
+/// exercises the rollback for all of them, because there is only one.
+///
+/// A FAILED ROLLBACK IS REPORTED, NOT DISCARDED. Every existing site
+/// spelled it `let _ = free_io(...)`, which is silent about the case that
+/// matters: a rollback that fails leaves clusters marked in use with
+/// nothing referencing them, which is the leak the rollback exists to
+/// prevent, and the caller heard only about the original error.
+/// `undo_new_record_io` above already argues this for the MFT record it
+/// retires; this is the same argument for the clusters.
+fn undo_cluster_allocation_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    bm: &crate::bitmap::BitmapLocation,
+    allocated: &[(u64, u64)],
+    cause: String,
+) -> String {
+    let mut failures: Vec<String> = Vec::new();
+    for &(lcn, n_clusters) in allocated {
+        if let Err(e) = crate::bitmap::free_io(io, bm, lcn, n_clusters) {
+            failures.push(format!("{n_clusters} clusters at LCN {lcn}: {e}"));
+        }
+    }
+    if failures.is_empty() {
+        cause
+    } else {
+        format!(
+            "{cause} (rollback incomplete, clusters leaked in $Bitmap: {})",
+            failures.join("; ")
+        )
+    }
+}
+
 fn undo_new_record_io<T: BlockIo + ?Sized>(
     io: &mut T,
     mbm: &mft_bitmap::MftBitmap,
@@ -2998,9 +3110,54 @@ pub fn promote_resident_data_to_nonresident_io<T: BlockIo + ?Sized>(
     let new_lcn = crate::bitmap::find_free_run_io(io, &bm, n_clusters, params.mft_lcn)?
         .ok_or_else(|| format!("no contiguous free run of {n_clusters} clusters"))?;
     crate::bitmap::allocate_io(io, &bm, new_lcn, n_clusters)?;
-
-    // Write the data (zero-padded to cluster boundary).
     let allocated_length = n_clusters * cluster_size;
+
+    // EVERYTHING BELOW THE ALLOCATION IS FALLIBLE AND ROLLED BACK ONCE.
+    //
+    // Four of the error paths below already gave the clusters back, one
+    // per hand-written `let _ = free_io(...)`. `encode_runs` and the
+    // record replacement did not: both returned through `?`, leaving
+    // `n_clusters` marked in use with nothing on the volume naming them.
+    // Splitting at the allocation is the shape `write_sparse_file_io`
+    // already moved to, and it is what makes one test of one failure
+    // path exercise the rollback for every path. See #251.
+    match promote_data_commit_io(
+        io,
+        &params,
+        rec,
+        new_data,
+        new_lcn,
+        n_clusters,
+        allocated_length,
+        loc.attribute_id,
+    ) {
+        Ok(()) => Ok(()),
+        Err(e) => Err(undo_cluster_allocation_io(
+            io,
+            &bm,
+            &[(new_lcn, n_clusters)],
+            e,
+        )),
+    }
+}
+
+/// The part of [`promote_resident_data_to_nonresident_io`] that runs after the allocation, with every
+/// failure as a `?`.
+///
+/// Split out so the rollback has exactly one site; see
+/// `undo_cluster_allocation_io`.
+#[allow(clippy::too_many_arguments)]
+fn promote_data_commit_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    params: &crate::mft_io::BootParams,
+    rec: u64,
+    new_data: &[u8],
+    new_lcn: u64,
+    n_clusters: u64,
+    allocated_length: u64,
+    attr_id: u16,
+) -> Result<(), String> {
+    let new_size = new_data.len() as u64;
     {
         // Checked and bounded by the volume and the device; see
         // `mft_io::cluster_span`. The LCN comes from
@@ -3008,39 +3165,21 @@ pub fn promote_resident_data_to_nonresident_io<T: BlockIo + ?Sized>(
         // declares for itself -- so a bitmap whose length field says the
         // volume is larger than it is hands back a cluster the volume
         // does not have, and on a file-backed image `write_all_at`
-        // silently extends the file rather than failing. The allocation
-        // is given back before the refusal, so a rejected write does not
-        // leave the clusters marked in use.
-        let disk_offset = match crate::mft_io::cluster_span(
-            &params,
-            new_lcn,
-            0,
-            0,
-            allocated_length,
-            io.size(),
-        ) {
-            Ok(at) => at,
-            Err(e) => {
-                let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
-                return Err(format!("write data: {e}"));
-            }
-        };
-        if let Err(e) = io.write_all_at(disk_offset, new_data) {
-            let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
-            return Err(format!("write data: {e}"));
-        }
+        // silently extends the file rather than failing. The caller
+        // gives the allocation back on any error from here down, so a
+        // rejected write does not leave the clusters marked in use.
+        let disk_offset =
+            crate::mft_io::cluster_span(params, new_lcn, 0, 0, allocated_length, io.size())
+                .map_err(|e| format!("write data: {e}"))?;
+        io.write_all_at(disk_offset, new_data)
+            .map_err(|e| format!("write data: {e}"))?;
         let pad = (allocated_length - new_size) as usize;
         if pad > 0 {
             let zeros = vec![0u8; pad];
-            if let Err(e) = io.write_all_at(disk_offset + new_size, &zeros) {
-                let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
-                return Err(format!("write zero-pad: {e}"));
-            }
+            io.write_all_at(disk_offset + new_size, &zeros)
+                .map_err(|e| format!("write zero-pad: {e}"))?;
         }
-        if let Err(e) = io.sync() {
-            let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
-            return Err(format!("fsync data: {e}"));
-        }
+        io.sync().map_err(|e| format!("fsync data: {e}"))?;
     }
 
     // Build mapping_pairs (single run).
@@ -3074,7 +3213,6 @@ pub fn promote_resident_data_to_nonresident_io<T: BlockIo + ?Sized>(
     // then zero and this is `-1`, which is what `-1` actually means.
     let clusters_covered: u64 = runs.iter().map(|r| r.length).sum();
     let last_vcn = clusters_covered as i64 - 1;
-    let attr_id = loc.attribute_id;
     let new_attr_bytes = crate::record_build::build_nonresident_data_attribute(
         attr_id,
         new_size,
@@ -3090,10 +3228,7 @@ pub fn promote_resident_data_to_nonresident_io<T: BlockIo + ?Sized>(
             .ok_or_else(|| "$DATA vanished during RMW".to_string())?;
         crate::attr_resize::replace_attribute(record, loc.attr_offset, &new_attr_bytes)
     });
-    if let Err(e) = replace_res {
-        let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
-        return Err(format!("replace $DATA: {e}"));
-    }
+    replace_res.map_err(|e| format!("replace $DATA: {e}"))?;
 
     Ok(())
 }
@@ -3157,12 +3292,13 @@ pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
         attr_id,
         &mut allocated,
     );
-    if outcome.is_err() {
-        for &(lcn, n) in &allocated {
-            let _ = crate::bitmap::free_io(io, &bm, lcn, n);
-        }
+    match outcome {
+        Ok(()) => Ok(()),
+        // Through the shared helper, so a rollback that itself fails is
+        // reported rather than dropped -- this site spelled it
+        // `let _ = free_io(...)` too. See #146.
+        Err(e) => Err(undo_cluster_allocation_io(io, &bm, &allocated, e)),
     }
-    outcome
 }
 
 /// The body of [`write_sparse_file_io`], with every failure as a `?`.
@@ -3366,8 +3502,56 @@ pub fn promote_attribute_to_nonresident_io<T: BlockIo + ?Sized>(
     let new_lcn = crate::bitmap::find_free_run_io(io, &bm, n_clusters, params.mft_lcn)?
         .ok_or_else(|| format!("no contiguous free run of {n_clusters} clusters"))?;
     crate::bitmap::allocate_io(io, &bm, new_lcn, n_clusters)?;
-
     let allocated_length = n_clusters * cluster_size;
+
+    // EVERYTHING BELOW THE ALLOCATION IS FALLIBLE AND ROLLED BACK ONCE.
+    //
+    // Four of the error paths below already gave the clusters back, one
+    // per hand-written `let _ = free_io(...)`. `encode_runs` and the
+    // record replacement did not: both returned through `?`, leaving
+    // `n_clusters` marked in use with nothing on the volume naming them.
+    // Splitting at the allocation is the shape `write_sparse_file_io`
+    // already moved to, and it is what makes one test of one failure
+    // path exercise the rollback for every path. See #251.
+    match promote_attribute_commit_io(
+        io,
+        &params,
+        rec,
+        new_data,
+        new_lcn,
+        n_clusters,
+        allocated_length,
+        attr_type,
+        attr_name,
+    ) {
+        Ok(()) => Ok(()),
+        Err(e) => Err(undo_cluster_allocation_io(
+            io,
+            &bm,
+            &[(new_lcn, n_clusters)],
+            e,
+        )),
+    }
+}
+
+/// The part of [`promote_attribute_to_nonresident_io`] that runs after the allocation, with every
+/// failure as a `?`.
+///
+/// Split out so the rollback has exactly one site; see
+/// `undo_cluster_allocation_io`.
+#[allow(clippy::too_many_arguments)]
+fn promote_attribute_commit_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    params: &crate::mft_io::BootParams,
+    rec: u64,
+    new_data: &[u8],
+    new_lcn: u64,
+    n_clusters: u64,
+    allocated_length: u64,
+    attr_type: AttrType,
+    attr_name: Option<&str>,
+) -> Result<(), String> {
+    let new_size = new_data.len() as u64;
     {
         // Checked and bounded by the volume and the device; see
         // `mft_io::cluster_span`. The LCN comes from
@@ -3375,39 +3559,21 @@ pub fn promote_attribute_to_nonresident_io<T: BlockIo + ?Sized>(
         // declares for itself -- so a bitmap whose length field says the
         // volume is larger than it is hands back a cluster the volume
         // does not have, and on a file-backed image `write_all_at`
-        // silently extends the file rather than failing. The allocation
-        // is given back before the refusal, so a rejected write does not
-        // leave the clusters marked in use.
-        let disk_offset = match crate::mft_io::cluster_span(
-            &params,
-            new_lcn,
-            0,
-            0,
-            allocated_length,
-            io.size(),
-        ) {
-            Ok(at) => at,
-            Err(e) => {
-                let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
-                return Err(format!("write data: {e}"));
-            }
-        };
-        if let Err(e) = io.write_all_at(disk_offset, new_data) {
-            let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
-            return Err(format!("write data: {e}"));
-        }
+        // silently extends the file rather than failing. The caller
+        // gives the allocation back on any error from here down, so a
+        // rejected write does not leave the clusters marked in use.
+        let disk_offset =
+            crate::mft_io::cluster_span(params, new_lcn, 0, 0, allocated_length, io.size())
+                .map_err(|e| format!("write data: {e}"))?;
+        io.write_all_at(disk_offset, new_data)
+            .map_err(|e| format!("write data: {e}"))?;
         let pad = (allocated_length - new_size) as usize;
         if pad > 0 {
             let zeros = vec![0u8; pad];
-            if let Err(e) = io.write_all_at(disk_offset + new_size, &zeros) {
-                let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
-                return Err(format!("write zero-pad: {e}"));
-            }
+            io.write_all_at(disk_offset + new_size, &zeros)
+                .map_err(|e| format!("write zero-pad: {e}"))?;
         }
-        if let Err(e) = io.sync() {
-            let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
-            return Err(format!("fsync data: {e}"));
-        }
+        io.sync().map_err(|e| format!("fsync data: {e}"))?;
     }
 
     let runs = vec![DataRun {
@@ -3444,10 +3610,7 @@ pub fn promote_attribute_to_nonresident_io<T: BlockIo + ?Sized>(
         }
         Ok(())
     });
-    if let Err(e) = replace_res {
-        let _ = crate::bitmap::free_io(io, &bm, new_lcn, n_clusters);
-        return Err(format!("replace attribute: {e}"));
-    }
+    replace_res.map_err(|e| format!("replace attribute: {e}"))?;
 
     Ok(())
 }

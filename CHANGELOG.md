@@ -91,6 +91,29 @@
   own entry became `[]` and was then compared against the wanted name as
   though the entry were legitimately unnamed — a lookup for the empty
   name matched it, and the corrupt entry was never reported.
+- A failure after a cluster allocation gives the clusters back, once, and
+  says so when it cannot. `grow` and both non-resident promotions took
+  clusters out of `$Bitmap` and then had error paths that returned through
+  `?` — `encode_runs` in all three, and in `grow` the MFT-record commit
+  itself. Every error inside that commit (a `$DATA` that moved under the
+  re-read, a record whose IN_USE bit is clear, the fixup, the write-back,
+  the fsync) left the clusters marked in use with no record naming them:
+  nothing allocates them again and no `unlink` frees them, so only
+  `chkdsk /f` reclaims them and a driver retrying against a flaky device
+  burns free space on every attempt. The fallible work now lives in an
+  inner function using `?` throughout and the rollback happens at one
+  site, which is the shape the sparse writer already had. A rollback that
+  itself fails is reported in the error rather than discarded by
+  `let _ = free_io(...)`, which is the only way a caller can learn the
+  clusters really did leak.
+- The grow path checks that the clusters it allocated are on the volume
+  before it commits them. The three sites with a data write were given
+  that check; `grow` writes no data — its new clusters are uninitialised
+  by design — so it had no check anywhere, and a free bit on a cluster the
+  volume cannot address produced a committed, permanently allocated,
+  unreadable extent reported as a successful grow. Reachable through a
+  foreign, truncated or corrupt `$Bitmap`: the allocator's capacity
+  includes a final partial cluster that every transfer bound rejects.
 - An index block that leaves its run is refused rather than transferred
   anyway. On a volume with clusters smaller than the 4096-byte index
   block, a block landing across a run boundary took its tail from — and
