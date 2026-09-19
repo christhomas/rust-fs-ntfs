@@ -459,16 +459,31 @@ jobs:
   # stayed green with the cargo invocation below deleted.
   #
   # `(advisory)` is in the name on purpose, and it is the part to keep.
-  # `continue-on-error: true` below is a declaration that this job must
-  # not gate anything; naming it in branch protection re-arms the gate
-  # that key disclaims, which is exactly what had happened. The required
-  # set now lives in .github-guard and deliberately does not name this
-  # job -- but the next person to edit that file reads this name first,
-  # and the name should be the one that stops them.
+  # This job must not GATE anything: the required set lives in
+  # .github-guard and deliberately does not name it, and the next person
+  # to edit that file reads this name first.
+  #
+  # ADVISORY IS NOT THE SAME AS SILENT, which is what `continue-on-error:
+  # true` on the job made it (#158). That key cannot tell "nightly stopped
+  # building this crate" -- which must not stop work on stable -- from
+  # "ASan found an out-of-bounds write", which is the entire reason the
+  # job exists. Both produced the same green tick.
+  #
+  # So the toleration is on the TOOLCHAIN STEP only. A nightly that will
+  # not install leaves the job green and says so; a sanitizer finding
+  # turns it red. Red here blocks nothing, because the job is not a
+  # required check -- it is a signal a human reads, and a signal that
+  # cannot go red is not one.
   asan:
     name: unit tests under ASan (nightly toolchain, advisory)
     runs-on: ubuntu-latest
-    continue-on-error: true
+    env:
+      # PINNED, like every other toolchain in both workflows. It floated on
+      # `@nightly` while the rest pin 1.95.0, and combined with the old
+      # blanket continue-on-error a nightly that stopped building this
+      # crate simply stopped testing it, indefinitely, with no signal.
+      # Move this deliberately; the job says when it cannot install.
+      ASAN_TOOLCHAIN: nightly-2026-09-01
     steps:
       - uses: actions/checkout@v4
       - name: check out sibling repos
@@ -516,10 +531,18 @@ jobs:
             git clone --quiet --depth 1 --branch "$harness_ref" \
               https://github.com/antimatter-studios/fs-windows-test-harness.git ../fs-windows-test-harness
           fi
-      - uses: dtolnay/rust-toolchain@nightly
+      - id: nightly
+        continue-on-error: true
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.ASAN_TOOLCHAIN }}
           components: rust-src
+      - name: Say so if the pinned nightly is unavailable
+        if: steps.nightly.outcome != 'success'
+        run: |
+          echo "::notice::${ASAN_TOOLCHAIN} could not be installed, so nothing was sanitized in this run. This job is advisory and stays green; bump ASAN_TOOLCHAIN in ci.yml."
       - name: Cache cargo registry
+        if: steps.nightly.outcome == 'success'
         uses: actions/cache@v4
         with:
           path: |
@@ -528,16 +551,19 @@ jobs:
             target
           key: asan-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Run unit tests under ASan
+        # No continue-on-error: a finding here is the job's whole output.
+        if: steps.nightly.outcome == 'success'
         env:
           RUSTFLAGS: "-Zsanitizer=address"
           RUSTDOCFLAGS: "-Zsanitizer=address"
         run: |
-          scripts/tier.sh asan -- cargo +nightly test --release --locked --lib \
+          scripts/tier.sh asan -- cargo "+$ASAN_TOOLCHAIN" test --release --locked --lib \
             --target x86_64-unknown-linux-gnu
           # A floor on an ADVISORY job, which is not a contradiction. This job
-          # cannot gate a merge (see `continue-on-error` above), so the only
-          # thing it produces is a signal a human reads -- and a signal that
-          # reads green because it sanitized nothing is worse than no signal.
+          # cannot gate a merge (it is not in .github-guard's required set),
+          # so the only thing it produces is a signal a human reads -- and a
+          # signal that reads green because it sanitized nothing is worse
+          # than no signal.
           # ASan needs a nightly toolchain, `-Zsanitizer=address` and an
           # explicit `--target`; every one of those can stop selecting tests
           # without stopping the job.
