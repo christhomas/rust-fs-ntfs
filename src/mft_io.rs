@@ -750,6 +750,73 @@ where
 ///
 /// If `saved` is not one record long, or the write fails. A caller that
 /// gets an error here has a torn operation on disk and should say so in
+/// Copy MFT record `record_number` into `$MFTMirr`, if it is one of the
+/// records the mirror holds.
+///
+/// THE MIRROR IS WRITTEN ONCE BY mkfs AND WAS NEVER UPDATED AGAIN
+/// (#145). It holds the first four records -- `$MFT`, `$MFTMirr`,
+/// `$LogFile` and `$Volume` -- and this crate writes into `$Volume`
+/// routinely: `set_dirty`, `clear_dirty` and `upgrade_volume_version`
+/// all edit record 3. Every one of those left the mirror holding the
+/// record as mkfs first wrote it.
+///
+/// What that costs is the mirror's whole purpose. `$MFTMirr` exists so a
+/// volume whose first MFT records are unreadable can still be mounted
+/// and repaired, and chkdsk compares the two copies: a mirror that
+/// disagrees is reported, and a recovery that trusts it restores a
+/// `$Volume` with the dirty bit and the version this driver had already
+/// changed.
+///
+/// Records 4 and up are not mirrored, so this is a no-op for them.
+pub fn sync_mftmirr_record_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+) -> Result<(), String> {
+    /// `$MFTMirr` mirrors records 0..MIRRORED-1. Same constant as
+    /// `mkfs::MFTMIRR_RECORDS`, which sizes the mirror when it is built.
+    const MIRRORED: u64 = 4;
+    if record_number >= MIRRORED {
+        return Ok(());
+    }
+    let params = read_boot_params_io(io)?;
+
+    // Where the mirror lives: $MFTMirr is record 1, and its unnamed
+    // $DATA's first run is the mirror itself.
+    let (_p, mirr_record) = read_mft_record_io(io, 1)?;
+    let loc = crate::attr_io::find_attribute(&mirr_record, crate::attr_io::AttrType::Data, None)
+        .ok_or("$MFTMirr has no unnamed $DATA")?;
+    if loc.is_resident {
+        return Err("$MFTMirr's $DATA is resident, which is not a volume this crate wrote".into());
+    }
+    let mpo = loc
+        .non_resident_mapping_pairs_offset
+        .ok_or("$MFTMirr's $DATA has no mapping-pairs offset")? as usize;
+    let runs = crate::data_runs::decode_runs(
+        &mirr_record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length],
+    )?;
+    let first = runs.first().ok_or("$MFTMirr's $DATA has no runs")?;
+    let lcn = first.lcn.ok_or("$MFTMirr's first run is sparse")?;
+
+    // The record as it now stands, fixups and all: the mirror holds the
+    // same on-disk bytes, so this is a copy rather than a re-encode.
+    let at_in_mirror = record_number
+        .checked_mul(params.file_record_size)
+        .ok_or("mirror offset overflows")?;
+    let mirror_at = cluster_span(
+        &params,
+        lcn,
+        0,
+        at_in_mirror,
+        params.file_record_size,
+        io.size(),
+    )?;
+    let mut raw = vec![0u8; params.file_record_size as usize];
+    let source_at = mft_record_offset(&params, record_number);
+    io.read_exact_at(source_at, &mut raw)?;
+    io.write_all_at(mirror_at, &raw)?;
+    io.sync()
+}
+
 /// the error it returns, because nothing further can repair it.
 pub fn restore_mft_record_io<T: BlockIo + ?Sized>(
     io: &mut T,

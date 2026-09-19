@@ -318,6 +318,8 @@ pub fn clear_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
     io.write_all_at(flag_disk_offset, &new_flags.to_le_bytes())
         .map_err(|e| format!("write volume flags: {e}"))?;
     io.sync().map_err(|e| format!("fsync: {e}"))?;
+    // $Volume is record 3, which $MFTMirr mirrors (#145).
+    crate::mft_io::sync_mftmirr_record_io(io, VOLUME_RECORD_NUMBER)?;
     Ok(true)
 }
 
@@ -331,6 +333,7 @@ pub fn set_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
     io.write_all_at(flag_disk_offset, &new_flags.to_le_bytes())
         .map_err(|e| format!("write volume flags: {e}"))?;
     io.sync().map_err(|e| format!("fsync: {e}"))?;
+    crate::mft_io::sync_mftmirr_record_io(io, VOLUME_RECORD_NUMBER)?;
     Ok(true)
 }
 
@@ -382,6 +385,7 @@ pub fn upgrade_volume_version_io<T: FsckIo>(io: &mut T) -> Result<bool, String> 
     io.write_all_at(major_disk_offset, &new_bytes)
         .map_err(|e| format!("write volume version+flags: {e}"))?;
     io.sync().map_err(|e| format!("fsync: {e}"))?;
+    crate::mft_io::sync_mftmirr_record_io(io, VOLUME_RECORD_NUMBER)?;
     Ok(true)
 }
 
