@@ -105,20 +105,28 @@ struct Cost {
     opens: u64,
 }
 
+/// The image these numbers are measured on, BY NAME.
+///
+/// This used to be "whichever `test-disks/*.img` is largest", which is
+/// not a fixture, it is a race: the build script's largest is this one at
+/// 64 MiB, but `tests/cluster_size_matrix.rs` leaves a 512 MiB
+/// `_csize_c64k.img` behind and `tests/mftmirr_extent.rs` leaves a
+/// 512 MiB `_mirror_c65536.img`. Whichever ran last won, the two are
+/// tied, and the tie broke arbitrarily -- so the baseline recorded in
+/// `docs/read-path-cost.md` was measured on a different volume from the
+/// one the document names, and a rerun could compare against neither
+/// (#226).
+///
+/// A cost baseline only means something against a fixed input. Naming
+/// the file is what makes two runs comparable; if it is absent the
+/// measurement is skipped rather than taken on a substitute.
+const FIXTURE: &str = "ntfs-large-file.img";
+
 fn fixture() -> Option<PathBuf> {
-    let disks = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-disks");
-    let Ok(entries) = std::fs::read_dir(&disks) else {
-        return None;
-    };
-    // The largest image available: the cost of a walk is the point, and
-    // the bigger fixtures have the deeper trees.
-    let mut images: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("img"))
-        .collect();
-    images.sort_by_key(|p| std::cmp::Reverse(p.metadata().map(|m| m.len()).unwrap_or(0)));
-    images.into_iter().next()
+    let img = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("test-disks")
+        .join(FIXTURE);
+    img.is_file().then_some(img)
 }
 
 fn report(what: &str, c: &Cost) {
@@ -388,7 +396,12 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
 #[test]
 fn what_a_read_costs_in_calls_to_the_device() {
     let Some(img) = fixture() else {
-        eprintln!("no fixture to measure — run test-disks/build-ntfs-feature-images.sh");
+        // Named so `scripts/tier.sh`'s skip gate sees it: a measurement
+        // that did not happen is not a measurement that passed (#298).
+        eprintln!(
+            "SKIP: test-disks/{FIXTURE} is not present — run \
+             test-disks/build-ntfs-feature-images.sh"
+        );
         return;
     };
     eprintln!("measuring {}", img.display());
