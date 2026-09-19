@@ -481,6 +481,22 @@ pub fn apply_fixup_on_read_magic(
     bytes_per_sector: u16,
     expected_magic: &[u8; 4],
 ) -> Result<(), String> {
+    // A BUFFER TOO SHORT TO HOLD A MAGIC IS AN ERROR, NOT A PANIC. This
+    // sliced `record[0..4]` first, so anything shorter than four bytes
+    // took the process down before the magic could be checked -- found
+    // by the `apply_fixup` fuzz target on its first run (#296), with the
+    // three bytes `ff ff 0a`.
+    //
+    // A record read through this crate's own paths is `file_record_size`
+    // bytes and cannot be short, but this is `pub` on a published crate
+    // and the INDX variant is handed block sizes that come off the disk.
+    if record.len() < 4 {
+        return Err(format!(
+            "a record of {} bytes is too short to hold a {:?} magic",
+            record.len(),
+            std::str::from_utf8(expected_magic).unwrap_or("?")
+        ));
+    }
     if &record[0..4] != expected_magic {
         return Err(format!(
             "magic mismatch: expected {:?}, got {:02x?}",
@@ -525,6 +541,14 @@ pub fn apply_fixup_on_write_magic(
     bytes_per_sector: u16,
     expected_magic: &[u8; 4],
 ) -> Result<(), String> {
+    // Same short-buffer guard as the read side (#296).
+    if record.len() < 4 {
+        return Err(format!(
+            "a record of {} bytes is too short to hold a {:?} magic",
+            record.len(),
+            std::str::from_utf8(expected_magic).unwrap_or("?")
+        ));
+    }
     if &record[0..4] != expected_magic {
         return Err(format!(
             "magic mismatch: expected {:?}, got {:02x?}",
