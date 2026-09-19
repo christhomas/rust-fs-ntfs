@@ -151,6 +151,29 @@ fn targets() -> Vec<Target> {
                 }
             },
         },
+        // THE FIXUP APPLIER, which rewrites bytes at offsets the record
+        // itself declares and runs before anything about that record
+        // has been validated. The explorer found a panic here on its
+        // first run -- `record[0..4]` on a two-byte buffer -- so the
+        // sector size is part of the case rather than fixed: the stride
+        // count derives from it and a hostile boot sector chooses it.
+        Target {
+            // ITS OWN CORPUS, because one of the seeds is three bytes
+            // long and `every_committed_record_has_attributes_to_walk`
+            // rightly asserts that everything in `mft_record` is a
+            // record. The three bytes are the explorer's crash input,
+            // kept as the reproducer the way this file's header says
+            // findings should be.
+            corpus: "apply_fixup",
+            name: "apply_fixup",
+            cases: 128,
+            run: |b| {
+                for bytes_per_sector in [512u16, 1024, 4096] {
+                    let mut record = b.to_vec();
+                    let _ = fs_ntfs::mft_io::apply_fixup_on_read(&mut record, bytes_per_sector);
+                }
+            },
+        },
     ]
 }
 

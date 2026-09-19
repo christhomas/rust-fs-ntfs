@@ -244,6 +244,10 @@ pub fn build_directory_record(
     nt_time: u64,
     bytes_per_sector: u16,
     index_block_size: u32,
+    // The volume's cluster size, which decides the
+    // `clusters_per_index_block` byte inside `$INDEX_ROOT` -- see
+    // `build_empty_ir_value` (#144).
+    cluster_size: u32,
 ) -> Result<Vec<u8>, String> {
     if record_size < 512 || !record_size.is_multiple_of(bytes_per_sector as usize) {
         return Err(format!("invalid record_size {record_size}"));
@@ -272,8 +276,23 @@ pub fn build_directory_record(
         nt_time,
         /* is_dir */ true,
         fn_namespace_for(name),
-    );
-    cursor = write_empty_index_root(&mut rec, cursor, 2, index_block_size, bytes_per_sector)?;
+    )
+    .ok_or_else(|| {
+        format!(
+            "record overflow: a $FILE_NAME for a {}-unit directory name does not fit in a \
+             {record_size}-byte record alongside the attributes already written ({cursor} bytes \
+             used)",
+            utf16.len()
+        )
+    })?;
+    cursor = write_empty_index_root(
+        &mut rec,
+        cursor,
+        2,
+        index_block_size,
+        cluster_size,
+        bytes_per_sector,
+    )?;
 
     // W2.5 — bounds guard, same rationale as `build_record_inner`.
     if cursor + 8 > record_size {
@@ -303,14 +322,29 @@ const ATTR_INDEX_ROOT: u32 = 0x90;
 /// Layout: IR_HEADER (16) + INDEX_HEADER (16) + LAST sentinel entry (16).
 /// This is a pure function — no record buffer needed — so it can be tested
 /// independently and reused wherever an empty index-root value is needed.
-pub(crate) fn build_empty_ir_value(index_block_size: u32) -> [u8; 48] {
+/// `cluster_size` decides the `clusters_per_index_block` BYTE, which is
+/// not the same encoding as the boot sector's field of that name:
+///
+///   cluster_size <= index_block_size -> index_block_size / cluster_size
+///   cluster_size  > index_block_size -> index_block_size / 512
+///
+/// (`mkfs::build_index_root_value` derives it the same way and cites the
+/// reference dumps it came from.) This used to hardcode 1 with the
+/// comment "assumes block == cluster size", and chkdsk reports
+/// `Error detected in index $I30 for file 5` when the byte disagrees
+/// with the volume's geometry (#144).
+pub(crate) fn build_empty_ir_value(index_block_size: u32, cluster_size: u32) -> [u8; 48] {
     let mut v = [0u8; 48];
     // IR_HEADER (bytes 0..16):
     v[0..4].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes()); // attribute_type = $FILE_NAME
     v[4..8].copy_from_slice(&COLLATION_FILE_NAME.to_le_bytes()); // collation_rule
     v[8..12].copy_from_slice(&index_block_size.to_le_bytes()); // index_block_size
-    v[12] = 1; // clusters_per_index_block (assumes block == cluster size)
-               // v[13..16] = padding, already zero.
+    v[12] = if cluster_size <= index_block_size {
+        (index_block_size / cluster_size) as u8
+    } else {
+        (index_block_size / 512) as u8
+    };
+    // v[13..16] = padding, already zero.
 
     // INDEX_HEADER (bytes 16..32):
     v[16..20].copy_from_slice(&16u32.to_le_bytes()); // first_entry: immediately after INDEX_HEADER
@@ -332,6 +366,7 @@ fn write_empty_index_root(
     at: usize,
     attr_id: u16,
     index_block_size: u32,
+    cluster_size: u32,
     bytes_per_sector: u16,
 ) -> Result<usize, String> {
     let name_u16: [u16; 4] = ['$' as u16, 'I' as u16, '3' as u16, '0' as u16];
@@ -339,7 +374,7 @@ fn write_empty_index_root(
     let header_size = 24usize;
     let name_offset = header_size;
     let value_offset = align8(header_size + name_bytes);
-    let ir_value = build_empty_ir_value(index_block_size);
+    let ir_value = build_empty_ir_value(index_block_size, cluster_size);
     let attr_length = align8(value_offset + ir_value.len());
 
     if at + attr_length > rec.len() {
@@ -411,7 +446,14 @@ fn build_record_inner(
         nt_time,
         is_dir,
         fn_namespace_for(name),
-    );
+    )
+    .ok_or_else(|| {
+        format!(
+            "record overflow: a $FILE_NAME for a {}-unit name does not fit in a {record_size}-byte \
+             record alongside the attributes already written ({cursor} bytes used)",
+            utf16.len()
+        )
+    })?;
     cursor = write_empty_data(&mut rec, cursor, 2);
 
     // W2.5 — bounds guard. The resident-only attributes above
@@ -1007,6 +1049,16 @@ pub fn build_file_name_attribute(
     Ok(buf)
 }
 
+/// Returns `None` when the attribute would not fit in the record.
+///
+/// THE BOUNDS GUARD USED TO RUN AFTERWARDS. `rec[at..at + len]` is a
+/// slice of a record sized from the boot sector, and nothing compared
+/// the two -- so on a volume formatted with `--mft-record-size 512` (a
+/// documented, accepted option) a name of 136 characters or more
+/// panicked here, aborting the process, while the "record overflow"
+/// error written for exactly this case sat ten lines below and was
+/// never reached (#143). A caller asking for a name too long for the
+/// geometry gets that error now.
 fn write_file_name(
     rec: &mut [u8],
     at: usize,
@@ -1016,7 +1068,7 @@ fn write_file_name(
     nt_time: u64,
     is_dir: bool,
     namespace: u8,
-) -> usize {
+) -> Option<usize> {
     // Delegate to build_file_name_attribute to avoid duplicating byte-layout
     // logic. The only difference is that callers pass an explicit namespace
     // (e.g. POSIX for system metafiles), so we patch that byte after building.
@@ -1027,8 +1079,12 @@ fn write_file_name(
     const NAMESPACE_BYTE: usize = 24 + 65;
     blob[NAMESPACE_BYTE] = namespace;
     let len = blob.len();
-    rec[at..at + len].copy_from_slice(&blob);
-    at + len
+    let end = at.checked_add(len)?;
+    if end > rec.len() {
+        return None;
+    }
+    rec[at..end].copy_from_slice(&blob);
+    Some(end)
 }
 
 fn write_empty_data(rec: &mut [u8], at: usize, attr_id: u16) -> usize {
@@ -1359,28 +1415,56 @@ mod tests {
 
     #[test]
     fn build_empty_ir_value_is_48_bytes() {
-        let v = build_empty_ir_value(4096);
+        let v = build_empty_ir_value(4096, 4096);
         assert_eq!(v.len(), 48);
     }
 
     #[test]
     fn build_empty_ir_value_ir_header_attribute_type_is_file_name() {
-        let v = build_empty_ir_value(4096);
+        let v = build_empty_ir_value(4096, 4096);
         let attr_type = u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
         assert_eq!(attr_type, ATTR_FILE_NAME);
     }
 
     #[test]
     fn build_empty_ir_value_ir_header_collation_is_file_name() {
-        let v = build_empty_ir_value(4096);
+        let v = build_empty_ir_value(4096, 4096);
         let collation = u32::from_le_bytes([v[4], v[5], v[6], v[7]]);
         assert_eq!(collation, COLLATION_FILE_NAME);
+    }
+
+    /// THE cpib BYTE FOLLOWS THE VOLUME'S GEOMETRY, and it used to be a
+    /// hardcoded 1 with the comment "assumes block == cluster size".
+    /// `mkfs` writes 4096-byte index blocks whatever the cluster size,
+    /// so on any volume that is not 4096-clustered the assumption was
+    /// false and chkdsk reports `Error detected in index $I30 for file
+    /// 5` on the mismatch (#144).
+    ///
+    /// The encoding is `mkfs::build_index_root_value`'s, derived from
+    /// format.com reference dumps: the block's cluster count when a
+    /// cluster is no larger than a block, and its sector count when it
+    /// is bigger.
+    #[test]
+    fn build_empty_ir_value_cpib_follows_the_cluster_size() {
+        for (cluster, block, expected) in [
+            (512u32, 4096u32, 8u8), // eight clusters to a block
+            (1024, 4096, 4),
+            (4096, 4096, 1), // the case the old constant assumed
+            (8192, 4096, 8), // cluster > block: sectors per block
+            (65536, 4096, 8),
+        ] {
+            let v = build_empty_ir_value(block, cluster);
+            assert_eq!(
+                v[12], expected,
+                "cluster {cluster}, block {block}: clusters_per_index_block"
+            );
+        }
     }
 
     #[test]
     fn build_empty_ir_value_ir_header_stores_block_size() {
         for block_size in [4096u32, 8192, 65536] {
-            let v = build_empty_ir_value(block_size);
+            let v = build_empty_ir_value(block_size, 4096);
             let stored = u32::from_le_bytes([v[8], v[9], v[10], v[11]]);
             assert_eq!(stored, block_size, "block_size={block_size}");
         }
@@ -1388,7 +1472,7 @@ mod tests {
 
     #[test]
     fn build_empty_ir_value_index_header_first_entry_is_16() {
-        let v = build_empty_ir_value(4096);
+        let v = build_empty_ir_value(4096, 4096);
         let first_entry = u32::from_le_bytes([v[16], v[17], v[18], v[19]]);
         assert_eq!(
             first_entry, 16,
@@ -1398,7 +1482,7 @@ mod tests {
 
     #[test]
     fn build_empty_ir_value_index_header_sizes_are_32() {
-        let v = build_empty_ir_value(4096);
+        let v = build_empty_ir_value(4096, 4096);
         let total = u32::from_le_bytes([v[20], v[21], v[22], v[23]]);
         let alloc = u32::from_le_bytes([v[24], v[25], v[26], v[27]]);
         assert_eq!(total, 32, "total_size = INDEX_HEADER + LAST entry");
@@ -1407,14 +1491,14 @@ mod tests {
 
     #[test]
     fn build_empty_ir_value_last_entry_length_is_16() {
-        let v = build_empty_ir_value(4096);
+        let v = build_empty_ir_value(4096, 4096);
         let len = u16::from_le_bytes([v[40], v[41]]);
         assert_eq!(len, 16, "LAST sentinel entry is 16 bytes");
     }
 
     #[test]
     fn build_empty_ir_value_last_entry_flag_is_set() {
-        let v = build_empty_ir_value(4096);
+        let v = build_empty_ir_value(4096, 4096);
         let flags = u16::from_le_bytes([v[44], v[45]]);
         assert_eq!(flags, INDEX_ENTRY_FLAG_LAST);
     }
@@ -1471,6 +1555,7 @@ mod tests {
             nt_time_now(),
             512,
             4096,
+            4096,
         )
         .unwrap();
         assert_eq!(rec.len(), 1024);
@@ -1485,18 +1570,18 @@ mod tests {
     #[test]
     fn build_directory_record_rejects_invalid_record_size() {
         assert!(
-            build_directory_record(513, 5, 1, 0, "docs", 0, 512, 4096).is_err(),
+            build_directory_record(513, 5, 1, 0, "docs", 0, 512, 4096, 4096).is_err(),
             "513 not a multiple of 512"
         );
         assert!(
-            build_directory_record(256, 5, 1, 0, "docs", 0, 512, 4096).is_err(),
+            build_directory_record(256, 5, 1, 0, "docs", 0, 512, 4096, 4096).is_err(),
             "256 < 512 minimum"
         );
     }
 
     #[test]
     fn build_directory_record_rejects_empty_name() {
-        assert!(build_directory_record(1024, 5, 1, 0, "", 0, 512, 4096).is_err());
+        assert!(build_directory_record(1024, 5, 1, 0, "", 0, 512, 4096, 4096).is_err());
     }
 
     // --- build_resident_volume_name_attribute --------------------------------
@@ -1590,6 +1675,29 @@ mod tests {
     }
 
     // --- build_nonresident_attribute (named stream) --------------------------
+
+    /// A NAME TOO LONG FOR THE RECORD IS AN ERROR, NOT AN ABORT.
+    ///
+    /// `rust-ntfs format --mft-record-size 512` is a documented option,
+    /// and on the volume it produces a 136-character name used to panic
+    /// inside `write_file_name` -- `rec[at..at + len]` on a 512-byte
+    /// record -- taking the process down. The "record overflow" error
+    /// written for exactly this case sat ten lines further on and was
+    /// never reached (#143).
+    #[test]
+    fn a_name_too_long_for_the_record_is_refused_not_panicked() {
+        let long = "n".repeat(200);
+        let err = build_regular_file_record(512, 40, 1, 0x0005_0000_0000_0005, &long, 0, 512)
+            .expect_err("a 200-character name cannot fit a 512-byte record");
+        assert!(
+            err.contains("record overflow"),
+            "the caller gets the overflow error, got: {err}"
+        );
+
+        // The same name in a 4096-byte record is ordinary.
+        build_regular_file_record(4096, 40, 1, 0x0005_0000_0000_0005, &long, 0, 512)
+            .expect("200 characters fit a 4096-byte record");
+    }
 
     #[test]
     fn build_nonresident_attribute_named_encodes_stream_name() {

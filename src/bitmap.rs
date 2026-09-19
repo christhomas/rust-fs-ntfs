@@ -581,9 +581,14 @@ fn write_bitmap_bytes_io<T: BlockIo + ?Sized>(
     for (i, c) in chunks.iter().enumerate() {
         if let Err(e) = io.write_all_at(c.disk_offset, &data[c.cursor..c.cursor + c.len]) {
             let failure = format!("write bitmap: {e}");
-            // Put back the chunks that did land.
+            // PUT BACK THE CHUNK THAT FAILED TOO, not only the ones
+            // before it. `write_all_at` is not atomic: a failure can
+            // leave part of chunk `i` written, and `chunks[..i]` left
+            // exactly that part changed while the error said the write
+            // had been undone (#272). Restoring it costs one more write
+            // and removes the case where the message is wrong.
             let mut rollback_failed = None;
-            for done in &chunks[..i] {
+            for done in &chunks[..=i] {
                 if let Err(re) = io.write_all_at(
                     done.disk_offset,
                     &previous[done.cursor..done.cursor + done.len],
@@ -592,13 +597,23 @@ fn write_bitmap_bytes_io<T: BlockIo + ?Sized>(
                     break;
                 }
             }
-            let _ = io.sync();
-            return Err(match rollback_failed {
-                None => failure,
-                Some(re) => format!(
-                    "{failure}; and rolling the earlier chunks back failed too ({re}): \
+            // AND THE SYNC IS PART OF THE ROLLBACK. `let _ = io.sync()`
+            // discarded the one result that says whether the restored
+            // bytes reached the device; a rollback that stayed in a
+            // buffer is not a rollback, and the caller was told the
+            // volume was consistent.
+            let sync_failed = io.sync().err();
+            return Err(match (rollback_failed, sync_failed) {
+                (None, None) => failure,
+                (Some(re), _) => format!(
+                    "{failure}; and rolling back failed too ({re}): \
                      $Bitmap now records an allocation state that does not match the \
                      records it describes — run chkdsk"
+                ),
+                (None, Some(se)) => format!(
+                    "{failure}; the rollback was written but syncing it failed ({se}): \
+                     whether $Bitmap on disk matches the records it describes depends on \
+                     what the device did with the buffered writes — run chkdsk"
                 ),
             });
         }
@@ -724,6 +739,7 @@ mod tests {
                 // under test.
                 total_sectors: 1 << 20,
                 serial_number: 0,
+                index_block_size: 4096,
                 oem_id: *b"NTFS    ",
             },
             // One run: bitmap lives at LCN 1, one cluster's worth.
@@ -1852,6 +1868,7 @@ mod range_bound_tests {
                 file_record_size: 1024,
                 total_sectors: 1 << 20,
                 serial_number: 0,
+                index_block_size: 4096,
                 oem_id: *b"NTFS    ",
             },
             runs: Vec::new(),
@@ -1912,6 +1929,7 @@ mod volume_own_tests {
                 file_record_size: 1024,
                 total_sectors: 1 << 20,
                 serial_number: 0,
+                index_block_size: 4096,
                 oem_id: *b"NTFS    ",
             },
             runs: Vec::new(),

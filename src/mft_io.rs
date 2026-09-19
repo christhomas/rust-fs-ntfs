@@ -52,6 +52,10 @@ const BOOT_OFF_OEM: usize = 0x03; // 8-byte OEM ID — "NTFS    " on a real NTFS
 const BOOT_OFF_BYTES_PER_SECTOR: usize = 0x0B; // WORD BytsPerSec
 const BOOT_OFF_SECTORS_PER_CLUSTER: usize = 0x0D; // BYTE SecPerClus
 const BOOT_OFF_TOTAL_SECTORS: usize = 0x28; // NTFS extension: QWORD total sectors
+/// Clusters per index block, same signed encoding as
+/// `clusters_per_mft_record`: positive is a cluster count, negative is
+/// `2^|v|` bytes.
+const BOOT_OFF_CLUSTERS_PER_INDEX_BLOCK: usize = 0x44;
 const BOOT_OFF_MFT_LCN: usize = 0x30; // NTFS extension: QWORD MFT cluster number
 const BOOT_OFF_CLUSTERS_PER_MFT_RECORD: usize = 0x40; // NTFS extension: BYTE/i8 clusters per FILE record
 const BOOT_OFF_SERIAL: usize = 0x48; // NTFS extension: QWORD volume serial number
@@ -91,6 +95,12 @@ pub struct BootParams {
     pub total_sectors: u64,
     /// QWORD volume serial number (+0x48).
     pub serial_number: u64,
+    /// Index block size in bytes, from `clusters_per_index_block`
+    /// (+0x44). THE VOLUME DECIDES THIS, NOT THE CODE THAT WRITES A
+    /// DIRECTORY: chkdsk validates an `$INDEX_ROOT`'s block size against
+    /// this field and reports `Corrupt master file table` on a mismatch,
+    /// so `mkdir` has to read it rather than assume one (#144).
+    pub index_block_size: u32,
     /// 8-byte OEM ID (+0x03). `NTFS_OEM_ID` on a real NTFS volume; parsed but
     /// NOT validated here (see the doc on `read_boot_params_io`) so callers
     /// that only need geometry are unaffected — `read::read_volume_info`
@@ -127,7 +137,24 @@ pub fn read_boot_params(path: &Path) -> Result<BootParams, String> {
 pub fn read_boot_params_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BootParams, String> {
     let mut boot = [0u8; 512];
     io.read_exact_at(0, &mut boot)?;
-    parse_boot_params_from_bytes(&boot)
+    let params = parse_boot_params_from_bytes(&boot)?;
+
+    // WHY THIS DOES NOT REFUSE A VOLUME BIGGER THAN ITS DEVICE, having
+    // briefly done so (#176, reverted here after the Windows matrix
+    // caught it): a volume formatted by Windows inside a partitioned
+    // VHD and then shipped back as a raw image legitimately declares
+    // more sectors than the file holds. Four `win-format-*` scenarios
+    // present exactly that -- 622,463 sectors of 512 in a 268,435,456
+    // byte image -- and refusing them made every one unreadable.
+    //
+    // The hole #176 describes is real: `total_sectors` is unvalidated,
+    // and `read::bounded_value_length` used it as the ceiling for an
+    // attribute's declared length, so one image set both the value and
+    // the limit. That is fixed where it belongs -- the ceiling is the
+    // SMALLER of the volume's claim and the device -- rather than by
+    // rejecting the volume. Every transfer is bounded the same way in
+    // `cluster_span`.
+    Ok(params)
 }
 
 fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> {
@@ -225,6 +252,44 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
             "file_record_size {file_record_size} out of plausible range"
         ));
     }
+    // THE FIXUP CHECK NEEDS AT LEAST TWO STRIDES TO CHECK ANYTHING.
+    // NTFS's update sequence array is the torn-write detector: the last
+    // two bytes of every `bytes_per_sector` stride hold a copy of the
+    // record's USN, and a stride whose tail does not match means the
+    // write was partial. With `bytes_per_sector >= file_record_size` a
+    // record is one stride, the array has one entry, and the check
+    // becomes "the record's own USN equals itself" -- it passes on
+    // every record, torn or not, and nothing says the detector is off
+    // (#154).
+    //
+    // Both fields come off the disk, so a volume can present this, and
+    // a real one cannot: NTFS requires a record to hold at least two
+    // sectors' worth of strides for the array to mean anything.
+    // `>` and not `>=`: a record EQUAL to one sector is the ordinary 4Kn
+    // shape (4096-byte sectors, 4096-byte records) and its array still
+    // works -- one USN plus one stride, and the stride's tail is checked
+    // against the USN. What cannot work is a record SMALLER than a
+    // sector: no stride fits, the array has nothing to check, and the
+    // detector passes on every record, torn or not.
+    if bytes_per_sector as u64 > file_record_size {
+        return Err(format!(
+            "bytes_per_sector {bytes_per_sector} is larger than file_record_size \
+             {file_record_size}: no fixup stride fits in a record, so the torn-write check \
+             has nothing to compare and would pass on a record written in half"
+        ));
+    }
+
+    // Same signed encoding as clusters_per_mft_record.
+    let cpib = boot[BOOT_OFF_CLUSTERS_PER_INDEX_BLOCK] as i8;
+    let index_block_size: u32 = if cpib > 0 {
+        (cpib as u64).saturating_mul(cluster_size) as u32
+    } else if cpib < 0 && -(cpib as i32) < 32 {
+        1u32 << (-(cpib as i32)) as u32
+    } else {
+        // Zero, or an exponent that cannot be a size: fall back to the
+        // cluster, which is what a volume with a small cluster uses.
+        cluster_size as u32
+    };
 
     let total_sectors = u64::from_le_bytes(
         boot[BOOT_OFF_TOTAL_SECTORS..BOOT_OFF_TOTAL_SECTORS + 8]
@@ -245,6 +310,7 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
         cluster_size,
         mft_lcn,
         file_record_size,
+        index_block_size,
         total_sectors,
         serial_number,
         oem_id,
@@ -415,6 +481,22 @@ pub fn apply_fixup_on_read_magic(
     bytes_per_sector: u16,
     expected_magic: &[u8; 4],
 ) -> Result<(), String> {
+    // A BUFFER TOO SHORT TO HOLD A MAGIC IS AN ERROR, NOT A PANIC. This
+    // sliced `record[0..4]` first, so anything shorter than four bytes
+    // took the process down before the magic could be checked -- found
+    // by the `apply_fixup` fuzz target on its first run (#296), with the
+    // three bytes `ff ff 0a`.
+    //
+    // A record read through this crate's own paths is `file_record_size`
+    // bytes and cannot be short, but this is `pub` on a published crate
+    // and the INDX variant is handed block sizes that come off the disk.
+    if record.len() < 4 {
+        return Err(format!(
+            "a record of {} bytes is too short to hold a {:?} magic",
+            record.len(),
+            std::str::from_utf8(expected_magic).unwrap_or("?")
+        ));
+    }
     if &record[0..4] != expected_magic {
         return Err(format!(
             "magic mismatch: expected {:?}, got {:02x?}",
@@ -459,6 +541,14 @@ pub fn apply_fixup_on_write_magic(
     bytes_per_sector: u16,
     expected_magic: &[u8; 4],
 ) -> Result<(), String> {
+    // Same short-buffer guard as the read side (#296).
+    if record.len() < 4 {
+        return Err(format!(
+            "a record of {} bytes is too short to hold a {:?} magic",
+            record.len(),
+            std::str::from_utf8(expected_magic).unwrap_or("?")
+        ));
+    }
     if &record[0..4] != expected_magic {
         return Err(format!(
             "magic mismatch: expected {:?}, got {:02x?}",
@@ -671,6 +761,73 @@ where
 ///
 /// If `saved` is not one record long, or the write fails. A caller that
 /// gets an error here has a torn operation on disk and should say so in
+/// Copy MFT record `record_number` into `$MFTMirr`, if it is one of the
+/// records the mirror holds.
+///
+/// THE MIRROR IS WRITTEN ONCE BY mkfs AND WAS NEVER UPDATED AGAIN
+/// (#145). It holds the first four records -- `$MFT`, `$MFTMirr`,
+/// `$LogFile` and `$Volume` -- and this crate writes into `$Volume`
+/// routinely: `set_dirty`, `clear_dirty` and `upgrade_volume_version`
+/// all edit record 3. Every one of those left the mirror holding the
+/// record as mkfs first wrote it.
+///
+/// What that costs is the mirror's whole purpose. `$MFTMirr` exists so a
+/// volume whose first MFT records are unreadable can still be mounted
+/// and repaired, and chkdsk compares the two copies: a mirror that
+/// disagrees is reported, and a recovery that trusts it restores a
+/// `$Volume` with the dirty bit and the version this driver had already
+/// changed.
+///
+/// Records 4 and up are not mirrored, so this is a no-op for them.
+pub fn sync_mftmirr_record_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+) -> Result<(), String> {
+    /// `$MFTMirr` mirrors records 0..MIRRORED-1. Same constant as
+    /// `mkfs::MFTMIRR_RECORDS`, which sizes the mirror when it is built.
+    const MIRRORED: u64 = 4;
+    if record_number >= MIRRORED {
+        return Ok(());
+    }
+    let params = read_boot_params_io(io)?;
+
+    // Where the mirror lives: $MFTMirr is record 1, and its unnamed
+    // $DATA's first run is the mirror itself.
+    let (_p, mirr_record) = read_mft_record_io(io, 1)?;
+    let loc = crate::attr_io::find_attribute(&mirr_record, crate::attr_io::AttrType::Data, None)
+        .ok_or("$MFTMirr has no unnamed $DATA")?;
+    if loc.is_resident {
+        return Err("$MFTMirr's $DATA is resident, which is not a volume this crate wrote".into());
+    }
+    let mpo = loc
+        .non_resident_mapping_pairs_offset
+        .ok_or("$MFTMirr's $DATA has no mapping-pairs offset")? as usize;
+    let runs = crate::data_runs::decode_runs(
+        &mirr_record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length],
+    )?;
+    let first = runs.first().ok_or("$MFTMirr's $DATA has no runs")?;
+    let lcn = first.lcn.ok_or("$MFTMirr's first run is sparse")?;
+
+    // The record as it now stands, fixups and all: the mirror holds the
+    // same on-disk bytes, so this is a copy rather than a re-encode.
+    let at_in_mirror = record_number
+        .checked_mul(params.file_record_size)
+        .ok_or("mirror offset overflows")?;
+    let mirror_at = cluster_span(
+        &params,
+        lcn,
+        0,
+        at_in_mirror,
+        params.file_record_size,
+        io.size(),
+    )?;
+    let mut raw = vec![0u8; params.file_record_size as usize];
+    let source_at = mft_record_offset(&params, record_number);
+    io.read_exact_at(source_at, &mut raw)?;
+    io.write_all_at(mirror_at, &raw)?;
+    io.sync()
+}
+
 /// the error it returns, because nothing further can repair it.
 pub fn restore_mft_record_io<T: BlockIo + ?Sized>(
     io: &mut T,
@@ -686,7 +843,30 @@ pub fn restore_mft_record_io<T: BlockIo + ?Sized>(
                 record.len()
             ));
         }
+        // THE USN MUST MOVE PAST WHAT IS ON DISK, and copying `saved`
+        // wholesale used to take it backwards (#242).
+        //
+        // `apply_fixup_on_write` bumps whatever USN it finds in the
+        // buffer AFTER this closure runs. `saved` was read before the
+        // write being undone, so its USN is N; the disk is at N+1 from
+        // that write; and the restore therefore recomputed N+1 -- the
+        // value already there. Deterministic, not occasional: it is what
+        // the arithmetic gives every time a single write is rolled back.
+        //
+        // What that costs is the torn-record detector, on the write
+        // where it matters most. Sectors already on disk from the first
+        // write carry N+1 in their tails, and the sectors a torn restore
+        // manages to update get stamped N+1 as well -- so a half-written
+        // rollback is indistinguishable from a complete one: USN and
+        // every tail agree either way.
+        //
+        // Keeping the CURRENT record's USN means the bump lands on the
+        // disk's value, so a torn restore leaves tails that disagree and
+        // a reader can see it.
+        let (usa_offset, _count) = read_usa_header(record)?;
+        let on_disk_usn = u16::from_le_bytes([record[usa_offset], record[usa_offset + 1]]);
         record.copy_from_slice(saved);
+        record[usa_offset..usa_offset + 2].copy_from_slice(&on_disk_usn.to_le_bytes());
         Ok(())
     })
 }
@@ -694,6 +874,76 @@ pub fn restore_mft_record_io<T: BlockIo + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ROLLBACK MUST LEAVE A USN THE DISK HAS NOT SEEN.
+    ///
+    /// `restore_mft_record_io` copied the saved buffer wholesale, and
+    /// `apply_fixup_on_write` bumps whatever USN is in the buffer -- so
+    /// the restore recomputed exactly the value the write it was undoing
+    /// had already put on disk (#242). A torn restore then looked
+    /// identical to a complete one: the sectors it managed to update
+    /// carried the same USN as the ones still holding the first write.
+    #[test]
+    fn a_restore_does_not_reuse_the_usn_already_on_disk() {
+        use crate::block_io::BlockIo;
+
+        struct Mem {
+            bytes: Vec<u8>,
+        }
+        impl BlockIo for Mem {
+            fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+                let at = offset as usize;
+                buf.copy_from_slice(&self.bytes[at..at + buf.len()]);
+                Ok(())
+            }
+            fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+                let at = offset as usize;
+                self.bytes[at..at + buf.len()].copy_from_slice(buf);
+                Ok(())
+            }
+            fn size(&self) -> u64 {
+                self.bytes.len() as u64
+            }
+        }
+
+        const SIZE: u64 = 32 * 1024 * 1024;
+        let mut dev = Mem {
+            bytes: vec![0u8; SIZE as usize],
+        };
+        crate::mkfs::format_filesystem(&mut dev, SIZE, 4096, 4096, Some("USN"), Some(1))
+            .expect("format");
+
+        let rec = 5; // the root directory: a real record, never mind its contents
+        let usn_of = |dev: &mut Mem| -> u16 {
+            let (_p, r) = read_mft_record_io(dev, rec).expect("read");
+            let (usa_offset, _c) = read_usa_header(&r).expect("usa");
+            u16::from_le_bytes([r[usa_offset], r[usa_offset + 1]])
+        };
+
+        let (_params, saved) = read_mft_record_io(&mut dev, rec).expect("read");
+        let before = usn_of(&mut dev);
+
+        // One write, as the operation being rolled back would make.
+        // A harmless mutation: the tail of the record is padding, and
+        // what this test is about is the USN, not the contents.
+        update_mft_record_io(&mut dev, rec, |r| {
+            let last = r.len() - 3;
+            r[last] = 0xAB;
+            Ok(())
+        })
+        .expect("first write");
+        let after_write = usn_of(&mut dev);
+        assert_ne!(after_write, before, "a write bumps the USN");
+
+        // The rollback.
+        restore_mft_record_io(&mut dev, rec, &saved).expect("restore");
+        let after_restore = usn_of(&mut dev);
+        assert_ne!(
+            after_restore, after_write,
+            "the restore must not reuse the USN the write it is undoing already put on disk: \
+             a torn restore would be indistinguishable from a complete one"
+        );
+    }
 
     /// A slot with no `FILE` magic has never held a record, so there is
     /// no history to continue -- which is why a fresh volume is
@@ -821,11 +1071,43 @@ mod tests {
         assert_eq!(bp.file_record_size, 4096);
     }
 
+    /// A record smaller than a sector switches the torn-write detector
+    /// off, so the parse refuses the volume rather than reading it with
+    /// a check that cannot fail (#154).
+    #[test]
+    fn a_record_smaller_than_a_sector_is_refused() {
+        // 4096-byte sectors, 1024-byte records: no fixup stride fits.
+        let boot = synth_boot(4096, 1, 4, -10);
+        let err = parse_boot_params_from_bytes(&boot)
+            .expect_err("a record smaller than a sector has no usable fixup array");
+        assert!(
+            err.contains("no fixup stride fits"),
+            "the error says what is wrong with the geometry, got: {err}"
+        );
+    }
+
+    /// The boundary is real and legitimate: 4Kn volumes put a 4096-byte
+    /// record in a 4096-byte sector, one USN and one stride, and the
+    /// stride's tail is still checked against the USN.
+    #[test]
+    fn a_record_exactly_one_sector_is_accepted() {
+        let boot = synth_boot(4096, 1, 4, -12);
+        let bp = parse_boot_params_from_bytes(&boot).expect("4Kn with 4096-byte records");
+        assert_eq!(bp.bytes_per_sector as u64, bp.file_record_size);
+    }
+
     #[test]
     fn parse_boot_advanced_format_4096_bps() {
         // 4 KiB native-sector ("4Kn") drive: bytes_per_sector=4096, spc=1
         // → cluster_size=4096.  BPB is otherwise identical to 512e volumes.
-        let boot = synth_boot(4096, 1, 4, -10);
+        //
+        // RECORDS ARE 4096 HERE (cpmr -12), not 1024. A 1024-byte record
+        // on a 4096-byte sector is not a volume Windows can write: the
+        // fixup stride is one sector, so no stride fits in the record and
+        // the torn-write check has nothing to check (#154). The parse
+        // refuses that now, and this test says 4Kn rather than
+        // 4Kn-with-an-impossible-record-size.
+        let boot = synth_boot(4096, 1, 4, -12);
         let bp = parse_boot_params_from_bytes(&boot).unwrap();
         assert_eq!(bp.bytes_per_sector, 4096);
         assert_eq!(bp.sectors_per_cluster, 1);
@@ -884,6 +1166,7 @@ mod tests {
             // under test.
             total_sectors: 1 << 20,
             serial_number: 0,
+            index_block_size: 4096,
             oem_id: *b"NTFS    ",
         };
         assert_eq!(mft_record_offset(&p, 0), 4 * 4096);

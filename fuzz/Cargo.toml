@@ -72,3 +72,10 @@ path = "fuzz_targets/decompress_unit.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "apply_fixup"
+path = "fuzz_targets/apply_fixup.rs"
+test = false
+doc = false
+bench = false
