@@ -175,13 +175,12 @@ fn delete_kind_safety() {
 /// Two-name hard link: unlink the original, the alias must still
 /// resolve to the same MFT record and return the same bytes.
 ///
-/// Currently fails because `write::unlink` frees the MFT record
-/// regardless of link_count — the second unlink hits a freed record
-/// and reports `refusing to write to MFT record N: IN_USE flag is
-/// clear`. POSIX says the inode survives until link_count reaches 0.
-/// Drop `#[ignore]` once `unlink` consults link_count.
+/// This was `#[ignore]`d for a defect the driver no longer has:
+/// `write::unlink` used to free the MFT record regardless of
+/// `link_count`, so the second unlink hit a freed record and reported
+/// `refusing to write to MFT record N: IN_USE flag is clear`. It
+/// consults `link_count` now, and this passes (#149).
 #[test]
-#[ignore = "driver: unlink frees MFT record without checking link_count"]
 fn hard_link_pair_unlink_original_keeps_alias_alive() {
     let img = fresh_volume("hl_pair", "HL2");
     let fs = Filesystem::mount(&img).unwrap();
@@ -209,14 +208,10 @@ fn hard_link_pair_unlink_original_keeps_alias_alive() {
     assert!(user_entries(&fs, "/aliases").is_empty());
 }
 
-/// Drain a chain of 4 hard links by unlinking each in turn. Currently
-/// fails because the driver frees the MFT record before all names are
-/// gone (`refusing to write to MFT record N: IN_USE flag is clear`
-/// surfaces on the third unlink). Kept as a regression target — when
-/// the link-count plumbing in `write::unlink` is fixed, drop the
-/// `#[ignore]`.
+/// Drain a chain of 4 hard links by unlinking each in turn. Also
+/// `#[ignore]`d for the link-count defect, and also passing now: the
+/// record survives until the last name is gone (#149).
 #[test]
-#[ignore = "driver: hard-link drain frees MFT record before link_count reaches 0"]
 fn hard_link_chain_full_drain() {
     let img = fresh_volume("hl_drain", "HLD");
     let fs = Filesystem::mount(&img).unwrap();

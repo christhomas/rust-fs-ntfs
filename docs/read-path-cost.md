@@ -9,10 +9,30 @@ every time — so they can be compared across months and asserted on.
 Wall time is printed beside them because it is what a user feels. It is
 not what anything is judged by.
 
-## 2026-09-06 — the first measurement
+## 2026-09-06 — the first measurement (superseded; see the note below)
 
-Fixture: `test-disks/_csize_c64k.img`, the largest image the fixture
-script builds. 15 paths, 14 of them files.
+Fixture: `test-disks/_csize_c64k.img`, described here as "the largest
+image the fixture script builds". It is not: the script's largest is
+`ntfs-large-file.img` at 64 MiB, and `_csize_c64k.img` is a 512 MiB
+leftover of `tests/cluster_size_matrix.rs`. The test picked whichever
+`.img` happened to be biggest, so which volume these numbers describe
+depended on what had been run before (#226).
+
+**The two walk rows below are artefacts and should not be compared.**
+The two passes measured different directory sets — the shared walk
+listed `/`, the per-call walk did not — and divided by different
+quantities: every path found (15) against directories listed (1). That,
+and not the driver, is the "0.3 versus 8.0 reads per item" (#229).
+
+The stat and read rows are sound: both passes did the same work over the
+same files, which is why they agree across the two halves of the table.
+
+Both faults are fixed in `tests/read_path_cost.rs`, which now names its
+fixture and counts the same thing in both passes. THESE NUMBERS PREDATE
+THAT and have not been retaken; the next run on `ntfs-large-file.img`
+replaces this section.
+
+15 paths, 14 of them files.
 
 Each shape is measured twice: once through **one handle held across
 every call**, and once with a **fresh open per call**, which is what

@@ -18,9 +18,27 @@ const ATTRLIST_IMG: &str = "test-disks/ntfs-attrlist.img";
 const COMPRESSED_IMG: &str = "test-disks/ntfs-compressed.img";
 
 /// Open a fixture read-only, or return `None` (with a skip notice) if absent.
+///
+/// THESE TWO ARE NOT BUILT ANYWHERE (#279). `ntfs-attrlist.img` and
+/// `ntfs-compressed.img` hold shapes this crate's writer cannot produce
+/// -- compressed `$DATA`, an `$ATTRIBUTE_LIST` overflow -- so they were
+/// made on the Windows VM by hand, and nothing in the repository or in
+/// CI regenerates them. Until something does, the skip has to stand:
+/// refusing it in CI (which is what #210 asks for, and what
+/// `all_images_rw_smoke.rs` now does) would fail every run for a fixture
+/// no workflow can make.
+///
+/// `NTFS_FIXTURES_REQUIRED=1` turns the skip into a failure. Set it in
+/// the job that builds these two, on the day one exists; the assertion
+/// is here so that day needs no change to this file.
 fn open_fixture(path: &str) -> Option<PathIo> {
     if !Path::new(path).exists() {
-        eprintln!("SKIP: fixture {path} not present (generate on the Windows VM)");
+        assert!(
+            std::env::var_os("NTFS_FIXTURES_REQUIRED").is_none(),
+            "{path} is missing and NTFS_FIXTURES_REQUIRED is set: this run was supposed to \
+             have the Windows-authored fixtures, and without them these tests compare nothing"
+        );
+        eprintln!("SKIP: fixture {path} not present (generate on the Windows VM, see #279)");
         return None;
     }
     Some(PathIo::open_ro(Path::new(path)).expect("open_ro fixture"))

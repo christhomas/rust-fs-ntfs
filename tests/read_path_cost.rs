@@ -89,26 +89,65 @@ struct Cost {
     /// How much work was actually done, so a number that fell because
     /// the driver did less is not read as a number that fell because
     /// the driver got better.
+    ///
+    /// COUNTED ON SUCCESS ONLY (#227). This used to be the length of the
+    /// input list whatever happened, while every call site discarded its
+    /// result with `let _ =`. A reader regression that errored early did
+    /// fewer reads, so the recorded cost IMPROVED and the test passed --
+    /// the score got better because the driver stopped working.
     items: usize,
+    /// Operations that returned an error. A measurement over a driver
+    /// that is failing is not a measurement, so this is asserted to be
+    /// zero rather than reported and ignored.
+    failed: usize,
+    /// What those failures said, deduplicated. A count alone sends the
+    /// reader back to the fixture to guess; the reasons are what make
+    /// the assertion actionable.
+    reasons: Vec<String>,
     /// How many times the image file was opened. Zero is the shared
     /// handle; one per operation is what the facade does.
     opens: u64,
 }
 
+/// The image these numbers are measured on, BY NAME.
+///
+/// This used to be "whichever `test-disks/*.img` is largest", which is
+/// not a fixture, it is a race: the build script's largest is this one at
+/// 64 MiB, but `tests/cluster_size_matrix.rs` leaves a 512 MiB
+/// `_csize_c64k.img` behind and `tests/mftmirr_extent.rs` leaves a
+/// 512 MiB `_mirror_c65536.img`. Whichever ran last won, the two are
+/// tied, and the tie broke arbitrarily -- so the baseline recorded in
+/// `docs/read-path-cost.md` was measured on a different volume from the
+/// one the document names, and a rerun could compare against neither
+/// (#226).
+///
+/// A cost baseline only means something against a fixed input. Naming
+/// the file is what makes two runs comparable; if it is absent the
+/// measurement is skipped rather than taken on a substitute.
+const FIXTURE: &str = "ntfs-large-file.img";
+
 fn fixture() -> Option<PathBuf> {
-    let disks = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-disks");
-    let Ok(entries) = std::fs::read_dir(&disks) else {
-        return None;
-    };
-    // The largest image available: the cost of a walk is the point, and
-    // the bigger fixtures have the deeper trees.
-    let mut images: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("img"))
-        .collect();
-    images.sort_by_key(|p| std::cmp::Reverse(p.metadata().map(|m| m.len()).unwrap_or(0)));
-    images.into_iter().next()
+    let img = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("test-disks")
+        .join(FIXTURE);
+    img.is_file().then_some(img)
+}
+
+/// Where a passing run leaves its numbers.
+///
+/// `cargo test` captures a passing test's output, so the table this
+/// prints was visible only when the test FAILED -- which is the one run
+/// whose numbers are worthless. CI uploads `tmp/logs/`, so writing the
+/// measurement there is what makes a green run's cost readable at all,
+/// and what the ceiling below was set from.
+fn record(line: &str) {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/logs");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("read-cost.txt");
+    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
+    existing.push_str(line);
+    existing.push('\n');
+    let _ = std::fs::write(&path, existing);
 }
 
 fn report(what: &str, c: &Cost) {
@@ -117,11 +156,22 @@ fn report(what: &str, c: &Cost) {
     } else {
         c.reads as f64 / c.items as f64
     };
-    eprintln!(
+    let line = format!(
         "{what:<12} {:>6} reads  {:>9} bytes  {:>4} opens  {:>8} µs  over {:>4} items  \
-         ({per:.1} reads/item)",
-        c.reads, c.bytes, c.opens, c.micros, c.items
+         ({per:.1} reads/item){}",
+        c.reads,
+        c.bytes,
+        c.opens,
+        c.micros,
+        c.items,
+        if c.failed == 0 {
+            String::new()
+        } else {
+            format!("  [{} FAILED]", c.failed)
+        }
     );
+    eprintln!("{line}");
+    record(&line);
 }
 
 /// Every path in the tree, bounded so a large fixture cannot make this
@@ -138,6 +188,17 @@ fn walk_paths<T: BlockIo>(io: &mut T, at: &str, record: u64, depth: u32, out: &m
             return;
         }
         if e.name == "." || e.name == ".." {
+            continue;
+        }
+        // THE SYSTEM METAFILES ARE NOT WHAT A READ COSTS. NTFS keeps
+        // `$MFT`, `$Secure`, `$UpCase`, `$BadClus` and the rest in the
+        // root's own index, so a listing of `/` returns them alongside
+        // the volume's actual files -- thirteen of the fifteen entries on
+        // this fixture. Measuring them answers a question nobody asked,
+        // and four of them have no readable unnamed `$DATA` at all, which
+        // is what put `[4 FAILED]` in the first run with #227's counter
+        // (CI run 35459478820). Records below 16 are the reserved range.
+        if e.record_number < 16 {
             continue;
         }
         let child = if at == "/" {
@@ -189,11 +250,18 @@ fn measure_shared(img: &Path) -> Pass {
     let mut paths = Vec::new();
     let start = Instant::now();
     walk_paths(&mut io, "/", root, 8, &mut paths);
+    // DIRECTORIES LISTED, which is what the per-call pass counts too:
+    // the root plus every directory found under it. Counting paths here
+    // and directories there is what made the two columns incomparable
+    // (#229).
+    let dirs_listed = 1 + paths.iter().filter(|p| p.is_dir).count();
     let walk = Cost {
         reads: io.reads,
         bytes: io.bytes,
         micros: start.elapsed().as_micros(),
-        items: paths.len(),
+        items: dirs_listed,
+        failed: 0, // a directory it could not list contributes no paths
+        reasons: Vec::new(),
         opens: 0,
     };
     report("walk", &walk);
@@ -202,37 +270,62 @@ fn measure_shared(img: &Path) -> Pass {
 
     io.reset();
     let start = Instant::now();
+    let (mut ok, mut failed) = (0usize, 0usize);
+    let mut reasons: Vec<String> = Vec::new();
     for f in &files {
-        let _ = read::resolve_path(&mut io, &f.path);
+        match read::resolve_path(&mut io, &f.path) {
+            Ok(_) => ok += 1,
+            Err(e) => {
+                failed += 1;
+                if !reasons.iter().any(|r| r == &e) {
+                    reasons.push(e);
+                }
+            }
+        }
     }
     let stat = Cost {
         reads: io.reads,
         bytes: io.bytes,
         micros: start.elapsed().as_micros(),
-        items: files.len(),
+        items: ok,
+        failed,
+        reasons: std::mem::take(&mut reasons),
         opens: 0,
     };
     report("stat", &stat);
 
     io.reset();
     let start = Instant::now();
+    let (mut ok, mut failed) = (0usize, 0usize);
+    let mut reasons: Vec<String> = Vec::new();
     for f in &files {
-        if let Ok(record) = read::resolve_path(&mut io, &f.path) {
-            let _ = read::read_attribute_range(
+        let read = read::resolve_path(&mut io, &f.path).and_then(|record| {
+            read::read_attribute_range(
                 &mut io,
                 record,
                 fs_ntfs::attr_io::AttrType::Data,
                 None,
                 0,
                 1 << 20,
-            );
+            )
+        });
+        match read {
+            Ok(_) => ok += 1,
+            Err(e) => {
+                failed += 1;
+                if !reasons.iter().any(|r| r == &e) {
+                    reasons.push(e);
+                }
+            }
         }
     }
     let read_cost = Cost {
         reads: io.reads,
         bytes: io.bytes,
         micros: start.elapsed().as_micros(),
-        items: files.len(),
+        items: ok,
+        failed,
+        reasons: std::mem::take(&mut reasons),
         opens: 0,
     };
     report("read", &read_cost);
@@ -249,18 +342,43 @@ fn measure_shared(img: &Path) -> Pass {
 /// its `stat`, `read_dir` and `read_file` each begin with
 /// `PathIo::open_ro(&self.image)`.
 fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
-    let dirs: Vec<&PathEntry> = paths.iter().filter(|p| p.is_dir).collect();
+    // THE SAME DIRECTORY SET AS THE SHARED PASS, root included. The
+    // shared walk starts at `/` and `walk_paths` pushes only children, so
+    // `paths` never contains the root -- while this pass listed `dirs`
+    // alone. The two columns measured different sets, and worse, divided
+    // by different quantities: `paths.len()` (every path) against
+    // `dirs.len()` (one). That is where `docs/read-path-cost.md`'s "0.3
+    // versus 8.0 reads per item" came from -- an artefact of the
+    // denominators, not a property of the driver (#229).
+    let root = PathEntry {
+        path: "/".to_string(),
+        record: read::ROOT_RECORD_NUMBER,
+        is_dir: true,
+    };
+    let dirs: Vec<&PathEntry> = std::iter::once(&root)
+        .chain(paths.iter().filter(|p| p.is_dir))
+        .collect();
     let files: Vec<&PathEntry> = paths.iter().filter(|p| !p.is_dir).collect();
 
     let mut reads = 0u64;
     let mut bytes = 0u64;
     let mut opens = 0u64;
     let start = Instant::now();
+    let (mut ok, mut failed) = (0usize, 0usize);
+    let mut reasons: Vec<String> = Vec::new();
     for d in &dirs {
         let mut io = CountingIo::new(PathIo::open_ro(img).expect("open the fixture"));
         opens += 1;
-        if let Ok(record) = read::resolve_path(&mut io, &d.path) {
-            let _ = read::read_dir_entries(&mut io, record);
+        let listed = read::resolve_path(&mut io, &d.path)
+            .and_then(|record| read::read_dir_entries(&mut io, record));
+        match listed {
+            Ok(_) => ok += 1,
+            Err(e) => {
+                failed += 1;
+                if !reasons.iter().any(|r| r == &e) {
+                    reasons.push(e);
+                }
+            }
         }
         reads += io.reads;
         bytes += io.bytes;
@@ -269,7 +387,9 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
         reads,
         bytes,
         micros: start.elapsed().as_micros(),
-        items: dirs.len(),
+        items: ok,
+        failed,
+        reasons: std::mem::take(&mut reasons),
         opens,
     };
     report("walk", &walk);
@@ -278,10 +398,20 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
     let mut bytes = 0u64;
     let mut opens = 0u64;
     let start = Instant::now();
+    let (mut ok, mut failed) = (0usize, 0usize);
+    let mut reasons: Vec<String> = Vec::new();
     for f in &files {
         let mut io = CountingIo::new(PathIo::open_ro(img).expect("open the fixture"));
         opens += 1;
-        let _ = read::resolve_path(&mut io, &f.path);
+        match read::resolve_path(&mut io, &f.path) {
+            Ok(_) => ok += 1,
+            Err(e) => {
+                failed += 1;
+                if !reasons.iter().any(|r| r == &e) {
+                    reasons.push(e);
+                }
+            }
+        }
         reads += io.reads;
         bytes += io.bytes;
     }
@@ -289,7 +419,9 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
         reads,
         bytes,
         micros: start.elapsed().as_micros(),
-        items: files.len(),
+        items: ok,
+        failed,
+        reasons: std::mem::take(&mut reasons),
         opens,
     };
     report("stat", &stat);
@@ -298,18 +430,29 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
     let mut bytes = 0u64;
     let mut opens = 0u64;
     let start = Instant::now();
+    let (mut ok, mut failed) = (0usize, 0usize);
+    let mut reasons: Vec<String> = Vec::new();
     for f in &files {
         let mut io = CountingIo::new(PathIo::open_ro(img).expect("open the fixture"));
         opens += 1;
-        if let Ok(record) = read::resolve_path(&mut io, &f.path) {
-            let _ = read::read_attribute_range(
+        let read = read::resolve_path(&mut io, &f.path).and_then(|record| {
+            read::read_attribute_range(
                 &mut io,
                 record,
                 fs_ntfs::attr_io::AttrType::Data,
                 None,
                 0,
                 1 << 20,
-            );
+            )
+        });
+        match read {
+            Ok(_) => ok += 1,
+            Err(e) => {
+                failed += 1;
+                if !reasons.iter().any(|r| r == &e) {
+                    reasons.push(e);
+                }
+            }
         }
         reads += io.reads;
         bytes += io.bytes;
@@ -318,7 +461,9 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
         reads,
         bytes,
         micros: start.elapsed().as_micros(),
-        items: files.len(),
+        items: ok,
+        failed,
+        reasons: std::mem::take(&mut reasons),
         opens,
     };
     report("read", &read_cost);
@@ -340,15 +485,51 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
 #[test]
 fn what_a_read_costs_in_calls_to_the_device() {
     let Some(img) = fixture() else {
-        eprintln!("no fixture to measure — run test-disks/build-ntfs-feature-images.sh");
+        // Named so `scripts/tier.sh`'s skip gate sees it: a measurement
+        // that did not happen is not a measurement that passed (#298).
+        eprintln!(
+            "SKIP: test-disks/{FIXTURE} is not present — run \
+             test-disks/build-ntfs-feature-images.sh"
+        );
         return;
     };
+    let _ =
+        std::fs::remove_file(Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/logs/read-cost.txt"));
     eprintln!("measuring {}", img.display());
+    record(&format!("measuring {}", img.display()));
 
     eprintln!("--- one handle, held across every call ---");
+    record("--- one handle, held across every call ---");
     let shared = measure_shared(&img);
     eprintln!("--- a fresh open per call, which is what the facade does ---");
+    record("--- a fresh open per call, which is what the facade does ---");
     let percall = measure_per_call(&img, &shared.paths);
+
+    // A MEASUREMENT OVER A FAILING DRIVER IS NOT A MEASUREMENT (#227).
+    // Every call used to be `let _ =`, and `items` was the length of the
+    // input list whatever happened -- so a reader regression that errored
+    // early did fewer reads, recorded a BETTER cost, and passed.
+    for (what, c) in [
+        ("shared stat", &shared.stat),
+        ("shared read", &shared.read),
+        ("per-call walk", &percall.walk),
+        ("per-call stat", &percall.stat),
+        ("per-call read", &percall.read),
+    ] {
+        assert_eq!(
+            c.failed,
+            0,
+            "{what}: {} of {} operations failed, so the cost recorded here is the cost of \
+             failing rather than of reading. What they said: {:?}",
+            c.failed,
+            c.failed + c.items,
+            c.reasons
+        );
+        assert!(
+            c.items > 0,
+            "{what}: nothing succeeded, so there is nothing to measure"
+        );
+    }
 
     assert!(
         shared.walk.items > 0,
