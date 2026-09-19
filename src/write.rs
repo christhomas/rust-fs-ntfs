@@ -1373,9 +1373,44 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
 /// `rename_same_length_io` — tested only for a separator and emptiness.
 /// That path is public through `facade::rename_same_length` and through
 /// the C ABI as `fs_ntfs_rename_same_length`, with no guard downstream.
+/// The single gate every create, mkdir, link and rename passes through.
+///
+/// IT USED TO CHECK ONLY FOR PATH SEPARATORS, and this crate writes NTFS
+/// volumes, where the name rule is Windows'. `create_file("/", "a:b")`
+/// and `mkdir("/", "C:\\Windows")` both succeeded and wrote the
+/// character into `$FILE_NAME` (#151). The entry is then on the volume
+/// and enumerates, and Windows cannot address it: every Win32 path API
+/// reads `a:b` as the stream `b` of the file `a`, and `C:\Windows` as a
+/// path. Explorer lists such a file and then fails to open, rename, copy
+/// or delete it -- a file the user cannot get rid of without a low-level
+/// tool.
+///
+/// A host passing a name straight through from a POSIX API, where `:`
+/// and `\` are ordinary characters, produces these as a matter of
+/// course rather than as an edge case.
 fn validate_basename(name: &str) -> Result<(), String> {
-    if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+    if name.is_empty() || name == "." || name == ".." {
         return Err(format!("invalid basename: '{name}'"));
+    }
+    // The Win32 reserved set, and the control range. `/` is here as well
+    // as in the check above, because it is both "not a component" and a
+    // character NTFS refuses.
+    if let Some(bad) = name.chars().find(|c| {
+        matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (*c as u32) < 0x20
+    }) {
+        return Err(format!(
+            "invalid basename '{name}': Windows cannot address a name containing {bad:?}. \
+             Reserved: \\ / : * ? \" < > | and the control characters"
+        ));
+    }
+    // A TRAILING SPACE OR PERIOD IS UNADDRESSABLE FOR THE SAME REASON:
+    // Windows strips both when it parses a path, so "report." names the
+    // file "report" and can never reach the one actually on the volume.
+    if name.ends_with(' ') || name.ends_with('.') {
+        return Err(format!(
+            "invalid basename '{name}': Windows strips a trailing space or period when it \
+             parses a path, so this name could never be opened by the name it has"
+        ));
     }
     Ok(())
 }
@@ -6257,11 +6292,54 @@ mod basename_validation_tests {
     }
 
     /// Names that merely contain dots are fine — only the two special
-    /// components are not.
+    /// components are not, and only at the END does a dot matter.
     #[test]
     fn ordinary_names_pass() {
-        for ok in ["a", "ab", "..a", "a..", "a.b", "...", "file.txt"] {
+        for ok in ["a", "ab", "..a", "a.b", "file.txt", "a b", " lead"] {
             assert!(validate_basename(ok).is_ok(), "{ok:?} is a legal file name");
+        }
+    }
+
+    /// THE WIN32 RESERVED SET. NTFS stores these bytes happily; Windows
+    /// cannot address the result. `a:b` is read by every Win32 path API
+    /// as the stream `b` of the file `a`, so the entry lists in Explorer
+    /// and then cannot be opened, renamed, copied or deleted (#151).
+    #[test]
+    fn names_windows_cannot_address_are_rejected() {
+        for bad in [
+            "a:b",
+            "C:\\Windows",
+            "what?",
+            "star*",
+            "quote\"",
+            "less<",
+            "greater>",
+            "pipe|",
+            "ctrl\u{1}",
+        ] {
+            assert!(
+                validate_basename(bad).is_err(),
+                "{bad:?} contains a character Windows reserves"
+            );
+        }
+    }
+
+    /// A CONTRACT CHANGE, RECORDED. `a..` and `...` used to be asserted
+    /// legal, and they are legal NTFS names -- but Windows strips a
+    /// trailing period or space when it parses a path, so a file called
+    /// `a..` can only ever be opened as `a`. The name is on the volume
+    /// and unreachable by it, which is the same failure as the reserved
+    /// characters above and is why #151 asks for both.
+    ///
+    /// A LEADING dot or space is untouched and stays legal, which is
+    /// what `..a` and `" lead"` above check.
+    #[test]
+    fn a_trailing_dot_or_space_is_rejected() {
+        for bad in ["a..", "...", "report.", "trailing "] {
+            assert!(
+                validate_basename(bad).is_err(),
+                "{bad:?} ends in something Windows strips, so it could not be opened by name"
+            );
         }
     }
 }
