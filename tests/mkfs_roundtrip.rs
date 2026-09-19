@@ -368,8 +368,12 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
         sdh_data_length, 20,
         "$SDH entry data_length must equal value length"
     );
-    // Value starts after key, 8-aligned. With 16-byte header + 8-byte
-    // key = 24, next 8-aligned offset = 24.
+    // The value starts IMMEDIATELY after the key -- 16-byte header +
+    // 8-byte key = 24 -- with no padding between them. 24 is also
+    // 8-aligned, which is why an earlier cut of the builder that aligned
+    // `value_off` passed here and still produced the `$SII` layout
+    // chkdsk called corrupt (4-byte keys, where the two rules differ).
+    // The rule is "after the key".
     let val_off = 24usize;
     let v_sds_off = u64::from_le_bytes(e0[val_off + 8..val_off + 16].try_into().unwrap());
     let v_sds_size = u32::from_le_bytes(e0[val_off + 16..val_off + 20].try_into().unwrap());

@@ -1030,12 +1030,17 @@ pub fn format_filesystem(
             },
         ];
         let sds_mp = encode_runs(&sds_runs)?;
-        // data_length: bytes from offset 0 through end of mirror
-        // entry. With a single 72-byte SD payload, each entry
-        // (header+SD) is 92 bytes padded to 96. Mirror starts at
-        // 0x40000; mirror entry occupies 0x40000..0x40060 (data
-        // bytes) — and we round to the 16-byte boundary, ending at
-        // 0x40060. allocated_length is the on-stream allocated size
+        // data_length: bytes from offset 0 through the end of the
+        // mirror entry's DATA, and it is not rounded. `SD_SYSFILE_RW`
+        // is 104 bytes, so header + SD is 124; the mirror starts at
+        // SDS_MIRROR_GAP (0x40000) and its data ends at 0x4007C.
+        //
+        // THE 16-BYTE ALIGNMENT IS A PROPERTY OF THE NEXT ENTRY'S
+        // OFFSET, not of this length: `sds::entry_len` rounds 124 up to
+        // 128 so a following entry starts aligned, and there is no
+        // following entry here. Writing the rounded 0x40080 would claim
+        // four bytes of padding that were never written.
+        // allocated_length is the on-stream allocated size
         // ((gap_vcn + 1) clusters * cluster_size).
         let sds_data_len = crate::sds::SDS_MIRROR_GAP
             + (crate::sds::SDS_HEADER_LEN as u64)
@@ -2125,14 +2130,16 @@ fn build_populated_named_index_root_attr(
 /// Full layout this builder produces:
 ///
 /// ```text
-///   +0x00 data_offset   u16   = `value_off` (== key data ends, aligned to 8)
+///   +0x00 data_offset   u16   = `value_off` (== where the key data ends;
+///                                   NOT aligned -- see the Iter K finding)
 ///   +0x02 data_length   u16   = `value.len()`
 ///   +0x04 reserved      u32   = 0
 ///   +0x08 entry_length  u16   = total bytes incl. padding
 ///   +0x0A key_length    u16
 ///   +0x0C flags         u32   = 0 (normal) or 0x02 (LAST / INDEX_ENTRY_END)
 ///   +0x10 key           key_length bytes
-///   +pad  value         value.len() bytes (at data_offset)
+///         value         value.len() bytes, immediately after the key
+///                       (at data_offset; no padding in between)
 /// ```
 ///
 /// Returns the entry bytes (no extra padding outside `entry_length`).
