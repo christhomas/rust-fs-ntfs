@@ -89,7 +89,17 @@ struct Cost {
     /// How much work was actually done, so a number that fell because
     /// the driver did less is not read as a number that fell because
     /// the driver got better.
+    ///
+    /// COUNTED ON SUCCESS ONLY (#227). This used to be the length of the
+    /// input list whatever happened, while every call site discarded its
+    /// result with `let _ =`. A reader regression that errored early did
+    /// fewer reads, so the recorded cost IMPROVED and the test passed --
+    /// the score got better because the driver stopped working.
     items: usize,
+    /// Operations that returned an error. A measurement over a driver
+    /// that is failing is not a measurement, so this is asserted to be
+    /// zero rather than reported and ignored.
+    failed: usize,
     /// How many times the image file was opened. Zero is the shared
     /// handle; one per operation is what the facade does.
     opens: u64,
@@ -119,8 +129,17 @@ fn report(what: &str, c: &Cost) {
     };
     eprintln!(
         "{what:<12} {:>6} reads  {:>9} bytes  {:>4} opens  {:>8} µs  over {:>4} items  \
-         ({per:.1} reads/item)",
-        c.reads, c.bytes, c.opens, c.micros, c.items
+         ({per:.1} reads/item){}",
+        c.reads,
+        c.bytes,
+        c.opens,
+        c.micros,
+        c.items,
+        if c.failed == 0 {
+            String::new()
+        } else {
+            format!("  [{} FAILED]", c.failed)
+        }
     );
 }
 
@@ -194,6 +213,8 @@ fn measure_shared(img: &Path) -> Pass {
         bytes: io.bytes,
         micros: start.elapsed().as_micros(),
         items: paths.len(),
+        failed: 0, // the walk records what it found; a directory it
+        // could not list contributes no paths rather than an error
         opens: 0,
     };
     report("walk", &walk);
@@ -202,37 +223,48 @@ fn measure_shared(img: &Path) -> Pass {
 
     io.reset();
     let start = Instant::now();
+    let (mut ok, mut failed) = (0usize, 0usize);
     for f in &files {
-        let _ = read::resolve_path(&mut io, &f.path);
+        match read::resolve_path(&mut io, &f.path) {
+            Ok(_) => ok += 1,
+            Err(_) => failed += 1,
+        }
     }
     let stat = Cost {
         reads: io.reads,
         bytes: io.bytes,
         micros: start.elapsed().as_micros(),
-        items: files.len(),
+        items: ok,
+        failed,
         opens: 0,
     };
     report("stat", &stat);
 
     io.reset();
     let start = Instant::now();
+    let (mut ok, mut failed) = (0usize, 0usize);
     for f in &files {
-        if let Ok(record) = read::resolve_path(&mut io, &f.path) {
-            let _ = read::read_attribute_range(
+        let read = read::resolve_path(&mut io, &f.path).and_then(|record| {
+            read::read_attribute_range(
                 &mut io,
                 record,
                 fs_ntfs::attr_io::AttrType::Data,
                 None,
                 0,
                 1 << 20,
-            );
+            )
+        });
+        match read {
+            Ok(_) => ok += 1,
+            Err(_) => failed += 1,
         }
     }
     let read_cost = Cost {
         reads: io.reads,
         bytes: io.bytes,
         micros: start.elapsed().as_micros(),
-        items: files.len(),
+        items: ok,
+        failed,
         opens: 0,
     };
     report("read", &read_cost);
@@ -256,11 +288,15 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
     let mut bytes = 0u64;
     let mut opens = 0u64;
     let start = Instant::now();
+    let (mut ok, mut failed) = (0usize, 0usize);
     for d in &dirs {
         let mut io = CountingIo::new(PathIo::open_ro(img).expect("open the fixture"));
         opens += 1;
-        if let Ok(record) = read::resolve_path(&mut io, &d.path) {
-            let _ = read::read_dir_entries(&mut io, record);
+        let listed = read::resolve_path(&mut io, &d.path)
+            .and_then(|record| read::read_dir_entries(&mut io, record));
+        match listed {
+            Ok(_) => ok += 1,
+            Err(_) => failed += 1,
         }
         reads += io.reads;
         bytes += io.bytes;
@@ -269,7 +305,8 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
         reads,
         bytes,
         micros: start.elapsed().as_micros(),
-        items: dirs.len(),
+        items: ok,
+        failed,
         opens,
     };
     report("walk", &walk);
@@ -278,10 +315,14 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
     let mut bytes = 0u64;
     let mut opens = 0u64;
     let start = Instant::now();
+    let (mut ok, mut failed) = (0usize, 0usize);
     for f in &files {
         let mut io = CountingIo::new(PathIo::open_ro(img).expect("open the fixture"));
         opens += 1;
-        let _ = read::resolve_path(&mut io, &f.path);
+        match read::resolve_path(&mut io, &f.path) {
+            Ok(_) => ok += 1,
+            Err(_) => failed += 1,
+        }
         reads += io.reads;
         bytes += io.bytes;
     }
@@ -289,7 +330,8 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
         reads,
         bytes,
         micros: start.elapsed().as_micros(),
-        items: files.len(),
+        items: ok,
+        failed,
         opens,
     };
     report("stat", &stat);
@@ -298,18 +340,23 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
     let mut bytes = 0u64;
     let mut opens = 0u64;
     let start = Instant::now();
+    let (mut ok, mut failed) = (0usize, 0usize);
     for f in &files {
         let mut io = CountingIo::new(PathIo::open_ro(img).expect("open the fixture"));
         opens += 1;
-        if let Ok(record) = read::resolve_path(&mut io, &f.path) {
-            let _ = read::read_attribute_range(
+        let read = read::resolve_path(&mut io, &f.path).and_then(|record| {
+            read::read_attribute_range(
                 &mut io,
                 record,
                 fs_ntfs::attr_io::AttrType::Data,
                 None,
                 0,
                 1 << 20,
-            );
+            )
+        });
+        match read {
+            Ok(_) => ok += 1,
+            Err(_) => failed += 1,
         }
         reads += io.reads;
         bytes += io.bytes;
@@ -318,7 +365,8 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
         reads,
         bytes,
         micros: start.elapsed().as_micros(),
-        items: files.len(),
+        items: ok,
+        failed,
         opens,
     };
     report("read", &read_cost);
@@ -349,6 +397,31 @@ fn what_a_read_costs_in_calls_to_the_device() {
     let shared = measure_shared(&img);
     eprintln!("--- a fresh open per call, which is what the facade does ---");
     let percall = measure_per_call(&img, &shared.paths);
+
+    // A MEASUREMENT OVER A FAILING DRIVER IS NOT A MEASUREMENT (#227).
+    // Every call used to be `let _ =`, and `items` was the length of the
+    // input list whatever happened -- so a reader regression that errored
+    // early did fewer reads, recorded a BETTER cost, and passed.
+    for (what, c) in [
+        ("shared stat", &shared.stat),
+        ("shared read", &shared.read),
+        ("per-call walk", &percall.walk),
+        ("per-call stat", &percall.stat),
+        ("per-call read", &percall.read),
+    ] {
+        assert_eq!(
+            c.failed,
+            0,
+            "{what}: {} of {} operations failed, so the cost recorded here is the cost of \
+             failing rather than of reading",
+            c.failed,
+            c.failed + c.items
+        );
+        assert!(
+            c.items > 0,
+            "{what}: nothing succeeded, so there is nothing to measure"
+        );
+    }
 
     assert!(
         shared.walk.items > 0,
