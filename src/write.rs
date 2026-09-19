@@ -3212,11 +3212,67 @@ pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
         return Err("stream_name must be non-empty".to_string());
     }
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+
+    // A NON-RESIDENT STREAM OWNS CLUSTERS, and removing the attribute
+    // was the whole of the delete -- so the last reference to those
+    // clusters went with it and `$Bitmap` still called them allocated.
+    // Nothing on the volume pointed at them afterwards, so even `unlink`
+    // could not reclaim them: the loss was permanent, and it happened on
+    // every rewrite of a promoted stream too, because that path deletes
+    // the old attribute before inserting the new one (#142).
+    //
+    // The runs are read BEFORE the attribute is removed, and freed after
+    // the record is written -- the ordering `truncate` documents and
+    // `unlink` now follows (#141): a crash between the two leaves
+    // clusters marked allocated that nothing owns, never a live
+    // attribute pointing at free space.
+    let (_params, record_bytes) = read_mft_record_io(io, rec)?;
+    let runs_to_free =
+        match attr_io::find_attribute(&record_bytes, AttrType::Data, Some(stream_name)) {
+            Some(loc) if !loc.is_resident => {
+                let mapping_offset = loc
+                    .non_resident_mapping_pairs_offset
+                    .ok_or("non-resident named stream has no mapping-pairs offset")?
+                    as usize;
+                let start = loc.attr_offset + mapping_offset;
+                let end = loc.attr_offset + loc.attr_length;
+                if start >= end || end > record_bytes.len() {
+                    return Err(format!(
+                        "named stream '{stream_name}' has a mapping-pair range outside its record"
+                    ));
+                }
+                data_runs::decode_runs(&record_bytes[start..end])?
+                    .into_iter()
+                    .filter_map(|run| {
+                        run.lcn
+                            .filter(|_| run.length > 0)
+                            .map(|lcn| (lcn, run.length))
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+
     update_mft_record_io(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, Some(stream_name))
             .ok_or_else(|| format!("named stream '{stream_name}' not found"))?;
         remove_attribute_at(record, loc.attr_offset, loc.attr_length)
-    })
+    })?;
+
+    if !runs_to_free.is_empty() {
+        let bm = bitmap::locate_bitmap_io(io)?;
+        for (lcn, n) in runs_to_free {
+            bitmap::free_io(io, &bm, lcn, n).map_err(|e| {
+                format!(
+                    "the named stream '{stream_name}' was removed, but freeing its clusters \
+                     [{lcn}..{}] failed ({e}): those clusters are still marked allocated and \
+                     nothing owns them now",
+                    lcn + n
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

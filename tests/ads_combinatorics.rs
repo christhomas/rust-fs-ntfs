@@ -113,15 +113,14 @@ fn delete_missing_stream_errors_cleanly() {
 /// Stream churn: write-delete-write-delete on the same name. Free
 /// cluster count must return to baseline after the final delete.
 ///
-/// Currently fails: each `delete_named_stream` of a 32 KiB
-/// non-resident stream leaks exactly the stream's 8-cluster
-/// allocation. After 5 cycles, 40 clusters are unreachable but
-/// marked allocated. The deletion path removes the attribute from
-/// the MFT record but doesn't release the data runs to the volume
-/// `$Bitmap`. Drop `#[ignore]` once `delete_named_stream` walks
-/// data runs and clears bitmap bits.
+/// This was `#[ignore]`d and is not any more (#142). Each
+/// `delete_named_stream` of a 32 KiB non-resident stream used to leak
+/// exactly the stream's 8-cluster allocation -- 40 clusters unreachable
+/// but marked allocated after five cycles -- because the delete removed
+/// the attribute from the MFT record and never released its runs to
+/// `$Bitmap`. With the last reference gone, `unlink` could not reclaim
+/// them either: the loss was permanent.
 #[test]
-#[ignore = "driver: delete_named_stream does not free non-resident clusters"]
 fn stream_churn_does_not_leak_clusters() {
     let img = fresh_volume("churn_leak");
     let fs = Filesystem::mount(&img).unwrap();
