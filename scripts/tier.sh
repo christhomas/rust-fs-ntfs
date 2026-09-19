@@ -53,7 +53,7 @@ shift
 #   mkfs        115 / 3,858 cold (Mac), 24 / 1,022 warm           160 / 5,200
 #   suite       2,143 / 108,930 (CI Linux, fixtures built)        2,900 / 150,000
 #   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
-#   scripts     46 / 979 (three shell tests)                       70 / 1,600
+#   scripts     56 / 1,180 (four shell tests)                      80 / 1,800
 #   matrix      633 / 35,311 green, 1,521 / 78,075 red (see below)  900 / 50,000
 #
 # THE MATRIX ROW is measured on a GREEN 46-scenario run (2026-09-18, 46 min,
@@ -70,7 +70,7 @@ case "$TIER" in
     mkfs)       MAX_LINES=160;  MAX_BYTES=5200 ;;
     suite)      MAX_LINES=2900; MAX_BYTES=150000 ;;
     asan)       MAX_LINES=1100; MAX_BYTES=72000 ;;
-    scripts)    MAX_LINES=70;   MAX_BYTES=1600 ;;
+    scripts)    MAX_LINES=80;   MAX_BYTES=1800 ;;
     matrix)     MAX_LINES=900;  MAX_BYTES=50000 ;;
     *)
         echo "tier.sh: '$TIER' has no budget. Add a measured row to scripts/tier.sh." >&2
@@ -91,9 +91,48 @@ case " ${CLI_ARGS:-} " in
     *" --verbose "*|*" -v "*) export FWTH_VERBOSE=1 ;;
 esac
 
-exec "$BUDGET" \
-    --log "$REPO/tmp/logs/$TIER.log" \
+LOG="$REPO/tmp/logs/$TIER.log"
+
+set +e
+"$BUDGET" \
+    --log "$LOG" \
     --max-lines "$MAX_LINES" \
     --max-bytes "$MAX_BYTES" \
     --label "$TIER" \
     -- "$@"
+status=$?
+set -e
+
+# A TEST THAT DECIDED NOT TO RUN IS NOT A TEST THAT PASSED. Two shapes
+# reach the log and neither turns a run red on its own:
+#
+#   * `SKIP: ...` on stderr from a test that found its fixture absent and
+#     returned early -- it is counted as passed;
+#   * libtest's own `N ignored`, from `#[ignore]`.
+#
+# Both are reported here and the first one fails the tier. Nothing on this
+# branch is expected to print SKIP: the fixture-driven files panic when
+# their images are missing (#289), and the only self-skipping file is
+# `tests/native_read_fixtures.rs`, whose two Windows-authored fixtures
+# nothing currently builds (#279). If that file skips in CI, this gate is
+# how it becomes visible instead of passing quietly -- raise the ceiling
+# WITH the measurement and the issue, the way the budgets above are set.
+if [ -f "$LOG" ]; then
+    # `|| true` on BOTH, and for two different reasons under `set -o
+    # pipefail`: grep exits 1 when it matches nothing, which is the
+    # ordinary case here, and in the second the failing grep is upstream
+    # of awk in a pipeline, so pipefail propagates it. Without these the
+    # gate failed every clean run -- measured, not imagined.
+    skips=$(grep -ac '^SKIP:' "$LOG" || true)
+    ignored=$( (grep -aoE '[0-9]+ ignored' "$LOG" || true) | awk '{s+=$1} END{print s+0}')
+    if [ "${ignored:-0}" -gt 0 ]; then
+        echo "$TIER: $ignored test(s) ignored -- see #277"
+    fi
+    if [ "${skips:-0}" -gt 0 ]; then
+        echo "::error::$TIER: $skips test(s) printed SKIP and were counted as passing. A skipped test is not a passing test; see $LOG" >&2
+        grep -a '^SKIP:' "$LOG" | sed 's/^/    /' >&2
+        exit 66
+    fi
+fi
+
+exit "$status"
