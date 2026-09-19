@@ -1351,11 +1351,92 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
     }
 
     // 2) Patch the file's own $FILE_NAME attributes.
-    update_mft_record_io(io, file_rec, |record| {
+    //
+    // STEP 1 IS ALREADY ON DISK. Both branches above write and sync the
+    // parent's index entry under the NEW name, so returning the error
+    // here used to leave the directory saying one name and the file's
+    // own `$FILE_NAME` saying the other -- a torn rename, produced
+    // silently, and the inconsistency chkdsk reports (#140).
+    // `rename_replace_io` learned to undo its first step in 8021a3f;
+    // this path, which handles the more common case, did not.
+    //
+    // The undo is the same edit backwards, and it can fail too. If it
+    // does, both names are reported, because at that point neither this
+    // function nor the caller knows which one the volume will answer to.
+    if let Err(e) = update_mft_record_io(io, file_rec, |record| {
         index_io::rename_filename_attribute_same_length(record, &current_basename, new_name)
-    })?;
+    }) {
+        let undo = undo_index_rename_same_length(
+            io,
+            parent_rec,
+            ir_flags,
+            new_name,
+            &current_basename,
+            &upcase,
+        );
+        return Err(match undo {
+            Ok(()) => format!(
+                "renaming the file's own $FILE_NAME failed ({e}); the directory entry was put \
+                 back, so the file is still '{current_basename}'"
+            ),
+            Err(ue) => format!(
+                "renaming the file's own $FILE_NAME failed ({e}), and putting the directory \
+                 entry back failed too ({ue}): the directory now says '{new_name}' and the \
+                 file's own $FILE_NAME says '{current_basename}' — run chkdsk"
+            ),
+        });
+    }
 
     Ok(())
+}
+
+/// Put a same-length index-entry rename back, for the rollback above.
+///
+/// Renaming `from` to `to` in the parent's index is the same operation
+/// whichever direction it runs in, so this is step 1 again with the
+/// names swapped -- including the `$INDEX_ROOT` / INDX split, because a
+/// directory that spilled is exactly the one whose entry is hardest to
+/// find twice.
+fn undo_index_rename_same_length<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    ir_flags: u8,
+    from: &str,
+    to: &str,
+    upcase: &crate::upcase::UpcaseTable,
+) -> Result<(), String> {
+    update_mft_record_io(io, parent_rec, |record| {
+        match index_io::find_index_entry(record, from, Some(upcase))? {
+            Some(entry) => index_io::rename_index_entry_same_length(record, &entry, to),
+            None => Ok(()),
+        }
+    })?;
+    // Did the resident index hold it? If so, the update above did the
+    // work; otherwise look through the allocated blocks.
+    let (_params, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
+    if index_io::find_index_entry(&parent_record_bytes, to, Some(upcase))?.is_some() {
+        return Ok(());
+    }
+    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES == 0 {
+        return Err(format!(
+            "the entry for '{from}' is no longer in the parent's resident $INDEX_ROOT, and the \
+             directory has no $INDEX_ALLOCATION to look in"
+        ));
+    }
+    let ia = idx_block::load_for_directory_io(io, parent_rec)?;
+    for vcn in ia.allocated_block_vcns() {
+        let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+        if index_io::find_entry_in_indx_block(&block, from, Some(upcase))?.is_some() {
+            return idx_block::update_indx_block_io(io, &ia, vcn, |block| {
+                let entry = index_io::find_entry_in_indx_block(block, from, Some(upcase))?
+                    .ok_or_else(|| "race: INDX entry vanished during rollback".to_string())?;
+                index_io::rename_index_entry_same_length(block, &entry, to)
+            });
+        }
+    }
+    Err(format!(
+        "could not find the entry for '{from}' to put it back"
+    ))
 }
 
 // ---------------------------------------------------------------------------

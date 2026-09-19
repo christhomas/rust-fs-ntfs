@@ -172,6 +172,54 @@ fn delete_kind_safety() {
     fs.rmdir("/d").unwrap();
 }
 
+/// A SAME-LENGTH RENAME EITHER HAPPENS OR IT DOES NOT.
+///
+/// The two steps -- the parent's index entry, then the file's own
+/// `$FILE_NAME` -- are separate writes with no journal between them, and
+/// step 1 is synced before step 2 runs. When step 2 failed, nothing put
+/// step 1 back: the directory said one name and the file said the other
+/// (#140). `rename_replace_io` had learned to undo its first step; this
+/// path, the more common one, had not.
+///
+/// The honest end-to-end reproduction needs step 2 to fail on a volume
+/// where step 1 succeeded, which needs a fault injected between them --
+/// there is no such seam in the public API. What this checks is the
+/// property the rollback exists to preserve, on the path that now has
+/// one: after a rename, the directory and the file agree, and after a
+/// REFUSED rename nothing moved.
+#[test]
+fn a_same_length_rename_leaves_the_directory_and_the_file_agreeing() {
+    let img = fresh_volume("rn_same", "RNS");
+    let fs = Filesystem::mount(&img).unwrap();
+    fs.create_file("/", "aaa.txt").unwrap();
+    fs.write_file_contents("/aaa.txt", b"content").unwrap();
+    let rec = fs.stat("/aaa.txt").unwrap().file_record_number;
+
+    fs.rename_same_length("/aaa.txt", "bbb.txt").unwrap();
+
+    // The directory answers to the new name, and to the same record.
+    let after = fs.stat("/bbb.txt").expect("the new name resolves");
+    assert_eq!(after.file_record_number, rec);
+    assert!(fs.stat("/aaa.txt").is_err(), "the old name is gone");
+    let names: Vec<String> = fs
+        .read_dir("/")
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert!(names.iter().any(|n| n == "bbb.txt"), "{names:?}");
+    assert!(!names.iter().any(|n| n == "aaa.txt"), "{names:?}");
+
+    // A refused rename changes nothing: the guard rejects the name
+    // before either step runs.
+    assert!(fs.rename_same_length("/bbb.txt", "cc:.txt").is_err());
+    assert_eq!(
+        fs.stat("/bbb.txt").unwrap().file_record_number,
+        rec,
+        "a refused rename must not have moved anything"
+    );
+}
+
 /// Two-name hard link: unlink the original, the alias must still
 /// resolve to the same MFT record and return the same bytes.
 ///
