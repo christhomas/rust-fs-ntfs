@@ -159,8 +159,8 @@
   required argument, `device_bytes`. It was added to remove a `u64::MAX`
   device bound that let a VCN resolve past the end of the device; a
   two-argument wrapper would re-expose exactly that, so there is no
-  compatibility shim. Every caller is in-crate, and DiskJockey links the C
-  ABI rather than the Rust API, so nothing outside this repository has to
+  compatibility shim. Every caller is in-crate, and the known downstream
+  consumer links the C ABI rather than the Rust API, so nothing outside has to
   change — the version is 0.5.0 and this is the entry that says why. (#236)
 - The CI workflows build their test images with the same VHD writer. The
   release workflow's copy had moved to `am-img-vhd` v0.3.5 while this
@@ -547,9 +547,9 @@ feedback"), 1 (record_build preflight) deferred to its own focused PR.
   not-implemented list, and a plain-English at-your-own-risk
   disclaimer restating the MIT/Apache-2.0 no-warranty clauses.
 - Framing neutralised: crate is described as a general-purpose FFI
-  NTFS driver. DiskJockey is mentioned once as a production user
-  with an explicit no-coupling note; no more `Swift` / `FSKit`-
-  specific language in the API description.
+  NTFS driver. A production user is mentioned once, with an explicit
+  no-coupling note; no more `Swift` / `FSKit`-specific language in the
+  API description.
 - `Cargo.toml` description updated to match (`FFI from C/C++/Go/etc.`
   instead of `Swift/C/Go/etc.`) and `version` bumped to `0.1.2` to
   match the new tag (previous releases were tag-only; the manifest

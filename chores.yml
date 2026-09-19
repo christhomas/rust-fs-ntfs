@@ -3,8 +3,8 @@ chore_min_version: 0.6.0
 
 # THE CONTRACT THIS FILE EXISTS TO OWN.
 #
-# How to build rust-fs-ntfs is knowledge that belongs to rust-fs-ntfs. It used to
-# live in diskjockey/scripts/build-fs-*.sh — four scripts, 757 lines between
+# How to build rust-fs-ntfs is knowledge that belongs to rust-fs-ntfs. It used
+# to live in a consumer's build scripts — four of them, 757 lines between
 # them, byte-identical once you normalise the driver name, of which three
 # lines per script were actually about the filesystem: the cargo invocation,
 # the header name and the archive name.
