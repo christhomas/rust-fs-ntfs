@@ -476,12 +476,31 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
     }
 }
 
-/// The measurement itself. Prints the numbers and asserts only that the
-/// work was done and that the per-call pass really does re-open — the
-/// figures are recorded in `docs/read-path-cost.md` and compared by hand
-/// when something changes, because a threshold baked in here would
-/// either be so loose it catches nothing or so tight it fails on a
-/// fixture rebuild.
+/// The measurement, and a ceiling on it.
+///
+/// The module doc promises that "a change that makes the driver ask for
+/// more is a regression a test can catch". It was not implemented: the
+/// test asserted only that some work happened, and a comment argued a
+/// threshold would be either too loose to catch anything or too tight to
+/// survive a fixture rebuild (#228). Both halves of that argument came
+/// from measuring an unnamed fixture (#226) over NTFS's own metafiles
+/// (#227's failures), which made the numbers unstable enough that no
+/// ceiling could have held.
+///
+/// They are stable now: a named fixture, the volume's own two files, and
+/// every operation required to succeed. So the ceiling is the promise,
+/// kept — set at roughly 1.5x the measurement, which catches a change in
+/// KIND (an extra read per cluster, a lost short-circuit) while leaving
+/// room for one that adds a read or two to a path.
+const CEILING: [(&str, u64); 3] = [
+    // Measured on CI run 35460761620, ntfs-large-file.img, one handle:
+    // walk 5, stat 82, read 342. The per-call pass differs only in the
+    // walk (39, because it re-opens), so the ceilings are taken from the
+    // larger of the two and both passes are checked against them.
+    ("walk", 60),
+    ("stat", 125),
+    ("read", 520),
+];
 #[test]
 fn what_a_read_costs_in_calls_to_the_device() {
     let Some(img) = fixture() else {
@@ -551,4 +570,24 @@ fn what_a_read_costs_in_calls_to_the_device() {
         "re-opening per call asked the device for fewer reads than holding \
          one handle, which cannot be right"
     );
+
+    // THE CEILING. A number here that nobody can breach measures nothing,
+    // and one that trips on ordinary growth gets raised without being
+    // read. Raise these deliberately, with the run they were measured on,
+    // the way the budgets in scripts/tier.sh are raised.
+    for (what, ceiling) in CEILING {
+        let (shared_reads, percall_reads) = match what {
+            "walk" => (shared.walk.reads, percall.walk.reads),
+            "stat" => (shared.stat.reads, percall.stat.reads),
+            _ => (shared.read.reads, percall.read.reads),
+        };
+        for (pass, reads) in [("one handle", shared_reads), ("per call", percall_reads)] {
+            assert!(
+                reads <= ceiling,
+                "{what} ({pass}): {reads} device reads, ceiling {ceiling}. Either the read path \
+                 got more expensive -- which is what this ceiling is for -- or the fixture \
+                 changed shape, in which case re-measure and raise it here with the run id."
+            );
+        }
+    }
 }

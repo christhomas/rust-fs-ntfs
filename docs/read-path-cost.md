@@ -9,6 +9,39 @@ every time — so they can be compared across months and asserted on.
 Wall time is printed beside them because it is what a user feels. It is
 not what anything is judged by.
 
+## 2026-09-19 — measured on the named fixture
+
+Fixture: `test-disks/ntfs-large-file.img`, named in the test rather than
+chosen by size. Its two files, `big.bin` (8 MiB) and `small.txt`; NTFS's
+own metafiles are excluded, because `$MFT` and `$Secure` are not what a
+read costs.
+
+From CI run 35460761620, `tmp/logs/read-cost.txt`:
+
+| shape | reads | bytes | opens | reads/item |
+|---|---:|---:|---:|---:|
+| **one handle** | | | | |
+| walk — list every directory | 5 | 7.2 KB | 0 | 5.0 |
+| stat — resolve every file by path | 82 | 283 KB | 0 | 41.0 |
+| read — read every file | 342 | 1.33 MB | 0 | 171.0 |
+| **fresh open per call** | | | | |
+| walk | 39 | 140 KB | 1 | 39.0 |
+| stat | 82 | 283 KB | 2 | 41.0 |
+| read | 342 | 1.33 MB | 2 | 171.0 |
+
+**The finding holds, and is now measured on files rather than metafiles.**
+`stat` and `read` are identical across the two halves: 82 reads either
+way, 342 either way. Holding a handle saves the `open` and nothing else,
+because the driver keeps no state between calls.
+
+The walk is the one row where re-opening costs something (5 against 39),
+and that is the `open` plus re-reading the boot sector and `$MFT`'s own
+record to get back to the root.
+
+`tests/read_path_cost.rs` asserts a ceiling of 60 / 125 / 520 reads —
+about 1.5x these numbers, which catches a change in kind without tripping
+on a path that grows by a read or two.
+
 ## 2026-09-06 — the first measurement (superseded; see the note below)
 
 Fixture: `test-disks/_csize_c64k.img`, described here as "the largest
