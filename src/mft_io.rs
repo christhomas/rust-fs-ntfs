@@ -225,6 +225,32 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
             "file_record_size {file_record_size} out of plausible range"
         ));
     }
+    // THE FIXUP CHECK NEEDS AT LEAST TWO STRIDES TO CHECK ANYTHING.
+    // NTFS's update sequence array is the torn-write detector: the last
+    // two bytes of every `bytes_per_sector` stride hold a copy of the
+    // record's USN, and a stride whose tail does not match means the
+    // write was partial. With `bytes_per_sector >= file_record_size` a
+    // record is one stride, the array has one entry, and the check
+    // becomes "the record's own USN equals itself" -- it passes on
+    // every record, torn or not, and nothing says the detector is off
+    // (#154).
+    //
+    // Both fields come off the disk, so a volume can present this, and
+    // a real one cannot: NTFS requires a record to hold at least two
+    // sectors' worth of strides for the array to mean anything.
+    // `>` and not `>=`: a record EQUAL to one sector is the ordinary 4Kn
+    // shape (4096-byte sectors, 4096-byte records) and its array still
+    // works -- one USN plus one stride, and the stride's tail is checked
+    // against the USN. What cannot work is a record SMALLER than a
+    // sector: no stride fits, the array has nothing to check, and the
+    // detector passes on every record, torn or not.
+    if bytes_per_sector as u64 > file_record_size {
+        return Err(format!(
+            "bytes_per_sector {bytes_per_sector} is larger than file_record_size \
+             {file_record_size}: no fixup stride fits in a record, so the torn-write check \
+             has nothing to compare and would pass on a record written in half"
+        ));
+    }
 
     let total_sectors = u64::from_le_bytes(
         boot[BOOT_OFF_TOTAL_SECTORS..BOOT_OFF_TOTAL_SECTORS + 8]
@@ -821,11 +847,43 @@ mod tests {
         assert_eq!(bp.file_record_size, 4096);
     }
 
+    /// A record smaller than a sector switches the torn-write detector
+    /// off, so the parse refuses the volume rather than reading it with
+    /// a check that cannot fail (#154).
+    #[test]
+    fn a_record_smaller_than_a_sector_is_refused() {
+        // 4096-byte sectors, 1024-byte records: no fixup stride fits.
+        let boot = synth_boot(4096, 1, 4, -10);
+        let err = parse_boot_params_from_bytes(&boot)
+            .expect_err("a record smaller than a sector has no usable fixup array");
+        assert!(
+            err.contains("no fixup stride fits"),
+            "the error says what is wrong with the geometry, got: {err}"
+        );
+    }
+
+    /// The boundary is real and legitimate: 4Kn volumes put a 4096-byte
+    /// record in a 4096-byte sector, one USN and one stride, and the
+    /// stride's tail is still checked against the USN.
+    #[test]
+    fn a_record_exactly_one_sector_is_accepted() {
+        let boot = synth_boot(4096, 1, 4, -12);
+        let bp = parse_boot_params_from_bytes(&boot).expect("4Kn with 4096-byte records");
+        assert_eq!(bp.bytes_per_sector as u64, bp.file_record_size);
+    }
+
     #[test]
     fn parse_boot_advanced_format_4096_bps() {
         // 4 KiB native-sector ("4Kn") drive: bytes_per_sector=4096, spc=1
         // → cluster_size=4096.  BPB is otherwise identical to 512e volumes.
-        let boot = synth_boot(4096, 1, 4, -10);
+        //
+        // RECORDS ARE 4096 HERE (cpmr -12), not 1024. A 1024-byte record
+        // on a 4096-byte sector is not a volume Windows can write: the
+        // fixup stride is one sector, so no stride fits in the record and
+        // the torn-write check has nothing to check (#154). The parse
+        // refuses that now, and this test says 4Kn rather than
+        // 4Kn-with-an-impossible-record-size.
+        let boot = synth_boot(4096, 1, 4, -12);
         let bp = parse_boot_params_from_bytes(&boot).unwrap();
         assert_eq!(bp.bytes_per_sector, 4096);
         assert_eq!(bp.sectors_per_cluster, 1);
