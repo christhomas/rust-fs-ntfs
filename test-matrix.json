@@ -2,7 +2,7 @@
   "_doc": "Multi-agent NTFS test work list. See docs/multi-agent-test-protocol.md. Each scenario name is unique. status starts at 'pending'; agents transition via scripts/claim-scenario.sh.",
   "scenarios": {
     "mac-format-basic-256mib": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "CITEST",
@@ -50,7 +50,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-cluster-1k": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "C1K",
@@ -80,7 +80,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-cluster-512": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "C512",
@@ -110,7 +110,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-cluster-64k": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 1024,
         "label": "C64K",
@@ -140,7 +140,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-cluster-8k": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "C8K",
@@ -170,7 +170,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-label-32chars": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
@@ -200,7 +200,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-label-cjk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "\u65e5\u672c\u8a9e\u30e9\u30d9\u30eb",
@@ -230,7 +230,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-label-empty": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "",
@@ -260,7 +260,7 @@
       "_notes": "Empirically confirmed at the frs.cxx:60f ceiling (run-20260502-140029, ro=3 scan=11, same upcase + frs.cxx assert as the other 11 scenarios). chkdsk-readonly line 4 is blank where labelled scenarios print 'Volume label is X' \u2014 empty label propagates through mkfs_ntfs cleanly, no label-specific bug. Earlier run-20260502-132455 had errored at PowerShell param binding ('Cannot bind argument to parameter Label because it is an empty string'); fixed in scripts/run-scenario.ps1 by adding [AllowEmptyString()] to $Label. $Label is param-only \u2014 never read in script body \u2014 so the fix has zero behavioural effect beyond unblocking empty-string scenarios."
     },
     "mac-format-label-latin1": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "Disk \u00e9clipse",
@@ -290,7 +290,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-large-1gib": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 1024,
         "label": "ONE_GIB",
@@ -320,7 +320,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-mac-enumerate-empty": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "MENUM",
@@ -342,7 +342,7 @@
       "_notes": "Pure-Mac flow (mac:format -> mac:enumerate via inspect_ntfs CLI). 11 system entries indexed, 0 user-visible. Verified on c5fe branch.\n\ndepends on Mac-side enumerate CLI; first agent picking this scaffolds tests/matrix/inspect/"
     },
     "mac-format-mac-mkdir-mac-touch-mac-enumerate": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "MACMKDIR",
@@ -373,7 +373,7 @@
       "_notes": "Pure-mac chain with nested directory creation. Catches bugs in parent-pointer setup that the flat-only scenarios miss."
     },
     "mac-format-mac-touch-mac-write-mac-enumerate": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "MACONLY",
@@ -404,7 +404,7 @@
       "_notes": "Pure-mac chain. Exercises rust-ntfs format/touch/write/ls end-to-end without leaving the Mac. Runs on every host."
     },
     "mac-format-mac-write-mac-rm-mac-enumerate-empty": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "MACDEL",
@@ -439,7 +439,7 @@
       "_notes": "Pure-mac chain exercising the unlink path. After delete, only system files should remain."
     },
     "mac-format-mac-write-win-repeat-mount-3-win-chkdsk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "REPEAT3W",
@@ -489,7 +489,7 @@
       "_notes": "Tier-3 repeat-mount with mac-side content. Verifies our writer's metadata stays valid across multiple dismount/remount cycles after we've added a file."
     },
     "mac-format-mkdir-set-dirty-win-chkdsk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "DIRTY3",
@@ -531,7 +531,7 @@
       "_notes": "Tier-3 dirty volume with directory + nested file. Stresses the parent-pointer / $I30 invariants the chkdsk dirty-bit branch would walk."
     },
     "mac-format-set-dirty-win-chkdsk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "DIRTY1",
@@ -563,7 +563,7 @@
       "_notes": "Tier-3 dirty-volume injection. Mac formats then explicitly sets VOLUME_IS_DIRTY. Windows-side chkdsk must detect the dirty bit and either repair or report it. Clean baseline for chkdsk's dirty-volume code path."
     },
     "mac-format-small-64mib": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 64,
         "label": "SMALL",
@@ -593,7 +593,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-tiny-32mib": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 32,
         "label": "TINY",
@@ -623,7 +623,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md.\n\niter11+12+13+14+15 all applied. Orphan-recovery cascade gone (iter13). SD added (iter14, no effect on frs.cxx). MFT placeholders added (iter15, no effect on frs.cxx). Trailing chkdsk: ro=3 /scan=11 \u2014 bad upcase table + frs.cxx 60f assert. See _unfixed_blockers for next step."
     },
     "mac-format-volume-16gib-cluster-4k": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 16384,
         "label": "SIXTEEN_GIB",
@@ -652,7 +652,7 @@
       "_notes": "Forces non-trivial MFT growth past the initial $MFT extent. $Bitmap also non-trivially sized."
     },
     "mac-format-volume-32mib-cluster-512": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 32,
         "label": "TINY_512",
@@ -681,7 +681,7 @@
       "_notes": "Smallest viable + smallest cluster \u2014 stresses runlist packing and minimum-size $MFT layout."
     },
     "mac-format-volume-4gib-cluster-4k": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 4096,
         "label": "FOUR_GIB_4K",
@@ -710,7 +710,7 @@
       "_notes": "Crosses the 32-bit LBA boundary. Surfaces sign / overflow bugs anywhere we treat sector or cluster counts as i32."
     },
     "mac-format-volume-4gib-cluster-64k": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 4096,
         "label": "FOUR_GIB_64K",
@@ -739,7 +739,7 @@
       "_notes": "Large clusters at large volume \u2014 MFT runs may compact differently and $Bitmap is denser."
     },
     "mac-format-win-repeat-mount-10-win-chkdsk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "REPEAT10",
@@ -779,7 +779,7 @@
       "_notes": "Same as repeat-mount-5 but \u00d710 cycles. If our writer leaves a slowly-degrading state, this surfaces it past the 5-cycle ceiling."
     },
     "mac-format-win-repeat-mount-5-win-chkdsk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "REPEAT5",
@@ -819,7 +819,7 @@
       "_notes": "Tier-3 repeat-mount. After initial chkdsk, dismount/remount \u00d7 5, then run trailing chkdsk. Catches bugs where the volume only goes inconsistent after multiple clean dismounts (e.g. $LogFile state ntfs.sys tolerates once but rejects on later mounts)."
     },
     "mac-format-win-write-deep-nesting-win-chkdsk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "DEEP",
@@ -869,7 +869,7 @@
       "_notes": "Deep parent-pointer chain. Each $FILE_NAME's parent reference must point at the right MFT record; broken pointers surface as 'orphan' under chkdsk Stage 2."
     },
     "mac-format-win-write-large": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "WRLARGE",
@@ -915,7 +915,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-mac-enumerate": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "RTRIP",
@@ -959,7 +959,7 @@
       "_notes": "Operation sequence needs the chkdsk-clean state iter15+ has to deliver. mac:enumerate itself is plumbed via the new inspect_ntfs CLI on c5fe branch.\n\ndepends on Mac-side enumerate CLI; uses the harness `ship-to-host` builtin to pull the VM-side .img back so mac-enumerate sees the win-side writes. VM-side .img + .vhdx are intentionally left in place after the last win-write-content (keep_image=true on every win-* step) so ship-to-host has something to copy; cleanup happens implicitly the next time `ship-to-vm` overwrites the path or the user clears the VM workdir manually (~70+ GiB free)."
     },
     "mac-format-win-write-many-small": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "MANY",
@@ -1006,7 +1006,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-many-win-delete-half-win-chkdsk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "CHURN",
@@ -1060,7 +1060,7 @@
       "_notes": "$Bitmap free-then-reuse and $I30 entry-removal churn. If our writer leaves dangling free-bitmap state, chkdsk after delete catches it."
     },
     "mac-format-win-write-medium": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "WRMED",
@@ -1106,7 +1106,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-modify-win-chkdsk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "MODIFY",
@@ -1165,7 +1165,7 @@
       "_notes": "Overwrites a middle range of an existing non-resident $DATA. Surfaces bugs in run-list rewrite when a single run is split. v2 recipe substitutes a 4 MiB zero-fill for 'random' content (chkdsk's structural checks don't care about $DATA payload bytes), and uses win-modify with a fixed 0xFF pattern at offset=1 MiB len=4 KiB so win-read can eyeball the modified window against a known-non-zero value."
     },
     "mac-format-win-write-remount-win-chkdsk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "REMOUNT",
@@ -1215,7 +1215,7 @@
       "_notes": "Adds a dismount/remount cycle in the middle. Catches bugs where our writer leaves the volume in a state that's only inconsistent after a clean dismount. Originally written as `win:dismount -> win:remount` in v1; collapsed to `win:repeat-mount(1)` in v2 since the per-op model already mounts/dismounts implicitly per op, so a single explicit cycle on top is the equivalent unit of work."
     },
     "mac-format-win-write-rename-win-chkdsk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "RENAME",
@@ -1266,7 +1266,7 @@
       "_notes": "Same-parent rename \u2014 catches bugs where the old $FILE_NAME isn't fully retired or the parent $I30 isn't kept consistent."
     },
     "mac-format-win-write-then-delete": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "WRDEL",
@@ -1323,7 +1323,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-tiny": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "WRTINY",
@@ -1369,7 +1369,7 @@
       "_notes": "Reaches the chkdsk frs.cxx:60f ceiling. iter13 (root $I30 populated), iter14-v2 (default $SECURITY_DESCRIPTOR with reference layout order), iter15 ($Extend at rec 11 dropped to match reference layout, backup boot at last sector, BPB NumberSectors=N-1) \u2014 Stage 1 + Stage 2 chkdsk verify clean across volume sizes 32 MiB..1 GiB. Post-Stage-2 reconnect-scan errors with  \u2014 the same ceiling agents c5fe and c6a1 both reach. Same as c6a1's  convention. iter16+ candidates: $Secure view-index attrs ($SDS/$SDH/$SII), or $LogFile RSTR invariants. See branch agent/agent-c5fe-2026-05-02 docs/chkdsk-findings.md."
     },
     "mac-format-win-write-win-delete-mac-verify-empty": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "DELRT",
@@ -1434,7 +1434,7 @@
       "_notes": "Operation sequence needs the chkdsk-clean state iter15+ has to deliver. mac:enumerate itself is plumbed via the new inspect_ntfs CLI on c5fe branch. mac-enumerate is observation-only today, so this scenario passes if the steps complete without error; future verdict shapes can gate on the listing being empty of user-visible files (only NTFS metadata visible).\n\ndepends on Mac-side enumerate CLI; uses the harness `ship-to-host` builtin to pull the VM-side .img back so mac-enumerate can verify the post-delete state. VM-side .img + .vhdx are intentionally left in place after the last win-delete (keep_image=true on every win-* step) so ship-to-host has something to copy; cleanup happens implicitly the next time `ship-to-vm` overwrites the path or the user clears the VM workdir manually (~70+ GiB free)."
     },
     "mac-format-write-set-dirty-win-chkdsk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "DIRTY2",
@@ -1476,7 +1476,7 @@
       "_notes": "Tier-3 dirty-volume + content. Simulates a half-completed write followed by a crash (dirty-bit set without our writer issuing a clean dismount). chkdsk must keep our partial-write file readable, not orphan or truncate it."
     },
     "mac-format-hardlink-unlink-win-chkdsk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "HLNK",
@@ -1528,7 +1528,7 @@
       "_notes": "Validates Tier-0 B1: create a file, hard-link it (count 2), then unlink the original name. The alias + shared $DATA must survive and the FILE record's hard_link_count must drop to 1 (== number of $FILE_NAME attrs). chkdsk must report Clean \u2014 a stale count or orphaned $FILE_NAME would flag."
     },
     "mac-format-rename-win-chkdsk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "RNAM",
@@ -1575,7 +1575,7 @@
       "_notes": "Validates the mac-side rename write path end-to-end: rename before.txt -> after.txt (same-length path patches the $INDEX_ROOT entry + the file's own $FILE_NAME). chkdsk must report Clean \u2014 a duplicate/stale $I30 key or mismatched $FILE_NAME would flag."
     },
     "win-format-mac-enumerate-empty": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "WINFMT",
@@ -1608,7 +1608,7 @@
       "_notes": "Pure reader test on Microsoft-canonical format. If our reader chokes here it's a reader bug, not a writer bug \u2014 orthogonal axis to all the mac:format scenarios.\n\nForward-only ship-from-vm shape: init-image (zeros) -> ship-to-vm -> win-format -> ship-to-host -> mac-enumerate. NO mac-format step (otherwise the .img would arrive at the VM already-NTFS-formatted by rust-ntfs, defeating the win-format-* axis). VM-side .img + .vhdx are intentionally left in place after win-format (keep_image=true) so ship-to-host has something to copy; cleanup happens implicitly the next time ship-to-vm overwrites the path or the user clears the VM workdir manually (~70+ GiB free)."
     },
     "win-format-win-write-mac-delete-win-verify": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "MACDEL",
@@ -1670,7 +1670,7 @@
       "_notes": "Filesystem::unlink plumbed via inspect_ntfs CLI on c5fe branch. Matrix runner glue not yet wired.\n\ndepends on Mac-side deleter"
     },
     "win-format-win-write-mac-verify": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "WINREF",
@@ -1716,7 +1716,7 @@
       "_notes": "Operation sequence needs the chkdsk-clean state iter15+ has to deliver. mac:enumerate itself is plumbed via the new inspect_ntfs CLI on c5fe branch.\n\nMicrosoft format.com is the canonical reference; this proves our reader handles Microsoft-format output. Forward-only ship-from-vm shape: init-image (zeros) -> ship-to-vm -> win-format -> 2x win-write-content -> ship-to-host -> mac-enumerate. NO mac-format step (would defeat the win-format axis). VM-side .img + .vhdx are intentionally left in place after the last win-write-content (keep_image=true on every win-* step) so ship-to-host has something to copy; cleanup happens implicitly the next time ship-to-vm overwrites the path or the user clears the VM workdir manually (~70+ GiB free)."
     },
     "win-format-win-write-mac-write-win-verify": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "INTERMIX",
@@ -1778,7 +1778,7 @@
       "_notes": "Filesystem::create_file is plumbed and exposed via the inspect_ntfs CLI on the c5fe branch. Matrix runner glue (drive a Mac-side touch in the orchestrator) is the only missing piece.\n\ndepends on Mac-side writer; first agent scaffolds it or marks blocked-on-writer"
     },
     "mac-format-mac-write-sparse-zeros-win-chkdsk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "SPARSEW",
@@ -1824,7 +1824,7 @@
       "_notes": "Sparse-file write (zeros). mac creates + writes a sparse $DATA (holes for all-zero clusters), ships to VM, chkdsk must report Clean (validates SPARSE flag + hole mapping-pairs + allocated_size)."
     },
     "mac-format-mac-write-sparse-mixed-win-chkdsk": {
-      "status": "passed-chore-matrix-46of46-2026-09-19",
+      "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
         "size_mib": 256,
         "label": "SPARSEM",
@@ -1871,8 +1871,8 @@
     }
   },
   "_consolidated_by": "chore matrix (fs-windows-test-harness runner)",
-  "_consolidated_at": "2026-09-19 15:05 local",
-  "_source_branch": "feat/vm-is-a-chore-task (merged as #294)",
+  "_consolidated_at": "2026-09-19 21:58 local",
+  "_source_branch": "fix/the-write-path-finishes-what-it-starts",
   "_source_diag_root": "/var/folders/0k/nf8vt_350d16l72c1syfqww80000gn/T/rust-fs-ntfs-diag/agent-c5fe-2026-05-02",
   "_iter13_commit": "1c5007a \u2014 populate root $I30 with system-file entries",
   "_iter14_v2_commit": "f2677d3 \u2014 embed default $SECURITY_DESCRIPTOR on root (reference layout order)",
@@ -1982,5 +1982,5 @@
   },
   "_iter16_attempt": "4cf548d \u2014 tried SD on every system rec (byte-identical to ref); REVERTED, broke mount with Event 55. SYSTEM_SECURITY_DESCRIPTOR const kept under #[allow(dead_code)] for iter17 redo.",
   "_iter17_candidates": "1) pair SD-on-every-rec with security_id!=0 OR populated $Secure ($SDS/$SDH/$SII); 2) $LogFile RSTR header; 3) canonical $UpCase bytes (Bug B from iter6).",
-  "_run_note": "46/46 green in 46 minutes at max_parallel=4, on the VM described in fs-windows-test-harness.toml. Every scenario in this file was run; none was retried. Eleven were flagged by scripts/matrix-fetch-diag.sh for a human to read and all eleven are understood: four small volumes where chkdsk /scan cannot take a shadow copy (#295), three dirty-flag scenarios whose /scan is SUPPOSED to report problems before the repair pass (#300), and four host-only recipes that have no VM diagnostics by design (fixed in #294)."
+  "_run_note": "46/46 green in 34 minutes at max_parallel=4, on the write-path branch -- the run that gates it. Seven scenarios are flagged for a reader and all seven are understood: four small volumes where chkdsk /scan cannot take a shadow copy (#295), and three dirty-flag scenarios whose /scan is SUPPOSED to report problems before the repair pass (#300). An earlier run of this same branch failed four win-format-* scenarios, which is how the over-strict volume-size refusal in #176 was caught and corrected before merge."
 }
