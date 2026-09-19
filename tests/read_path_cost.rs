@@ -100,6 +100,10 @@ struct Cost {
     /// that is failing is not a measurement, so this is asserted to be
     /// zero rather than reported and ignored.
     failed: usize,
+    /// What those failures said, deduplicated. A count alone sends the
+    /// reader back to the fixture to guess; the reasons are what make
+    /// the assertion actionable.
+    reasons: Vec<String>,
     /// How many times the image file was opened. Zero is the shared
     /// handle; one per operation is what the facade does.
     opens: u64,
@@ -167,6 +171,17 @@ fn walk_paths<T: BlockIo>(io: &mut T, at: &str, record: u64, depth: u32, out: &m
         if e.name == "." || e.name == ".." {
             continue;
         }
+        // THE SYSTEM METAFILES ARE NOT WHAT A READ COSTS. NTFS keeps
+        // `$MFT`, `$Secure`, `$UpCase`, `$BadClus` and the rest in the
+        // root's own index, so a listing of `/` returns them alongside
+        // the volume's actual files -- thirteen of the fifteen entries on
+        // this fixture. Measuring them answers a question nobody asked,
+        // and four of them have no readable unnamed `$DATA` at all, which
+        // is what put `[4 FAILED]` in the first run with #227's counter
+        // (CI run 35459478820). Records below 16 are the reserved range.
+        if e.record_number < 16 {
+            continue;
+        }
         let child = if at == "/" {
             format!("/{}", e.name)
         } else {
@@ -227,6 +242,7 @@ fn measure_shared(img: &Path) -> Pass {
         micros: start.elapsed().as_micros(),
         items: dirs_listed,
         failed: 0, // a directory it could not list contributes no paths
+        reasons: Vec::new(),
         opens: 0,
     };
     report("walk", &walk);
@@ -236,10 +252,16 @@ fn measure_shared(img: &Path) -> Pass {
     io.reset();
     let start = Instant::now();
     let (mut ok, mut failed) = (0usize, 0usize);
+    let mut reasons: Vec<String> = Vec::new();
     for f in &files {
         match read::resolve_path(&mut io, &f.path) {
             Ok(_) => ok += 1,
-            Err(_) => failed += 1,
+            Err(e) => {
+                failed += 1;
+                if !reasons.iter().any(|r| r == &e) {
+                    reasons.push(e);
+                }
+            }
         }
     }
     let stat = Cost {
@@ -248,6 +270,7 @@ fn measure_shared(img: &Path) -> Pass {
         micros: start.elapsed().as_micros(),
         items: ok,
         failed,
+        reasons: std::mem::take(&mut reasons),
         opens: 0,
     };
     report("stat", &stat);
@@ -255,6 +278,7 @@ fn measure_shared(img: &Path) -> Pass {
     io.reset();
     let start = Instant::now();
     let (mut ok, mut failed) = (0usize, 0usize);
+    let mut reasons: Vec<String> = Vec::new();
     for f in &files {
         let read = read::resolve_path(&mut io, &f.path).and_then(|record| {
             read::read_attribute_range(
@@ -268,7 +292,12 @@ fn measure_shared(img: &Path) -> Pass {
         });
         match read {
             Ok(_) => ok += 1,
-            Err(_) => failed += 1,
+            Err(e) => {
+                failed += 1;
+                if !reasons.iter().any(|r| r == &e) {
+                    reasons.push(e);
+                }
+            }
         }
     }
     let read_cost = Cost {
@@ -277,6 +306,7 @@ fn measure_shared(img: &Path) -> Pass {
         micros: start.elapsed().as_micros(),
         items: ok,
         failed,
+        reasons: std::mem::take(&mut reasons),
         opens: 0,
     };
     report("read", &read_cost);
@@ -316,6 +346,7 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
     let mut opens = 0u64;
     let start = Instant::now();
     let (mut ok, mut failed) = (0usize, 0usize);
+    let mut reasons: Vec<String> = Vec::new();
     for d in &dirs {
         let mut io = CountingIo::new(PathIo::open_ro(img).expect("open the fixture"));
         opens += 1;
@@ -323,7 +354,12 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
             .and_then(|record| read::read_dir_entries(&mut io, record));
         match listed {
             Ok(_) => ok += 1,
-            Err(_) => failed += 1,
+            Err(e) => {
+                failed += 1;
+                if !reasons.iter().any(|r| r == &e) {
+                    reasons.push(e);
+                }
+            }
         }
         reads += io.reads;
         bytes += io.bytes;
@@ -334,6 +370,7 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
         micros: start.elapsed().as_micros(),
         items: ok,
         failed,
+        reasons: std::mem::take(&mut reasons),
         opens,
     };
     report("walk", &walk);
@@ -343,12 +380,18 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
     let mut opens = 0u64;
     let start = Instant::now();
     let (mut ok, mut failed) = (0usize, 0usize);
+    let mut reasons: Vec<String> = Vec::new();
     for f in &files {
         let mut io = CountingIo::new(PathIo::open_ro(img).expect("open the fixture"));
         opens += 1;
         match read::resolve_path(&mut io, &f.path) {
             Ok(_) => ok += 1,
-            Err(_) => failed += 1,
+            Err(e) => {
+                failed += 1;
+                if !reasons.iter().any(|r| r == &e) {
+                    reasons.push(e);
+                }
+            }
         }
         reads += io.reads;
         bytes += io.bytes;
@@ -359,6 +402,7 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
         micros: start.elapsed().as_micros(),
         items: ok,
         failed,
+        reasons: std::mem::take(&mut reasons),
         opens,
     };
     report("stat", &stat);
@@ -368,6 +412,7 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
     let mut opens = 0u64;
     let start = Instant::now();
     let (mut ok, mut failed) = (0usize, 0usize);
+    let mut reasons: Vec<String> = Vec::new();
     for f in &files {
         let mut io = CountingIo::new(PathIo::open_ro(img).expect("open the fixture"));
         opens += 1;
@@ -383,7 +428,12 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
         });
         match read {
             Ok(_) => ok += 1,
-            Err(_) => failed += 1,
+            Err(e) => {
+                failed += 1;
+                if !reasons.iter().any(|r| r == &e) {
+                    reasons.push(e);
+                }
+            }
         }
         reads += io.reads;
         bytes += io.bytes;
@@ -394,6 +444,7 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
         micros: start.elapsed().as_micros(),
         items: ok,
         failed,
+        reasons: std::mem::take(&mut reasons),
         opens,
     };
     report("read", &read_cost);
@@ -445,9 +496,10 @@ fn what_a_read_costs_in_calls_to_the_device() {
             c.failed,
             0,
             "{what}: {} of {} operations failed, so the cost recorded here is the cost of \
-             failing rather than of reading",
+             failing rather than of reading. What they said: {:?}",
             c.failed,
-            c.failed + c.items
+            c.failed + c.items,
+            c.reasons
         );
         assert!(
             c.items > 0,
