@@ -134,7 +134,24 @@ jobs:
       # regenerate the lock and abort on a dirty tree after the gates pass.
       # Quiet tiers, as in ci.yml: a verdict line per run, the whole run in
       # tmp/logs/, the tail on failure, exit 65 over budget (scripts/tier.sh).
-      - run: scripts/tier.sh suite -- cargo test --release --locked --no-fail-fast
+      #
+      # AN EXECUTED-TEST FLOOR, because this job gates `cargo publish`.
+      # `cargo test` exits 0 on "0 passed; 0 failed", so a suite that
+      # selected nothing -- an unbuilt test binary, a filter that stopped
+      # matching -- is indistinguishable from a full green run by exit
+      # status alone. ci.yml has carried this floor since #278; a tag did
+      # not, which is the one run where publishing follows the tick.
+      # Same number and same source as ci.yml's `integration` job: 1427
+      # executed on 2026-09-17 in run 34985102618, floor 1350.
+      - name: full suite with an executed-test floor
+        run: |
+          scripts/tier.sh suite -- cargo test --release --locked --no-fail-fast
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
+          echo "tests executed: $n (floor 1350)"
+          if [ "$n" -lt 1350 ]; then
+              echo "::error::only $n tests executed, floor is 1350 -- 1427 ran on 2026-09-17 in run 34985102618. The suite passed, so something stopped tests from being selected rather than failing them. This job gates cargo publish; read tmp/logs/suite.log, uploaded as test-logs-release."
+              exit 1
+          fi
       - run: scripts/tier.sh clippy -- cargo clippy --locked --all-targets -- -D warnings
       - name: upload test logs
         if: always()
