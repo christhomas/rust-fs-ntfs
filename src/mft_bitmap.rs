@@ -258,7 +258,7 @@ fn read_bitmap_byte_io<T: BlockIo + ?Sized>(
                 .ok_or_else(|| format!("byte_idx {byte_idx} past record end"))
         }
         MftBitmapLayout::NonResident { runs, .. } => {
-            let (_, disk_offset) = disk_offset_for_byte(bm, runs, byte_idx)?;
+            let (_, disk_offset) = disk_offset_for_byte(bm, runs, byte_idx, io.size())?;
             let mut b = [0u8; 1];
             io.read_exact_at(disk_offset, &mut b)
                 .map_err(|e| format!("read mftbm: {e}"))?;
@@ -290,7 +290,7 @@ fn write_bitmap_byte_io<T: BlockIo + ?Sized>(
             })
         }
         MftBitmapLayout::NonResident { runs, .. } => {
-            let (_, disk_offset) = disk_offset_for_byte(bm, runs, byte_idx)?;
+            let (_, disk_offset) = disk_offset_for_byte(bm, runs, byte_idx, io.size())?;
             io.write_all_at(disk_offset, &[v])
                 .map_err(|e| format!("write mftbm: {e}"))?;
             io.sync()
@@ -298,10 +298,14 @@ fn write_bitmap_byte_io<T: BlockIo + ?Sized>(
     }
 }
 
+/// `device_bytes`: see `bitmap::map_bitmap_range`. This path is reachable
+/// from `allocate_io` / `free_io`, so the bound decides where an MFT
+/// record allocation may write.
 fn disk_offset_for_byte(
     bm: &MftBitmap,
     runs: &[DataRun],
     byte_idx: u64,
+    device_bytes: u64,
 ) -> Result<(DataRun, u64), String> {
     let vcn = byte_idx / bm.params.cluster_size;
     let off_in_cluster = byte_idx % bm.params.cluster_size;
@@ -318,7 +322,7 @@ fn disk_offset_for_byte(
         vcn - run.starting_vcn,
         off_in_cluster,
         1,
-        u64::MAX,
+        device_bytes,
     )?;
     Ok((run, disk))
 }
@@ -426,7 +430,7 @@ mod tests {
         // cluster_size=512, byte 0 → VCN 0, lcn=10 → disk = 10*512 + 0 = 5120
         let b = bm(512);
         let runs = vec![run(0, 4, 10)];
-        let (_, disk) = disk_offset_for_byte(&b, &runs, 0).unwrap();
+        let (_, disk) = disk_offset_for_byte(&b, &runs, 0, u64::MAX).unwrap();
         assert_eq!(disk, 10 * 512);
     }
 
@@ -435,7 +439,7 @@ mod tests {
         // cluster_size=512, byte 7 → VCN 0, off_in_cluster=7, disk = 10*512 + 7
         let b = bm(512);
         let runs = vec![run(0, 4, 10)];
-        let (_, disk) = disk_offset_for_byte(&b, &runs, 7).unwrap();
+        let (_, disk) = disk_offset_for_byte(&b, &runs, 7, u64::MAX).unwrap();
         assert_eq!(disk, 10 * 512 + 7);
     }
 
@@ -444,7 +448,7 @@ mod tests {
         // byte 512 → VCN 1 (cluster_size=512), lcn=10+1=11, disk = 11*512 + 0
         let b = bm(512);
         let runs = vec![run(0, 4, 10)];
-        let (_, disk) = disk_offset_for_byte(&b, &runs, 512).unwrap();
+        let (_, disk) = disk_offset_for_byte(&b, &runs, 512, u64::MAX).unwrap();
         assert_eq!(disk, 11 * 512);
     }
 
@@ -454,7 +458,7 @@ mod tests {
         // byte 4*512 → VCN 4, in second run, lcn=20, disk = 20*512
         let b = bm(512);
         let runs = vec![run(0, 4, 10), run(4, 4, 20)];
-        let (_, disk) = disk_offset_for_byte(&b, &runs, 4 * 512).unwrap();
+        let (_, disk) = disk_offset_for_byte(&b, &runs, 4 * 512, u64::MAX).unwrap();
         assert_eq!(disk, 20 * 512);
     }
 
@@ -462,14 +466,39 @@ mod tests {
     fn disk_offset_unmapped_byte_errors() {
         let b = bm(512);
         let runs = vec![run(0, 4, 10)]; // only covers VCNs 0-3
-        assert!(disk_offset_for_byte(&b, &runs, 4 * 512).is_err());
+        assert!(disk_offset_for_byte(&b, &runs, 4 * 512, u64::MAX).is_err());
     }
 
     #[test]
     fn disk_offset_sparse_run_errors() {
         let b = bm(512);
         let runs = vec![sparse_run(0, 4)];
-        assert!(disk_offset_for_byte(&b, &runs, 0).is_err());
+        assert!(disk_offset_for_byte(&b, &runs, 0, u64::MAX).is_err());
+    }
+
+    /// THE DEVICE, NOT THE CLAIM. `cluster_span` bounds a transfer by the
+    /// smaller of the boot sector's volume size and the device's real
+    /// size, and this path used to pass `u64::MAX` for the second -- so a
+    /// volume claiming more than the device holds was checked against its
+    /// own claim (#241). Reachable from `allocate_io` / `free_io`: the
+    /// bound decides where an MFT record allocation may write.
+    #[test]
+    fn a_bitmap_byte_past_the_end_of_the_device_is_refused() {
+        let b = bm(512);
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 4,
+            lcn: Some(100),
+        }];
+        // Inside the volume as the boot sector describes it...
+        let (_, disk) = disk_offset_for_byte(&b, &runs, 0, u64::MAX).unwrap();
+        assert_eq!(disk, 100 * b.params.cluster_size);
+        // ...and outside a device that stops before it.
+        let err = disk_offset_for_byte(&b, &runs, 0, disk).unwrap_err();
+        assert!(
+            err.contains("a transfer spans"),
+            "a byte past the device's end must be refused, got: {err}"
+        );
     }
 
     // -------------------------------------------------------------------------

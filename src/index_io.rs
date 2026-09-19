@@ -13,7 +13,7 @@ use crate::mkfs::stream;
 /// Layout: `INDEX_ROOT_HEADER (16 bytes) + INDEX_HEADER (16 bytes) + entries…`.
 const IR_INDEX_HEADER_OFFSET: usize = 16;
 /// Flags byte within INDEX_HEADER.
-pub const IH_FLAGS_OFFSET: usize = 0x0C;
+pub(crate) const IH_FLAGS_OFFSET: usize = 0x0C;
 /// INDEX_HEADER bit: any of the entries has a subnode pointer (i.e.
 /// the index overflows into `$INDEX_ALLOCATION`).
 pub const IH_FLAG_HAS_SUBNODES: u8 = 0x01;
@@ -465,6 +465,13 @@ fn scan_entries_for_name(
 pub struct DirEntryRaw {
     /// Target file's MFT record number (low 48 bits of the file_reference).
     pub file_record_number: u64,
+    /// The file reference's sequence number (its top 16 bits). A record
+    /// slot is reused, and its sequence is bumped each time; an index
+    /// entry that still points at the previous tenant carries the OLD
+    /// sequence. Comparing this against the target record's own sequence
+    /// is what tells a stale entry from a live one -- see
+    /// `read::lookup_in_directory` (#257).
+    pub sequence: u16,
     /// Filename (lossy UTF-16 → UTF-8).
     pub name: String,
     /// `$FILE_NAME` namespace: 0=POSIX, 1=Win32, 2=DOS, 3=Win32+DOS.
@@ -549,6 +556,7 @@ fn collect_entries(
                 );
                 out.push(DirEntryRaw {
                     file_record_number: file_ref & 0x0000_FFFF_FFFF_FFFF,
+                    sequence: (file_ref >> 48) as u16,
                     name,
                     namespace,
                     file_attributes,
@@ -1194,7 +1202,7 @@ pub fn insert_entry_into_indx_block_with_collation(
 ///
 /// `flags` is the INDEX_HEADER flags byte at [`IH_FLAGS_OFFSET`];
 /// `what` names the structure for the error message.
-pub fn refuse_if_interior(flags: u8, what: &str) -> Result<(), String> {
+pub(crate) fn refuse_if_interior(flags: u8, what: &str) -> Result<(), String> {
     if flags & IH_FLAG_HAS_SUBNODES != 0 {
         return Err(format!(
             "{what} has sub-nodes; inserting into an interior node needs \

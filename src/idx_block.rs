@@ -126,12 +126,30 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
     // Get $Bitmap:$I30.
     let bm_attr = attr_io::find_attribute(&record, AttrType::Bitmap, Some(stream::I30))
         .ok_or_else(|| "$Bitmap:$I30 not found".to_string())?;
+    // A DIRECTORY BIG ENOUGH PUSHES ITS OWN BITMAP OUT OF THE RECORD, and
+    // this used to refuse it: "non-resident $Bitmap:$I30 unsupported in
+    // this MVP". `load_for_directory_io` is the single door to
+    // `$INDEX_ALLOCATION` for reading AND writing, and all of its call
+    // sites propagate, so such a directory could not be listed, looked up
+    // in, created in, renamed in or removed from -- the whole directory,
+    // not the entry that overflowed (#174).
+    //
+    // One bit per index block, so the crossover is a directory with more
+    // blocks than the record has spare bytes for: a few thousand entries
+    // at 4 KiB blocks. Reading it is the same non-resident read every
+    // other attribute gets.
     let bitmap = if bm_attr.is_resident {
         let off = bm_attr.resident_value_offset.ok_or("no value_offset")? as usize;
         let len = bm_attr.resident_value_length.ok_or("no value_length")? as usize;
         record[bm_attr.attr_offset + off..bm_attr.attr_offset + off + len].to_vec()
     } else {
-        return Err("non-resident $Bitmap:$I30 unsupported in this MVP".to_string());
+        crate::read::read_attribute_value(
+            io,
+            parent_record_number,
+            AttrType::Bitmap,
+            Some(stream::I30),
+        )
+        .map_err(|e| format!("reading a non-resident $Bitmap:$I30: {e}"))?
     };
 
     Ok(IndexAllocation {

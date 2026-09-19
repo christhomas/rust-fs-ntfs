@@ -136,3 +136,45 @@ fn a_symlink_still_reads_its_target() {
     let st = fs.stat("/link").expect("stat the symlink");
     assert_eq!(st.file_type, FileType::Symlink);
 }
+
+/// THE GUARD MUST DISCRIMINATE ON THE TAG, NOT ON THE PRESENCE OF A
+/// REPARSE POINT, and until this test nothing checked that.
+///
+/// `a_symlink_still_reads_its_target` above calls only `stat`, and
+/// `read_stat` never reaches `refuse_wof_compressed` -- so it passed with
+/// the guard rejecting every reparse tag (#232). Reading the symlink
+/// instead does not help: a symlink has no meaningful unnamed `$DATA`,
+/// and `readlink` reads `$REPARSE_POINT`, which also bypasses the guard.
+///
+/// What exercises it is a REGULAR FILE WITH REAL CONTENT carrying a
+/// NON-WOF tag, read through the path the guard is on. Change the guard
+/// to refuse any reparse tag and this fails; the symlink test does not.
+#[test]
+fn a_file_with_a_non_wof_reparse_tag_still_reads_its_content() {
+    let img = fresh_volume("nonwof");
+    let p = Path::new(&img);
+    write::create_file(p, "/", "tagged.bin").expect("create");
+    write::write_file_contents(p, "/tagged.bin", &vec![b'q'; 4096]).expect("write");
+    // A symlink tag on a file that also has real content: not a shape
+    // Windows produces, and precisely the discrimination under test.
+    write::write_reparse_point(p, "/tagged.bin", reparse_tag::SYMLINK, &[0u8; 12])
+        .expect("set a non-WOF reparse tag");
+
+    let fs = Filesystem::mount(&img).expect("mount");
+    let mut buf = vec![0u8; 4096];
+    let n = fs
+        .read_file("/tagged.bin", 0, &mut buf)
+        .expect("a non-WOF reparse tag must not be refused");
+    assert_eq!(n, 4096);
+    assert!(
+        buf.iter().all(|&b| b == b'q'),
+        "the file's real content comes back, not zeros"
+    );
+
+    // The same through the whole-value read, the guard's other call site.
+    let mut io = PathIo::open_ro(Path::new(&img)).expect("open_ro");
+    let rec = read::resolve_path(&mut io, "/tagged.bin").expect("resolve");
+    let whole = read::read_attribute_value(&mut io, rec, fs_ntfs::attr_io::AttrType::Data, None)
+        .expect("a non-WOF reparse tag must not be refused here either");
+    assert_eq!(whole.len(), 4096);
+}
