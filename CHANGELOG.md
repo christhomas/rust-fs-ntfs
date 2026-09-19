@@ -158,6 +158,12 @@
   as `test-logs-*` artifacts. `tests/ci_profile.rs` reads a run through
   `scripts/tier.sh TIER --` and still refuses every other prefix.
   `test:suite` checks for the `test-disks/ntfs-*.img` fixtures first.
+- The Windows test VM is started and stopped by chore: `chore vm:status`,
+  `vm:up` (start headless if needed, wait for SSH) and `vm:down` (clean
+  shutdown), through VMware Fusion's `vmrun`. The VM's encryption password
+  is read from trove when it is needed. `.test-env` gains `VM_VMX`, the
+  `.vmx` path. The README's matrix section sends VM setup to
+  fs-windows-test-harness's `docs/vm-setup.md`.
 
 - **BREAKING.** `index_io::IndexEntryLocation` gains a required public
   field, `sequence: u16`, and is now `#[non_exhaustive]`. Code that

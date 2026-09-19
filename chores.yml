@@ -52,6 +52,22 @@ vars:
   # version runs the matrix.
   HARNESS_REF: v4.1.0
 
+  # THE WINDOWS TEST VM is driven by scripts/vm.sh (vmrun, trove for the
+  # encryption password, the fixed host-only address). See that file and
+  # docs/vm-setup.md in fs-windows-test-harness.
+
+# .test-env is this machine's VM config: VM_HOST, SSH_KEY, VM_WORKDIR,
+# HOST_IMAGE_DIR, and VM_VMX for the vm:* tasks. Gitignored and per machine;
+# the harness's run-tests.sh writes the first four on its first run.
+#
+# THE `?` MAKES ITS ABSENCE NORMAL. chore treats a missing dotenv file as an
+# error, which is right for a file that decides which stack a command acts on
+# -- but this one only configures the VM, and CI has no VM. Without the `?`
+# every CI job died at its first chore call with `siblings: no environment
+# loaded`, before a test ran. A machine with no VM config runs everything
+# that does not need one.
+dotenv: ['?.test-env']
+
 tasks:
   staticlib:
     desc: Build the static library and its headers into this crate's dist/
@@ -226,6 +242,116 @@ tasks:
           printf '%s\n' "$out" >&2
           exit 1
         fi
+  build:cli:
+    desc: Build the rust-ntfs CLI the matrix drives (target/release/rust-ntfs) -- skipped when up to date
+    # UP TO DATE MEANS THE SOURCES HAVE NOT CHANGED, by content: chore hashes
+    # these files and skips the task while the hashes match and the binary
+    # exists. cargo would also notice nothing changed, but only after
+    # starting up, resolving the workspace and checking every crate --
+    # measured at about a second and a screen of output per run; this is
+    # neither. Patterns are LITERAL for the reason given on staticlib.
+    #
+    # ../rust-fs-core is here because it is a path dependency: its source
+    # is compiled into the binary, so a change there must rebuild it too.
+    # rust-toolchain.toml because a toolchain bump changes the output.
+    sources:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - 'src/**/*.rs'
+      - '../rust-fs-core/Cargo.toml'
+      - '../rust-fs-core/src/**/*.rs'
+    generates:
+      - target/release/rust-ntfs
+    # THE GATE, not the report: siblings:check prints a line per sibling
+    # whether or not anything drifted, and `chore matrix` would wear those
+    # two lines in front of every run. Same check, silent when it passes.
+    deps: [siblings:gate]
+    cmds:
+      - cargo build --release --locked --bin rust-ntfs --quiet
+
+  matrix:
+    desc: 'Run matrix scenarios on the Windows VM: `chore matrix -- <group|filter>` (e.g. smoke, mac-format-tiny-32mib)'
+    # Everything a scenario needs, declared rather than remembered: the CLI
+    # it formats with (rebuilt only if its sources changed) and a running VM
+    # whose address is in .test-env. Missing either used to fail every
+    # scenario at step 1 -- five retries each of `rust-ntfs: No such file`.
+    deps: [build:cli, vm:up]
+    # Sweep the VM's disk images twice, and the FIRST sweep is the one that
+    # matters: a run that dies (the VM stopped responding on 2026-09-18)
+    # never reaches its own cleanup, and its 30 GiB of leftovers are what
+    # makes the NEXT run fail to ship a 4 GiB image. `after` runs on failure
+    # as well as success, so the normal path leaves nothing either.
+    after: [bash scripts/vm-clean-images.sh]
+    cmds:
+      # After the run, pass or fail: bring the VM's per-scenario evidence
+      # (chkdsk's report, what Windows enumerated) home and say what it shows.
+      - defer: scripts/matrix-fetch-diag.sh
+      - bash scripts/vm-clean-images.sh
+      # THROUGH tier.sh, like every other tier: the scenarios' own output is
+      # 1,500 lines of per-step progress that nobody reads when the run is
+      # green, and an agent re-reads on every later step. What is left is one
+      # verdict line, the diagnostics summary for the scenarios that need a
+      # look, and the whole run in tmp/logs/matrix.log. `-- --verbose`
+      # streams it as it happens -- worth it for a run this long when you are
+      # watching one.
+      #
+      # The filter is forwarded, so `chore matrix -- smoke --verbose` works:
+      # tier.sh takes --verbose out of CLI_ARGS and run-matrix.sh never sees
+      # it.
+      - |
+        set -eu
+        # The runner shells out to ssh and scp, so it needs the agent that
+        # holds the VM's key -- see scripts/vm-ssh-agent.sh for what happens
+        # when it inherits a shell's empty one instead.
+        SSH_AUTH_SOCK="$(scripts/vm-ssh-agent.sh)"; export SSH_AUTH_SOCK
+        filter=""
+        for arg in {{.CLI_ARGS}}; do
+          case "$arg" in --verbose|-v) continue ;; esac
+          filter="$filter $arg"
+        done
+        # shellcheck disable=SC2086  # the words are the point
+        scripts/tier.sh matrix -- bash scripts/run-matrix.sh $filter
+
+  # THE VM TASKS. The Windows VM is a thing a task depends on, not a thing a
+  # person remembers to start: a matrix task declares `deps: [vm:up]`, and
+  # vm:up is idempotent. The work is in scripts/vm.sh; each task is one line
+  # so a failure prints the script's one-line reason, not a screen of shell.
+  # Opening the encrypted VM needs trove unlocked in the calling shell.
+  vm:clean:
+    desc: Delete the disk images a matrix run left on the VM, and say how much space that gave back
+    silent: true
+    timeout: 5m
+    cmds: [bash scripts/vm-clean-images.sh]
+
+  vm:status:
+    desc: Is the Windows test VM running, and does it answer SSH at VM_HOST? One line.
+    silent: true
+    cmds: [scripts/vm.sh status]
+
+  vm:up:
+    desc: Start the VM headless if needed, discover its address, write VM_HOST to .test-env, wait for SSH
+    silent: true
+    timeout: 15m
+    cmds: [scripts/vm.sh up]
+
+  vm:address:
+    desc: Discover the running VM's address (prefers its fixed host-only one) and print user@ip
+    silent: true
+    timeout: 10m
+    cmds: [scripts/vm.sh address]
+
+  vm:network:
+    desc: Give the VM its fixed address (VM_STATIC_IP) inside Windows, or say what is missing
+    silent: true
+    timeout: 15m
+    cmds: [scripts/vm.sh network]
+
+  vm:down:
+    desc: Shut the Windows test VM down cleanly (a no-op if it is not running)
+    silent: true
+    timeout: 5m
+    cmds: [scripts/vm.sh down]
 
   lint:
     desc: Formatting and clippy, exactly as CI runs them
@@ -250,7 +376,7 @@ tasks:
     # cargo already BUILDS the sibling — it is a path dep. What cargo
     # cannot know is whether that checkout is the one this crate
     # intends, which is what the gate answers.
-    deps: [siblings:check]
+    deps: [siblings:gate]
     cmds: ['cargo build']
 
   # THE TEST TIERS. Each is one `cargo test` selection from ci.yml, run
@@ -304,6 +430,15 @@ tasks:
       - task: test:suite
       # THE LAST LINE: one number across the tiers, and where the detail is.
       - scripts/test-verdict.sh unit unit-debug mkfs suite
+
+  test:scripts:
+    desc: The shell tests (tests/scripts/*.sh), every one by glob
+    # By glob, so a test added later needs no edit here -- a test that has to
+    # be registered somewhere else is a test that gets silently skipped.
+    cmds:
+      # Through tier.sh, so a failure prints the tail of the log instead of
+      # telling the reader to go and run it again themselves.
+      - scripts/tier.sh scripts -- bash -c 'for t in tests/scripts/*.sh; do bash "$t"; done'
 
   clean:
     desc: Remove this crate's cargo output
