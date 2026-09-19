@@ -458,7 +458,12 @@ fn read_value_from_record<T: BlockIo + ?Sized>(
         return read_compressed_nonresident(io, params, record, loc);
     }
 
-    let data_size = bounded_value_length(params, &loc.non_resident_value_length, "non-resident")?;
+    let data_size = bounded_value_length(
+        params,
+        &loc.non_resident_value_length,
+        "non-resident",
+        io.size(),
+    )?;
     let init_size = u64::from_le_bytes(
         record[loc.attr_offset + attr_off::NONRES_INITIALIZED_LENGTH
             ..loc.attr_offset + attr_off::NONRES_INITIALIZED_LENGTH + 8]
@@ -638,16 +643,34 @@ const MAX_COMPRESSION_UNIT: u32 = 4;
 ///
 /// A non-resident value lives in clusters, and a volume has only so
 /// many.
+/// `device_bytes` is the size of the device the value would be read
+/// from, and the ceiling is the SMALLER of that and the volume's claim.
+///
+/// THE CEILING USED TO COME FROM THE SAME PLACE AS THE VALUE. It was
+/// `params.volume_bytes()` alone -- `total_sectors * bytes_per_sector`,
+/// both read off the boot sector and neither validated -- so a hostile
+/// image set the length AND the limit that was supposed to bound it
+/// (#176). The failure that guard exists for is an abort rather than an
+/// error: `$UpCase` with `data_length = 0x0000_FFFF_FFFF_FFFF` on a
+/// 10 MB image asked for 256 TiB and the process died, on the first
+/// operation of any mount, where the FFI guard never sees it.
+///
+/// Taking the smaller of the two is the fix rather than refusing a
+/// volume whose claim exceeds its device: a Windows-formatted volume
+/// shipped back as a raw image legitimately does that, and the matrix
+/// has four scenarios that prove it.
 fn bounded_value_length(
     params: &crate::mft_io::BootParams,
     declared: &Option<u64>,
     what: &str,
+    device_bytes: u64,
 ) -> Result<usize, String> {
     let declared = declared.ok_or(format!("{what} attr has no data size"))?;
-    let volume = params.volume_bytes();
+    let volume = params.volume_bytes().min(device_bytes);
     if declared > volume {
         return Err(format!(
-            "{what} attribute says its value is {declared} bytes, on a volume of {volume}"
+            "{what} attribute says its value is {declared} bytes, and the smaller of the \
+             volume's own size and the device's is {volume}"
         ));
     }
     Ok(declared as usize)
@@ -669,7 +692,12 @@ fn read_compressed_nonresident<T: BlockIo + ?Sized>(
     record: &[u8],
     loc: &attr_io::AttrLocation,
 ) -> Result<Vec<u8>, String> {
-    let data_size = bounded_value_length(params, &loc.non_resident_value_length, "compressed")?;
+    let data_size = bounded_value_length(
+        params,
+        &loc.non_resident_value_length,
+        "compressed",
+        io.size(),
+    )?;
     let cu_exp = u16::from_le_bytes([
         record[loc.attr_offset + NONRES_COMPRESSION_UNIT],
         record[loc.attr_offset + NONRES_COMPRESSION_UNIT + 1],
@@ -2060,6 +2088,47 @@ mod tests {
         // iterator stops before the first attribute.
         rec[0x18..0x1C].copy_from_slice(&((end + 4) as u32).to_le_bytes());
         rec
+    }
+
+    /// THE CEILING IS THE SMALLER OF THE TWO SIZES, so an image whose
+    /// boot sector claims more than the file holds cannot use its own
+    /// claim as the limit on an attribute's length (#176).
+    ///
+    /// It must not REFUSE such a volume: a Windows-formatted volume
+    /// shipped back as a raw image declares more sectors than the file
+    /// holds, and four `win-format-*` matrix scenarios do exactly that.
+    #[test]
+    fn a_value_is_bounded_by_the_device_not_only_by_the_volumes_claim() {
+        let params = crate::mft_io::BootParams {
+            bytes_per_sector: 512,
+            sectors_per_cluster: 8,
+            cluster_size: 4096,
+            mft_lcn: 4,
+            file_record_size: 1024,
+            // The volume claims 64 MiB.
+            total_sectors: 131072,
+            serial_number: 0,
+            index_block_size: 4096,
+            oem_id: *b"NTFS    ",
+        };
+        let claimed = params.volume_bytes();
+        assert_eq!(claimed, 64 * 1024 * 1024);
+
+        // On a device that matches, a value just inside the claim is fine.
+        assert!(bounded_value_length(&params, &Some(claimed - 1), "$Test", claimed).is_ok());
+
+        // On a device half that size, the same value is refused -- the
+        // device is the smaller of the two and therefore the ceiling.
+        let device = claimed / 2;
+        let err = bounded_value_length(&params, &Some(claimed - 1), "$Test", device)
+            .expect_err("the device bounds the value");
+        assert!(
+            err.contains(&format!("{device}")),
+            "the error names the ceiling it used, got: {err}"
+        );
+
+        // And a value that fits the device is still read.
+        assert!(bounded_value_length(&params, &Some(device - 1), "$Test", device).is_ok());
     }
 
     /// A `$ATTRIBUTE_LIST` IS NEVER LEGITIMATELY SPARSE, and this is the
