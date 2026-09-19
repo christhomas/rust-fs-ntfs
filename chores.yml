@@ -55,18 +55,6 @@ vars:
   # version runs the matrix.
   HARNESS_REF: v4.1.0
 
-  # The VHD writer the Windows validation jobs build their test image
-  # with. Windows' Mount-DiskImage will not take a raw .img, so every
-  # chkdsk run in CI goes through this tool -- and it was pinned in the
-  # two workflows and declared nowhere (#190). They had already drifted
-  # once: the release copy moved to v0.3.5 and ci.yml was left at v0.2.0,
-  # so the two jobs built their images with versions three releases
-  # apart, one of them predating that crate's own hardening (#128).
-  #
-  # Declared here for the same reason as the two above: one copy of a
-  # fact cannot disagree with itself.
-  VHD_TOOL_REF: v0.3.5
-
   # THE WINDOWS TEST VM is driven by scripts/vm.sh (vmrun, trove for the
   # encryption password, the fixed host-only address). See that file and
   # docs/vm-setup.md in fs-windows-test-harness.

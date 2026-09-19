@@ -227,10 +227,7 @@ are documented there.
   heavily fragmented files don't get rejected.
 - [ ] **Compressed-read support** — `LZNT1` decompression so files
   written by Windows with compression enabled can be read back.
-- [ ] Revisit this list. It planned a 0.2 release "once W2.6 + W3.2 +
-  W3.3 land"; 0.2, 0.3, 0.4 and 0.5 have shipped and those three are
-  still unchecked above, so the one dated commitment here was overtaken
-  and never revised (#189). Treat the boxes as a wish list, not a plan.
+- [ ] Cut a 0.2 release tag once W2.6 + W3.2 + W3.3 land.
 
 ## Changelog
 
