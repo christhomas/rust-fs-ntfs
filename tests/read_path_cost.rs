@@ -216,13 +216,17 @@ fn measure_shared(img: &Path) -> Pass {
     let mut paths = Vec::new();
     let start = Instant::now();
     walk_paths(&mut io, "/", root, 8, &mut paths);
+    // DIRECTORIES LISTED, which is what the per-call pass counts too:
+    // the root plus every directory found under it. Counting paths here
+    // and directories there is what made the two columns incomparable
+    // (#229).
+    let dirs_listed = 1 + paths.iter().filter(|p| p.is_dir).count();
     let walk = Cost {
         reads: io.reads,
         bytes: io.bytes,
         micros: start.elapsed().as_micros(),
-        items: paths.len(),
-        failed: 0, // the walk records what it found; a directory it
-        // could not list contributes no paths rather than an error
+        items: dirs_listed,
+        failed: 0, // a directory it could not list contributes no paths
         opens: 0,
     };
     report("walk", &walk);
@@ -289,7 +293,22 @@ fn measure_shared(img: &Path) -> Pass {
 /// its `stat`, `read_dir` and `read_file` each begin with
 /// `PathIo::open_ro(&self.image)`.
 fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
-    let dirs: Vec<&PathEntry> = paths.iter().filter(|p| p.is_dir).collect();
+    // THE SAME DIRECTORY SET AS THE SHARED PASS, root included. The
+    // shared walk starts at `/` and `walk_paths` pushes only children, so
+    // `paths` never contains the root -- while this pass listed `dirs`
+    // alone. The two columns measured different sets, and worse, divided
+    // by different quantities: `paths.len()` (every path) against
+    // `dirs.len()` (one). That is where `docs/read-path-cost.md`'s "0.3
+    // versus 8.0 reads per item" came from -- an artefact of the
+    // denominators, not a property of the driver (#229).
+    let root = PathEntry {
+        path: "/".to_string(),
+        record: 5, // the root directory's MFT record
+        is_dir: true,
+    };
+    let dirs: Vec<&PathEntry> = std::iter::once(&root)
+        .chain(paths.iter().filter(|p| p.is_dir))
+        .collect();
     let files: Vec<&PathEntry> = paths.iter().filter(|p| !p.is_dir).collect();
 
     let mut reads = 0u64;
