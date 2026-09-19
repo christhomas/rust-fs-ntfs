@@ -155,6 +155,13 @@
 
 ### Changed
 
+- **Breaking (Rust API):** `idx_block::vcn_to_disk_offset` takes a third
+  required argument, `device_bytes`. It was added to remove a `u64::MAX`
+  device bound that let a VCN resolve past the end of the device; a
+  two-argument wrapper would re-expose exactly that, so there is no
+  compatibility shim. Every caller is in-crate, and DiskJockey links the C
+  ABI rather than the Rust API, so nothing outside this repository has to
+  change — the version is 0.5.0 and this is the entry that says why. (#236)
 - The CI workflows build their test images with the same VHD writer. The
   release workflow's copy had moved to `am-img-vhd` v0.3.5 while this
   one stayed at v0.2.0, so two jobs exercised the same tool at versions
