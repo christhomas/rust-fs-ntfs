@@ -323,10 +323,25 @@ enum MountSource {
     },
 }
 
-// Safety: the `*mut c_void` context pointer is opaque to us; the
-// caller (FSKit / Go backend) is responsible for keeping it alive
-// for the duration of the handle, just like for `CallbackReader`
-// already (see the comment on `unsafe impl Send for CallbackReader`).
+// Safety: ONE FIELD IS THE REASON THIS IS UNSAFE. `Path(PathBuf)` and
+// `FsCore { device }` are already `Send + Sync` -- `fs_core::BlockRead`,
+// which `BlockDevice` requires, is declared `Send + Sync`, so the `Arc`
+// carries that. `Callbacks` holds `context: *mut c_void`, and a raw
+// pointer is neither, which is what these impls assert past.
+//
+// What they assert: the context is OPAQUE TO US. We never dereference it,
+// never read through it, and only ever hand it straight back to the
+// caller's own `read_fn` / `write_fn`. Its validity, its lifetime and any
+// synchronisation it needs are the caller's, and the C header says so
+// (include/fs_ntfs.h, "Guarantees and obligations": a single process and
+// thread mounting one volume is the supported shape, two concurrent
+// writers against one image is undefined behaviour, and the caller must
+// quiesce the device for the duration of a mutation).
+//
+// So this is not a claim that the context is thread-safe. It is the claim
+// that moving the handle between threads cannot make it less safe than
+// the header already permits, because nothing on this side of the
+// boundary touches the pointer at all.
 unsafe impl Send for MountSource {}
 unsafe impl Sync for MountSource {}
 
