@@ -588,10 +588,19 @@ jobs:
   # NTFS volume?" check, against the same code Microsoft ships.
   # Triggers:
   #   - tag pushes (release candidates)
-  #   - manual `workflow_dispatch` from the GitHub Actions UI for
-  #     ad-hoc validation while iterating on the mkfs implementation
-  # Doesn't run on every PR because windows-latest provisioning is
-  # ~3x slower than ubuntu-latest.
+  #   - manual `workflow_dispatch` from the GitHub Actions UI
+  #   - a pull request that changes the code deciding the bytes on disk
+  #     (see the `changes` job below)
+  #
+  # IT IS A REQUIRED CHECK, AND A SKIPPED REQUIRED CHECK COUNTS AS
+  # SATISFIED. Until #266 it ran on tags and dispatch only, so on every
+  # pull request it reported `skipped` and the requirement was met by a
+  # job that had not run -- the format gate advertised in front of every
+  # merge had never seen one. windows-latest provisioning is ~3x slower
+  # than ubuntu, which is why it still does not run on every PR; it runs
+  # on the ones where it could catch something. A PR that touches none of
+  # those paths still satisfies the requirement by skipping, which is the
+  # residue of this design and is deliberate.
   #
   # Windows Mount-DiskImage doesn't accept raw .img files, so we wrap
   # the binary's output in a VHD container via vhd_tool (from
@@ -603,12 +612,52 @@ jobs:
   # commits. This is the iteration loop for finding mkfs bugs —
   # chkdsk's error text tells us exactly which on-disk structure is
   # wrong.
+  # Which paths a pull request touched. A tiny ubuntu job rather than a
+  # third-party action: the answer is one `git diff --name-only` against
+  # the merge base, and a filter action would be another unpinned
+  # dependency in front of the gate it decides.
+  changes:
+    name: what this pull request touches
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    outputs:
+      mkfs: ${{ steps.filter.outputs.mkfs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          # THE CODE THAT DECIDES BYTES ON DISK, plus the workflow that
+          # validates them. Deliberately not "any .rs": a change to the
+          # read path cannot make chkdsk unhappy about a volume, and
+          # paying three minutes of Windows for it teaches people to
+          # merge without reading the gate.
+          changed=$(git diff --name-only "$BASE_SHA"...HEAD)
+          echo "$changed" | sed 's/^/  /'
+          if echo "$changed" | grep -qE '^(src/(mkfs|sds|record_build|idx_block|index_io|write)\.rs|src/bin/mkfs_ntfs\.rs|test-matrix\.json|fs-windows-test-harness\.toml|scripts/fs-windows-test-harness/|\.github/workflows/ci\.yml)'; then
+              echo "mkfs=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::this pull request changes format-relevant code, so the Windows chkdsk gate will run"
+          else
+              echo "mkfs=false" >> "$GITHUB_OUTPUT"
+          fi
+
   validate-mkfs-windows:
     name: validate rust-ntfs format (Windows chkdsk)
     runs-on: windows-latest
+    needs: [changes]
+    # `always()` because `needs: [changes]` would otherwise skip this job
+    # whenever `changes` itself was skipped -- which is every tag push and
+    # every manual run, the two cases that must always validate.
     if: >-
-      startsWith(github.ref, 'refs/tags/v') ||
-      github.event_name == 'workflow_dispatch'
+      always() && (
+        startsWith(github.ref, 'refs/tags/v') ||
+        github.event_name == 'workflow_dispatch' ||
+        needs.changes.outputs.mkfs == 'true'
+      )
     steps:
       - uses: actions/checkout@v4
       - name: check out sibling repos
