@@ -7,6 +7,11 @@ description = "Pure-Rust NTFS filesystem driver. Exposes a C ABI (fs_ntfs_*) sui
 repository = "https://github.com/christhomas/rust-fs-ntfs"
 readme = "README.md"
 
+# The fuzz crate is its own package, on its own toolchain, and is not
+# part of this one. Without this, `cargo package` and `cargo publish`
+# try to include it and fail on the nightly-only dependency.
+exclude = ["fuzz"]
+
 [lib]
 name = "fs_ntfs"
 crate-type = ["staticlib", "rlib"]
