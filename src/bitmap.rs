@@ -699,14 +699,14 @@ mod tests {
                 // Placed far outside every cluster range these
                 // allocate/free tests exercise (0..n_bytes*8, always
                 // well under 1_000_000 here). $MFT IS modelled -- a
-                // NON-zero `mft_clusters` -- because zero now means
-                // "could not be determined," which fails closed and
-                // would refuse every free in this file. A disjoint
-                // placeholder keeps that fail-closed path untested here
-                // (see `a_files_runs_may_not_free_the_volumes_own_clusters`
-                // for where it IS tested) while leaving these ordinary
-                // allocate/free tests exercising exactly the clusters
-                // they always did.
+                // NON-zero `mft_clusters` -- so that the fast path in
+                // `covers_the_volumes_own` is the one under test, and
+                // it is pointed somewhere these tests never touch so it
+                // refuses none of their frees. Zero would not refuse
+                // them either: it means "not known from this scalar"
+                // and merely skips that path (see the function, and
+                // `a_files_runs_may_not_free_the_volumes_own_clusters`
+                // for where $MFT's real protection is tested).
                 mft_lcn: 1_000_000,
                 file_record_size: 1024,
                 // A real boot sector always says how big the volume is,

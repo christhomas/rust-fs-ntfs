@@ -885,7 +885,7 @@ mod tests {
 
     /// THE WIRING between `locate_logfile_data_io` and the shared
     /// helper, on a real device. `a_fill_over_another_system_metafile_is_also_refused`
-    /// and `a_whole_volume_fallback_range_refuses_a_fill_anywhere` prove
+    /// and `a_range_spanning_the_volume_refuses_a_fill_anywhere` prove
     /// `forbidden_fill_ranges` uses whatever `other` it is given
     /// correctly; neither would notice `locate_logfile_data_io` itself
     /// no longer calling `other_protected_metafile_ranges_io` at all,
@@ -1274,13 +1274,18 @@ mod fill_range_tests {
         assert!(!overlaps((mft_at + mft_bytes, mftmirr.0 - 4096)));
     }
 
-    /// When any of the other five could not be located, the shared
-    /// helper's fallback is one range spanning the whole volume (see
-    /// `crate::read::other_protected_metafile_ranges_io`), and that
-    /// range refuses a fill anywhere on the volume through the same
-    /// overlap check -- no special case needed here either.
+    /// `forbidden_fill_ranges` refuses against whatever ranges it is
+    /// handed, wherever they fall and however large -- including one
+    /// spanning the volume, which is the widest case the overlap check
+    /// has to survive and needs no special case.
+    ///
+    /// NOTHING PRODUCES THAT RANGE. `read::other_protected_metafile_ranges_io`
+    /// is best-effort per metafile: one it cannot locate contributes
+    /// nothing. A volume-wide range existed for one revision of #157,
+    /// refused 4,095 of 4,095 clusters and was removed. This test names
+    /// the property, not a fallback.
     #[test]
-    fn a_whole_volume_fallback_range_refuses_a_fill_anywhere() {
+    fn a_range_spanning_the_volume_refuses_a_fill_anywhere() {
         let p = params();
         let mft_at = 1024 * 4096;
         let mft_bytes = 16 * 1024 * 1024;
