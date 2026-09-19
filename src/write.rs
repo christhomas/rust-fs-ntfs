@@ -1499,6 +1499,7 @@ fn undo_new_record_io<T: BlockIo + ?Sized>(
     cause: String,
 ) -> String {
     let mut failures: Vec<String> = Vec::new();
+    let mut in_use_cleared = state != NewRecordState::RecordWritten;
     if state == NewRecordState::RecordWritten {
         if let Err(e) = update_mft_record_io(io, new_rec, |record| {
             let cur = u16::from_le_bytes([record[0x16], record[0x17]]);
@@ -1507,19 +1508,48 @@ fn undo_new_record_io<T: BlockIo + ?Sized>(
             Ok(())
         }) {
             failures.push(format!("clearing IN_USE failed: {e}"));
+        } else {
+            in_use_cleared = true;
         }
     }
+    let mut bit_freed = true;
     if let Err(e) = mft_bitmap::free_io(io, mbm, new_rec) {
+        bit_freed = false;
         failures.push(format!("freeing the $MFT:$Bitmap bit failed: {e}"));
     }
     if failures.is_empty() {
-        cause
-    } else {
-        format!(
-            "{cause} (rollback incomplete, MFT record {new_rec} leaked: {})",
-            failures.join("; ")
-        )
+        return cause;
     }
+
+    // WHICH HALF FAILED DECIDES WHAT IS WRONG WITH THE VOLUME, and the
+    // message used to call every incomplete rollback a leak (#273).
+    // Only one of the three is:
+    //
+    //   * the bit is still set  -> the slot is spoken for and nothing
+    //     will reuse it. That is a leak.
+    //   * the bit was freed and IN_USE is still set -> the opposite of a
+    //     leak: the slot is available, and the next allocation will find
+    //     a record that still says it is in use. Whether that is
+    //     tolerated depends on the allocator, so it is named for what it
+    //     is rather than filed under the wrong word.
+    //   * both failed -> both descriptions apply.
+    let shape = match (bit_freed, in_use_cleared) {
+        (false, true) => format!("MFT record {new_rec} leaked: its $MFT:$Bitmap bit is still set"),
+        (true, false) => format!(
+            "MFT record {new_rec} is NOT leaked -- its $MFT:$Bitmap bit was freed -- but the \
+             record still has IN_USE set, so the next allocation of that slot meets a record \
+             that claims to be live"
+        ),
+        (false, false) => format!(
+            "MFT record {new_rec} leaked AND still says IN_USE: neither half of the rollback \
+             landed"
+        ),
+        (true, true) => unreachable!("failures is non-empty, so one of the two must have failed"),
+    };
+    format!(
+        "{cause} (rollback incomplete, {shape}: {})",
+        failures.join("; ")
+    )
 }
 
 pub fn create_file_io<T: BlockIo + ?Sized>(
