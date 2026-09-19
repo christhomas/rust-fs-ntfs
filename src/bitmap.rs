@@ -739,6 +739,7 @@ mod tests {
                 // under test.
                 total_sectors: 1 << 20,
                 serial_number: 0,
+                index_block_size: 4096,
                 oem_id: *b"NTFS    ",
             },
             // One run: bitmap lives at LCN 1, one cluster's worth.
@@ -1867,6 +1868,7 @@ mod range_bound_tests {
                 file_record_size: 1024,
                 total_sectors: 1 << 20,
                 serial_number: 0,
+                index_block_size: 4096,
                 oem_id: *b"NTFS    ",
             },
             runs: Vec::new(),
@@ -1927,6 +1929,7 @@ mod volume_own_tests {
                 file_record_size: 1024,
                 total_sectors: 1 << 20,
                 serial_number: 0,
+                index_block_size: 4096,
                 oem_id: *b"NTFS    ",
             },
             runs: Vec::new(),

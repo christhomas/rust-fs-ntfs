@@ -2081,6 +2081,7 @@ mod tests {
             file_record_size: 1024,
             total_sectors: 65536,
             serial_number: 0,
+            index_block_size: 4096,
             oem_id: *b"NTFS    ",
         };
         // One run of one cluster, for a value that claims two: VCN 1 has
@@ -2128,6 +2129,7 @@ mod tests {
             file_record_size: 1024,
             total_sectors: 65536,
             serial_number: 0,
+            index_block_size: 4096,
             oem_id: *b"NTFS    ",
         };
         // Two clusters, both mapped; initialized to one.

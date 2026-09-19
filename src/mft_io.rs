@@ -52,6 +52,10 @@ const BOOT_OFF_OEM: usize = 0x03; // 8-byte OEM ID — "NTFS    " on a real NTFS
 const BOOT_OFF_BYTES_PER_SECTOR: usize = 0x0B; // WORD BytsPerSec
 const BOOT_OFF_SECTORS_PER_CLUSTER: usize = 0x0D; // BYTE SecPerClus
 const BOOT_OFF_TOTAL_SECTORS: usize = 0x28; // NTFS extension: QWORD total sectors
+/// Clusters per index block, same signed encoding as
+/// `clusters_per_mft_record`: positive is a cluster count, negative is
+/// `2^|v|` bytes.
+const BOOT_OFF_CLUSTERS_PER_INDEX_BLOCK: usize = 0x44;
 const BOOT_OFF_MFT_LCN: usize = 0x30; // NTFS extension: QWORD MFT cluster number
 const BOOT_OFF_CLUSTERS_PER_MFT_RECORD: usize = 0x40; // NTFS extension: BYTE/i8 clusters per FILE record
 const BOOT_OFF_SERIAL: usize = 0x48; // NTFS extension: QWORD volume serial number
@@ -91,6 +95,12 @@ pub struct BootParams {
     pub total_sectors: u64,
     /// QWORD volume serial number (+0x48).
     pub serial_number: u64,
+    /// Index block size in bytes, from `clusters_per_index_block`
+    /// (+0x44). THE VOLUME DECIDES THIS, NOT THE CODE THAT WRITES A
+    /// DIRECTORY: chkdsk validates an `$INDEX_ROOT`'s block size against
+    /// this field and reports `Corrupt master file table` on a mismatch,
+    /// so `mkdir` has to read it rather than assume one (#144).
+    pub index_block_size: u32,
     /// 8-byte OEM ID (+0x03). `NTFS_OEM_ID` on a real NTFS volume; parsed but
     /// NOT validated here (see the doc on `read_boot_params_io`) so callers
     /// that only need geometry are unaffected — `read::read_volume_info`
@@ -282,6 +292,18 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
         ));
     }
 
+    // Same signed encoding as clusters_per_mft_record.
+    let cpib = boot[BOOT_OFF_CLUSTERS_PER_INDEX_BLOCK] as i8;
+    let index_block_size: u32 = if cpib > 0 {
+        (cpib as u64).saturating_mul(cluster_size) as u32
+    } else if cpib < 0 && -(cpib as i32) < 32 {
+        1u32 << (-(cpib as i32)) as u32
+    } else {
+        // Zero, or an exponent that cannot be a size: fall back to the
+        // cluster, which is what a volume with a small cluster uses.
+        cluster_size as u32
+    };
+
     let total_sectors = u64::from_le_bytes(
         boot[BOOT_OFF_TOTAL_SECTORS..BOOT_OFF_TOTAL_SECTORS + 8]
             .try_into()
@@ -301,6 +323,7 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
         cluster_size,
         mft_lcn,
         file_record_size,
+        index_block_size,
         total_sectors,
         serial_number,
         oem_id,
@@ -1117,6 +1140,7 @@ mod tests {
             // under test.
             total_sectors: 1 << 20,
             serial_number: 0,
+            index_block_size: 4096,
             oem_id: *b"NTFS    ",
         };
         assert_eq!(mft_record_offset(&p, 0), 4 * 4096);

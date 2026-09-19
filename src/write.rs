@@ -1979,9 +1979,13 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
     // the sequence number exists to prevent. See
     // `mft_io::next_sequence_for_slot`.
     let new_seq = crate::mft_io::next_sequence_for_allocation_io(io, &params, new_rec)?;
-    // For a fresh directory, use cluster_size as the index block size —
-    // matches what NTFS formatter does for small volumes.
-    let index_block_size = params.cluster_size as u32;
+    // THE BOOT SECTOR DECIDES THE INDEX BLOCK SIZE, NOT THIS FUNCTION.
+    // This used to be `params.cluster_size`, while `mkfs` writes 4096 at
+    // boot+0x44 whatever the cluster size -- so `mkdir` on a volume with
+    // any cluster size other than 4096 produced a directory whose
+    // `$INDEX_ROOT` contradicted the boot sector, and chkdsk reports
+    // `Corrupt master file table` on that mismatch (#144).
+    let index_block_size = params.index_block_size;
     let mut new_record = crate::record_build::build_directory_record(
         params.file_record_size as usize,
         new_rec as u32,
@@ -1991,6 +1995,7 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
         nt_time,
         params.bytes_per_sector,
         index_block_size,
+        params.cluster_size as u32,
     )?;
     crate::mft_io::apply_fixup_on_write(&mut new_record, params.bytes_per_sector)?;
 
