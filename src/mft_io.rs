@@ -742,7 +742,30 @@ pub fn restore_mft_record_io<T: BlockIo + ?Sized>(
                 record.len()
             ));
         }
+        // THE USN MUST MOVE PAST WHAT IS ON DISK, and copying `saved`
+        // wholesale used to take it backwards (#242).
+        //
+        // `apply_fixup_on_write` bumps whatever USN it finds in the
+        // buffer AFTER this closure runs. `saved` was read before the
+        // write being undone, so its USN is N; the disk is at N+1 from
+        // that write; and the restore therefore recomputed N+1 -- the
+        // value already there. Deterministic, not occasional: it is what
+        // the arithmetic gives every time a single write is rolled back.
+        //
+        // What that costs is the torn-record detector, on the write
+        // where it matters most. Sectors already on disk from the first
+        // write carry N+1 in their tails, and the sectors a torn restore
+        // manages to update get stamped N+1 as well -- so a half-written
+        // rollback is indistinguishable from a complete one: USN and
+        // every tail agree either way.
+        //
+        // Keeping the CURRENT record's USN means the bump lands on the
+        // disk's value, so a torn restore leaves tails that disagree and
+        // a reader can see it.
+        let (usa_offset, _count) = read_usa_header(record)?;
+        let on_disk_usn = u16::from_le_bytes([record[usa_offset], record[usa_offset + 1]]);
         record.copy_from_slice(saved);
+        record[usa_offset..usa_offset + 2].copy_from_slice(&on_disk_usn.to_le_bytes());
         Ok(())
     })
 }
@@ -750,6 +773,76 @@ pub fn restore_mft_record_io<T: BlockIo + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ROLLBACK MUST LEAVE A USN THE DISK HAS NOT SEEN.
+    ///
+    /// `restore_mft_record_io` copied the saved buffer wholesale, and
+    /// `apply_fixup_on_write` bumps whatever USN is in the buffer -- so
+    /// the restore recomputed exactly the value the write it was undoing
+    /// had already put on disk (#242). A torn restore then looked
+    /// identical to a complete one: the sectors it managed to update
+    /// carried the same USN as the ones still holding the first write.
+    #[test]
+    fn a_restore_does_not_reuse_the_usn_already_on_disk() {
+        use crate::block_io::BlockIo;
+
+        struct Mem {
+            bytes: Vec<u8>,
+        }
+        impl BlockIo for Mem {
+            fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+                let at = offset as usize;
+                buf.copy_from_slice(&self.bytes[at..at + buf.len()]);
+                Ok(())
+            }
+            fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+                let at = offset as usize;
+                self.bytes[at..at + buf.len()].copy_from_slice(buf);
+                Ok(())
+            }
+            fn size(&self) -> u64 {
+                self.bytes.len() as u64
+            }
+        }
+
+        const SIZE: u64 = 32 * 1024 * 1024;
+        let mut dev = Mem {
+            bytes: vec![0u8; SIZE as usize],
+        };
+        crate::mkfs::format_filesystem(&mut dev, SIZE, 4096, 4096, Some("USN"), Some(1))
+            .expect("format");
+
+        let rec = 5; // the root directory: a real record, never mind its contents
+        let usn_of = |dev: &mut Mem| -> u16 {
+            let (_p, r) = read_mft_record_io(dev, rec).expect("read");
+            let (usa_offset, _c) = read_usa_header(&r).expect("usa");
+            u16::from_le_bytes([r[usa_offset], r[usa_offset + 1]])
+        };
+
+        let (_params, saved) = read_mft_record_io(&mut dev, rec).expect("read");
+        let before = usn_of(&mut dev);
+
+        // One write, as the operation being rolled back would make.
+        // A harmless mutation: the tail of the record is padding, and
+        // what this test is about is the USN, not the contents.
+        update_mft_record_io(&mut dev, rec, |r| {
+            let last = r.len() - 3;
+            r[last] = 0xAB;
+            Ok(())
+        })
+        .expect("first write");
+        let after_write = usn_of(&mut dev);
+        assert_ne!(after_write, before, "a write bumps the USN");
+
+        // The rollback.
+        restore_mft_record_io(&mut dev, rec, &saved).expect("restore");
+        let after_restore = usn_of(&mut dev);
+        assert_ne!(
+            after_restore, after_write,
+            "the restore must not reuse the USN the write it is undoing already put on disk: \
+             a torn restore would be indistinguishable from a complete one"
+        );
+    }
 
     /// A slot with no `FILE` magic has never held a record, so there is
     /// no history to continue -- which is why a fresh volume is
