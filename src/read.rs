@@ -160,9 +160,9 @@ pub fn read_attribute_value<T: BlockIo + ?Sized>(
     name: Option<&str>,
 ) -> Result<Vec<u8>, String> {
     match locate_attribute(io, record_number, attr_type, name)? {
-        Some((params, _holder, record, loc)) => {
+        Some((params, holder, record, loc)) => {
             if attr_type == AttrType::Data && name.is_none() {
-                refuse_wof_compressed(io, &params, &record, record_number)?;
+                refuse_wof_compressed(io, &params, &record, holder, record_number)?;
             }
             read_value_from_record(io, &params, &record, &loc, Holes::AreZeros)
         }
@@ -195,19 +195,49 @@ pub fn read_attribute_value<T: BlockIo + ?Sized>(
 /// crate cannot decode yet -- refusing to list it or to size it would
 /// make a Windows system volume unusable rather than honest.
 ///
-/// The record checked is the one holding `$DATA`. For the shape WOF
-/// produces that is the base record, which is also where the
-/// `$REPARSE_POINT` is: an empty sparse `$DATA` does not overflow into
-/// an extension record.
+/// THE GUARD AND THE THING IT GUARDS CAN LIVE IN DIFFERENT RECORDS. This
+/// used to scan only the record `$DATA` was found in, with a comment
+/// asserting that WOF puts both in the base record. Nothing enforced it,
+/// and it leaks both ways on a file with an `$ATTRIBUTE_LIST`: `$DATA` in
+/// an extension record means the base record's `$REPARSE_POINT` is never
+/// seen, and `$REPARSE_POINT` in an extension record means a guard
+/// looking at the base sees nothing. The second is the likelier order,
+/// because NTFS evicts attributes by type and `$REPARSE_POINT` (0xC0)
+/// goes before `$DATA` (0x80). Either way the sparse, zero-filled stream
+/// was returned as the file's contents -- the bug #202 fixed for files
+/// without an attribute list (#221).
+///
+/// THE COMMON CASE STAYS ONE RECORD-LOCAL SCAN. A base record with no
+/// `$ATTRIBUTE_LIST` cannot have attributes anywhere else, so the scan is
+/// provably sufficient and nothing extra is read. Only a file that HAS an
+/// attribute list pays for `locate_attribute`, which matters on a driver
+/// already costing about six device reads per `stat`.
 fn refuse_wof_compressed<T: BlockIo + ?Sized>(
     io: &mut T,
     params: &crate::mft_io::BootParams,
     record: &[u8],
+    holder_record_number: u64,
     record_number: u64,
 ) -> Result<(), String> {
-    let Some(rp) = attr_io::find_attribute(record, AttrType::ReparsePoint, None) else {
-        return Ok(());
+    // `record` holds `$DATA`. If that is the base record and the base
+    // record has no `$ATTRIBUTE_LIST`, this file's attributes are all
+    // here and the local scan is the whole answer -- no extra read. If
+    // `$DATA` came from an extension record, there is an attribute list
+    // by definition.
+    let overflowed = holder_record_number != record_number
+        || attr_io::find_attribute(record, AttrType::AttributeList, None).is_some();
+    let (holder, rp) = if overflowed {
+        match locate_attribute(io, record_number, AttrType::ReparsePoint, None)? {
+            Some((_p, _n, holder_record, loc)) => (holder_record, loc),
+            None => return Ok(()),
+        }
+    } else {
+        match attr_io::find_attribute(record, AttrType::ReparsePoint, None) {
+            Some(loc) => (record.to_vec(), loc),
+            None => return Ok(()),
+        }
     };
+    let record = holder.as_slice();
     let value = read_value_from_record(io, params, record, &rp, Holes::AreZeros)?;
     if value.len() >= 4
         && u32::from_le_bytes([value[0], value[1], value[2], value[3]])
@@ -456,12 +486,12 @@ pub fn read_attribute_range<T: BlockIo + ?Sized>(
     offset: u64,
     len: usize,
 ) -> Result<Vec<u8>, String> {
-    let (params, _holder, record, loc) = locate_attribute(io, record_number, attr_type, name)?
+    let (params, holder, record, loc) = locate_attribute(io, record_number, attr_type, name)?
         .ok_or_else(|| {
             format!("read_attribute_range: attribute {attr_type:?} (name {name:?}) not found in record {record_number}")
         })?;
     if attr_type == AttrType::Data && name.is_none() {
-        refuse_wof_compressed(io, &params, &record, record_number)?;
+        refuse_wof_compressed(io, &params, &record, holder, record_number)?;
     }
 
     // Uncompressed, unencrypted, non-resident → true ranged read.
