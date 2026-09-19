@@ -133,13 +133,30 @@ fn fixture() -> Option<PathBuf> {
     img.is_file().then_some(img)
 }
 
+/// Where a passing run leaves its numbers.
+///
+/// `cargo test` captures a passing test's output, so the table this
+/// prints was visible only when the test FAILED -- which is the one run
+/// whose numbers are worthless. CI uploads `tmp/logs/`, so writing the
+/// measurement there is what makes a green run's cost readable at all,
+/// and what the ceiling below was set from.
+fn record(line: &str) {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/logs");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("read-cost.txt");
+    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
+    existing.push_str(line);
+    existing.push('\n');
+    let _ = std::fs::write(&path, existing);
+}
+
 fn report(what: &str, c: &Cost) {
     let per = if c.items == 0 {
         0.0
     } else {
         c.reads as f64 / c.items as f64
     };
-    eprintln!(
+    let line = format!(
         "{what:<12} {:>6} reads  {:>9} bytes  {:>4} opens  {:>8} µs  over {:>4} items  \
          ({per:.1} reads/item){}",
         c.reads,
@@ -153,6 +170,8 @@ fn report(what: &str, c: &Cost) {
             format!("  [{} FAILED]", c.failed)
         }
     );
+    eprintln!("{line}");
+    record(&line);
 }
 
 /// Every path in the tree, bounded so a large fixture cannot make this
@@ -474,11 +493,16 @@ fn what_a_read_costs_in_calls_to_the_device() {
         );
         return;
     };
+    let _ =
+        std::fs::remove_file(Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/logs/read-cost.txt"));
     eprintln!("measuring {}", img.display());
+    record(&format!("measuring {}", img.display()));
 
     eprintln!("--- one handle, held across every call ---");
+    record("--- one handle, held across every call ---");
     let shared = measure_shared(&img);
     eprintln!("--- a fresh open per call, which is what the facade does ---");
+    record("--- a fresh open per call, which is what the facade does ---");
     let percall = measure_per_call(&img, &shared.paths);
 
     // A MEASUREMENT OVER A FAILING DRIVER IS NOT A MEASUREMENT (#227).
