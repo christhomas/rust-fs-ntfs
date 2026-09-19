@@ -127,7 +127,37 @@ pub fn read_boot_params(path: &Path) -> Result<BootParams, String> {
 pub fn read_boot_params_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BootParams, String> {
     let mut boot = [0u8; 512];
     io.read_exact_at(0, &mut boot)?;
-    parse_boot_params_from_bytes(&boot)
+    let params = parse_boot_params_from_bytes(&boot)?;
+
+    // THE VOLUME'S CLAIM, CHECKED AGAINST THE DEVICE IT IS ON.
+    //
+    // `volume_bytes()` is `total_sectors * bytes_per_sector`, and
+    // `total_sectors` was read verbatim: no bound, no range. It is also
+    // the ceiling `read::bounded_value_length` uses to decide whether an
+    // attribute's declared length is plausible -- so a hostile image set
+    // the value AND the limit, and the guard could not fire (#176). The
+    // failure it exists for is an abort rather than an error: `$UpCase`
+    // with `data_length = 0x0000_FFFF_FFFF_FFFF` asked for a 256 TiB
+    // allocation on a 10 MB image, and `resolve_path` loads `$UpCase`
+    // before any lookup, so it happened on the first operation of a
+    // mount.
+    //
+    // A device smaller than the volume is a misread or a lie either way.
+    // NTFS puts the backup boot sector in the device's last sector,
+    // OUTSIDE `total_sectors`, so a real volume is at least one sector
+    // short of its device -- `>` rather than `>=` leaves the exactly-
+    // equal case (an image cut to the volume) readable.
+    let device = io.size();
+    let claimed = params.volume_bytes();
+    if device > 0 && claimed > device {
+        return Err(format!(
+            "the boot sector says this volume is {claimed} bytes ({} sectors of {}), and the \
+             device holds {device}: every length this driver bounds is bounded by that number, \
+             so a volume larger than its device cannot be read safely",
+            params.total_sectors, params.bytes_per_sector
+        ));
+    }
+    Ok(params)
 }
 
 fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> {
@@ -801,6 +831,58 @@ mod tests {
 
     /// Synthesize a 512-byte NTFS boot sector with the four fields we
     /// parse, plus the "NTFS    " magic so we don't trip the magic check
+    /// A VOLUME CANNOT BE BIGGER THAN ITS DEVICE, and the number that
+    /// says how big it is doubles as the ceiling every attribute length
+    /// is bounded against (#176). Left unchecked, one hostile image set
+    /// the value and the limit.
+    #[test]
+    fn a_volume_larger_than_its_device_is_refused() {
+        use crate::block_io::BlockIo;
+
+        struct Fixed {
+            bytes: Vec<u8>,
+            size: u64,
+        }
+        impl BlockIo for Fixed {
+            fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+                let at = offset as usize;
+                buf.copy_from_slice(&self.bytes[at..at + buf.len()]);
+                Ok(())
+            }
+            fn write_all_at(&mut self, _offset: u64, _buf: &[u8]) -> Result<(), String> {
+                Err("read-only".into())
+            }
+            fn size(&self) -> u64 {
+                self.size
+            }
+        }
+
+        // 512-byte sectors and a declared total of 4 sectors: a 2 KiB
+        // volume. `synth_boot` leaves total_sectors at zero, so the test
+        // writes it -- that field is the whole subject here.
+        let mut boot = synth_boot(512, 8, 4, -10);
+        boot[BOOT_OFF_TOTAL_SECTORS..BOOT_OFF_TOTAL_SECTORS + 8]
+            .copy_from_slice(&4u64.to_le_bytes());
+        let boot = boot.to_vec();
+        let honest = &mut Fixed {
+            bytes: boot.clone(),
+            size: 4 * 512,
+        };
+        read_boot_params_io(honest).expect("a volume that fits its device");
+
+        // ...and a lie on a device of one sector.
+        let lying = &mut Fixed {
+            bytes: boot,
+            size: 512,
+        };
+        let err = read_boot_params_io(lying)
+            .expect_err("a volume larger than its device must be refused");
+        assert!(
+            err.contains("the device holds 512"),
+            "the error names both sizes, got: {err}"
+        );
+    }
+
     /// upstream (we don't check it here, but real boot sectors have it).
     fn synth_boot(
         bytes_per_sector: u16,
