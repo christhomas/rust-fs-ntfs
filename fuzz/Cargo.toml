@@ -22,7 +22,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-fs-ntfs = { path = ".." }
+am-fs-ntfs = { path = ".." }
 
 [[bin]]
 name = "decode_runs"
@@ -41,6 +41,34 @@ bench = false
 [[bin]]
 name = "iter_attributes"
 path = "fuzz_targets/iter_attributes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "image"
+path = "fuzz_targets/image.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "boot_sector"
+path = "fuzz_targets/boot_sector.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "index_block"
+path = "fuzz_targets/index_block.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decompress_unit"
+path = "fuzz_targets/decompress_unit.rs"
 test = false
 doc = false
 bench = false

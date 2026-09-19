@@ -1,4 +1,14 @@
 target
-corpus
 artifacts
 coverage
+
+# `corpus` WAS IGNORED HERE, which is cargo-fuzz's default and wrong for
+# this arrangement. The corpus is not scratch that a run regenerates: it
+# is the seeds tests/fuzz_decoders.rs replays and mutates on every pull
+# request, and the reproducer for every defect ever found. Ignoring it
+# means the gate has nothing to run and the explorer starts from zero
+# every night.
+#
+# scripts/fuzz-all.sh gives libFuzzer a throwaway directory to write its
+# own discoveries into, so a local run does not fill this one with
+# hash-named blobs.

@@ -47,7 +47,7 @@ shift
 # only Linux can build) it does not pass, and a failing run is not budgeted.
 #
 #   tier        measured (lines / bytes)                          budget
-#   clippy      94 / 3,037 cold, 1 / 70 warm                      150 / 5,000
+#   clippy      196 / 8,654 (CI Linux, 2026-09-19)                260 / 11,500
 #   unit        744 / 47,145 cold (Mac), 653 / 44,386 (CI Linux)  1,000 / 64,000
 #   unit-debug  723 / 46,497 cold (Mac), 674 / 46,723 (CI Linux)  1,000 / 64,000
 #   mkfs        115 / 3,858 cold (Mac), 24 / 1,022 warm           160 / 5,200
@@ -56,6 +56,14 @@ shift
 #   scripts     56 / 1,180 (four shell tests)                      80 / 1,800
 #   matrix      633 / 35,311 green, 1,521 / 78,075 red (see below)  900 / 50,000
 #
+# THE CLIPPY ROW MOVED ON 2026-09-19, from 150/5,000 to 260/11,500. Adding
+# tests/fuzz_decoders.rs gave `--all-targets` another target to lint, and a
+# cold clippy prints a line per crate compiled: the measured figure went from
+# 94 lines to 196 on CI (run 35448280025, job 105910912877). Raised to that
+# plus a third, by the same rule as every other row. This is the "raise the
+# budget deliberately" the failure message asks for -- the run passed, it
+# simply printed more than the old measurement allowed.
+
 # THE MATRIX ROW is measured on a GREEN 46-scenario run (2026-09-18, 46 min,
 # max_parallel=4): 633 lines / 35,311 bytes, budgeted at that plus a third.
 # Only a passing run is budgeted, so the 1,521 lines the same matrix printed
@@ -64,7 +72,7 @@ shift
 # only tier whose length depends on a machine rather than on this repository,
 # so it is the one most likely to need raising -- do that with a measurement.
 case "$TIER" in
-    clippy)     MAX_LINES=150;  MAX_BYTES=5000 ;;
+    clippy)     MAX_LINES=260;  MAX_BYTES=11500 ;;
     unit)       MAX_LINES=1000; MAX_BYTES=64000 ;;
     unit-debug) MAX_LINES=1000; MAX_BYTES=64000 ;;
     mkfs)       MAX_LINES=160;  MAX_BYTES=5200 ;;
