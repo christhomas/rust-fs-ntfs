@@ -1865,6 +1865,28 @@ pub extern "C" fn fs_ntfs_list_ea_keys(
         }
         match write::list_ea_keys(std::path::Path::new(img), p) {
             Ok(keys) => {
+                // THE NUL TERMINATOR IS ONLY UNAMBIGUOUS IF THE NAMES
+                // HAVE NONE. This function's contract says "EA names
+                // cannot contain NUL by the EA wire format, so the NUL
+                // terminator is unambiguous" -- and nothing checked the
+                // volume against it (#178). A name with an embedded NUL
+                // makes the caller see two keys where there is one, the
+                // second built from the bytes after it, and the count
+                // returned disagrees with the number of strings the
+                // buffer holds. Every later key is then attributed to
+                // the wrong name.
+                //
+                // The volume decides what is in the name, so the claim
+                // has to be checked here rather than assumed.
+                if let Some(bad) = keys.iter().find(|k| k.contains(&0u8)) {
+                    set_error(&format!(
+                        "fs_ntfs_list_ea_keys: an EA name on this volume contains a NUL byte \
+                         ({bad:?}), and the packed form this function returns uses NUL as the \
+                         separator -- the list cannot be represented without silently splitting \
+                         that name in two"
+                    ));
+                    return -1;
+                }
                 let total: usize = keys.iter().map(|k| k.len() + 1).sum();
                 unsafe { *out_total_len = total };
                 if total > out_buf_len {
