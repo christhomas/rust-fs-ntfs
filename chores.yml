@@ -318,6 +318,11 @@ tasks:
   # vm:up is idempotent. The work is in scripts/vm.sh; each task is one line
   # so a failure prints the script's one-line reason, not a screen of shell.
   # Opening the encrypted VM needs trove unlocked in the calling shell.
+  matrix:check:
+    desc: Lint test-matrix.json against fs-windows-test-harness.toml (no VM needed)
+    silent: true
+    cmds: [python3 scripts/fs-windows-test-harness/check-matrix]
+
   vm:clean:
     desc: Delete the disk images a matrix run left on the VM, and say how much space that gave back
     silent: true
