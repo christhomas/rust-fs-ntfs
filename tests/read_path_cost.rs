@@ -303,7 +303,7 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
     // denominators, not a property of the driver (#229).
     let root = PathEntry {
         path: "/".to_string(),
-        record: 5, // the root directory's MFT record
+        record: read::ROOT_RECORD_NUMBER,
         is_dir: true,
     };
     let dirs: Vec<&PathEntry> = std::iter::once(&root)
