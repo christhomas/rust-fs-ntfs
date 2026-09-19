@@ -975,9 +975,11 @@ pub fn nonresident_contiguous_disk_range<T: BlockIo + ?Sized>(
 
 /// Record numbers of every metafile whose on-disk storage must never be
 /// handed out by `$Bitmap`'s allocator, or overwritten by `fsck`'s
-/// `$LogFile` reset -- beyond `$MFT` (record 0), which every caller
-/// already locates by other means, because it needs `$MFT`'s length for
-/// its own purposes anyway.
+/// `$LogFile` reset. `$MFT` (record 0) IS one of them -- see its entry
+/// -- but it is located differently: `other_protected_metafile_ranges_io`
+/// skips it in the loop and calls `mft_ranges_io`, which has its own
+/// fallback tiers, because a fragmented `$MFT` is ordinary and the
+/// contiguous reader the others use would refuse it.
 ///
 /// See rust-fs-ntfs#157: `BitmapLocation::covers_the_volumes_own` and
 /// `fsck`'s `forbidden_fill_ranges` each protected only the boot sector
@@ -985,7 +987,7 @@ pub fn nonresident_contiguous_disk_range<T: BlockIo + ?Sized>(
 /// `$MFTMirr`, `$Bitmap`'s own storage, `$LogFile`, `$AttrDef`,
 /// `$Secure` or `$UpCase` could free or overwrite live volume metadata
 /// with no refusal at all.
-pub const OTHER_PROTECTED_METAFILE_RECORDS: [(u64, Option<&str>, &str); 8] = [
+pub const PROTECTED_METAFILE_RECORDS: [(u64, Option<&str>, &str); 8] = [
     // $MFT itself. It belongs in this list rather than being handled
     // separately by `mft_clusters`, because that scalar is derived from
     // `nonresident_contiguous_disk_range`, which REFUSES a fragmented
@@ -1181,7 +1183,7 @@ fn nonresident_disk_ranges_io<T: BlockIo + ?Sized>(
 
 /// Byte ranges `[start, end)` that must never be freed or overwritten:
 /// the on-disk storage of every metafile in
-/// [`OTHER_PROTECTED_METAFILE_RECORDS`].
+/// [`PROTECTED_METAFILE_RECORDS`].
 ///
 /// `$MFT`'s own extent, with a bounded fallback when record 0 will not
 /// decode.
@@ -1306,7 +1308,7 @@ pub fn other_protected_metafile_ranges_io<T: BlockIo + ?Sized>(
     io: &mut T,
     exclude_record: Option<u64>,
 ) -> Vec<(u64, u64)> {
-    let mut ranges = Vec::with_capacity(OTHER_PROTECTED_METAFILE_RECORDS.len());
+    let mut ranges = Vec::with_capacity(PROTECTED_METAFILE_RECORDS.len());
     // `$MFT` is not best-effort: see `mft_ranges_io`. Its absence from
     // the set is the defect this whole guard exists to close, so it
     // fails closed -- bounded, never volume-wide.
@@ -1315,7 +1317,7 @@ pub fn other_protected_metafile_ranges_io<T: BlockIo + ?Sized>(
             ranges.extend(mft_ranges_io(io, &params));
         }
     }
-    for &(record_number, name, _label) in &OTHER_PROTECTED_METAFILE_RECORDS {
+    for &(record_number, name, _label) in &PROTECTED_METAFILE_RECORDS {
         if record_number == 0 {
             continue; // handled above, with its own fallback tiers
         }

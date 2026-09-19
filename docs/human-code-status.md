@@ -12,8 +12,17 @@ ordering is followed: G1 first, then B2.
 
 | | count |
 |---|---|
-| Fixed | 2 |
-| Still open | 98 High/Medium |
+| Fixed | 6 |
+| Documented and pinned rather than changed | 1 (C1) |
+| Still open | 96 High/Medium |
+
+THE TRACKER IS THE ANSWER TO "IS THIS FIXED?", NOT THIS FILE. Where a
+finding has an issue, the issue is authoritative and is linked from the
+entry below; a finding fixed by a PR shows which paths that PR touched,
+which a markdown ledger cannot. This document stays as the map from the
+August report's identifiers (G1, B2, …) to that tracker. It said "Fixed
+2" while its own body marked six `**fixed**` and C1 documented, which is
+the failure mode being described.
 
 ---
 
@@ -48,10 +57,11 @@ be allowed (`..a`, `a..`, `...`).
 
 ---
 
-## Still open — 98 High and Medium
+## Still open — 96 High and Medium
 
-Not triaged individually here; the report carries the detail. The ones its own
-ordering puts next:
+Not triaged individually here; the report carries the detail, and the
+issue tracker carries the ones that have been transcribed. The ones the
+report's own ordering puts next:
 
 ### C1 — `fs_ntfs_write_file` and `fs_ntfs_write_file_contents` treat `len == 0` oppositely — High
 
@@ -98,7 +108,13 @@ interesting one:
   `write_bitmap_bytes_io` directly and documented as defence in depth rather
   than as where the guarantee comes from.
 
-### B4 — a rename that committed step 1 and then ran step 2 with no rollback — **fixed**
+### B4 — a rename that committed step 1 and then ran step 2 with no rollback — **fixed for the variable-length path only**
+
+THE SAME-LENGTH PATH STILL HAS NO ROLLBACK, and it is the more common
+one: `rename_io` dispatches to it whenever the old and new names have the
+same UTF-16 length. The rollback landed in `rename_replace_io`;
+`grep -n restore_mft_record_io src/*.rs` finds that one call site. Open as
+[#140](https://github.com/christhomas/rust-fs-ntfs/issues/140).
 
 A variable-length rename is two record writes with no journal between them:
 

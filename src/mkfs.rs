@@ -962,24 +962,28 @@ pub fn format_filesystem(
         ));
     }
 
-    // record 9: $Secure — minimal resident stub. Real NTFS has $SDS /
-    // $SDH / $SII; for v1 we ship empty placeholders. chkdsk treats
-    // an empty $Secure as "no security descriptor cache" and tolerates
-    // it — the per-file SD pointer in $STANDARD_INFORMATION is what
-    // governs ACL semantics, and we set it to 0 (default DACL).
+    // record 9: $Secure — POPULATED, not a stub. It carries a
+    // non-resident `$SDS` holding one canonical security descriptor
+    // (plus its mirror at SDS_MIRROR_GAP) and one-entry `$SDH` / `$SII`
+    // view indexes pointing at it. The three claims that used to stand
+    // here were each false and are recorded so they are not re-derived:
+    //
+    //   * "for v1 we ship empty placeholders" — the empty layout existed
+    //     and was abandoned: chkdsk's open of `$Secure:$SDS` failed with
+    //     STATUS_OBJECT_PATH_NOT_FOUND on it (Iter H Procmon trace).
+    //   * "we set [the SD pointer] to 0 (default DACL)" — 0 is the value
+    //     that FAILS. Every system record references security_id 0x100,
+    //     the canonical `$SDS` entry, because `/scan` validates the
+    //     SecurityId→$SDS linkage and exits 13 on SecurityId 0.
+    //   * "slot 9 is `$Quota` at non-4K cluster sizes" — `rec::name`
+    //     returns `$Secure` for slot 9 at every cluster size, and says
+    //     why: a volume written as NTFS 3.1 names it `$Secure`
+    //     throughout. Renaming the slot would break `$Secure` on every
+    //     volume this crate formats.
     {
-        // Microsoft modern format.com names slot 9 `$Quota` (NTFS 3.x
-        // convention: $Quota is the slot-9 system file; $Secure lives
-        // under \$Extend on the volume). chkdsk validates this name
-        // explicitly at non-4K cluster sizes and reports
-        // `Deleting invalid system file name $Secure (9) in directory 5.
-        //  Repairing invalid system file name $Quota (9)`
-        // when the slot carries the legacy NTFS 1.x name (matrix
-        // run-20260503-024058 cluster-8k / cluster-64k).
-        //
-        // The IS_VIEW_INDEX flag applies to both $Quota and $Secure
-        // — both host named view indexes in modern NTFS — so keep
-        // the flag-setting branch in build_system_record unchanged.
+        // The IS_VIEW_INDEX flag applies to a slot that hosts named view
+        // indexes, which `$Secure` does ($SDH / $SII) — so keep the
+        // flag-setting branch in build_system_record unchanged.
         //
         // Sub-PR S1 (see docs/implementation-plan-secure-and-extend.md
         // §"Sub-PR S1") adds the three named streams chkdsk's Iter H
@@ -1030,12 +1034,17 @@ pub fn format_filesystem(
             },
         ];
         let sds_mp = encode_runs(&sds_runs)?;
-        // data_length: bytes from offset 0 through end of mirror
-        // entry. With a single 72-byte SD payload, each entry
-        // (header+SD) is 92 bytes padded to 96. Mirror starts at
-        // 0x40000; mirror entry occupies 0x40000..0x40060 (data
-        // bytes) — and we round to the 16-byte boundary, ending at
-        // 0x40060. allocated_length is the on-stream allocated size
+        // data_length: bytes from offset 0 through the end of the
+        // mirror entry's DATA, and it is not rounded. `SD_SYSFILE_RW`
+        // is 104 bytes, so header + SD is 124; the mirror starts at
+        // SDS_MIRROR_GAP (0x40000) and its data ends at 0x4007C.
+        //
+        // THE 16-BYTE ALIGNMENT IS A PROPERTY OF THE NEXT ENTRY'S
+        // OFFSET, not of this length: `sds::entry_len` rounds 124 up to
+        // 128 so a following entry starts aligned, and there is no
+        // following entry here. Writing the rounded 0x40080 would claim
+        // four bytes of padding that were never written.
+        // allocated_length is the on-stream allocated size
         // ((gap_vcn + 1) clusters * cluster_size).
         let sds_data_len = crate::sds::SDS_MIRROR_GAP
             + (crate::sds::SDS_HEADER_LEN as u64)
@@ -2125,14 +2134,16 @@ fn build_populated_named_index_root_attr(
 /// Full layout this builder produces:
 ///
 /// ```text
-///   +0x00 data_offset   u16   = `value_off` (== key data ends, aligned to 8)
+///   +0x00 data_offset   u16   = `value_off` (== where the key data ends;
+///                                   NOT aligned -- see the Iter K finding)
 ///   +0x02 data_length   u16   = `value.len()`
 ///   +0x04 reserved      u32   = 0
 ///   +0x08 entry_length  u16   = total bytes incl. padding
 ///   +0x0A key_length    u16
 ///   +0x0C flags         u32   = 0 (normal) or 0x02 (LAST / INDEX_ENTRY_END)
 ///   +0x10 key           key_length bytes
-///   +pad  value         value.len() bytes (at data_offset)
+///         value         value.len() bytes, immediately after the key
+///                       (at data_offset; no padding in between)
 /// ```
 ///
 /// Returns the entry bytes (no extra padding outside `entry_length`).

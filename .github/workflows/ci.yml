@@ -439,8 +439,9 @@ jobs:
   # chkdsk's, and chkdsk only runs on Windows.
   #
   # Trigger validate-mkfs-windows manually via "Run workflow" while
-  # iterating on the mkfs implementation — see the doc'd path in
-  # diskjockey/docs/windows-validation-environment.md.
+  # iterating on the mkfs implementation. Setting up the Windows side is
+  # documented where the harness lives: docs/vm-setup.md in
+  # fs-windows-test-harness, which README.md's matrix section links.
 
   # AddressSanitizer smoke test (§5.5). Catches OOB reads/writes in
   # the raw-byte buffer manipulations (mft_io / data_runs / attr_io /

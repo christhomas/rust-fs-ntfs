@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- One file-reference encoder, not two. `encode_file_reference` was defined
+  twice — public in `record_build`, private in `mkfs` — with its own tests
+  on each copy, and mkfs used its own. Two copies of a packing rule is how
+  they stop agreeing. The release job's VHD writer also moved from
+  `am-img-vhd` v0.2.0, three releases back and predating that crate's own
+  hardening, to v0.3.5. (#127, missing from this list until #240 counted
+  the commits.)
+
 - The sparse writer's header comes from its run list, like the two
   promotion paths. `write_sparse_file` wrote `HighestVcn` as
   `total_clusters - 1` and `AllocatedLength` as `total_clusters *
@@ -147,6 +155,29 @@
 
 ### Changed
 
+- **Breaking (Rust API):** `idx_block::vcn_to_disk_offset` takes a third
+  required argument, `device_bytes`. It was added to remove a `u64::MAX`
+  device bound that let a VCN resolve past the end of the device; a
+  two-argument wrapper would re-expose exactly that, so there is no
+  compatibility shim. Every caller is in-crate, and the known downstream
+  consumer links the C ABI rather than the Rust API, so nothing outside has to
+  change — the version is 0.5.0 and this is the entry that says why. (#236)
+- The CI workflows build their test images with the same VHD writer. The
+  release workflow's copy had moved to `am-img-vhd` v0.3.5 while this
+  one stayed at v0.2.0, so two jobs exercised the same tool at versions
+  three releases apart. (#128)
+- The reproducible-release guard checks the lock against the version the
+  workflows pin, in the one case it used to skip: an external path
+  dependency. Bumping a sibling in its own checkout and then running any
+  cargo command in a consumer rewrites the consumer's lock, and CI —
+  cloning the sibling at the tag in the workflow — then fails several
+  minutes in with "cannot update the lock file ... because --locked was
+  passed". (#129)
+- `tests/read_path_cost.rs` records what a read costs in calls to the
+  device: 86 reads / 1.97 MB for fourteen `stat`s, 144 reads / 4.00 MB for
+  fourteen file reads, identical whether one handle is held across the
+  calls or each call opens its own. Holding the handle saves the `open`
+  and nothing else, because the driver keeps no state between calls. (#138)
 - The test tiers print a verdict, not a transcript. `chore test` runs
   every `cargo test` selection CI runs (`test:unit`, `test:unit:debug`,
   `test:mkfs`, `test:suite`) and `chore lint` runs clippy, each through
@@ -516,9 +547,9 @@ feedback"), 1 (record_build preflight) deferred to its own focused PR.
   not-implemented list, and a plain-English at-your-own-risk
   disclaimer restating the MIT/Apache-2.0 no-warranty clauses.
 - Framing neutralised: crate is described as a general-purpose FFI
-  NTFS driver. DiskJockey is mentioned once as a production user
-  with an explicit no-coupling note; no more `Swift` / `FSKit`-
-  specific language in the API description.
+  NTFS driver. A production user is mentioned once, with an explicit
+  no-coupling note; no more `Swift` / `FSKit`-specific language in the
+  API description.
 - `Cargo.toml` description updated to match (`FFI from C/C++/Go/etc.`
   instead of `Swift/C/Go/etc.`) and `version` bumped to `0.1.2` to
   match the new tag (previous releases were tag-only; the manifest
