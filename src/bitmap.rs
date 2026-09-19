@@ -50,9 +50,13 @@ pub struct BitmapLocation {
     /// Logical byte length of `$Bitmap`'s $DATA.
     pub value_length: u64,
     /// How many clusters `$MFT` occupies, so a free can be refused
-    /// before it hands them out. Zero when `$MFT`'s own length could
-    /// not be read -- treated as fail-closed in `covers_the_volumes_own`,
-    /// not as "nothing to protect."
+    /// before it hands them out. Zero when `$MFT`'s length could not be
+    /// read as ONE contiguous range -- a fragmented `$MFT` is ordinary,
+    /// so zero is common and says nothing about the volume. It is not a
+    /// fail-closed sentinel: `covers_the_volumes_own` skips this fast
+    /// path when it is zero and refuses against `$MFT`'s real runs in
+    /// `other_protected` instead. Short-circuiting to "refuse" here
+    /// refused 4,095 of 4,095 clusters once; see that function.
     pub mft_clusters: u64,
     /// CLUSTER ranges `[start_lcn, end_lcn)` of every OTHER system
     /// metafile's own storage -- `$MFTMirr`, `$LogFile`, `$AttrDef`,
@@ -164,10 +168,11 @@ pub fn locate_bitmap_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BitmapLocatio
         declared_bits.min(cluster_capacity)
     };
     // $MFT's own extent, so `free_io` can refuse to hand it out. Read
-    // once here rather than on every free. `mft_clusters == 0` is the
-    // "could not be determined" sentinel `covers_the_volumes_own`
-    // treats as fail-closed. `other_protected` below covers the other
-    // five metafiles' own equivalent failure.
+    // once here rather than on every free. `mft_clusters == 0` means
+    // only that $MFT is not one contiguous range, which is ordinary;
+    // `covers_the_volumes_own` then skips this fast path and refuses
+    // against $MFT's real runs, which `other_protected` below carries
+    // along with the other metafiles'.
     //
     // BOUNDED BY THE VOLUME, like every run in `other_protected` is.
     // This scalar is `$MFT`'s declared value length in clusters, and a
