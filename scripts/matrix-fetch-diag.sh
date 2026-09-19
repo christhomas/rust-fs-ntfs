@@ -103,7 +103,15 @@ main() {
         mkdir -p "$dir/vm"
         # scp from Windows OpenSSH: a drive-letter path is addressed as /C:/...
         if ! scp -q -r "${ssh_opts[@]}" "$VM_HOST:/$VM_WORKDIR/diag/$name/." "$dir/vm/" 2>/dev/null; then
-            line="$name: no VM diagnostics (nothing ran on the VM, or it is unreachable)"
+            # A MAC-ONLY SCENARIO HAS NOTHING THERE, and saying so as though
+            # it were a problem costs the reader four lines a run and teaches
+            # them to skim the ones that are. The recipe says which it is:
+            # every step that runs on the VM is recorded with "host": "vm".
+            if grep -q '"host": *"vm"' "$dir/recipe.json" 2>/dev/null; then
+                line="$name: no VM diagnostics (nothing ran on the VM, or it is unreachable)"
+            else
+                line="$name: no VM steps (host-only scenario)"
+            fi
         else
             parts=()
             for f in "$dir"/vm/chkdsk-*.txt; do

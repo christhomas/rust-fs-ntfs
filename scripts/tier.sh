@@ -54,14 +54,15 @@ shift
 #   suite       2,143 / 108,930 (CI Linux, fixtures built)        2,900 / 150,000
 #   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
 #   scripts     46 / 979 (three shell tests)                       70 / 1,600
-#   matrix      1,521 / 78,075 (46 scenarios on the VM, see below) 2,000 / 105,000
+#   matrix      633 / 35,311 green, 1,521 / 78,075 red (see below)  900 / 50,000
 #
-# THE MATRIX ROW IS MEASURED ON A RUN THAT WENT BADLY, which is the run worth
-# budgeting: 46 scenarios of which 10 failed and were retried five times each
-# (the VM died mid-run, 2026-09-18). A run where everything passes prints
-# less. It is the only tier whose length depends on a machine rather than on
-# this repository, so it is the one most likely to need raising -- do that
-# with a measurement, not a guess.
+# THE MATRIX ROW is measured on a GREEN 46-scenario run (2026-09-18, 46 min,
+# max_parallel=4): 633 lines / 35,311 bytes, budgeted at that plus a third.
+# Only a passing run is budgeted, so the 1,521 lines the same matrix printed
+# when ten scenarios failed and were retried five times each do not have to
+# fit -- a failing run prints its tail and fails on its own account. It is the
+# only tier whose length depends on a machine rather than on this repository,
+# so it is the one most likely to need raising -- do that with a measurement.
 case "$TIER" in
     clippy)     MAX_LINES=150;  MAX_BYTES=5000 ;;
     unit)       MAX_LINES=1000; MAX_BYTES=64000 ;;
@@ -70,7 +71,7 @@ case "$TIER" in
     suite)      MAX_LINES=2900; MAX_BYTES=150000 ;;
     asan)       MAX_LINES=1100; MAX_BYTES=72000 ;;
     scripts)    MAX_LINES=70;   MAX_BYTES=1600 ;;
-    matrix)     MAX_LINES=2000; MAX_BYTES=105000 ;;
+    matrix)     MAX_LINES=900;  MAX_BYTES=50000 ;;
     *)
         echo "tier.sh: '$TIER' has no budget. Add a measured row to scripts/tier.sh." >&2
         exit 2

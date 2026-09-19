@@ -97,6 +97,9 @@ wrong repaired          "s: chkdsk -F--X: REPAIRED (was not clean)"             
 wrong not-scanned       "s: chkdsk -scan: NOT SCANNED (snapshot error)"               yes
 wrong unrecognised      "s: chkdsk -scan: unrecognised: Volume label is Disk "        yes
 wrong no-diagnostics    "s: no VM diagnostics (nothing ran on the VM, or it is unreachable)" yes
+# A recipe with no VM steps has no VM diagnostics BY DESIGN -- four of the 46
+# scenarios are host-only, and flagging them teaches the reader to skim.
+wrong host-only-quiet   "s: no VM steps (host-only scenario)"                        no
 wrong empty-report      "s: chkdsk -scan: empty report"                               yes
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
