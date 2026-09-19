@@ -4454,15 +4454,22 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
         return Ok(());
     }
 
-    // 2) Free the clusters of EVERY non-resident attribute, not just the
-    //    unnamed $DATA: named non-resident $DATA streams and any attribute
-    //    promoted to non-resident own clusters in $Bitmap too. Freeing only
-    //    the unnamed $DATA (as this path used to) leaked theirs on every
-    //    last-link delete. Resident attributes live inside the MFT record
-    //    and are reclaimed when its bit is freed below.
-    free_all_nonresident_runs_io(io, &file_record_bytes)?;
-
-    // 3) Clear IN_USE flag in the file's MFT record.
+    // 2) RETIRE THE RECORD FIRST, THEN FREE THE CLUSTERS. This is the
+    //    ordering `truncate` documents, and this path used to run it
+    //    backwards (#141).
+    //
+    //    Freeing first opens a window where the record is still IN_USE,
+    //    its mapping pairs still name a set of clusters, and `$Bitmap`
+    //    says those clusters are free. A crash there -- power loss, the
+    //    device pulled, an I/O error in the next step -- leaves a live
+    //    file pointing at free space, and the next `create_file`, `grow`
+    //    or `promote` is handed those very clusters by
+    //    `bitmap::find_free_run_io` and writes over the surviving file's
+    //    contents. Two files, the same LCNs.
+    //
+    //    This way round the worst case is the one truncate's comment
+    //    describes: clusters still marked allocated that nothing owns.
+    //    Wasted space, recoverable by a scan, and nothing is overwritten.
     update_mft_record_io(io, file_rec, |record| {
         let flags_off = 0x16;
         let cur = u16::from_le_bytes([record[flags_off], record[flags_off + 1]]);
@@ -4470,6 +4477,17 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
         record[flags_off..flags_off + 2].copy_from_slice(&new.to_le_bytes());
         Ok(())
     })?;
+
+    // 3) Free the clusters of EVERY non-resident attribute, not just the
+    //    unnamed $DATA: named non-resident $DATA streams and any attribute
+    //    promoted to non-resident own clusters in $Bitmap too. Freeing only
+    //    the unnamed $DATA (as this path used to) leaked theirs on every
+    //    last-link delete. Resident attributes live inside the MFT record
+    //    and are reclaimed when its bit is freed below.
+    //
+    //    Read from `file_record_bytes`, the copy taken BEFORE the flag
+    //    was cleared, so the mapping pairs are the ones the file had.
+    free_all_nonresident_runs_io(io, &file_record_bytes)?;
 
     // 4) Free the MFT record bit.
     let mbm = mft_bitmap::locate_io(io)?;
