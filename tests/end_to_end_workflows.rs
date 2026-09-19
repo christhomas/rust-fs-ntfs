@@ -172,6 +172,71 @@ fn delete_kind_safety() {
     fs.rmdir("/d").unwrap();
 }
 
+/// TWO NAMES FOR ONE FILE IN ONE DIRECTORY, AND A RENAME ONTO THE OTHER.
+///
+/// The collision check excluded "the file's own entry" by record number,
+/// which assumes a file has one name in a directory. Hard links break
+/// that: with `aaa.txt` and `bbb.txt` both pointing at record N,
+/// renaming `aaa.txt` to `bbb.txt` found the other link's entry, saw the
+/// same record number, decided it was the entry being renamed, and
+/// renamed in place -- leaving two `$I30` entries with equal collation
+/// keys, which is the corruption the check exists to prevent (#219).
+#[test]
+fn a_rename_onto_this_files_other_hard_link_is_refused() {
+    let img = fresh_volume("hl_clash", "HLC");
+    let fs = Filesystem::mount(&img).unwrap();
+    fs.create_file("/", "aaa.txt").unwrap();
+    fs.link("/aaa.txt", "/", "bbb.txt").unwrap();
+    let rec = fs.stat("/aaa.txt").unwrap().file_record_number;
+    assert_eq!(fs.stat("/bbb.txt").unwrap().file_record_number, rec);
+
+    let err = fs
+        .rename_same_length("/aaa.txt", "bbb.txt")
+        .expect_err("renaming onto this file's other name in the same directory is a collision");
+    let text = format!("{err}");
+    assert!(
+        text.contains("already exists"),
+        "the refusal names the collision, got: {text}"
+    );
+
+    // Both names survive, once each.
+    let names: Vec<String> = fs
+        .read_dir("/")
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(
+        names.iter().filter(|n| *n == "bbb.txt").count(),
+        1,
+        "exactly one bbb.txt: {names:?}"
+    );
+    assert_eq!(
+        names.iter().filter(|n| *n == "aaa.txt").count(),
+        1,
+        "aaa.txt is untouched: {names:?}"
+    );
+}
+
+/// The case-only rename #195 was written for still works: there the
+/// clash IS the entry being renamed, and comparing entry identity says
+/// so where comparing record numbers only happened to.
+#[test]
+fn a_case_only_rename_still_works() {
+    let img = fresh_volume("case_only", "CSO");
+    let fs = Filesystem::mount(&img).unwrap();
+    fs.create_file("/", "readme.txt").unwrap();
+    fs.rename_same_length("/readme.txt", "README.TXT")
+        .expect("a case-only rename is legal and is not a collision with itself");
+    let names: Vec<String> = fs
+        .read_dir("/")
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert!(names.iter().any(|n| n == "README.TXT"), "{names:?}");
+}
+
 /// A SAME-LENGTH RENAME EITHER HAPPENS OR IT DOES NOT.
 ///
 /// The two steps -- the parent's index entry, then the file's own

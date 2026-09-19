@@ -1270,23 +1270,56 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
     // readme.txt to README.TXT finds the file's OWN entry under the new
     // name -- a case-only rename is the one case where the destination
     // legitimately collates equal to the source, and Windows allows it.
+    // THE FILE'S OWN ENTRY IS THE ONE BEING RENAMED, not any entry that
+    // happens to name the same file. Excluding by record number assumes
+    // a file has one name in a directory, and hard links break that: with
+    // `A.txt` and `B.txt` both pointing at record 42, renaming `A.txt` to
+    // `b.txt` found `B.txt`'s entry, saw the same record number, called it
+    // "the file's own entry" and renamed in place -- leaving two `$I30`
+    // entries with equal collation keys, which is the corruption this
+    // check exists to prevent (#219).
+    //
+    // `record_offset` identifies the entry itself, which is the
+    // distinction a record number cannot make. A case-only rename still
+    // works, because there the clash IS the same entry.
     if new_name != current_basename {
+        let own_in_root =
+            index_io::find_index_entry(&parent_record_bytes, &current_basename, Some(&upcase))?;
         if let Some(clash) =
             index_io::find_index_entry(&parent_record_bytes, new_name, Some(&upcase))?
         {
-            if clash.file_record_number != file_rec {
-                return Err(format!("'{new_name}' already exists"));
+            let is_own_entry = own_in_root
+                .as_ref()
+                .is_some_and(|own| own.record_offset == clash.record_offset);
+            if !is_own_entry {
+                return Err(format!(
+                    "'{new_name}' already exists (record {}), and it is a different index entry \
+                     from the one being renamed",
+                    clash.file_record_number
+                ));
             }
         }
         if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
             let ia = idx_block::load_for_directory_io(io, parent_rec)?;
             for vcn in ia.allocated_block_vcns() {
                 let blk = idx_block::read_indx_block_io(io, &ia, vcn)?;
+                let own_here =
+                    index_io::find_entry_in_indx_block(&blk, &current_basename, Some(&upcase))?;
                 if let Some(clash) =
                     index_io::find_entry_in_indx_block(&blk, new_name, Some(&upcase))?
                 {
-                    if clash.file_record_number != file_rec {
-                        return Err(format!("'{new_name}' already exists"));
+                    // Same block AND same offset: (vcn, offset) is the
+                    // entry's identity once the block is fixed.
+                    let is_own_entry = own_here
+                        .as_ref()
+                        .is_some_and(|own| own.record_offset == clash.record_offset);
+                    if !is_own_entry {
+                        return Err(format!(
+                            "'{new_name}' already exists in this directory (record {}, INDX block \
+                             VCN {vcn}), and it is a different index entry from the one being \
+                             renamed",
+                            clash.file_record_number
+                        ));
                     }
                 }
             }
