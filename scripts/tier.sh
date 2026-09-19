@@ -53,7 +53,7 @@ shift
 #   mkfs        115 / 3,858 cold (Mac), 24 / 1,022 warm           160 / 5,200
 #   suite       2,143 / 108,930 (CI Linux, fixtures built)        2,900 / 150,000
 #   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
-#   scripts     35 / 721 (both shell tests)                        60 / 1,400
+#   scripts     46 / 979 (three shell tests)                       70 / 1,600
 #   matrix      1,521 / 78,075 (46 scenarios on the VM, see below) 2,000 / 105,000
 #
 # THE MATRIX ROW IS MEASURED ON A RUN THAT WENT BADLY, which is the run worth
@@ -69,7 +69,7 @@ case "$TIER" in
     mkfs)       MAX_LINES=160;  MAX_BYTES=5200 ;;
     suite)      MAX_LINES=2900; MAX_BYTES=150000 ;;
     asan)       MAX_LINES=1100; MAX_BYTES=72000 ;;
-    scripts)    MAX_LINES=60;   MAX_BYTES=1400 ;;
+    scripts)    MAX_LINES=70;   MAX_BYTES=1600 ;;
     matrix)     MAX_LINES=2000; MAX_BYTES=105000 ;;
     *)
         echo "tier.sh: '$TIER' has no budget. Add a measured row to scripts/tier.sh." >&2

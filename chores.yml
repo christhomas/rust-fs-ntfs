@@ -301,6 +301,10 @@ tasks:
       # it.
       - |
         set -eu
+        # The runner shells out to ssh and scp, so it needs the agent that
+        # holds the VM's key -- see scripts/vm-ssh-agent.sh for what happens
+        # when it inherits a shell's empty one instead.
+        SSH_AUTH_SOCK="$(scripts/vm-ssh-agent.sh)"; export SSH_AUTH_SOCK
         filter=""
         for arg in {{.CLI_ARGS}}; do
           case "$arg" in --verbose|-v) continue ;; esac

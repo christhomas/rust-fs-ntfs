@@ -45,6 +45,11 @@ main() {
     cd "$REPO" || exit 1
     # shellcheck disable=SC1091
     [ -f .test-env ] && . ./.test-env
+    # The agent that holds the VM's key. SSH_KEY is a .pub: the private half is
+    # served by trove, and a shell whose SSH_AUTH_SOCK points somewhere else
+    # (launchd's agent, on macOS) offers no key and every ssh here fails as if
+    # the VM were at fault. See scripts/vm-ssh-agent.sh.
+    SSH_AUTH_SOCK="$("$REPO/scripts/vm-ssh-agent.sh")"; export SSH_AUTH_SOCK
     : "${VM_HOST:?VM_HOST is not set in .test-env}" "${VM_WORKDIR:?VM_WORKDIR is not set in .test-env}"
 
     key_opts=()
