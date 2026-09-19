@@ -13,7 +13,7 @@ use crate::mkfs::stream;
 /// Layout: `INDEX_ROOT_HEADER (16 bytes) + INDEX_HEADER (16 bytes) + entries…`.
 const IR_INDEX_HEADER_OFFSET: usize = 16;
 /// Flags byte within INDEX_HEADER.
-pub const IH_FLAGS_OFFSET: usize = 0x0C;
+pub(crate) const IH_FLAGS_OFFSET: usize = 0x0C;
 /// INDEX_HEADER bit: any of the entries has a subnode pointer (i.e.
 /// the index overflows into `$INDEX_ALLOCATION`).
 pub const IH_FLAG_HAS_SUBNODES: u8 = 0x01;
@@ -1194,7 +1194,7 @@ pub fn insert_entry_into_indx_block_with_collation(
 ///
 /// `flags` is the INDEX_HEADER flags byte at [`IH_FLAGS_OFFSET`];
 /// `what` names the structure for the error message.
-pub fn refuse_if_interior(flags: u8, what: &str) -> Result<(), String> {
+pub(crate) fn refuse_if_interior(flags: u8, what: &str) -> Result<(), String> {
     if flags & IH_FLAG_HAS_SUBNODES != 0 {
         return Err(format!(
             "{what} has sub-nodes; inserting into an interior node needs \
