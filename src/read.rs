@@ -88,12 +88,47 @@ fn match_name(
     entries: &[index_io::DirEntryRaw],
     want: &[u16],
     upcase: &UpcaseTable,
-) -> Option<u64> {
+) -> Option<(u64, u16)> {
     entries.iter().find_map(|e| {
         let entry_name: Vec<u16> = e.name.encode_utf16().collect();
         (upcase.cmp_names(&entry_name, want) == std::cmp::Ordering::Equal)
-            .then_some(e.file_record_number)
+            .then_some((e.file_record_number, e.sequence))
     })
+}
+
+/// A NAME RESOLVES TO A RECORD ONLY IF THE RECORD IS STILL THAT FILE.
+///
+/// An MFT slot is reused, and `write` bumps its sequence when it recycles
+/// one (#256). An index entry left behind by an interrupted unlink still
+/// names the slot and still carries the OLD sequence -- so following it
+/// without comparing hands back whatever now lives there, under the name
+/// the caller asked for. That is the failure worth refusing: not a
+/// missing file, but the wrong file's contents served as the right one.
+///
+/// Checked where a reference is FOLLOWED, which is here: the record is
+/// being read anyway, so the comparison costs nothing. A listing does not
+/// check, because it reads no child records at all today and doing so
+/// would turn one index read into one read per entry (#257 records that
+/// trade). A stale entry can therefore still appear in a listing and be
+/// refused when used, which is the visible failure rather than the silent
+/// one.
+fn refuse_if_stale(
+    record: &[u8],
+    record_number: u64,
+    reference_sequence: u16,
+    name: &str,
+) -> Result<(), String> {
+    // Zero means "not recorded" in a file reference; nothing to compare.
+    if reference_sequence == 0 {
+        return Ok(());
+    }
+    let on_record = crate::mft_io::record_sequence(record);
+    if on_record != reference_sequence {
+        return Err(format!(
+            "the index entry for '{name}' points at record {record_number} with sequence              {reference_sequence}, and that record's sequence is {on_record}: the entry is stale              and the record now holds a different file"
+        ));
+    }
+    Ok(())
 }
 
 /// Look up a single name in one directory, upcase-collated. `dir_bytes` is the
@@ -115,11 +150,20 @@ fn lookup_in_directory<T: BlockIo + ?Sized>(
 ) -> Result<Option<u64>, String> {
     let want: Vec<u16> = name.encode_utf16().collect();
 
+    // The reference's sequence is checked against the record it lands on
+    // before the number is handed back, so no caller can follow a stale
+    // entry (#257).
+    let checked = |io: &mut T, rec: u64, seq: u16| -> Result<Option<u64>, String> {
+        let (_params, record) = read_mft_record_io(io, rec)?;
+        refuse_if_stale(&record, rec, seq, name)?;
+        Ok(Some(rec))
+    };
+
     // Resident $INDEX_ROOT first — return on hit.
     let mut root_entries = Vec::new();
     index_io::collect_index_root_entries(dir_bytes, &mut root_entries)?;
-    if let Some(rec) = match_name(&root_entries, &want, upcase) {
-        return Ok(Some(rec));
+    if let Some((rec, seq)) = match_name(&root_entries, &want, upcase) {
+        return checked(io, rec, seq);
     }
 
     // Spilled into $INDEX_ALLOCATION? Scan blocks one at a time, returning on
@@ -133,8 +177,8 @@ fn lookup_in_directory<T: BlockIo + ?Sized>(
             let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
             block_entries.clear();
             index_io::collect_indx_block_entries(&block, &mut block_entries)?;
-            if let Some(rec) = match_name(&block_entries, &want, upcase) {
-                return Ok(Some(rec));
+            if let Some((rec, seq)) = match_name(&block_entries, &want, upcase) {
+                return checked(io, rec, seq);
             }
         }
     }

@@ -465,6 +465,13 @@ fn scan_entries_for_name(
 pub struct DirEntryRaw {
     /// Target file's MFT record number (low 48 bits of the file_reference).
     pub file_record_number: u64,
+    /// The file reference's sequence number (its top 16 bits). A record
+    /// slot is reused, and its sequence is bumped each time; an index
+    /// entry that still points at the previous tenant carries the OLD
+    /// sequence. Comparing this against the target record's own sequence
+    /// is what tells a stale entry from a live one -- see
+    /// `read::lookup_in_directory` (#257).
+    pub sequence: u16,
     /// Filename (lossy UTF-16 → UTF-8).
     pub name: String,
     /// `$FILE_NAME` namespace: 0=POSIX, 1=Win32, 2=DOS, 3=Win32+DOS.
@@ -549,6 +556,7 @@ fn collect_entries(
                 );
                 out.push(DirEntryRaw {
                     file_record_number: file_ref & 0x0000_FFFF_FFFF_FFFF,
+                    sequence: (file_ref >> 48) as u16,
                     name,
                     namespace,
                     file_attributes,
