@@ -394,17 +394,22 @@ jobs:
       # AN EXECUTED-TEST FLOOR, AND THIS IS THE JOB THAT MOST NEEDS ONE.
       #
       # Everything this job is for depends on a step that ran earlier:
-      # `build-ntfs-feature-images.sh` writes the read-path .img fixtures,
-      # and the fixture-driven test files SELF-SKIP when the images are not
-      # there (that is deliberate -- it is what lets the suite run on a
-      # developer's machine without 3 GB of pre-baked NTFS). So a fixture
-      # builder that half-failed, or an apt install of ntfs-3g that produced
-      # no mkntfs, does not turn this job red. It turns the integration
-      # suite into the unit suite, silently, and the tick stays green.
+      # `build-ntfs-feature-images.sh` writes the read-path .img fixtures.
       #
-      # That is what the count catches: the full run executes ~1427 tests,
-      # the self-skipped shape executes a few hundred, and nothing else in
-      # this workflow can tell those two apart. #278.
+      # WHAT A MISSING FIXTURE ACTUALLY DOES, measured on 2026-09-18 at
+      # 6670e25 with no fixtures present: the suite FAILS. `cargo test
+      # --release --locked --no-fail-fast` exits 101 with 414 FAILED lines,
+      # because `tests/common/mod.rs`'s `open` panics ("did you run
+      # test-disks/build-ntfs-feature-images.sh?") and files like
+      # `tests/attr_resize.rs` panic in `std::fs::copy`. Only the two
+      # Windows-authored fixtures (ntfs-attrlist / ntfs-compressed) self-skip.
+      # So a half-failed fixture builder turns this job red through the
+      # suite's own exit status, before the floor is ever read.
+      #
+      # THE FLOOR IS FOR THE OTHER CASE: a selection that stops matching. A
+      # renamed file, a changed filter, a test binary that was not built --
+      # `cargo test` exits 0 on "0 passed; 0 failed", and nothing else in
+      # this workflow can tell that from a full run. #278, #289.
       #
       # Measured 2026-09-17 from run 34985102618 (job 104435064811, the last
       # CI run on main at the time of writing): 1427 executed. Floor 1350,
@@ -415,7 +420,7 @@ jobs:
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
           echo "tests executed: $n (floor 1350)"
           if [ "$n" -lt 1350 ]; then
-              echo "::error::only $n tests executed, floor is 1350 -- 1427 ran on 2026-09-17 in run 34985102618, and a run that executes less than that stopped early rather than passed (the usual cause is the .img fixtures not being built, which makes the fixture-driven test files self-skip instead of fail)"
+              echo "::error::only $n tests executed, floor is 1350 -- 1427 ran on 2026-09-17 in run 34985102618. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
               exit 1
           fi
       - run: scripts/tier.sh clippy -- cargo clippy --locked --all-targets -- -D warnings
