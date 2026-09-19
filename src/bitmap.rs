@@ -448,10 +448,18 @@ struct MappedChunk {
 /// never sparse in practice — a hole would mean clusters whose
 /// allocation state is unrecorded — so both are corruption rather than
 /// an unsupported layout.
+/// `device_bytes` is the size of the device the transfer will land on,
+/// and it is not the same number as the boot sector's volume size: a
+/// volume that claims more than the device holds is the case a bound
+/// taken from the boot sector alone cannot refuse. `idx_block`'s
+/// `vcn_to_disk_offset` took this parameter for the same reason (#236);
+/// these two call sites still passed `u64::MAX`, which asks
+/// `cluster_span` to check against the claim only (#241).
 fn map_bitmap_range(
     bm: &BitmapLocation,
     start_byte: u64,
     len: u64,
+    device_bytes: u64,
 ) -> Result<Vec<MappedChunk>, String> {
     let cluster_size = bm.params.cluster_size;
     let end = start_byte + len;
@@ -510,7 +518,7 @@ fn map_bitmap_range(
                 vcn - run.starting_vcn,
                 off_in_cluster,
                 chunk as u64,
-                u64::MAX,
+                device_bytes,
             )?,
             cursor,
             len: chunk,
@@ -528,7 +536,7 @@ fn read_bitmap_bytes_io<T: BlockIo + ?Sized>(
     len: u64,
 ) -> Result<Vec<u8>, String> {
     let mut out = vec![0u8; len as usize];
-    for c in map_bitmap_range(bm, start_byte, len)? {
+    for c in map_bitmap_range(bm, start_byte, len, io.size())? {
         io.read_exact_at(c.disk_offset, &mut out[c.cursor..c.cursor + c.len])
             .map_err(|e| format!("read bitmap: {e}"))?;
     }
@@ -568,7 +576,7 @@ fn write_bitmap_bytes_io<T: BlockIo + ?Sized>(
         previous.len(),
         "the pre-image must cover the same range as the new bytes"
     );
-    let chunks = map_bitmap_range(bm, start_byte, data.len() as u64)?;
+    let chunks = map_bitmap_range(bm, start_byte, data.len() as u64, io.size())?;
 
     for (i, c) in chunks.iter().enumerate() {
         if let Err(e) = io.write_all_at(c.disk_offset, &data[c.cursor..c.cursor + c.len]) {
