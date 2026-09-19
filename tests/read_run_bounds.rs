@@ -140,6 +140,47 @@ fn repoint_data_run(img: &str, lcn: u64) {
     );
 }
 
+/// Mark `/victim.bin`'s `$DATA` as COMPRESSED, so a read of it goes
+/// through `read_compressed_nonresident` instead of the plain path.
+///
+/// THE BYTES ARE NOT ACTUALLY COMPRESSED, and they do not need to be:
+/// what is under test is the bounds check the compressed reader makes
+/// BEFORE it reads a cluster (`src/read.rs:604`). It had no negative
+/// coverage anywhere (#230) -- this file never set the flag, and the
+/// only compressed-read test is a happy path against a Windows-built
+/// image that self-skips when absent.
+fn mark_data_compressed(img: &str) {
+    let mut io = PathIo::open_rw(Path::new(img)).expect("open_rw");
+    let record_number = read::resolve_path(&mut io, "/victim.bin").expect("resolve_path");
+    mft_io::update_mft_record_io(&mut io, record_number, |record| {
+        let loc = attr_io::find_attribute(record, AttrType::Data, None)
+            .ok_or("no unnamed $DATA in the victim's record")?;
+        let flags_at = loc.attr_offset + attr_off::FLAGS;
+        let flags = u16::from_le_bytes([record[flags_at], record[flags_at + 1]]);
+        record[flags_at..flags_at + 2]
+            .copy_from_slice(&(flags | attr_io::attr_flags::COMPRESSED).to_le_bytes());
+        // Compression unit: 2^4 = 16 clusters, the LZNT1 default, at
+        // +0x22 of the non-resident header.
+        let unit_at = loc.attr_offset + 0x22;
+        record[unit_at..unit_at + 2].copy_from_slice(&4u16.to_le_bytes());
+        Ok(())
+    })
+    .expect("set the compression flag");
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
+
+    // The flag has to survive the write, or this test silently measures
+    // the ordinary non-resident path instead of the compressed one.
+    let (_p, record) = mft_io::read_mft_record_io(&mut io, record_number).expect("re-read");
+    let loc = attr_io::find_attribute(&record, AttrType::Data, None).expect("$DATA");
+    let flags_at = loc.attr_offset + attr_off::FLAGS;
+    let flags = u16::from_le_bytes([record[flags_at], record[flags_at + 1]]);
+    assert_ne!(
+        flags & attr_io::attr_flags::COMPRESSED,
+        0,
+        "the COMPRESSED flag must be set on disk, or the compressed reader is never reached"
+    );
+}
+
 /// Both read entry points, so a guard added to one of them is not
 /// mistaken for a guard on the read path.
 fn read_both_ways(
@@ -202,4 +243,45 @@ fn a_run_whose_offset_overflows_is_refused_rather_than_wrapped() {
         "read_attribute_range: an LCN of {lcn} at a {CLUSTER}-byte cluster \
          overflows a u64 byte offset; the read must refuse it"
     );
+}
+
+/// THE COMPRESSED READER IS BOUNDED TOO, and nothing checked that.
+///
+/// `read_compressed_nonresident` reads its clusters through its own
+/// `cluster_span` call, and this file -- whose whole subject is bounds
+/// refusal -- only ever built uncompressed victims, so that call had no
+/// negative coverage in the repository (#230).
+#[test]
+fn a_compressed_run_off_the_volume_is_refused_rather_than_read() {
+    let img = volume_with_a_file("off_volume_compressed");
+    repoint_data_run(&img, OFF_VOLUME_LCN);
+    mark_data_compressed(&img);
+
+    let mut probe = PathIo::open_ro(Path::new(&img)).expect("open_ro");
+    let rec = read::resolve_path(&mut probe, "/victim.bin").expect("resolve_path");
+    drop(probe);
+
+    let (whole, ranged) = read_both_ways(&img, rec);
+    for (what, got) in [
+        ("read_attribute_value", whole),
+        ("read_attribute_range", ranged),
+    ] {
+        match got {
+            // THE BOUND, NOT THE DEVICE. Reading past the end of the
+            // file would fail anyway -- `PathIo` returns an error for a
+            // short read -- so a bare `is_err()` here would pass with
+            // the guard deleted. `cluster_span`'s wording is what says
+            // the refusal happened before the read was attempted.
+            Err(e) => assert!(
+                e.contains("a transfer spans") && e.contains("on a volume of"),
+                "{what} failed, but not in the bounds check: {e}"
+            ),
+            Ok(bytes) => panic!(
+                "{what}: a COMPRESSED $DATA run at LCN {OFF_VOLUME_LCN} starts past the \
+                 {VOL_SIZE}-byte volume, yet the read returned {} bytes: {:02x?}...",
+                bytes.len(),
+                &bytes[..8.min(bytes.len())]
+            ),
+        }
+    }
 }
