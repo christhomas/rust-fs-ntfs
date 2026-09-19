@@ -272,7 +272,15 @@ pub fn build_directory_record(
         nt_time,
         /* is_dir */ true,
         fn_namespace_for(name),
-    );
+    )
+    .ok_or_else(|| {
+        format!(
+            "record overflow: a $FILE_NAME for a {}-unit directory name does not fit in a \
+             {record_size}-byte record alongside the attributes already written ({cursor} bytes \
+             used)",
+            utf16.len()
+        )
+    })?;
     cursor = write_empty_index_root(&mut rec, cursor, 2, index_block_size, bytes_per_sector)?;
 
     // W2.5 — bounds guard, same rationale as `build_record_inner`.
@@ -411,7 +419,14 @@ fn build_record_inner(
         nt_time,
         is_dir,
         fn_namespace_for(name),
-    );
+    )
+    .ok_or_else(|| {
+        format!(
+            "record overflow: a $FILE_NAME for a {}-unit name does not fit in a {record_size}-byte \
+             record alongside the attributes already written ({cursor} bytes used)",
+            utf16.len()
+        )
+    })?;
     cursor = write_empty_data(&mut rec, cursor, 2);
 
     // W2.5 — bounds guard. The resident-only attributes above
@@ -1007,6 +1022,16 @@ pub fn build_file_name_attribute(
     Ok(buf)
 }
 
+/// Returns `None` when the attribute would not fit in the record.
+///
+/// THE BOUNDS GUARD USED TO RUN AFTERWARDS. `rec[at..at + len]` is a
+/// slice of a record sized from the boot sector, and nothing compared
+/// the two -- so on a volume formatted with `--mft-record-size 512` (a
+/// documented, accepted option) a name of 136 characters or more
+/// panicked here, aborting the process, while the "record overflow"
+/// error written for exactly this case sat ten lines below and was
+/// never reached (#143). A caller asking for a name too long for the
+/// geometry gets that error now.
 fn write_file_name(
     rec: &mut [u8],
     at: usize,
@@ -1016,7 +1041,7 @@ fn write_file_name(
     nt_time: u64,
     is_dir: bool,
     namespace: u8,
-) -> usize {
+) -> Option<usize> {
     // Delegate to build_file_name_attribute to avoid duplicating byte-layout
     // logic. The only difference is that callers pass an explicit namespace
     // (e.g. POSIX for system metafiles), so we patch that byte after building.
@@ -1027,8 +1052,12 @@ fn write_file_name(
     const NAMESPACE_BYTE: usize = 24 + 65;
     blob[NAMESPACE_BYTE] = namespace;
     let len = blob.len();
-    rec[at..at + len].copy_from_slice(&blob);
-    at + len
+    let end = at.checked_add(len)?;
+    if end > rec.len() {
+        return None;
+    }
+    rec[at..end].copy_from_slice(&blob);
+    Some(end)
 }
 
 fn write_empty_data(rec: &mut [u8], at: usize, attr_id: u16) -> usize {
@@ -1590,6 +1619,29 @@ mod tests {
     }
 
     // --- build_nonresident_attribute (named stream) --------------------------
+
+    /// A NAME TOO LONG FOR THE RECORD IS AN ERROR, NOT AN ABORT.
+    ///
+    /// `rust-ntfs format --mft-record-size 512` is a documented option,
+    /// and on the volume it produces a 136-character name used to panic
+    /// inside `write_file_name` -- `rec[at..at + len]` on a 512-byte
+    /// record -- taking the process down. The "record overflow" error
+    /// written for exactly this case sat ten lines further on and was
+    /// never reached (#143).
+    #[test]
+    fn a_name_too_long_for_the_record_is_refused_not_panicked() {
+        let long = "n".repeat(200);
+        let err = build_regular_file_record(512, 40, 1, 0x0005_0000_0000_0005, &long, 0, 512)
+            .expect_err("a 200-character name cannot fit a 512-byte record");
+        assert!(
+            err.contains("record overflow"),
+            "the caller gets the overflow error, got: {err}"
+        );
+
+        // The same name in a 4096-byte record is ordinary.
+        build_regular_file_record(4096, 40, 1, 0x0005_0000_0000_0005, &long, 0, 512)
+            .expect("200 characters fit a 4096-byte record");
+    }
 
     #[test]
     fn build_nonresident_attribute_named_encodes_stream_name() {
