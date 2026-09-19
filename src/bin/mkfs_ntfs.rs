@@ -12,9 +12,20 @@
 //! second implementation of a formatter is exactly the kind of copy
 //! that ends up quietly weaker than the original.
 //!
-//! The target name is `mkfs_ntfs` because cargo will not accept a dot
-//! in one; the release job renames it to `mkfs.ntfs` when it packages,
-//! so what you install has the conventional name.
+//! The target name is `mkfs_ntfs` because cargo will not accept a dot in
+//! one, and NOTHING RENAMES IT. `release.yml` publishes to crates.io and
+//! ships no binary artifacts, so `cargo install am-fs-ntfs` puts
+//! `mkfs_ntfs` on the path; installing it under the conventional name is
+//! the packager's step:
+//!
+//! ```text
+//! install -m755 target/release/mkfs_ntfs /usr/local/sbin/mkfs.ntfs
+//! ```
+//!
+//! What the binary CALLS itself is already conventional — usage and
+//! errors say `mkfs.ntfs`, because that is the name passed to
+//! `format::run` below, and a tool invoked through a renamed link should
+//! not contradict the name it was invoked by.
 
 use std::process::ExitCode;
 

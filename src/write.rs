@@ -1384,10 +1384,14 @@ fn validate_basename(name: &str) -> Result<(), String> {
 /// at `parent_path`. Returns the new file's MFT record number.
 ///
 /// **Limitations (MVP):**
-/// * Parent must currently have a resident `$INDEX_ROOT:$I30` with no
-///   `$INDEX_ALLOCATION` overflow. (Same limitation as
-///   `rename_same_length` pre-W3-full: root-dir creates aren't
-///   supported on NTFS formatter-laid volumes because the root is split.)
+/// * A parent WITH `$INDEX_ALLOCATION` is handled, but not correctly:
+///   `insert_entry_in_parent_io` takes the first leaf block with room
+///   rather than the leaf the name collates into, and writes no routing
+///   entry. The entry lands in a real block, in sorted order within that
+///   block, on the wrong side of the parent's routing keys. See #301;
+///   this line used to claim the case was refused, and nothing refuses
+///   it. Creates in a root directory laid out by another formatter --
+///   which is split even when small -- take this path.
 /// * MFT must have a free record. Growing `$MFT` itself is W2.6.
 /// * Filename collation is case-insensitive ASCII-only (proper
 ///   NTFS upcase-table collation is future work).
@@ -1739,8 +1743,9 @@ fn insert_entry_in_parent_io<T: BlockIo + ?Sized>(
 /// Create a new empty directory `basename` inside `parent_path`.
 /// Returns the new directory's MFT record number on success.
 ///
-/// Shares the limitation set of [`create_file`] — the parent must hold
-/// its index entirely in `$INDEX_ROOT`.
+/// Shares the limitation set of [`create_file`], including the
+/// `$INDEX_ALLOCATION` placement defect (#301): a parent whose index has
+/// overflowed is not refused, it is inserted into wrongly.
 pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, String> {
     let mut io = PathIo::open_rw(image)?;
     mkdir_io(&mut io, parent_path, basename)

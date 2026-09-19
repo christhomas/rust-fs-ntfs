@@ -33,9 +33,11 @@ What's solid today:
 
 What's still landing:
 
-- B+ tree insert / delete in `$INDEX_ALLOCATION` once a directory
-  has overflowed out of `$INDEX_ROOT` (W3.2 / W3.3 in
-  `docs/future-features.md`).
+- B+ tree insert / delete in `$INDEX_ALLOCATION` once a directory has
+  overflowed out of `$INDEX_ROOT` (W3.2 / W3.3 in
+  `docs/future-features.md`). Insert is not absent, which is worse than
+  absent: it runs, and picks the leaf by free space rather than by where
+  the name collates, writing no routing entry (#301).
 - `$MFT` self-growth when `$MFT:$Bitmap` is exhausted (W2.6).
 - A handful of mkfs scenarios in the multi-VM matrix that still
   trip `chkdsk` in repair mode — tracked in `test-matrix.json`.
@@ -74,7 +76,7 @@ What's still landing:
 | File-attribute flag toggling | yes |
 | mkfs (format a blank image to NTFS) | yes |
 | fsck (clear dirty flag + `$LogFile` reset) | yes |
-| `$INDEX_ALLOCATION` insert / delete (overflowed dirs) | not yet — W3.2 / W3.3 |
+| `$INDEX_ALLOCATION` insert / delete (overflowed dirs) | insert runs but places the entry by free space, not by key — #301. Delete: not yet (W3.3) |
 | `$MFT` self-growth (full `$MFT:$Bitmap`) | not yet — W2.6 |
 
 ### NTFS feature coverage
@@ -84,7 +86,7 @@ What's still landing:
 | Resident attributes | yes | yes |
 | Non-resident attributes | yes | yes |
 | `$INDEX_ROOT` directories | yes | yes |
-| `$INDEX_ALLOCATION` directories (B+ tree) | yes | partial — read-traversal yes, insert / delete not implemented |
+| `$INDEX_ALLOCATION` directories (B+ tree) | yes | partial — read-traversal yes; insert runs but ignores the routing keys (#301), delete not implemented |
 | Alternate Data Streams | yes | yes (resident + auto-promote) |
 | Reparse points (symlinks, junctions, generic) | yes | yes |
 | Extended Attributes (`$EA`) | yes | yes |
@@ -210,8 +212,10 @@ are documented there.
   Unblocks `create_file` / `mkdir` on volumes whose initial MFT
   reservation is full.
 - [ ] **W3.2** — `$INDEX_ALLOCATION` B+ tree insert with split +
-  promotion from resident `$INDEX_ROOT`. Unblocks all writes against
-  overflowed directory parents.
+  promotion from resident `$INDEX_ROOT`. Not a greenfield task: an
+  insert path already runs against overflowed parents and places
+  entries in the wrong leaf (#301), so W3.2 is a correction as much as
+  an addition.
 - [ ] **W3.3** — `$INDEX_ALLOCATION` B+ tree delete with rebalance.
   Symmetric to W3.2; needed by `rmdir` / `unlink` / `rename`-out
   on overflowed parents.

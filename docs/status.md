@@ -1111,10 +1111,11 @@ covers it. -->
 - `github.com/christhomas/ext4-fskit` (archived) — `ntfsfskitd`
   extension target. Links `vendor/fs_ntfs/libfs_ntfs.a`, bridging
   header imports `fs_ntfs.h`.
-- `github.com/christhomas/diskjockey` — `DiskJockeyNTFS` extension
-  target. Same link shape. Uses the callback mount path
-  (`fs_ntfs_mount_with_callbacks`) because the extension is sandboxed
-  and can't open `/dev/diskN` directly.
+- A macOS FSKit extension target, same link shape. Uses the callback
+  mount path (`fs_ntfs_mount_with_callbacks`) because the extension is
+  sandboxed and can't open `/dev/diskN` directly. That constraint is the
+  reason the callback transport exists; the consumer itself is not this
+  repository's business.
 
 If you change the C ABI (add functions, rename symbols, change struct
 layouts), both consumers need a follow-up commit. The safest policy is

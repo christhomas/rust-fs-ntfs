@@ -323,10 +323,25 @@ enum MountSource {
     },
 }
 
-// Safety: the `*mut c_void` context pointer is opaque to us; the
-// caller (FSKit / Go backend) is responsible for keeping it alive
-// for the duration of the handle, just like for `CallbackReader`
-// already (see the comment on `unsafe impl Send for CallbackReader`).
+// Safety: ONE FIELD IS THE REASON THIS IS UNSAFE. `Path(PathBuf)` and
+// `FsCore { device }` are already `Send + Sync` -- `fs_core::BlockRead`,
+// which `BlockDevice` requires, is declared `Send + Sync`, so the `Arc`
+// carries that. `Callbacks` holds `context: *mut c_void`, and a raw
+// pointer is neither, which is what these impls assert past.
+//
+// What they assert: the context is OPAQUE TO US. We never dereference it,
+// never read through it, and only ever hand it straight back to the
+// caller's own `read_fn` / `write_fn`. Its validity, its lifetime and any
+// synchronisation it needs are the caller's, and the C header says so
+// (include/fs_ntfs.h, "Guarantees and obligations": a single process and
+// thread mounting one volume is the supported shape, two concurrent
+// writers against one image is undefined behaviour, and the caller must
+// quiesce the device for the duration of a mutation).
+//
+// So this is not a claim that the context is thread-safe. It is the claim
+// that moving the handle between threads cannot make it less safe than
+// the header already permits, because nothing on this side of the
+// boundary touches the pointer at all.
 unsafe impl Send for MountSource {}
 unsafe impl Sync for MountSource {}
 
@@ -1516,7 +1531,10 @@ pub extern "C" fn fs_ntfs_readlink(
         let target = match target {
             Some(t) => t,
             None => {
-                set_error("reparse print name is empty");
+                // `None` now means only "no name here": an empty print
+                // name, or a byte count that cannot be UTF-16. A name
+                // that is present but malformed decodes lossily (#184).
+                set_error("reparse point has no print name");
                 return -1;
             }
         };
@@ -1575,6 +1593,22 @@ fn decode_mount_point_print_name(data: &[u8]) -> Option<String> {
     utf16_le_bytes_to_string(&data[start..start + print_name_length])
 }
 
+/// Decode disk-sourced UTF-16LE. `None` means there is no name here --
+/// zero length, or a byte count that cannot be UTF-16 at all.
+///
+/// LOSSY, BECAUSE THE VOLUME IS THE AUTHORITY ON WHAT THE NAME IS. NTFS
+/// stores names as UTF-16 code units and does not require them to be
+/// well-formed: an unpaired surrogate is storable, and Windows will show
+/// such a link. This used to be `String::from_utf16(..).ok()`, so one
+/// unpaired surrogate turned into `None` and `fs_ntfs_readlink` reported
+/// "reparse print name is empty" -- a different failure from the one that
+/// happened, about a name that was present. The entry stayed a SYMLINK to
+/// `fs_ntfs_stat`, which dispatches on the reparse tag and never decodes
+/// the name, so the link was permanently unresolvable and the error sent
+/// the reader looking for an empty field that was not empty (#184).
+///
+/// `$VOLUME_NAME` (`read.rs`) and `$ATTRIBUTE_LIST` names already decoded
+/// lossily; this makes the three agree.
 fn utf16_le_bytes_to_string(bytes: &[u8]) -> Option<String> {
     if !bytes.len().is_multiple_of(2) {
         return None;
@@ -1586,7 +1620,7 @@ fn utf16_le_bytes_to_string(bytes: &[u8]) -> Option<String> {
     if u16s.is_empty() {
         return None;
     }
-    String::from_utf16(&u16s).ok()
+    Some(String::from_utf16_lossy(&u16s))
 }
 
 // ---------------------------------------------------------------------------
@@ -3553,11 +3587,32 @@ mod pure_fn_tests {
         assert_eq!(utf16_le_bytes_to_string(&bytes), Some("é".to_string()));
     }
 
+    /// A NAME THAT IS PRESENT BUT MALFORMED IS STILL A NAME. This asserted
+    /// `None` while the decoder was strict, which is what made a symlink
+    /// whose target holds an unpaired surrogate permanently unresolvable
+    /// and reported it as an empty print name (#184). NTFS stores UTF-16
+    /// code units without requiring them to be well-formed, so the volume
+    /// can hold this and Windows will show it.
     #[test]
-    fn utf16_le_invalid_surrogates_returns_none() {
-        // Lone high surrogate U+D800 — invalid UTF-16
+    fn utf16_le_an_unpaired_surrogate_decodes_lossily() {
+        // Lone high surrogate U+D800 — storable on disk, not valid UTF-16.
         let bytes = [0x00u8, 0xD8];
-        assert_eq!(utf16_le_bytes_to_string(&bytes), None);
+        assert_eq!(
+            utf16_le_bytes_to_string(&bytes),
+            Some("\u{FFFD}".to_string()),
+            "a malformed name decodes to the replacement character, not to nothing"
+        );
+    }
+
+    /// `None` keeps one meaning: there is no name here.
+    #[test]
+    fn utf16_le_none_means_no_name_at_all() {
+        assert_eq!(utf16_le_bytes_to_string(&[]), None, "zero bytes");
+        assert_eq!(
+            utf16_le_bytes_to_string(&[0x41]),
+            None,
+            "an odd byte count cannot be UTF-16"
+        );
     }
 
     // --- decode_symlink_print_name ---

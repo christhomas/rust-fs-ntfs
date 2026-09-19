@@ -88,12 +88,47 @@ fn match_name(
     entries: &[index_io::DirEntryRaw],
     want: &[u16],
     upcase: &UpcaseTable,
-) -> Option<u64> {
+) -> Option<(u64, u16)> {
     entries.iter().find_map(|e| {
         let entry_name: Vec<u16> = e.name.encode_utf16().collect();
         (upcase.cmp_names(&entry_name, want) == std::cmp::Ordering::Equal)
-            .then_some(e.file_record_number)
+            .then_some((e.file_record_number, e.sequence))
     })
+}
+
+/// A NAME RESOLVES TO A RECORD ONLY IF THE RECORD IS STILL THAT FILE.
+///
+/// An MFT slot is reused, and `write` bumps its sequence when it recycles
+/// one (#256). An index entry left behind by an interrupted unlink still
+/// names the slot and still carries the OLD sequence -- so following it
+/// without comparing hands back whatever now lives there, under the name
+/// the caller asked for. That is the failure worth refusing: not a
+/// missing file, but the wrong file's contents served as the right one.
+///
+/// Checked where a reference is FOLLOWED, which is here: the record is
+/// being read anyway, so the comparison costs nothing. A listing does not
+/// check, because it reads no child records at all today and doing so
+/// would turn one index read into one read per entry (#257 records that
+/// trade). A stale entry can therefore still appear in a listing and be
+/// refused when used, which is the visible failure rather than the silent
+/// one.
+fn refuse_if_stale(
+    record: &[u8],
+    record_number: u64,
+    reference_sequence: u16,
+    name: &str,
+) -> Result<(), String> {
+    // Zero means "not recorded" in a file reference; nothing to compare.
+    if reference_sequence == 0 {
+        return Ok(());
+    }
+    let on_record = crate::mft_io::record_sequence(record);
+    if on_record != reference_sequence {
+        return Err(format!(
+            "the index entry for '{name}' points at record {record_number} with sequence              {reference_sequence}, and that record's sequence is {on_record}: the entry is stale              and the record now holds a different file"
+        ));
+    }
+    Ok(())
 }
 
 /// Look up a single name in one directory, upcase-collated. `dir_bytes` is the
@@ -115,11 +150,20 @@ fn lookup_in_directory<T: BlockIo + ?Sized>(
 ) -> Result<Option<u64>, String> {
     let want: Vec<u16> = name.encode_utf16().collect();
 
+    // The reference's sequence is checked against the record it lands on
+    // before the number is handed back, so no caller can follow a stale
+    // entry (#257).
+    let checked = |io: &mut T, rec: u64, seq: u16| -> Result<Option<u64>, String> {
+        let (_params, record) = read_mft_record_io(io, rec)?;
+        refuse_if_stale(&record, rec, seq, name)?;
+        Ok(Some(rec))
+    };
+
     // Resident $INDEX_ROOT first — return on hit.
     let mut root_entries = Vec::new();
     index_io::collect_index_root_entries(dir_bytes, &mut root_entries)?;
-    if let Some(rec) = match_name(&root_entries, &want, upcase) {
-        return Ok(Some(rec));
+    if let Some((rec, seq)) = match_name(&root_entries, &want, upcase) {
+        return checked(io, rec, seq);
     }
 
     // Spilled into $INDEX_ALLOCATION? Scan blocks one at a time, returning on
@@ -133,8 +177,8 @@ fn lookup_in_directory<T: BlockIo + ?Sized>(
             let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
             block_entries.clear();
             index_io::collect_indx_block_entries(&block, &mut block_entries)?;
-            if let Some(rec) = match_name(&block_entries, &want, upcase) {
-                return Ok(Some(rec));
+            if let Some((rec, seq)) = match_name(&block_entries, &want, upcase) {
+                return checked(io, rec, seq);
             }
         }
     }
@@ -160,11 +204,11 @@ pub fn read_attribute_value<T: BlockIo + ?Sized>(
     name: Option<&str>,
 ) -> Result<Vec<u8>, String> {
     match locate_attribute(io, record_number, attr_type, name)? {
-        Some((params, _holder, record, loc)) => {
+        Some((params, holder, record, loc)) => {
             if attr_type == AttrType::Data && name.is_none() {
-                refuse_wof_compressed(io, &params, &record, record_number)?;
+                refuse_wof_compressed(io, &params, &record, holder, record_number)?;
             }
-            read_value_from_record(io, &params, &record, &loc)
+            read_value_from_record(io, &params, &record, &loc, Holes::AreZeros)
         }
         None => Err(format!(
             "read_attribute_value: attribute {attr_type:?} (name {name:?}) not found in record {record_number}"
@@ -195,20 +239,50 @@ pub fn read_attribute_value<T: BlockIo + ?Sized>(
 /// crate cannot decode yet -- refusing to list it or to size it would
 /// make a Windows system volume unusable rather than honest.
 ///
-/// The record checked is the one holding `$DATA`. For the shape WOF
-/// produces that is the base record, which is also where the
-/// `$REPARSE_POINT` is: an empty sparse `$DATA` does not overflow into
-/// an extension record.
+/// THE GUARD AND THE THING IT GUARDS CAN LIVE IN DIFFERENT RECORDS. This
+/// used to scan only the record `$DATA` was found in, with a comment
+/// asserting that WOF puts both in the base record. Nothing enforced it,
+/// and it leaks both ways on a file with an `$ATTRIBUTE_LIST`: `$DATA` in
+/// an extension record means the base record's `$REPARSE_POINT` is never
+/// seen, and `$REPARSE_POINT` in an extension record means a guard
+/// looking at the base sees nothing. The second is the likelier order,
+/// because NTFS evicts attributes by type and `$REPARSE_POINT` (0xC0)
+/// goes before `$DATA` (0x80). Either way the sparse, zero-filled stream
+/// was returned as the file's contents -- the bug #202 fixed for files
+/// without an attribute list (#221).
+///
+/// THE COMMON CASE STAYS ONE RECORD-LOCAL SCAN. A base record with no
+/// `$ATTRIBUTE_LIST` cannot have attributes anywhere else, so the scan is
+/// provably sufficient and nothing extra is read. Only a file that HAS an
+/// attribute list pays for `locate_attribute`, which matters on a driver
+/// already costing about six device reads per `stat`.
 fn refuse_wof_compressed<T: BlockIo + ?Sized>(
     io: &mut T,
     params: &crate::mft_io::BootParams,
     record: &[u8],
+    holder_record_number: u64,
     record_number: u64,
 ) -> Result<(), String> {
-    let Some(rp) = attr_io::find_attribute(record, AttrType::ReparsePoint, None) else {
-        return Ok(());
+    // `record` holds `$DATA`. If that is the base record and the base
+    // record has no `$ATTRIBUTE_LIST`, this file's attributes are all
+    // here and the local scan is the whole answer -- no extra read. If
+    // `$DATA` came from an extension record, there is an attribute list
+    // by definition.
+    let overflowed = holder_record_number != record_number
+        || attr_io::find_attribute(record, AttrType::AttributeList, None).is_some();
+    let (holder, rp) = if overflowed {
+        match locate_attribute(io, record_number, AttrType::ReparsePoint, None)? {
+            Some((_p, _n, holder_record, loc)) => (holder_record, loc),
+            None => return Ok(()),
+        }
+    } else {
+        match attr_io::find_attribute(record, AttrType::ReparsePoint, None) {
+            Some(loc) => (record.to_vec(), loc),
+            None => return Ok(()),
+        }
     };
-    let value = read_value_from_record(io, params, record, &rp)?;
+    let record = holder.as_slice();
+    let value = read_value_from_record(io, params, record, &rp, Holes::AreZeros)?;
     if value.len() >= 4
         && u32::from_le_bytes([value[0], value[1], value[2], value[3]])
             == crate::record_build::reparse_tag::WOF
@@ -262,7 +336,14 @@ fn locate_attribute<T: BlockIo + ?Sized>(
     // attributes live, and when it is present the base record's copy of
     // one is a segment rather than necessarily the whole thing.
     if let Some(al_loc) = attr_io::find_attribute(&record, AttrType::AttributeList, None) {
-        let al_value = read_value_from_record(io, &params, &record, &al_loc)?;
+        // $ATTRIBUTE_LIST IS NEVER LEGITIMATELY SPARSE, and it is a
+        // structure this code then walks entry by entry, stopping at the
+        // first zero length. A hole or a short `initialized_size` would
+        // hand `parse_attribute_list` zeros, it would stop there, and the
+        // base record's VCN-0 segment would be returned as the whole
+        // value -- the silent short read the `starting_vcn != 0` refusal
+        // below exists to prevent, reached by another route (#220).
+        let al_value = read_value_from_record(io, &params, &record, &al_loc, Holes::AreAnError)?;
         let entries = parse_attribute_list(&al_value)?;
         let matching: Vec<&AttrListEntry> = entries
             .iter()
@@ -320,11 +401,29 @@ fn locate_attribute<T: BlockIo + ?Sized>(
 /// (resident copy, or non-resident runs with sparse-hole zero-fill honouring
 /// `initialized_size`). Refuses compressed/encrypted values (the bytes would
 /// be transformed, not raw). `record` must be the record containing `loc`.
+/// What a hole in a non-resident value means to the caller.
+///
+/// A sparse `$DATA` is ordinary and its holes ARE zeros -- refusing them
+/// would break every sparse file. But an attribute whose value is a
+/// structure the driver then walks cannot be zero-filled and still be
+/// read correctly: the zeros parse as a terminator, and a short value is
+/// returned as a complete one. The caller says which kind it is asking
+/// for, because only the caller knows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Holes {
+    /// Sparse runs and the tail past `initialized_size` read as zeros.
+    AreZeros,
+    /// The runs must span `data_size` and `initialized_size` must reach
+    /// it; anything less is an error rather than a zero-filled buffer.
+    AreAnError,
+}
+
 fn read_value_from_record<T: BlockIo + ?Sized>(
     io: &mut T,
     params: &crate::mft_io::BootParams,
     record: &[u8],
     loc: &attr_io::AttrLocation,
+    holes: Holes,
 ) -> Result<Vec<u8>, String> {
     if loc.is_resident {
         let vo = loc.attr_offset
@@ -378,6 +477,23 @@ fn read_value_from_record<T: BlockIo + ?Sized>(
     let mut out = vec![0u8; data_size];
     let readable = data_size.min(init_size);
     let cluster_count = data_size.div_ceil(cluster_size);
+
+    if holes == Holes::AreAnError {
+        // The caller is going to parse this value, so a zero it did not
+        // write is a terminator it did not mean (#220).
+        if init_size < data_size {
+            return Err(format!(
+                "a value of {data_size} bytes is initialized to only {init_size}; the rest would                  read as zeros and parse as the end of it"
+            ));
+        }
+        if let Some(vcn) =
+            (0..cluster_count as u64).find(|&v| data_runs::vcn_to_lcn(&runs, v).is_none())
+        {
+            return Err(format!(
+                "a value of {data_size} bytes has no run behind VCN {vcn}; the hole would read as                  zeros and parse as the end of it"
+            ));
+        }
+    }
     for vcn in 0..cluster_count as u64 {
         let file_off = vcn as usize * cluster_size;
         if file_off >= readable {
@@ -414,12 +530,12 @@ pub fn read_attribute_range<T: BlockIo + ?Sized>(
     offset: u64,
     len: usize,
 ) -> Result<Vec<u8>, String> {
-    let (params, _holder, record, loc) = locate_attribute(io, record_number, attr_type, name)?
+    let (params, holder, record, loc) = locate_attribute(io, record_number, attr_type, name)?
         .ok_or_else(|| {
             format!("read_attribute_range: attribute {attr_type:?} (name {name:?}) not found in record {record_number}")
         })?;
     if attr_type == AttrType::Data && name.is_none() {
-        refuse_wof_compressed(io, &params, &record, record_number)?;
+        refuse_wof_compressed(io, &params, &record, holder, record_number)?;
     }
 
     // Uncompressed, unencrypted, non-resident → true ranged read.
@@ -434,7 +550,7 @@ pub fn read_attribute_range<T: BlockIo + ?Sized>(
     }
 
     // Resident or compressed: read the whole value, then slice the window.
-    let full = read_value_from_record(io, &params, &record, &loc)?;
+    let full = read_value_from_record(io, &params, &record, &loc, Holes::AreZeros)?;
     let full_len = full.len() as u64;
     let start = offset.min(full_len) as usize;
     let end = offset.saturating_add(len as u64).min(full_len) as usize;
@@ -824,7 +940,7 @@ pub fn read_volume_info<T: BlockIo + ?Sized>(io: &mut T) -> Result<VolumeInfo, S
     // surfaced rather than masked as "no label".
     let label = match locate_attribute(io, VOLUME_RECORD_NUMBER, AttrType::VolumeName, None)? {
         Some((p, _holder, record, loc)) => {
-            let bytes = read_value_from_record(io, &p, &record, &loc)?;
+            let bytes = read_value_from_record(io, &p, &record, &loc, Holes::AreZeros)?;
             let units: Vec<u16> = bytes
                 .chunks_exact(2)
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -975,9 +1091,11 @@ pub fn nonresident_contiguous_disk_range<T: BlockIo + ?Sized>(
 
 /// Record numbers of every metafile whose on-disk storage must never be
 /// handed out by `$Bitmap`'s allocator, or overwritten by `fsck`'s
-/// `$LogFile` reset -- beyond `$MFT` (record 0), which every caller
-/// already locates by other means, because it needs `$MFT`'s length for
-/// its own purposes anyway.
+/// `$LogFile` reset. `$MFT` (record 0) IS one of them -- see its entry
+/// -- but it is located differently: `other_protected_metafile_ranges_io`
+/// skips it in the loop and calls `mft_ranges_io`, which has its own
+/// fallback tiers, because a fragmented `$MFT` is ordinary and the
+/// contiguous reader the others use would refuse it.
 ///
 /// See rust-fs-ntfs#157: `BitmapLocation::covers_the_volumes_own` and
 /// `fsck`'s `forbidden_fill_ranges` each protected only the boot sector
@@ -985,7 +1103,7 @@ pub fn nonresident_contiguous_disk_range<T: BlockIo + ?Sized>(
 /// `$MFTMirr`, `$Bitmap`'s own storage, `$LogFile`, `$AttrDef`,
 /// `$Secure` or `$UpCase` could free or overwrite live volume metadata
 /// with no refusal at all.
-pub const OTHER_PROTECTED_METAFILE_RECORDS: [(u64, Option<&str>, &str); 8] = [
+pub const PROTECTED_METAFILE_RECORDS: [(u64, Option<&str>, &str); 8] = [
     // $MFT itself. It belongs in this list rather than being handled
     // separately by `mft_clusters`, because that scalar is derived from
     // `nonresident_contiguous_disk_range`, which REFUSES a fragmented
@@ -1181,7 +1299,7 @@ fn nonresident_disk_ranges_io<T: BlockIo + ?Sized>(
 
 /// Byte ranges `[start, end)` that must never be freed or overwritten:
 /// the on-disk storage of every metafile in
-/// [`OTHER_PROTECTED_METAFILE_RECORDS`].
+/// [`PROTECTED_METAFILE_RECORDS`].
 ///
 /// `$MFT`'s own extent, with a bounded fallback when record 0 will not
 /// decode.
@@ -1306,7 +1424,7 @@ pub fn other_protected_metafile_ranges_io<T: BlockIo + ?Sized>(
     io: &mut T,
     exclude_record: Option<u64>,
 ) -> Vec<(u64, u64)> {
-    let mut ranges = Vec::with_capacity(OTHER_PROTECTED_METAFILE_RECORDS.len());
+    let mut ranges = Vec::with_capacity(PROTECTED_METAFILE_RECORDS.len());
     // `$MFT` is not best-effort: see `mft_ranges_io`. Its absence from
     // the set is the defect this whole guard exists to close, so it
     // fails closed -- bounded, never volume-wide.
@@ -1315,7 +1433,7 @@ pub fn other_protected_metafile_ranges_io<T: BlockIo + ?Sized>(
             ranges.extend(mft_ranges_io(io, &params));
         }
     }
-    for &(record_number, name, _label) in &OTHER_PROTECTED_METAFILE_RECORDS {
+    for &(record_number, name, _label) in &PROTECTED_METAFILE_RECORDS {
         if record_number == 0 {
             continue; // handled above, with its own fallback tiers
         }
@@ -1922,6 +2040,122 @@ mod tests {
             e[name_offset + i * 2..name_offset + i * 2 + 2].copy_from_slice(&u.to_le_bytes());
         }
         e
+    }
+
+    /// A minimal in-memory FILE record holding one attribute, for the
+    /// hole-rule tests below. `find_attribute` reads the first-attribute
+    /// offset at 0x14 and walks from there, so a header and an end marker
+    /// are the whole of what it needs -- no fixups, because nothing here
+    /// goes through `read_mft_record_io`.
+    fn record_with_attribute(attr: &[u8]) -> Vec<u8> {
+        const FIRST_ATTR: usize = 0x38;
+        let mut rec = vec![0u8; 1024];
+        rec[0..4].copy_from_slice(b"FILE");
+        rec[0x14..0x16].copy_from_slice(&(FIRST_ATTR as u16).to_le_bytes());
+        rec[0x16..0x18].copy_from_slice(&1u16.to_le_bytes()); // IN_USE
+        rec[FIRST_ATTR..FIRST_ATTR + attr.len()].copy_from_slice(attr);
+        let end = FIRST_ATTR + attr.len();
+        rec[end..end + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        // bytes_used (0x18) bounds the attribute walk: left at zero the
+        // iterator stops before the first attribute.
+        rec[0x18..0x1C].copy_from_slice(&((end + 4) as u32).to_le_bytes());
+        rec
+    }
+
+    /// A `$ATTRIBUTE_LIST` IS NEVER LEGITIMATELY SPARSE, and this is the
+    /// route by which a short one used to be read as a complete one
+    /// (#220): `read_value_from_record` zero-fills a hole and the tail
+    /// past `initialized_size`, and `parse_attribute_list` stops at the
+    /// first zero length. The list truncated, the base record's VCN-0
+    /// segment was returned as the whole value, and nothing said so.
+    ///
+    /// The same zero-fill is CORRECT for `$DATA`, so the rule is per
+    /// caller and both halves are asserted here.
+    #[test]
+    fn a_hole_is_zeros_for_data_and_an_error_for_a_parsed_value() {
+        let params = crate::mft_io::BootParams {
+            bytes_per_sector: 512,
+            sectors_per_cluster: 8,
+            cluster_size: 4096,
+            mft_lcn: 4,
+            file_record_size: 1024,
+            total_sectors: 65536,
+            serial_number: 0,
+            oem_id: *b"NTFS    ",
+        };
+        // One run of one cluster, for a value that claims two: VCN 1 has
+        // nothing behind it.
+        let mapping_pairs = [0x11u8, 0x01, 0x20, 0x00];
+        let attr = crate::record_build::build_nonresident_attribute(
+            AttrType::AttributeList as u32,
+            None,
+            0,
+            8192, // data_size: two clusters
+            8192,
+            8192, // initialized to its full length -- the hole is the fault
+            1,
+            &mapping_pairs,
+        )
+        .expect("attribute bytes");
+        let record = record_with_attribute(&attr);
+        let loc = attr_io::find_attribute(&record, AttrType::AttributeList, None)
+            .expect("the attribute is in the record");
+        let mut dev = MemDev {
+            buf: vec![0u8; 64 * 4096],
+        };
+
+        let err = read_value_from_record(&mut dev, &params, &record, &loc, Holes::AreAnError)
+            .expect_err("a hole in a parsed value must be refused");
+        assert!(
+            err.contains("no run behind VCN 1"),
+            "the error names the hole, got: {err}"
+        );
+
+        let zero_filled = read_value_from_record(&mut dev, &params, &record, &loc, Holes::AreZeros)
+            .expect("the same hole is ordinary for a sparse $DATA");
+        assert_eq!(zero_filled.len(), 8192, "the hole reads as zeros");
+    }
+
+    /// The other half of the same rule: a value whose runs cover it but
+    /// whose `initialized_size` stops short would parse as ending there.
+    #[test]
+    fn a_short_initialized_size_is_an_error_for_a_parsed_value() {
+        let params = crate::mft_io::BootParams {
+            bytes_per_sector: 512,
+            sectors_per_cluster: 8,
+            cluster_size: 4096,
+            mft_lcn: 4,
+            file_record_size: 1024,
+            total_sectors: 65536,
+            serial_number: 0,
+            oem_id: *b"NTFS    ",
+        };
+        // Two clusters, both mapped; initialized to one.
+        let mapping_pairs = [0x11u8, 0x02, 0x20, 0x00];
+        let attr = crate::record_build::build_nonresident_attribute(
+            AttrType::AttributeList as u32,
+            None,
+            0,
+            8192,
+            8192,
+            4096,
+            1,
+            &mapping_pairs,
+        )
+        .expect("attribute bytes");
+        let record = record_with_attribute(&attr);
+        let loc = attr_io::find_attribute(&record, AttrType::AttributeList, None)
+            .expect("the attribute is in the record");
+        let mut dev = MemDev {
+            buf: vec![0u8; 64 * 4096],
+        };
+
+        let err = read_value_from_record(&mut dev, &params, &record, &loc, Holes::AreAnError)
+            .expect_err("a short initialized_size must be refused");
+        assert!(
+            err.contains("initialized to only 4096"),
+            "the error names the short length, got: {err}"
+        );
     }
 
     #[test]

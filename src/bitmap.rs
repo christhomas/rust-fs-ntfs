@@ -50,9 +50,13 @@ pub struct BitmapLocation {
     /// Logical byte length of `$Bitmap`'s $DATA.
     pub value_length: u64,
     /// How many clusters `$MFT` occupies, so a free can be refused
-    /// before it hands them out. Zero when `$MFT`'s own length could
-    /// not be read -- treated as fail-closed in `covers_the_volumes_own`,
-    /// not as "nothing to protect."
+    /// before it hands them out. Zero when `$MFT`'s length could not be
+    /// read as ONE contiguous range -- a fragmented `$MFT` is ordinary,
+    /// so zero is common and says nothing about the volume. It is not a
+    /// fail-closed sentinel: `covers_the_volumes_own` skips this fast
+    /// path when it is zero and refuses against `$MFT`'s real runs in
+    /// `other_protected` instead. Short-circuiting to "refuse" here
+    /// refused 4,095 of 4,095 clusters once; see that function.
     pub mft_clusters: u64,
     /// CLUSTER ranges `[start_lcn, end_lcn)` of every OTHER system
     /// metafile's own storage -- `$MFTMirr`, `$LogFile`, `$AttrDef`,
@@ -164,10 +168,11 @@ pub fn locate_bitmap_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BitmapLocatio
         declared_bits.min(cluster_capacity)
     };
     // $MFT's own extent, so `free_io` can refuse to hand it out. Read
-    // once here rather than on every free. `mft_clusters == 0` is the
-    // "could not be determined" sentinel `covers_the_volumes_own`
-    // treats as fail-closed. `other_protected` below covers the other
-    // five metafiles' own equivalent failure.
+    // once here rather than on every free. `mft_clusters == 0` means
+    // only that $MFT is not one contiguous range, which is ordinary;
+    // `covers_the_volumes_own` then skips this fast path and refuses
+    // against $MFT's real runs, which `other_protected` below carries
+    // along with the other metafiles'.
     //
     // BOUNDED BY THE VOLUME, like every run in `other_protected` is.
     // This scalar is `$MFT`'s declared value length in clusters, and a
@@ -443,10 +448,18 @@ struct MappedChunk {
 /// never sparse in practice — a hole would mean clusters whose
 /// allocation state is unrecorded — so both are corruption rather than
 /// an unsupported layout.
+/// `device_bytes` is the size of the device the transfer will land on,
+/// and it is not the same number as the boot sector's volume size: a
+/// volume that claims more than the device holds is the case a bound
+/// taken from the boot sector alone cannot refuse. `idx_block`'s
+/// `vcn_to_disk_offset` took this parameter for the same reason (#236);
+/// these two call sites still passed `u64::MAX`, which asks
+/// `cluster_span` to check against the claim only (#241).
 fn map_bitmap_range(
     bm: &BitmapLocation,
     start_byte: u64,
     len: u64,
+    device_bytes: u64,
 ) -> Result<Vec<MappedChunk>, String> {
     let cluster_size = bm.params.cluster_size;
     let end = start_byte + len;
@@ -505,7 +518,7 @@ fn map_bitmap_range(
                 vcn - run.starting_vcn,
                 off_in_cluster,
                 chunk as u64,
-                u64::MAX,
+                device_bytes,
             )?,
             cursor,
             len: chunk,
@@ -523,7 +536,7 @@ fn read_bitmap_bytes_io<T: BlockIo + ?Sized>(
     len: u64,
 ) -> Result<Vec<u8>, String> {
     let mut out = vec![0u8; len as usize];
-    for c in map_bitmap_range(bm, start_byte, len)? {
+    for c in map_bitmap_range(bm, start_byte, len, io.size())? {
         io.read_exact_at(c.disk_offset, &mut out[c.cursor..c.cursor + c.len])
             .map_err(|e| format!("read bitmap: {e}"))?;
     }
@@ -563,7 +576,7 @@ fn write_bitmap_bytes_io<T: BlockIo + ?Sized>(
         previous.len(),
         "the pre-image must cover the same range as the new bytes"
     );
-    let chunks = map_bitmap_range(bm, start_byte, data.len() as u64)?;
+    let chunks = map_bitmap_range(bm, start_byte, data.len() as u64, io.size())?;
 
     for (i, c) in chunks.iter().enumerate() {
         if let Err(e) = io.write_all_at(c.disk_offset, &data[c.cursor..c.cursor + c.len]) {
@@ -694,14 +707,14 @@ mod tests {
                 // Placed far outside every cluster range these
                 // allocate/free tests exercise (0..n_bytes*8, always
                 // well under 1_000_000 here). $MFT IS modelled -- a
-                // NON-zero `mft_clusters` -- because zero now means
-                // "could not be determined," which fails closed and
-                // would refuse every free in this file. A disjoint
-                // placeholder keeps that fail-closed path untested here
-                // (see `a_files_runs_may_not_free_the_volumes_own_clusters`
-                // for where it IS tested) while leaving these ordinary
-                // allocate/free tests exercising exactly the clusters
-                // they always did.
+                // NON-zero `mft_clusters` -- so that the fast path in
+                // `covers_the_volumes_own` is the one under test, and
+                // it is pointed somewhere these tests never touch so it
+                // refuses none of their frees. Zero would not refuse
+                // them either: it means "not known from this scalar"
+                // and merely skips that path (see the function, and
+                // `a_files_runs_may_not_free_the_volumes_own_clusters`
+                // for where $MFT's real protection is tested).
                 mft_lcn: 1_000_000,
                 file_record_size: 1024,
                 // A real boot sector always says how big the volume is,

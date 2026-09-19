@@ -12,6 +12,16 @@
 
 use fs_ntfs::index_io;
 
+// THESE ARE DELIBERATE COPIES, and the duplication is the point of the
+// test rather than an oversight. An integration test links the crate as a
+// consumer does, so it cannot see `pub(crate)` items -- and these offsets
+// are `pub(crate)` on purpose (#237): an on-disk layout constant is not a
+// promise this published crate wants to be held to across a minor bump.
+//
+// So the test states the layout independently, from the NTFS on-disk
+// format, and fails if the crate's idea of it drifts from this one. The
+// canonical copies are in `src/index_io.rs`; a change to either that is
+// not matched in the other is what these assertions are for.
 const INDX_INDEX_HEADER_OFFSET: usize = 0x18;
 const IH_FIRST_ENTRY_OFFSET: usize = 0x00;
 const IH_TOTAL_SIZE_OF_ENTRIES: usize = 0x04;

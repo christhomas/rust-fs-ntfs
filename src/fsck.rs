@@ -485,9 +485,11 @@ fn locate_volume_flags_io<T: FsckIo>(io: &mut T) -> Result<(u64, u16), String> {
 /// The boot sector is where a volume starts, and `$MFT` is where
 /// everything else is -- both were already forbidden. `other`
 /// (see rust-fs-ntfs#157) is what `$LogFile` reaching `$MFTMirr`,
-/// `$Bitmap`, `$AttrDef`, `$Secure` or `$UpCase` -- or, when any of
-/// those could not be located, the whole volume -- adds to the same
-/// check below. `fsck_io` runs the reset FIRST, so filling any of
+/// `$Bitmap`, `$AttrDef`, `$Secure` or `$UpCase` adds to the same check
+/// below. It is BEST-EFFORT PER METAFILE: one that cannot be located
+/// contributes no range, and costs only its own protection. It never
+/// widens to the whole volume -- that refusal existed for one revision
+/// of #157 and broke `rm` on an ordinary file. `fsck_io` runs the reset FIRST, so filling any of
 /// these destroys the volume and then reports success, counting the
 /// bytes it destroyed.
 fn forbidden_fill_ranges(
@@ -504,7 +506,7 @@ fn forbidden_fill_ranges(
     // refused on the bitmap side. See rust-fs-ntfs#157.
     //
     // `$Boot`'s REAL extent arrives through `other`, since record 7 is
-    // now in `read::OTHER_PROTECTED_METAFILE_RECORDS` -- bounded by
+    // now in `read::PROTECTED_METAFILE_RECORDS` -- bounded by
     // `run_protected_range` like every other run. This is deliberately
     // NOT a second read of record 7's declared length: an unbounded
     // length read off a damaged record is the other half of what
@@ -554,8 +556,10 @@ fn locate_logfile_data_io<T: FsckIo>(io: &mut T) -> Result<(u64, u64), String> {
         // fallback: a smaller guess would leave part of $MFT unguarded.
         .unwrap_or_else(|_| params.volume_bytes());
     // The other five system metafiles, by the same shared helper
-    // `bitmap::locate_bitmap_io` uses -- fails closed to the whole
-    // volume if any of them cannot be located. `$LogFile` itself
+    // `bitmap::locate_bitmap_io` uses -- best-effort per metafile: one
+    // that cannot be located contributes no range rather than widening
+    // the refusal to the volume. `$MFT` is the exception, and has its
+    // own bounded fallback tiers in `mft_ranges_io`. `$LogFile` itself
     // (record 2) is excluded: this is the reset that legitimately
     // overwrites `$LogFile`'s own storage, so its own target must not
     // "overlap" a list checking it against itself. See
@@ -881,7 +885,7 @@ mod tests {
 
     /// THE WIRING between `locate_logfile_data_io` and the shared
     /// helper, on a real device. `a_fill_over_another_system_metafile_is_also_refused`
-    /// and `a_whole_volume_fallback_range_refuses_a_fill_anywhere` prove
+    /// and `a_range_spanning_the_volume_refuses_a_fill_anywhere` prove
     /// `forbidden_fill_ranges` uses whatever `other` it is given
     /// correctly; neither would notice `locate_logfile_data_io` itself
     /// no longer calling `other_protected_metafile_ranges_io` at all,
@@ -1270,13 +1274,18 @@ mod fill_range_tests {
         assert!(!overlaps((mft_at + mft_bytes, mftmirr.0 - 4096)));
     }
 
-    /// When any of the other five could not be located, the shared
-    /// helper's fallback is one range spanning the whole volume (see
-    /// `crate::read::other_protected_metafile_ranges_io`), and that
-    /// range refuses a fill anywhere on the volume through the same
-    /// overlap check -- no special case needed here either.
+    /// `forbidden_fill_ranges` refuses against whatever ranges it is
+    /// handed, wherever they fall and however large -- including one
+    /// spanning the volume, which is the widest case the overlap check
+    /// has to survive and needs no special case.
+    ///
+    /// NOTHING PRODUCES THAT RANGE. `read::other_protected_metafile_ranges_io`
+    /// is best-effort per metafile: one it cannot locate contributes
+    /// nothing. A volume-wide range existed for one revision of #157,
+    /// refused 4,095 of 4,095 clusters and was removed. This test names
+    /// the property, not a fallback.
     #[test]
-    fn a_whole_volume_fallback_range_refuses_a_fill_anywhere() {
+    fn a_range_spanning_the_volume_refuses_a_fill_anywhere() {
         let p = params();
         let mft_at = 1024 * 4096;
         let mft_bytes = 16 * 1024 * 1024;

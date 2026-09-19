@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""scripts/v2/check-matrix -- mechanical lint for test-matrix.json + harness.toml.
+"""check-matrix -- mechanical lint for test-matrix.json + the harness config.
 
 Catches the kind of corruption that would otherwise blow up mid-run as
 a cryptic TOML parse panic or a "no such op" SSH failure deep into a
@@ -9,20 +9,20 @@ Checks (each prints a line-anchored error if it fails):
 
   1. test-matrix.json parses as valid JSON. On failure: line + column +
      the offending character + a few lines of context.
-  2. harness.toml parses as valid TOML.
+  2. fs-windows-test-harness.toml parses as valid TOML.
   3. Top-level `scenarios` map exists in the matrix.
   4. Each scenario has the required input fields (volume_params with
      size_mib/label/alloc_unit_size).
   5. Each recipe step:
        - is an object with an `op` field
-       - the op exists in harness.toml's [ops.X] block (or is one of
+       - the op exists in the config's [ops.X] block (or is one of
          the harness's built-ins: ship-to-vm, ship-to-host)
-  6. Cross-check: every op declared in harness.toml gets used by at
+  6. Cross-check: every op declared in the config gets used by at
      least one recipe (warn-only — declared-but-unused isn't fatal,
      just maybe rot).
 
 Exit code:
-  0 if matrix + harness.toml are both valid
+  0 if the matrix and the harness config are both valid
   1 on any check failure (stderr lists every problem before exiting,
     not just the first — a bulk scan is more useful than fail-fast
     when a contributor has just done a mass edit)
@@ -46,7 +46,8 @@ from pathlib import Path
 from typing import Any
 
 # Ops defined by the harness binary itself, not in [ops.X] of consumer
-# harness.toml. See vendor/harness/runner/src/dispatch.rs `run_builtin_ship`.
+# the config. See ../fs-windows-test-harness/runner/src/dispatch.rs
+# `run_builtin_ship`.
 HARNESS_BUILTIN_OPS = {"ship-to-vm", "ship-to-host"}
 
 # Fields every scenario MUST have for the harness to dispatch.
@@ -55,12 +56,19 @@ REQUIRED_VOLUME_PARAMS = {"size_mib", "label", "alloc_unit_size"}
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Mechanical lint for test-matrix.json + harness.toml."
+        description="Mechanical lint for test-matrix.json + fs-windows-test-harness.toml."
     )
-    parser.add_argument("--matrix", default="test-matrix.json",
-                        help="Path to the matrix JSON (default: test-matrix.json)")
-    parser.add_argument("--harness", default="harness.toml",
-                        help="Path to harness.toml (default: harness.toml)")
+    # DEFAULTS RESOLVE FROM THE REPOSITORY ROOT, not the caller's working
+    # directory: this script lives two levels down, and `check-matrix` with
+    # no arguments used to lint `harness.toml` -- a name this repository has
+    # not used since the harness became a sibling (#275) and a file it does
+    # not have. A lint that cannot be run the obvious way does not get run.
+    repo_root = Path(__file__).resolve().parents[2]
+    parser.add_argument("--matrix", default=str(repo_root / "test-matrix.json"),
+                        help="Path to the matrix JSON (default: <repo>/test-matrix.json)")
+    parser.add_argument("--harness", default=str(repo_root / "fs-windows-test-harness.toml"),
+                        help="Path to the harness config "
+                             "(default: <repo>/fs-windows-test-harness.toml)")
     parser.add_argument("--quiet", "-q", action="store_true",
                         help="Suppress output; signal status via exit code only")
     args = parser.parse_args()

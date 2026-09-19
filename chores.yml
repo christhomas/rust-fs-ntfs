@@ -3,8 +3,8 @@ chore_min_version: 0.6.0
 
 # THE CONTRACT THIS FILE EXISTS TO OWN.
 #
-# How to build rust-fs-ntfs is knowledge that belongs to rust-fs-ntfs. It used to
-# live in diskjockey/scripts/build-fs-*.sh — four scripts, 757 lines between
+# How to build rust-fs-ntfs is knowledge that belongs to rust-fs-ntfs. It used
+# to live in a consumer's build scripts — four of them, 757 lines between
 # them, byte-identical once you normalise the driver name, of which three
 # lines per script were actually about the filesystem: the cargo invocation,
 # the header name and the archive name.
@@ -32,19 +32,22 @@ vars:
   # copies of one fact is three chances to disagree, and they did.
   #
   # FS_CORE_REF MUST MATCH Cargo.lock, AND MATCH WHAT THE OTHER CRATES
-  # EXPECT — those are two constraints, and the second one is why this
-  # says 0.2.3 rather than the 0.2.2 this crate used to pin.
+  # EXPECT — two constraints, and the second one is the one that is easy
+  # to forget. THE RATIONALE IS DELIBERATELY VERSION-NEUTRAL: it named
+  # specific versions twice and was wrong twice, because the pin has now
+  # held three different values and a comment that argues from numbers
+  # needs editing every time one of them moves.
   #
   # The sibling at ../rust-fs-core is ONE checkout shared by every crate
-  # in the family. Eight of them (ext4, btrfs, xfs, erofs, squashfs,
-  # qcow2, vhd, partitions) already pin 0.2.3. Checking the sibling out
-  # at 0.2.2 to suit this crate alone would build the other eight
-  # against a library older than their locks claim.
+  # in the family (ext4, btrfs, xfs, erofs, squashfs, qcow2, vhd,
+  # partitions and this one). Checking it out at a version that suits
+  # this crate alone would build the others against a library older or
+  # newer than their own locks claim.
   #
-  # So joining the sibling model is NOT a version-neutral refactor for
-  # this crate: it requires converging on the version the family already
-  # agreed. That is the cost of one shared copy, and it is the same
-  # property that makes drift impossible rather than merely detectable.
+  # So bumping this is NOT a local decision: it means converging with the
+  # family, and the bump lands here and in their pins together. That is
+  # the cost of one shared copy, and it is the same property that makes
+  # drift impossible rather than merely detectable.
   FS_CORE_REF: v0.2.10
 
   # The Windows-VM test harness. Not a cargo dependency — a tool this
@@ -318,6 +321,11 @@ tasks:
   # vm:up is idempotent. The work is in scripts/vm.sh; each task is one line
   # so a failure prints the script's one-line reason, not a screen of shell.
   # Opening the encrypted VM needs trove unlocked in the calling shell.
+  matrix:check:
+    desc: Lint test-matrix.json against fs-windows-test-harness.toml (no VM needed)
+    silent: true
+    cmds: [python3 scripts/fs-windows-test-harness/check-matrix]
+
   vm:clean:
     desc: Delete the disk images a matrix run left on the VM, and say how much space that gave back
     silent: true

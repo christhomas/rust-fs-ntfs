@@ -1,9 +1,9 @@
 //! `rust-ntfs format` — build a fresh NTFS volume.
 //!
-//! Wraps `fs_ntfs::mkfs::format_filesystem`, which the DiskJockey FSKit
-//! extension's `startFormat` also calls — so "format an SD card from
-//! the GUI" and "format a disk image from this CLI" exercise the
-//! exact same code path.
+//! Wraps `fs_ntfs::mkfs::format_filesystem`, the same entry point the C
+//! ABI exposes to an embedding filesystem extension — so formatting a
+//! removable disk through a host application and formatting an image
+//! from this CLI exercise the same code path.
 //!
 //! Convention: the device/file MUST already exist at the target size,
 //! same as every other mkfs.* tool. Use `truncate -s 256M out.img`
