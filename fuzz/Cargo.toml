@@ -74,13 +74,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "lznt1"
-path = "fuzz_targets/lznt1.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "apply_fixup"
 path = "fuzz_targets/apply_fixup.rs"
 test = false
