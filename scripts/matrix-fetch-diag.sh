@@ -58,6 +58,18 @@ chkdsk_says() {
     esac
 }
 
+# Is this summary line one a person needs to read? The count of them is the
+# run's headline, and they are the only lines printed -- so a verdict this
+# does not recognise as wrong is a verdict nobody sees. It errs towards
+# printing: anything that is not one of the two verdicts that mean "fine"
+# (a clean chkdsk, an observation with a line count) is worth a look.
+looks_wrong() {
+    case "$1" in
+        *PROBLEMS*|*REPAIRED*|*"NOT SCANNED"*|*unrecognised*|*"no VM diag"*|*"empty report"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Everything below touches the VM and the filesystem; the function above does
 # not, which is what lets tests/scripts/matrix-fetch-diag.sh source this file
 # and test the verdict alone.
@@ -103,11 +115,18 @@ main() {
             [ "${#parts[@]}" -gt 0 ] || parts=("files: $(ls "$dir/vm" | tr '\n' ' ')")
             line="$name: $(IFS=';'; printf '%s' "${parts[*]}" | sed 's/;/; /g')"
         fi
-        case "$line" in *PROBLEMS*|*REPAIRED*|*"NOT SCANNED"*|*unrecognised*|*"no VM diag"*) failed=$((failed + 1)) ;; esac
+        looks_wrong "$line" && failed=$((failed + 1))
         printf '%s\n' "$line" >> "$DIAG/summary.txt"
     done
 
-    cat "$DIAG/summary.txt"
+    # QUIET WHEN THERE IS NOTHING TO SAY. Printing a line per scenario means
+    # 46 lines after a run where every one of them says "no problems", and
+    # the reader who pays for that is the one who re-reads this transcript on
+    # every later step. The lines worth reading are printed; summary.txt
+    # holds all of them either way.
+    while IFS= read -r line; do
+        looks_wrong "$line" && printf '%s\n' "$line"
+    done < "$DIAG/summary.txt"
     echo "diag: $n scenario(s), $failed with something to look at -- test-diagnostics/matrix/<scenario>/vm/, summary.txt"
 }
 

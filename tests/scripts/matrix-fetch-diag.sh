@@ -76,5 +76,28 @@ check problems-ansi-label ansi     "$PROBLEMS_LABEL" "PROBLEMS FOUND"
 check clean-utf8-label    ascii    "$CLEAN_LABEL"    "no problems"
 check clean-utf16-label   utf16    "$CLEAN_LABEL"    "no problems"
 
+# looks_wrong decides which summary lines a run prints. A line it calls
+# fine is a line nobody will see, so the verdicts that mean trouble are
+# checked one by one rather than trusted to a pattern read once.
+printf '\nlooks_wrong\n'
+wrong() {
+    local name="$1" line="$2" want="$3" got=no
+    looks_wrong "$line" && got=yes
+    if [ "$got" = "$want" ]; then
+        pass=$((pass + 1)); printf '  ok    %s\n' "$name"
+    else
+        fail=$((fail + 1)); printf '  FAIL  %s\n        got:  %s\n        want: %s\n' "$name" "$got" "$want"
+    fi
+}
+
+wrong clean-is-quiet    "s: chkdsk -scan: no problems; chkdsk readonly: no problems"  no
+wrong observation-quiet "s: write-result: 1 line(s); enumerate: 7 line(s)"            no
+wrong problems          "s: chkdsk -scan: PROBLEMS FOUND"                             yes
+wrong repaired          "s: chkdsk -F--X: REPAIRED (was not clean)"                   yes
+wrong not-scanned       "s: chkdsk -scan: NOT SCANNED (snapshot error)"               yes
+wrong unrecognised      "s: chkdsk -scan: unrecognised: Volume label is Disk "        yes
+wrong no-diagnostics    "s: no VM diagnostics (nothing ran on the VM, or it is unreachable)" yes
+wrong empty-report      "s: chkdsk -scan: empty report"                               yes
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
