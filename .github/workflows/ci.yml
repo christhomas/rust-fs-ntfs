@@ -1154,6 +1154,21 @@ jobs:
         # 256 MiB it should run.
         continue-on-error: true
         run: |
+          # THE REPORT GOES TO THE ARTIFACT, THE VERDICT GOES TO THE LOG.
+          # Dumping chkdsk's full report here cost ~1,250 lines / 106 KB a
+          # run (#290) for output the ntfs-windows-diag artifact already
+          # carries. A reader needs to know what it decided; a reader
+          # DEBUGGING needs the report, and gets it on failure and from the
+          # artifact always.
+          function Show-Verdict($Label, $Path, $Exit) {
+              $n = if (Test-Path $Path) { (Get-Content $Path).Count } else { 0 }
+              Write-Host "$Label`: exit $Exit ($n lines) -- $Path"
+              if ($Exit -ne 0 -and (Test-Path $Path)) {
+                  Write-Host "--- last 40 lines of $Path ---"
+                  Get-Content $Path -Tail 40
+              }
+          }
+
           $letter = "${{ steps.mount.outputs.letter }}"
           New-Item -ItemType Directory -Path diag -Force | Out-Null
           if (-not $letter) {
@@ -1172,8 +1187,8 @@ jobs:
             -RedirectStandardOutput diag/chkdsk-readonly.txt `
             -RedirectStandardError diag/chkdsk-readonly-stderr.txt
           "chkdsk ${letter}: (read-only) exit: $($proc1.ExitCode)" |
-              Tee-Object diag/chkdsk-readonly-exit.txt
-          Get-Content diag/chkdsk-readonly.txt
+              Tee-Object diag/chkdsk-readonly-exit.txt | Out-Null
+          Show-Verdict "chkdsk ${letter}: (read-only)" diag/chkdsk-readonly.txt $proc1.ExitCode
 
           # Pass 2: `chkdsk /scan` — needs shadow-copy space which now
           # fits in our 256 MiB volume. Different code path than
@@ -1184,8 +1199,8 @@ jobs:
             -RedirectStandardOutput diag/chkdsk-scan.txt `
             -RedirectStandardError diag/chkdsk-scan-stderr.txt
           "chkdsk ${letter}: /scan exit: $($proc2.ExitCode)" |
-              Tee-Object diag/chkdsk-scan-exit.txt
-          Get-Content diag/chkdsk-scan.txt
+              Tee-Object diag/chkdsk-scan-exit.txt | Out-Null
+          Show-Verdict "chkdsk ${letter}: /scan" diag/chkdsk-scan.txt $proc2.ExitCode
 
           # The job verdict is the /scan exit code (chkdsk's standard).
           # Read-only + /scan agreement = good signal; disagreement = bug.
@@ -1256,8 +1271,13 @@ jobs:
             -ArgumentList "${letter}:","/scan" `
             -NoNewWindow -PassThru -Wait `
             -RedirectStandardOutput $log
-          Get-Content $log
           $exit = $proc.ExitCode
+          $n = if (Test-Path $log) { (Get-Content $log).Count } else { 0 }
+          Write-Host "chkdsk /scan (post round-trip): exit $exit ($n lines) -- $log"
+          if ($exit -ne 0 -and (Test-Path $log)) {
+              Write-Host "--- last 40 lines of $log ---"
+              Get-Content $log -Tail 40
+          }
           "chkdsk-after-roundtrip exit: $exit" | Out-File diag/chkdsk-exit-after.txt
           if ($exit -ne 0) {
             Write-Host "::error::chkdsk /scan after the round-trip reported issues (exit $exit) — the volume was well-formed at creation and is not now"
