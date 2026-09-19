@@ -71,23 +71,39 @@ fn set_data_flag(img: &str, flag: u16) {
     <PathIo as BlockIo>::sync(&mut io).expect("sync");
 }
 
+/// THE REFUSAL, NOT MERELY AN ERROR (#234). `is_err()` alone passes on
+/// any failure -- a missing file, a bad path, a bug in the test's own
+/// setup -- so it cannot tell the guard working from the guard never
+/// running. `refuse_transformed_data` names the entry point and prints
+/// the flags it read, and both are checked here: the entry point, so a
+/// refusal from somewhere else does not count, and `flags=` so the
+/// failure is the one that inspected the attribute.
+fn assert_refused_by_the_transform_guard<T: std::fmt::Debug>(
+    got: &Result<T, String>,
+    entry_point: &str,
+    what: &str,
+) {
+    let Err(e) = got else {
+        panic!("{entry_point} accepted a {what} $DATA and reported {got:?}");
+    };
+    assert!(
+        e.starts_with(&format!("{entry_point}: ")),
+        "{entry_point} on a {what} $DATA failed for some other reason: {e}"
+    );
+    assert!(
+        e.contains("non-resident $DATA is") && e.contains("flags="),
+        "{entry_point} on a {what} $DATA did not fail in the transform guard: {e}"
+    );
+}
+
 fn assert_all_three_refuse(img: &str, what: &str) {
     let p = Path::new(img);
     let wrote = write::write_at(p, "/f.bin", 0, &[b'Z'; 512]);
-    assert!(
-        wrote.is_err(),
-        "write_at accepted a {what} $DATA and reported {wrote:?}"
-    );
+    assert_refused_by_the_transform_guard(&wrote, "write_at", what);
     let shrunk = write::truncate(p, "/f.bin", CLUSTER as u64);
-    assert!(
-        shrunk.is_err(),
-        "truncate accepted a {what} $DATA and reported {shrunk:?}"
-    );
+    assert_refused_by_the_transform_guard(&shrunk, "truncate", what);
     let grown = write::grow_nonresident(p, "/f.bin", 8 * CLUSTER as u64);
-    assert!(
-        grown.is_err(),
-        "grow accepted a {what} $DATA and reported {grown:?}"
-    );
+    assert_refused_by_the_transform_guard(&grown, "grow", what);
 }
 
 #[test]

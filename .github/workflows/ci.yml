@@ -414,6 +414,17 @@ jobs:
       # Measured 2026-09-17 from run 34985102618 (job 104435064811, the last
       # CI run on main at the time of writing): 1427 executed. Floor 1350,
       # ~5% of slack. It moves up with the suite and never down.
+      # THE KNOWN-DEFECT TESTS, REPORTED NOT GATED. Two tests sat
+      # `#[ignore]`d over a link-count defect that had already been fixed
+      # (#149) and nothing said so, because nothing ran `--ignored`
+      # (#277). A pass here is the signal: the defect is fixed and the
+      # test should lose the attribute. Advisory, because the ones left
+      # are known-bad by construction and a permanent red gates nothing
+      # and means nothing.
+      - name: known defects (the ignored tests)
+        continue-on-error: true
+        run: chore test:ignored
+
       - name: full suite with an executed-test floor
         run: |
           scripts/tier.sh suite -- cargo test --release --locked --no-fail-fast

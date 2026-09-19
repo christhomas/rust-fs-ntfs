@@ -9,10 +9,63 @@ every time — so they can be compared across months and asserted on.
 Wall time is printed beside them because it is what a user feels. It is
 not what anything is judged by.
 
-## 2026-09-06 — the first measurement
+## 2026-09-19 — measured on the named fixture
 
-Fixture: `test-disks/_csize_c64k.img`, the largest image the fixture
-script builds. 15 paths, 14 of them files.
+Fixture: `test-disks/ntfs-large-file.img`, named in the test rather than
+chosen by size. Its two files, `big.bin` (8 MiB) and `small.txt`; NTFS's
+own metafiles are excluded, because `$MFT` and `$Secure` are not what a
+read costs.
+
+From CI run 35460761620, `tmp/logs/read-cost.txt`:
+
+| shape | reads | bytes | opens | reads/item |
+|---|---:|---:|---:|---:|
+| **one handle** | | | | |
+| walk — list every directory | 5 | 7.2 KB | 0 | 5.0 |
+| stat — resolve every file by path | 82 | 283 KB | 0 | 41.0 |
+| read — read every file | 342 | 1.33 MB | 0 | 171.0 |
+| **fresh open per call** | | | | |
+| walk | 39 | 140 KB | 1 | 39.0 |
+| stat | 82 | 283 KB | 2 | 41.0 |
+| read | 342 | 1.33 MB | 2 | 171.0 |
+
+**The finding holds, and is now measured on files rather than metafiles.**
+`stat` and `read` are identical across the two halves: 82 reads either
+way, 342 either way. Holding a handle saves the `open` and nothing else,
+because the driver keeps no state between calls.
+
+The walk is the one row where re-opening costs something (5 against 39),
+and that is the `open` plus re-reading the boot sector and `$MFT`'s own
+record to get back to the root.
+
+`tests/read_path_cost.rs` asserts a ceiling of 60 / 125 / 520 reads —
+about 1.5x these numbers, which catches a change in kind without tripping
+on a path that grows by a read or two.
+
+## 2026-09-06 — the first measurement (superseded; see the note below)
+
+Fixture: `test-disks/_csize_c64k.img`, described here as "the largest
+image the fixture script builds". It is not: the script's largest is
+`ntfs-large-file.img` at 64 MiB, and `_csize_c64k.img` is a 512 MiB
+leftover of `tests/cluster_size_matrix.rs`. The test picked whichever
+`.img` happened to be biggest, so which volume these numbers describe
+depended on what had been run before (#226).
+
+**The two walk rows below are artefacts and should not be compared.**
+The two passes measured different directory sets — the shared walk
+listed `/`, the per-call walk did not — and divided by different
+quantities: every path found (15) against directories listed (1). That,
+and not the driver, is the "0.3 versus 8.0 reads per item" (#229).
+
+The stat and read rows are sound: both passes did the same work over the
+same files, which is why they agree across the two halves of the table.
+
+Both faults are fixed in `tests/read_path_cost.rs`, which now names its
+fixture and counts the same thing in both passes. THESE NUMBERS PREDATE
+THAT and have not been retaken; the next run on `ntfs-large-file.img`
+replaces this section.
+
+15 paths, 14 of them files.
 
 Each shape is measured twice: once through **one handle held across
 every call**, and once with a **fresh open per call**, which is what

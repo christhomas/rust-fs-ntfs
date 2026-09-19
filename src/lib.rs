@@ -4035,6 +4035,53 @@ mod capi_read_tests {
 mod ffi_guard_tests {
     use super::*;
 
+    /// THE PANIC HOOK IS PROCESS-WIDE AND libtest RUNS TESTS IN PARALLEL.
+    ///
+    /// Two tests in this binary quiet the hook while they provoke a
+    /// panic on purpose. `take_hook`/`set_hook` is not atomic, so
+    /// unsynchronised they can interleave -- A takes H and installs its
+    /// no-op, B takes A's no-op and installs its own, A restores H, B
+    /// restores A's no-op -- and the binary finishes with a no-op hook
+    /// installed for every test that follows. And a panic inside the
+    /// quiet window, or an assertion that fails there, skips the
+    /// restore entirely (#255).
+    ///
+    /// This serialises the two and restores on every path, including
+    /// unwinding: the guard's `Drop` runs whether the body returns,
+    /// asserts or panics.
+    type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+    pub(crate) struct QuietPanics {
+        previous: Option<PanicHook>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl QuietPanics {
+        pub(crate) fn new() -> Self {
+            // A poisoned lock means another test panicked while holding
+            // it; the hook still needs restoring, so take it anyway.
+            let lock = PANIC_HOOK_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            Self {
+                previous: Some(previous),
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for QuietPanics {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::panic::set_hook(previous);
+            }
+        }
+    }
+
     /// An `extern "C"` function that unwinds aborts the process --
     /// Rust inserts the abort shim itself. Before the guard existed,
     /// any panic anywhere under the C ABI took the host process down
@@ -4044,8 +4091,7 @@ mod ffi_guard_tests {
     fn a_panic_under_the_c_abi_becomes_an_error_return() {
         // The panic message itself goes to stderr, which is where a
         // panic belongs; what matters here is what the caller gets.
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let _quiet = QuietPanics::new();
 
         let code = ffi_guard("fs_ntfs_test", -1, || -> c_int {
             panic!("a slice index out of range, say");
@@ -4060,8 +4106,6 @@ mod ffi_guard_tests {
             },
         );
         assert!(pointer.is_null());
-
-        std::panic::set_hook(previous);
 
         let why = LAST_ERROR.with(|cell| cell.borrow().to_string_lossy().into_owned());
         assert!(
@@ -4153,17 +4197,14 @@ mod overflow_checks {
         // thread's panic message would be swallowed too -- it would
         // still fail, just less legibly. Narrow, and worth it against a
         // log line that reads as a failure on every green run.
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let trapped = std::panic::catch_unwind(|| {
+        let _quiet = crate::ffi_guard_tests::QuietPanics::new();
+        std::panic::catch_unwind(|| {
             // `black_box` keeps this out of const evaluation, where it
             // would be a compile error rather than a runtime trap.
             let big = std::hint::black_box(u64::MAX);
             std::hint::black_box(big + 1);
         })
-        .is_err();
-        std::panic::set_hook(previous);
-        trapped
+        .is_err()
     }
 
     /// When the gate says it built a profile that traps, check that it

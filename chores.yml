@@ -439,6 +439,30 @@ tasks:
       # THE LAST LINE: one number across the tiers, and where the detail is.
       - scripts/test-verdict.sh unit unit-debug mkfs suite
 
+  test:ignored:
+    desc: 'The #[ignore]d tests: known defects, run so a fix cannot go unnoticed'
+    # AN IGNORED TEST NOBODY RUNS IS A DELETED TEST WITH EXTRA STEPS.
+    # Two tests sat ignored over a link-count defect that had already
+    # been fixed (#149); nothing told anyone, because no workflow ran
+    # `--ignored`. This does, and REPORTS rather than gates: the ones
+    # left are known-bad by construction, so a red here would be a red
+    # on every run and would stop meaning anything. A PASS is the signal
+    # -- it means a defect is fixed and its test should lose the
+    # attribute.
+    silent: true
+    deps: [siblings:gate]
+    cmds:
+      - |
+        set -u
+        out=$(cargo test --release --locked -- --ignored 2>&1)
+        printf '%s\n' "$out" | grep -E '^test .* \.\.\. (ok|FAILED)' || true
+        passed=$(printf '%s\n' "$out" | grep -cE '^test .* \.\.\. ok' || true)
+        if [ "${passed:-0}" -gt 0 ]; then
+            echo "test:ignored: $passed ignored test(s) PASSED -- the defect each documents is fixed; drop its #[ignore]" >&2
+        else
+            echo "test:ignored: every ignored test still fails, which is what 'known defect' means"
+        fi
+
   test:scripts:
     desc: The shell tests (tests/scripts/*.sh), every one by glob
     # By glob, so a test added later needs no edit here -- a test that has to
