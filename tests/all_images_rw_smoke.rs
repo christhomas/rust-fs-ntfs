@@ -81,7 +81,21 @@ fn run_round_trip(image_basename: &str) {
         image_basename
     );
     if !Path::new(&src).exists() {
-        eprintln!("SKIP {image_basename}: fixture missing at {src}");
+        // A SKIP IS FOR A DEVELOPER, NOT FOR CI (#210). The fixtures are
+        // gitignored and their builder needs `mkntfs` plus an `ntfs-3g`
+        // loop mount, neither of which a Mac has -- so skipping keeps a
+        // local run about the change being made. In CI the images are
+        // built by a step in the same job, and if that step fails,
+        // changes shape or is skipped, a silent skip here turns "read no
+        // image at all" into a green tick. That is the one circumstance
+        // where the signal matters most.
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{image_basename}: the fixture is missing at {src} and CI is set. The workflow \
+             builds these images before running the suite; without them this test would pass \
+             having read nothing."
+        );
+        eprintln!("SKIP: {image_basename} fixture missing at {src}");
         return;
     }
     let scratch = common::temp_image_path(format!("smoke_{image_basename}"));
