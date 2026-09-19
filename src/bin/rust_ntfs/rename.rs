@@ -11,26 +11,14 @@ parent directory. Fails if `<new_basename>` already exists.
 ";
 
 pub fn run(args: Vec<String>) -> ExitCode {
-    match run_inner(args) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(msg) => {
-            eprintln!("rust-ntfs rename: {msg}");
-            ExitCode::FAILURE
-        }
-    }
+    crate::cli::finish("rename", run_inner(args))
 }
 
-fn run_inner(args: Vec<String>) -> Result<(), String> {
-    if args.iter().any(|a| a == "-h" || a == "--help") {
-        print!("{USAGE}");
+fn run_inner(args: Vec<String>) -> Result<(), crate::cli::CliError> {
+    if crate::cli::asked_for_help(&args, USAGE) {
         return Ok(());
     }
-    if args.len() != 3 {
-        return Err(format!(
-            "expected exactly 3 arguments, got {}\n\n{USAGE}",
-            args.len()
-        ));
-    }
+    let args = crate::cli::positionals(&args, 3, USAGE)?;
     let image = &args[0];
     let old_path = &args[1];
     let new_basename = &args[2];

@@ -11,26 +11,14 @@ directories.
 ";
 
 pub fn run(args: Vec<String>) -> ExitCode {
-    match run_inner(args) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(msg) => {
-            eprintln!("rust-ntfs rmdir: {msg}");
-            ExitCode::FAILURE
-        }
-    }
+    crate::cli::finish("rmdir", run_inner(args))
 }
 
-fn run_inner(args: Vec<String>) -> Result<(), String> {
-    if args.iter().any(|a| a == "-h" || a == "--help") {
-        print!("{USAGE}");
+fn run_inner(args: Vec<String>) -> Result<(), crate::cli::CliError> {
+    if crate::cli::asked_for_help(&args, USAGE) {
         return Ok(());
     }
-    if args.len() != 2 {
-        return Err(format!(
-            "expected exactly 2 arguments, got {}\n\n{USAGE}",
-            args.len()
-        ));
-    }
+    let args = crate::cli::positionals(&args, 2, USAGE)?;
     let image = &args[0];
     let path = &args[1];
     let fs = Filesystem::mount_rw(image).map_err(|e| format!("mount {image}: {e}"))?;

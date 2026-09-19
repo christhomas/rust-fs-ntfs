@@ -179,6 +179,102 @@ fn remove_takes_either_a_file_or_a_directory() {
     );
 }
 
+/// THE THREE EXIT CODES ARE THREE DIFFERENT THINGS, which is what the
+/// documented contract promises and what a script needs: 2 for "you
+/// typed it wrong", 1 for "the volume said no", 0 for done. Every verb
+/// used to map its own usage error to 1 as well (#186).
+#[test]
+fn a_usage_error_and_a_failure_have_different_exit_codes() {
+    let img = volume("codes");
+    assert_eq!(
+        code(&run(&["rm", &img, "-x"])),
+        2,
+        "an unknown flag is a usage error"
+    );
+    assert_eq!(
+        code(&run(&["rm", &img])),
+        2,
+        "the wrong number of arguments is a usage error"
+    );
+    assert_eq!(
+        code(&run(&["rm", &img, "/nope.txt"])),
+        1,
+        "a file that is not there is a failure, not a usage error"
+    );
+    assert_eq!(code(&run(&["rm", &img, "/f.txt"])), 0);
+}
+
+/// AN UNKNOWN FLAG IS NOT A FILENAME. Ten verbs counted positionals
+/// only, so `rust-ntfs rm vol.img -x` tried to unlink a file NAMED `-x`
+/// -- and on a volume that has one, a mistyped flag is a delete (#186).
+#[test]
+fn a_mistyped_flag_is_refused_rather_than_taken_as_a_path() {
+    let img = volume("flagpath");
+    // The file this would delete if the flag were read as a path.
+    // `--` ends the options, which is how a legal dash-leading NTFS
+    // name stays reachable from the tool that writes the volume.
+    assert_eq!(
+        code(&run(&["touch", &img, "/", "--", "-x"])),
+        0,
+        "create a file named `-x`, after `--`"
+    );
+
+    for args in [
+        vec!["rm", &img, "-x"],
+        vec!["rmdir", &img, "-x"],
+        vec!["remove", &img, "-x"],
+    ] {
+        let out = run(&args);
+        assert_eq!(code(&out), 2, "{args:?} must be a usage error");
+        assert!(
+            stderr(&out).contains("unknown flag"),
+            "{args:?} says which flag it did not know: {}",
+            stderr(&out)
+        );
+    }
+
+    // It can still be removed, by saying so explicitly.
+    assert_eq!(
+        code(&run(&["rm", &img, "--", "/-x"])),
+        0,
+        "`--` reaches the file the bare flag could not"
+    );
+
+    // And nothing else went missing.
+    let listing = run(&["ls", &img]);
+    assert!(
+        stdout(&listing).contains("f.txt"),
+        "the ordinary file is untouched: {}",
+        stdout(&listing)
+    );
+}
+
+/// Every verb the binary dispatches is in its help. `sparse` writes to a
+/// volume and was undiscoverable from the tool itself (#186).
+#[test]
+fn the_help_lists_every_verb_that_exists() {
+    let help = stdout(&run(&["--help"]));
+    for verb in [
+        "format",
+        "ls",
+        "touch",
+        "mkdir",
+        "write",
+        "sparse",
+        "rm",
+        "rmdir",
+        "link",
+        "rename",
+        "remove",
+        "set-dirty",
+    ] {
+        assert!(
+            help.contains(verb),
+            "`--help` does not mention `{verb}`:\n{help}"
+        );
+    }
+}
+
 /// A missing required argument is a usage error, not a crash and not a
 /// silent success.
 #[test]
