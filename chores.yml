@@ -263,7 +263,10 @@ tasks:
       - '../rust-fs-core/src/**/*.rs'
     generates:
       - target/release/rust-ntfs
-    deps: [siblings:check]
+    # THE GATE, not the report: siblings:check prints a line per sibling
+    # whether or not anything drifted, and `chore matrix` would wear those
+    # two lines in front of every run. Same check, silent when it passes.
+    deps: [siblings:gate]
     cmds:
       - cargo build --release --locked --bin rust-ntfs --quiet
 
@@ -285,7 +288,26 @@ tasks:
       # (chkdsk's report, what Windows enumerated) home and say what it shows.
       - defer: scripts/matrix-fetch-diag.sh
       - bash scripts/vm-clean-images.sh
-      - bash scripts/run-matrix.sh {{.CLI_ARGS}}
+      # THROUGH tier.sh, like every other tier: the scenarios' own output is
+      # 1,500 lines of per-step progress that nobody reads when the run is
+      # green, and an agent re-reads on every later step. What is left is one
+      # verdict line, the diagnostics summary for the scenarios that need a
+      # look, and the whole run in tmp/logs/matrix.log. `-- --verbose`
+      # streams it as it happens -- worth it for a run this long when you are
+      # watching one.
+      #
+      # The filter is forwarded, so `chore matrix -- smoke --verbose` works:
+      # tier.sh takes --verbose out of CLI_ARGS and run-matrix.sh never sees
+      # it.
+      - |
+        set -eu
+        filter=""
+        for arg in {{.CLI_ARGS}}; do
+          case "$arg" in --verbose|-v) continue ;; esac
+          filter="$filter $arg"
+        done
+        # shellcheck disable=SC2086  # the words are the point
+        scripts/tier.sh matrix -- bash scripts/run-matrix.sh $filter
 
   # THE VM TASKS. The Windows VM is a thing a task depends on, not a thing a
   # person remembers to start: a matrix task declares `deps: [vm:up]`, and
@@ -350,7 +372,7 @@ tasks:
     # cargo already BUILDS the sibling — it is a path dep. What cargo
     # cannot know is whether that checkout is the one this crate
     # intends, which is what the gate answers.
-    deps: [siblings:check]
+    deps: [siblings:gate]
     cmds: ['cargo build']
 
   # THE TEST TIERS. Each is one `cargo test` selection from ci.yml, run
@@ -410,10 +432,9 @@ tasks:
     # By glob, so a test added later needs no edit here -- a test that has to
     # be registered somewhere else is a test that gets silently skipped.
     cmds:
-      - |
-        set -eu
-        for t in tests/scripts/*.sh; do bash "$t" >/dev/null || { echo "test:scripts: $t failed -- run it directly to see which case" >&2; exit 1; }; done
-        echo "test:scripts: $(ls tests/scripts/*.sh | wc -l | tr -d ' ') file(s) passed"
+      # Through tier.sh, so a failure prints the tail of the log instead of
+      # telling the reader to go and run it again themselves.
+      - scripts/tier.sh scripts -- bash -c 'for t in tests/scripts/*.sh; do bash "$t"; done'
 
   clean:
     desc: Remove this crate's cargo output
