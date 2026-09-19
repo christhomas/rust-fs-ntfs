@@ -164,7 +164,7 @@ pub fn read_attribute_value<T: BlockIo + ?Sized>(
             if attr_type == AttrType::Data && name.is_none() {
                 refuse_wof_compressed(io, &params, &record, record_number)?;
             }
-            read_value_from_record(io, &params, &record, &loc)
+            read_value_from_record(io, &params, &record, &loc, Holes::AreZeros)
         }
         None => Err(format!(
             "read_attribute_value: attribute {attr_type:?} (name {name:?}) not found in record {record_number}"
@@ -208,7 +208,7 @@ fn refuse_wof_compressed<T: BlockIo + ?Sized>(
     let Some(rp) = attr_io::find_attribute(record, AttrType::ReparsePoint, None) else {
         return Ok(());
     };
-    let value = read_value_from_record(io, params, record, &rp)?;
+    let value = read_value_from_record(io, params, record, &rp, Holes::AreZeros)?;
     if value.len() >= 4
         && u32::from_le_bytes([value[0], value[1], value[2], value[3]])
             == crate::record_build::reparse_tag::WOF
@@ -262,7 +262,14 @@ fn locate_attribute<T: BlockIo + ?Sized>(
     // attributes live, and when it is present the base record's copy of
     // one is a segment rather than necessarily the whole thing.
     if let Some(al_loc) = attr_io::find_attribute(&record, AttrType::AttributeList, None) {
-        let al_value = read_value_from_record(io, &params, &record, &al_loc)?;
+        // $ATTRIBUTE_LIST IS NEVER LEGITIMATELY SPARSE, and it is a
+        // structure this code then walks entry by entry, stopping at the
+        // first zero length. A hole or a short `initialized_size` would
+        // hand `parse_attribute_list` zeros, it would stop there, and the
+        // base record's VCN-0 segment would be returned as the whole
+        // value -- the silent short read the `starting_vcn != 0` refusal
+        // below exists to prevent, reached by another route (#220).
+        let al_value = read_value_from_record(io, &params, &record, &al_loc, Holes::AreAnError)?;
         let entries = parse_attribute_list(&al_value)?;
         let matching: Vec<&AttrListEntry> = entries
             .iter()
@@ -320,11 +327,29 @@ fn locate_attribute<T: BlockIo + ?Sized>(
 /// (resident copy, or non-resident runs with sparse-hole zero-fill honouring
 /// `initialized_size`). Refuses compressed/encrypted values (the bytes would
 /// be transformed, not raw). `record` must be the record containing `loc`.
+/// What a hole in a non-resident value means to the caller.
+///
+/// A sparse `$DATA` is ordinary and its holes ARE zeros -- refusing them
+/// would break every sparse file. But an attribute whose value is a
+/// structure the driver then walks cannot be zero-filled and still be
+/// read correctly: the zeros parse as a terminator, and a short value is
+/// returned as a complete one. The caller says which kind it is asking
+/// for, because only the caller knows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Holes {
+    /// Sparse runs and the tail past `initialized_size` read as zeros.
+    AreZeros,
+    /// The runs must span `data_size` and `initialized_size` must reach
+    /// it; anything less is an error rather than a zero-filled buffer.
+    AreAnError,
+}
+
 fn read_value_from_record<T: BlockIo + ?Sized>(
     io: &mut T,
     params: &crate::mft_io::BootParams,
     record: &[u8],
     loc: &attr_io::AttrLocation,
+    holes: Holes,
 ) -> Result<Vec<u8>, String> {
     if loc.is_resident {
         let vo = loc.attr_offset
@@ -378,6 +403,23 @@ fn read_value_from_record<T: BlockIo + ?Sized>(
     let mut out = vec![0u8; data_size];
     let readable = data_size.min(init_size);
     let cluster_count = data_size.div_ceil(cluster_size);
+
+    if holes == Holes::AreAnError {
+        // The caller is going to parse this value, so a zero it did not
+        // write is a terminator it did not mean (#220).
+        if init_size < data_size {
+            return Err(format!(
+                "a value of {data_size} bytes is initialized to only {init_size}; the rest would                  read as zeros and parse as the end of it"
+            ));
+        }
+        if let Some(vcn) =
+            (0..cluster_count as u64).find(|&v| data_runs::vcn_to_lcn(&runs, v).is_none())
+        {
+            return Err(format!(
+                "a value of {data_size} bytes has no run behind VCN {vcn}; the hole would read as                  zeros and parse as the end of it"
+            ));
+        }
+    }
     for vcn in 0..cluster_count as u64 {
         let file_off = vcn as usize * cluster_size;
         if file_off >= readable {
@@ -434,7 +476,7 @@ pub fn read_attribute_range<T: BlockIo + ?Sized>(
     }
 
     // Resident or compressed: read the whole value, then slice the window.
-    let full = read_value_from_record(io, &params, &record, &loc)?;
+    let full = read_value_from_record(io, &params, &record, &loc, Holes::AreZeros)?;
     let full_len = full.len() as u64;
     let start = offset.min(full_len) as usize;
     let end = offset.saturating_add(len as u64).min(full_len) as usize;
@@ -824,7 +866,7 @@ pub fn read_volume_info<T: BlockIo + ?Sized>(io: &mut T) -> Result<VolumeInfo, S
     // surfaced rather than masked as "no label".
     let label = match locate_attribute(io, VOLUME_RECORD_NUMBER, AttrType::VolumeName, None)? {
         Some((p, _holder, record, loc)) => {
-            let bytes = read_value_from_record(io, &p, &record, &loc)?;
+            let bytes = read_value_from_record(io, &p, &record, &loc, Holes::AreZeros)?;
             let units: Vec<u16> = bytes
                 .chunks_exact(2)
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -1924,6 +1966,122 @@ mod tests {
             e[name_offset + i * 2..name_offset + i * 2 + 2].copy_from_slice(&u.to_le_bytes());
         }
         e
+    }
+
+    /// A minimal in-memory FILE record holding one attribute, for the
+    /// hole-rule tests below. `find_attribute` reads the first-attribute
+    /// offset at 0x14 and walks from there, so a header and an end marker
+    /// are the whole of what it needs -- no fixups, because nothing here
+    /// goes through `read_mft_record_io`.
+    fn record_with_attribute(attr: &[u8]) -> Vec<u8> {
+        const FIRST_ATTR: usize = 0x38;
+        let mut rec = vec![0u8; 1024];
+        rec[0..4].copy_from_slice(b"FILE");
+        rec[0x14..0x16].copy_from_slice(&(FIRST_ATTR as u16).to_le_bytes());
+        rec[0x16..0x18].copy_from_slice(&1u16.to_le_bytes()); // IN_USE
+        rec[FIRST_ATTR..FIRST_ATTR + attr.len()].copy_from_slice(attr);
+        let end = FIRST_ATTR + attr.len();
+        rec[end..end + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        // bytes_used (0x18) bounds the attribute walk: left at zero the
+        // iterator stops before the first attribute.
+        rec[0x18..0x1C].copy_from_slice(&((end + 4) as u32).to_le_bytes());
+        rec
+    }
+
+    /// A `$ATTRIBUTE_LIST` IS NEVER LEGITIMATELY SPARSE, and this is the
+    /// route by which a short one used to be read as a complete one
+    /// (#220): `read_value_from_record` zero-fills a hole and the tail
+    /// past `initialized_size`, and `parse_attribute_list` stops at the
+    /// first zero length. The list truncated, the base record's VCN-0
+    /// segment was returned as the whole value, and nothing said so.
+    ///
+    /// The same zero-fill is CORRECT for `$DATA`, so the rule is per
+    /// caller and both halves are asserted here.
+    #[test]
+    fn a_hole_is_zeros_for_data_and_an_error_for_a_parsed_value() {
+        let params = crate::mft_io::BootParams {
+            bytes_per_sector: 512,
+            sectors_per_cluster: 8,
+            cluster_size: 4096,
+            mft_lcn: 4,
+            file_record_size: 1024,
+            total_sectors: 65536,
+            serial_number: 0,
+            oem_id: *b"NTFS    ",
+        };
+        // One run of one cluster, for a value that claims two: VCN 1 has
+        // nothing behind it.
+        let mapping_pairs = [0x11u8, 0x01, 0x20, 0x00];
+        let attr = crate::record_build::build_nonresident_attribute(
+            AttrType::AttributeList as u32,
+            None,
+            0,
+            8192, // data_size: two clusters
+            8192,
+            8192, // initialized to its full length -- the hole is the fault
+            1,
+            &mapping_pairs,
+        )
+        .expect("attribute bytes");
+        let record = record_with_attribute(&attr);
+        let loc = attr_io::find_attribute(&record, AttrType::AttributeList, None)
+            .expect("the attribute is in the record");
+        let mut dev = MemDev {
+            buf: vec![0u8; 64 * 4096],
+        };
+
+        let err = read_value_from_record(&mut dev, &params, &record, &loc, Holes::AreAnError)
+            .expect_err("a hole in a parsed value must be refused");
+        assert!(
+            err.contains("no run behind VCN 1"),
+            "the error names the hole, got: {err}"
+        );
+
+        let zero_filled = read_value_from_record(&mut dev, &params, &record, &loc, Holes::AreZeros)
+            .expect("the same hole is ordinary for a sparse $DATA");
+        assert_eq!(zero_filled.len(), 8192, "the hole reads as zeros");
+    }
+
+    /// The other half of the same rule: a value whose runs cover it but
+    /// whose `initialized_size` stops short would parse as ending there.
+    #[test]
+    fn a_short_initialized_size_is_an_error_for_a_parsed_value() {
+        let params = crate::mft_io::BootParams {
+            bytes_per_sector: 512,
+            sectors_per_cluster: 8,
+            cluster_size: 4096,
+            mft_lcn: 4,
+            file_record_size: 1024,
+            total_sectors: 65536,
+            serial_number: 0,
+            oem_id: *b"NTFS    ",
+        };
+        // Two clusters, both mapped; initialized to one.
+        let mapping_pairs = [0x11u8, 0x02, 0x20, 0x00];
+        let attr = crate::record_build::build_nonresident_attribute(
+            AttrType::AttributeList as u32,
+            None,
+            0,
+            8192,
+            8192,
+            4096,
+            1,
+            &mapping_pairs,
+        )
+        .expect("attribute bytes");
+        let record = record_with_attribute(&attr);
+        let loc = attr_io::find_attribute(&record, AttrType::AttributeList, None)
+            .expect("the attribute is in the record");
+        let mut dev = MemDev {
+            buf: vec![0u8; 64 * 4096],
+        };
+
+        let err = read_value_from_record(&mut dev, &params, &record, &loc, Holes::AreAnError)
+            .expect_err("a short initialized_size must be refused");
+        assert!(
+            err.contains("initialized to only 4096"),
+            "the error names the short length, got: {err}"
+        );
     }
 
     #[test]
