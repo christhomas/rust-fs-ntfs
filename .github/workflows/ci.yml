@@ -727,18 +727,22 @@ jobs:
         # lands in ~/.cargo/bin which is on PATH after
         # dtolnay/rust-toolchain.
         #
-        # v0.3.5 RATHER THAN v0.2.0. The release workflow's copy of this
-        # was three releases behind and moved; this one was left, so the
-        # two jobs built their test images with different versions of the
-        # same tool -- and this one with a version predating that crate's
-        # own hardening.
+        # The pin lives in chores.yml. It moved to v0.3.5 after the two
+        # workflows drifted three releases apart (#128); declaring it in
+        # one place is what stops that recurring (#190).
         shell: pwsh
         run: |
-          git clone --depth 1 --branch v0.3.5 https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
+          # THE PINS COME FROM chores.yml, not from this file (#190).
+          # `pin` is the same one-liner the sibling-checkout step uses;
+          # PowerShell rather than bash because this job is Windows.
+          $vhd = (Select-String -Path chores.yml -Pattern '^\s*VHD_TOOL_REF:\s*(\S+)').Matches[0].Groups[1].Value
+          $core = (Select-String -Path chores.yml -Pattern '^\s*FS_CORE_REF:\s*(\S+)').Matches[0].Groups[1].Value
+          Write-Host "vhd_tool $vhd, am-fs-core $core (from chores.yml)"
+          git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
           # am-img-vhd path-deps am-fs-core (`../rust-fs-core`), so the
           # sibling must sit beside it, at a version satisfying its
           # `version = "0.2"` requirement.
-          git clone --depth 1 --branch v0.2.10 https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
+          git clone --depth 1 --branch $core https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
           cargo install --path $env:RUNNER_TEMP/rust-img-vhd --bin vhd_tool
       - name: Build rust-ntfs (Windows)
         run: cargo build --release --locked --bin rust-ntfs
