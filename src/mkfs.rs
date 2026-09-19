@@ -962,24 +962,28 @@ pub fn format_filesystem(
         ));
     }
 
-    // record 9: $Secure — minimal resident stub. Real NTFS has $SDS /
-    // $SDH / $SII; for v1 we ship empty placeholders. chkdsk treats
-    // an empty $Secure as "no security descriptor cache" and tolerates
-    // it — the per-file SD pointer in $STANDARD_INFORMATION is what
-    // governs ACL semantics, and we set it to 0 (default DACL).
+    // record 9: $Secure — POPULATED, not a stub. It carries a
+    // non-resident `$SDS` holding one canonical security descriptor
+    // (plus its mirror at SDS_MIRROR_GAP) and one-entry `$SDH` / `$SII`
+    // view indexes pointing at it. The three claims that used to stand
+    // here were each false and are recorded so they are not re-derived:
+    //
+    //   * "for v1 we ship empty placeholders" — the empty layout existed
+    //     and was abandoned: chkdsk's open of `$Secure:$SDS` failed with
+    //     STATUS_OBJECT_PATH_NOT_FOUND on it (Iter H Procmon trace).
+    //   * "we set [the SD pointer] to 0 (default DACL)" — 0 is the value
+    //     that FAILS. Every system record references security_id 0x100,
+    //     the canonical `$SDS` entry, because `/scan` validates the
+    //     SecurityId→$SDS linkage and exits 13 on SecurityId 0.
+    //   * "slot 9 is `$Quota` at non-4K cluster sizes" — `rec::name`
+    //     returns `$Secure` for slot 9 at every cluster size, and says
+    //     why: a volume written as NTFS 3.1 names it `$Secure`
+    //     throughout. Renaming the slot would break `$Secure` on every
+    //     volume this crate formats.
     {
-        // Microsoft modern format.com names slot 9 `$Quota` (NTFS 3.x
-        // convention: $Quota is the slot-9 system file; $Secure lives
-        // under \$Extend on the volume). chkdsk validates this name
-        // explicitly at non-4K cluster sizes and reports
-        // `Deleting invalid system file name $Secure (9) in directory 5.
-        //  Repairing invalid system file name $Quota (9)`
-        // when the slot carries the legacy NTFS 1.x name (matrix
-        // run-20260503-024058 cluster-8k / cluster-64k).
-        //
-        // The IS_VIEW_INDEX flag applies to both $Quota and $Secure
-        // — both host named view indexes in modern NTFS — so keep
-        // the flag-setting branch in build_system_record unchanged.
+        // The IS_VIEW_INDEX flag applies to a slot that hosts named view
+        // indexes, which `$Secure` does ($SDH / $SII) — so keep the
+        // flag-setting branch in build_system_record unchanged.
         //
         // Sub-PR S1 (see docs/implementation-plan-secure-and-extend.md
         // §"Sub-PR S1") adds the three named streams chkdsk's Iter H
