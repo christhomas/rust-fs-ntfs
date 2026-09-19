@@ -195,6 +195,9 @@ fn is_shell_assignment(token: &str) -> bool {
 /// front of `cargo` — `echo`, `printf`, `:` — means the text is being
 /// quoted rather than run.
 ///
+/// The one program allowed in front of `cargo` is `scripts/tier.sh`,
+/// which RUNS what follows its `--` -- see [`through_the_tier_wrapper`].
+///
 /// The returned slice is the arguments after `test`, which is what
 /// [`names_one_integration_target`] reads.
 fn cargo_test_arguments<'a>(tokens: &'a [&'a str]) -> Option<&'a [&'a str]> {
@@ -202,6 +205,7 @@ fn cargo_test_arguments<'a>(tokens: &'a [&'a str]) -> Option<&'a [&'a str]> {
     while rest.first().is_some_and(|token| is_shell_assignment(token)) {
         rest = &rest[1..];
     }
+    rest = through_the_tier_wrapper(rest)?;
     let (program, after_program) = rest.split_first()?;
     if program.rsplit('/').next() != Some("cargo") {
         return None;
@@ -215,6 +219,37 @@ fn cargo_test_arguments<'a>(tokens: &'a [&'a str]) -> Option<&'a [&'a str]> {
         return None;
     }
     Some(arguments)
+}
+
+/// The command `scripts/tier.sh` runs, when the line is a tier; the
+/// line unchanged when it is not; `None` when it names the wrapper in a
+/// shape the wrapper itself refuses.
+///
+/// # WHY THE WRAPPER IS READ THROUGH, AND WHY ONLY THIS ONE
+///
+/// ci.yml runs each `cargo test` through `scripts/tier.sh TIER -- ...`,
+/// which writes the whole run to a log and prints a verdict line, so the
+/// PR gate's debug run is spelled `scripts/tier.sh unit-debug -- cargo
+/// test --locked --lib`. [`cargo_test_arguments`] refuses anything in
+/// front of `cargo`, which is what keeps `echo cargo test ...` from
+/// counting -- and it would refuse this too, making the guard fail on a
+/// run that is really there.
+///
+/// So exactly one prefix is read through, and only in the one shape
+/// tier.sh accepts: the program word is `tier.sh` (however it is reached
+/// on disk), then ONE tier name, then `--`. The script `exec`s what
+/// follows `--` as argv, not through a shell, so a leading `NAME=value`
+/// there would be run as a program called `NAME=value` -- which is why
+/// assignments are skipped before the wrapper and not after it. Any
+/// other shape, including an `echo` of the whole line, is not a run.
+fn through_the_tier_wrapper<'a>(tokens: &'a [&'a str]) -> Option<&'a [&'a str]> {
+    match tokens {
+        [program, rest @ ..] if program.rsplit('/').next() == Some("tier.sh") => match rest {
+            [_tier, "--", command @ ..] => Some(command),
+            _ => None,
+        },
+        _ => Some(tokens),
+    }
 }
 
 /// Whether the run selects a single integration target.
@@ -1415,6 +1450,65 @@ cargo test --release --locked --lib
                 runs_with_overflow_checks(line),
                 vec![line.to_string()],
                 "{line} is a real debug run and must still count"
+            );
+        }
+    }
+
+    /// The tier wrapper ci.yml runs every `cargo test` through. What it
+    /// runs is judged exactly as if it stood alone: a debug run counts,
+    /// a release run does not, and the handshake before the wrapper is
+    /// still the handshake.
+    #[test]
+    fn a_run_through_the_tier_wrapper_is_judged_by_what_it_runs() {
+        for line in [
+            "scripts/tier.sh unit-debug -- cargo test --locked --lib",
+            "EXPECT_OVERFLOW_CHECKS=1 scripts/tier.sh unit-debug -- cargo test --locked --lib",
+            "./scripts/tier.sh unit-debug -- cargo test --locked --lib",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                vec![line.to_string()],
+                "{line} runs a debug cargo test and must count"
+            );
+        }
+        assert_eq!(
+            super::debug_runs_that_prove_the_build_traps(
+                "EXPECT_OVERFLOW_CHECKS=1 scripts/tier.sh unit-debug -- cargo test --locked --lib"
+            )
+            .len(),
+            1,
+            "the handshake in front of the wrapper reaches the run"
+        );
+        for line in [
+            "scripts/tier.sh unit -- cargo test --release --locked --lib",
+            "scripts/tier.sh mkfs -- cargo test --locked --test mkfs_roundtrip",
+            "scripts/tier.sh lint -- cargo clippy --locked --all-targets",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line} is not a full debug run"
+            );
+        }
+    }
+
+    /// The wrapper is read through in the one shape it accepts and no
+    /// other, so it cannot become the next way to quote a command.
+    #[test]
+    fn the_tier_wrapper_in_any_other_shape_is_not_a_run() {
+        for line in [
+            "echo scripts/tier.sh unit-debug -- cargo test --locked --lib",
+            "scripts/tier.sh -- cargo test --locked --lib",
+            "scripts/tier.sh unit-debug cargo test --locked --lib",
+            "scripts/tier.sh unit-debug extra -- cargo test --locked --lib",
+            "scripts/tier.sh unit-debug -- echo cargo test --locked --lib",
+            "scripts/tier.sh unit-debug -- EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib",
+            "scripts/other.sh unit-debug -- cargo test --locked --lib",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line} does not run a debug cargo test"
             );
         }
     }

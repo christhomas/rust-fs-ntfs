@@ -68,3 +68,7 @@ diag/
 # Python bytecode, written beside any script run with python3.
 __pycache__/
 *.pyc
+
+# Test tier logs (scripts/tier.sh). The whole run of each tier lands here;
+# the terminal gets a verdict line naming the file.
+/tmp/

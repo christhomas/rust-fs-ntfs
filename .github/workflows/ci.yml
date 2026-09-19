@@ -121,7 +121,7 @@ jobs:
       # Run it on both Linux architectures; macOS adds nothing x86 lacks.
       - name: cargo clippy
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm'
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: scripts/tier.sh clippy -- cargo clippy --locked --all-targets -- -D warnings
 
       # Test scope is intentionally narrow: only tests that DON'T need
       # the out-of-tree `test-disks/*.img` fixtures. The fixture-driven
@@ -170,18 +170,26 @@ jobs:
       # `awk '{s+=$4}'` rather than `bc`: this job runs on macOS too, and the
       # sibling crates run the same shape on windows-latest where the default
       # shell is pwsh. Keep it POSIX and keep it in one pipeline.
+      #
+      # EACH RUN IS A QUIET TIER. `scripts/tier.sh <tier> -- cargo test ...`
+      # (the same line `chore test:<tier>` runs) writes the whole run to
+      # tmp/logs/<tier>.log and prints one verdict line; a failure prints the
+      # log's tail, and a pass that printed more than the tier's measured
+      # budget exits 65. The floor below reads that log. The exit status is
+      # the suite's own -- tier.sh never pipes through `tee`, which is how
+      # `cmd | tee` reports a red suite as green -- so GitHub's `bash -e`
+      # stops the step on a failure before the floor is read. Every log is
+      # uploaded as the `test-logs-*` artifact at the end of the job.
       - name: unit tests (release) with an executed-test floor
         run: |
-          cargo test --release --locked --lib 2>&1 | tee "$RUNNER_TEMP/lib-release.log"
-          rc=${PIPESTATUS[0]}
+          scripts/tier.sh unit -- cargo test --release --locked --lib
           # Measured 637 executed. Floor 600, ~6% of slack.
-          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/lib-release.log" | awk '{s+=$4} END{print s+0}')
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/unit.log | awk '{s+=$4} END{print s+0}')
           echo "tests executed: $n (floor 600)"
           if [ "$n" -lt 600 ]; then
               echo "::error::only $n unit tests executed, floor is 600 -- 637 ran on 2026-09-17 in run 34985102618, and a run that executes less than that stopped early rather than passed"
               exit 1
           fi
-          exit "$rc"
       # The floor here is 8 out of a measured 9, which looks like no margin at
       # all and is the right number anyway: this selection is two named test
       # binaries, so it does not drift the way a `--lib` count does, and what
@@ -191,16 +199,14 @@ jobs:
       # zero catches nothing. Raise it when the files grow.
       - name: fixture-free integration tests with an executed-test floor
         run: |
-          cargo test --release --locked --test mkfs_roundtrip --test mkfs_bin_smoke 2>&1 | tee "$RUNNER_TEMP/mkfs.log"
-          rc=${PIPESTATUS[0]}
+          scripts/tier.sh mkfs -- cargo test --release --locked --test mkfs_roundtrip --test mkfs_bin_smoke
           # Measured 9 executed (mkfs_roundtrip 3 + mkfs_bin_smoke 6). Floor 8.
-          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/mkfs.log" | awk '{s+=$4} END{print s+0}')
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/mkfs.log | awk '{s+=$4} END{print s+0}')
           echo "tests executed: $n (floor 8)"
           if [ "$n" -lt 8 ]; then
               echo "::error::only $n tests executed, floor is 8 -- 9 ran on 2026-09-17 in run 34985102618, and a run that executes less than that stopped early rather than passed"
               exit 1
           fi
-          exit "$rc"
 
       # AND ONCE IN DEBUG, BECAUSE `overflow-checks` IS OFF IN RELEASE.
       #
@@ -264,18 +270,26 @@ jobs:
       # nor the evidence. See the floor commentary above the release run.
       - name: unit tests (debug, overflow checks armed) with an executed-test floor
         run: |
-          cargo test --locked --lib 2>&1 | tee "$RUNNER_TEMP/lib-debug.log"
-          rc=${PIPESTATUS[0]}
+          scripts/tier.sh unit-debug -- cargo test --locked --lib
           # Measured 637 executed. Floor 600, ~6% of slack.
-          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/lib-debug.log" | awk '{s+=$4} END{print s+0}')
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/unit-debug.log | awk '{s+=$4} END{print s+0}')
           echo "tests executed: $n (floor 600)"
           if [ "$n" -lt 600 ]; then
               echo "::error::only $n unit tests executed under overflow checks, floor is 600 -- 637 ran on 2026-09-17 in run 34985102618, and a run that executes less than that stopped early rather than passed"
               exit 1
           fi
-          exit "$rc"
         env:
           EXPECT_OVERFLOW_CHECKS: "1"
+      # The whole of every tier, kept: the terminal got a verdict line and a
+      # failure's tail, and this is the rest. always(), because a failed run
+      # is when somebody wants it.
+      - name: upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.os }}
+          path: tmp/logs/
+          if-no-files-found: ignore
 
   # Full integration suite — every unit AND integration test, with the
   # read-path .img fixtures generated on the runner via ntfs-3g/mkntfs.
@@ -390,16 +404,21 @@ jobs:
       # ~5% of slack. It moves up with the suite and never down.
       - name: full suite with an executed-test floor
         run: |
-          cargo test --release --locked --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/full.log"
-          rc=${PIPESTATUS[0]}
-          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/full.log" | awk '{s+=$4} END{print s+0}')
+          scripts/tier.sh suite -- cargo test --release --locked --no-fail-fast
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
           echo "tests executed: $n (floor 1350)"
           if [ "$n" -lt 1350 ]; then
               echo "::error::only $n tests executed, floor is 1350 -- 1427 ran on 2026-09-17 in run 34985102618, and a run that executes less than that stopped early rather than passed (the usual cause is the .img fixtures not being built, which makes the fixture-driven test files self-skip instead of fail)"
               exit 1
           fi
-          exit "$rc"
-      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: scripts/tier.sh clippy -- cargo clippy --locked --all-targets -- -D warnings
+      - name: upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-integration
+          path: tmp/logs/
+          if-no-files-found: ignore
 
   # NTFS validation runs ONLY on the Windows side via Microsoft's
   # chkdsk. That is the only authoritative validator for NTFS, full
@@ -501,9 +520,8 @@ jobs:
           RUSTFLAGS: "-Zsanitizer=address"
           RUSTDOCFLAGS: "-Zsanitizer=address"
         run: |
-          cargo +nightly test --release --locked --lib \
-            --target x86_64-unknown-linux-gnu 2>&1 | tee "$RUNNER_TEMP/asan.log"
-          rc=${PIPESTATUS[0]}
+          scripts/tier.sh asan -- cargo +nightly test --release --locked --lib \
+            --target x86_64-unknown-linux-gnu
           # A floor on an ADVISORY job, which is not a contradiction. This job
           # cannot gate a merge (see `continue-on-error` above), so the only
           # thing it produces is a signal a human reads -- and a signal that
@@ -514,13 +532,19 @@ jobs:
           #
           # Measured 2026-09-17 from run 34985102618 (job 104435065061): 637
           # executed, the same `--lib` set the stable legs run. Floor 600.
-          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/asan.log" | awk '{s+=$4} END{print s+0}')
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/asan.log | awk '{s+=$4} END{print s+0}')
           echo "tests executed under ASan: $n (floor 600)"
           if [ "$n" -lt 600 ]; then
               echo "::error::only $n tests executed under ASan, floor is 600 -- 637 ran on 2026-09-17 in run 34985102618, and a run that executes less than that sanitized nothing rather than passed"
               exit 1
           fi
-          exit "$rc"
+      - name: upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-asan
+          path: tmp/logs/
+          if-no-files-found: ignore
 
   # Windows-side validation: chkdsk is the canonical "is this a valid
   # NTFS volume?" check, against the same code Microsoft ships.

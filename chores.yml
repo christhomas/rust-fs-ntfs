@@ -211,6 +211,22 @@ tasks:
         fi
         rm -f "$flag"
 
+  siblings:gate:
+    desc: siblings:check, silent unless a sibling has drifted
+    # What the test tiers depend on. siblings:check is a REPORT -- it prints
+    # a line per sibling whether or not anything is wrong, which is right
+    # when you asked for it and two lines of noise in front of every tier
+    # when you did not. This runs the same check and shows its report only
+    # when it fails, so the gate is the same gate and a green tier stays one
+    # line.
+    silent: true
+    cmds:
+      - |
+        if ! out="$("{{.CHORE_EXE}}" siblings:check 2>&1)"; then
+          printf '%s\n' "$out" >&2
+          exit 1
+        fi
+
   lint:
     desc: Formatting and clippy, exactly as CI runs them
     # `--locked` is not decoration. It makes the build fail rather than
@@ -220,9 +236,14 @@ tasks:
     #
     # This exists so the CI gate can be reproduced locally. If the two
     # ever differ, this is the copy that is wrong.
+    #
+    # fmt prints nothing when it passes and the diff when it does not,
+    # which is already the right shape. clippy prints a line per crate it
+    # checks, so it runs as a quiet tier: a verdict line, the log in
+    # tmp/logs/, and the tail on failure. `chore lint -- --verbose` streams it.
     cmds:
       - cargo fmt --check
-      - cargo clippy --locked --all-targets -- -D warnings
+      - scripts/tier.sh clippy -- cargo clippy --locked --all-targets -- -D warnings
 
   build:
     desc: Debug build
@@ -232,10 +253,57 @@ tasks:
     deps: [siblings:check]
     cmds: ['cargo build']
 
+  # THE TEST TIERS. Each is one `cargo test` selection from ci.yml, run
+  # through scripts/tier.sh: QUIET BY DEFAULT. A pass prints one line --
+  # the tier, its size, and the log in tmp/logs/ that holds the whole run.
+  # A failure prints the log's tail. A pass that printed more than the
+  # tier's measured budget fails with status 65. `-- --verbose` (or
+  # FWTH_VERBOSE=1) streams the run as well; it is still budgeted.
+  #
+  # The commands are ci.yml's, word for word, and ci.yml runs them through
+  # the same script, so a tier that goes over budget goes over it in both
+  # places. The executed-test floors stay in ci.yml, where they gate.
+  test:unit:
+    desc: 'Unit tests (src/), release -- ci.yml "unit tests (release)"'
+    deps: [siblings:gate]
+    cmds:
+      - scripts/tier.sh unit -- cargo test --release --locked --lib
+
+  test:unit:debug:
+    desc: 'Unit tests (src/), debug, overflow checks armed -- ci.yml "unit tests (debug, ...)"'
+    deps: [siblings:gate]
+    # EXPECT_OVERFLOW_CHECKS makes overflow_checks in src/lib.rs prove this
+    # build traps an overflow. See the long comment on the ci.yml step.
+    env:
+      EXPECT_OVERFLOW_CHECKS: '1'
+    cmds:
+      - scripts/tier.sh unit-debug -- cargo test --locked --lib
+
+  test:mkfs:
+    desc: 'The two fixture-free integration files -- ci.yml "fixture-free integration tests"'
+    deps: [siblings:gate]
+    cmds:
+      - scripts/tier.sh mkfs -- cargo test --release --locked --test mkfs_roundtrip --test mkfs_bin_smoke
+
+  test:suite:
+    desc: 'Every unit and integration test, release -- ci.yml "full suite"'
+    deps: [siblings:gate]
+    # The fixtures are checked first: without them the fixture-driven files
+    # panic one test at a time, 4,755 lines of the same missing file.
+    cmds:
+      - test-disks/check-fixtures.sh
+      - scripts/tier.sh suite -- cargo test --release --locked --no-fail-fast
+
   test:
-    desc: Test suite
-    deps: [siblings:check]
-    cmds: ['cargo test']
+    desc: 'Every test tier CI runs, quietly: unit, unit (debug), mkfs, the whole suite'
+    # `-- --verbose` reaches every tier: CLI_ARGS is chore's, not the task's.
+    cmds:
+      - task: test:unit
+      - task: test:unit:debug
+      - task: test:mkfs
+      - task: test:suite
+      # THE LAST LINE: one number across the tiers, and where the detail is.
+      - scripts/test-verdict.sh unit unit-debug mkfs suite
 
   clean:
     desc: Remove this crate's cargo output
