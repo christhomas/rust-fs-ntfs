@@ -45,7 +45,11 @@ fi
 
 # No sibling and no resolved package must be an actionable failure.
 missing_root="$tmp/no-core"
-if FS_CORE_ROOT="$missing_root" bash "$RESOLVER" >"$tmp/missing.out" 2>"$tmp/missing.err"; then
+missing_cargo_bin="$tmp/no-cargo-bin"
+mkdir -p "$missing_cargo_bin"
+printf '#!/usr/bin/env bash\necho "cargo metadata intentionally unavailable" >&2\nexit 1\n' > "$missing_cargo_bin/cargo"
+chmod +x "$missing_cargo_bin/cargo"
+if PATH="$missing_cargo_bin:$PATH" FS_CORE_ROOT="$missing_root" bash "$RESOLVER" >"$tmp/missing.out" 2>"$tmp/missing.err"; then
     fail=$((fail + 1)); printf '  FAIL  missing source fails\n        resolver unexpectedly passed\n'
 else
     if grep -q 'no sibling or resolved Cargo package' "$tmp/missing.err"; then
