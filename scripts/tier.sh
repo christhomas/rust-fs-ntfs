@@ -7,9 +7,10 @@
 # its budget fails with status 65 -- told apart from a failing suite, which
 # exits with the suite's own status.
 #
-# The work is done by the harness's scripts/output-budget.sh (the pinned
-# ../fs-windows-test-harness sibling, v4.1.0 and later). This file only owns
-# the part that is ours: which tiers exist, and how much each may print.
+# The work is done by rust-fs-core's canonical scripts/output-budget.sh. This
+# file resolves that script from a coordinated sibling or the packaged Cargo
+# dependency, and owns only the part that is ours: which tiers exist and how
+# much each may print.
 #
 # WHY THE BUDGET IS PART OF THE TIER and not a CI-only check: the reader who
 # pays most for a noisy suite is the one running it -- a person scrolling, or
@@ -30,7 +31,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUDGET="$REPO/../fs-windows-test-harness/scripts/output-budget.sh"
+BUDGET=""
 
 [ $# -ge 3 ] || { echo "tier.sh: usage: tier.sh TIER -- COMMAND [ARG...]" >&2; exit 2; }
 TIER="$1"; shift
@@ -86,23 +87,19 @@ case "$TIER" in
         ;;
 esac
 
-if [ ! -x "$BUDGET" ]; then
-    echo "tier.sh: $BUDGET is missing." >&2
-    echo "         The harness is a pinned sibling -- run 'chore siblings'." >&2
-    exit 1
-fi
+BUDGET="$(bash "$REPO/scripts/resolve-output-budget.sh")"
 
 # `chore test:unit -- --verbose` arrives as CLI_ARGS. output-budget.sh reads
-# FWTH_VERBOSE itself, so mapping the flag onto it is all that is needed --
-# and the variable and the flag cannot disagree.
+# OUTPUT_BUDGET_VERBOSE itself, so mapping the flag onto it is all that is
+# needed -- and the variable and the flag cannot disagree.
 case " ${CLI_ARGS:-} " in
-    *" --verbose "*|*" -v "*) export FWTH_VERBOSE=1 ;;
+    *" --verbose "*|*" -v "*) export OUTPUT_BUDGET_VERBOSE=1 ;;
 esac
 
 LOG="$REPO/tmp/logs/$TIER.log"
 
 set +e
-"$BUDGET" \
+bash "$BUDGET" \
     --log "$LOG" \
     --max-lines "$MAX_LINES" \
     --max-bytes "$MAX_BYTES" \

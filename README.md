@@ -514,8 +514,10 @@ A failure prints the last 40 lines of the log instead. A tier that passed
 but printed more than its budget fails with exit status 65, apart from a
 failing suite: the budgets are measured, they live in one table in
 `scripts/tier.sh`, and CI runs every `cargo test` through the same script.
-The work is done by `scripts/output-budget.sh` in the
-`../fs-windows-test-harness` sibling (`chore siblings`). `test:suite`
+The work is done by the canonical `scripts/output-budget.sh` supplied by
+`rust-fs-core`. `scripts/tier.sh` uses the sibling core checkout in a full
+development environment, or the packaged Cargo dependency in a standalone
+clone. `test:suite`
 needs the `test-disks/ntfs-*.img` fixtures (built on Linux by
 `test-disks/build-ntfs-feature-images.sh`) and says so if they are
 missing.

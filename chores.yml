@@ -48,7 +48,7 @@ vars:
   # family, and the bump lands here and in their pins together. That is
   # the cost of one shared copy, and it is the same property that makes
   # drift impossible rather than merely detectable.
-  FS_CORE_REF: v0.2.10
+  FS_CORE_REF: v0.2.11
 
   # The Windows-VM test harness. Not a cargo dependency — a tool this
   # repo's scripts invoke — so nothing but this pin governs which
@@ -392,7 +392,7 @@ tasks:
   # the tier, its size, and the log in tmp/logs/ that holds the whole run.
   # A failure prints the log's tail. A pass that printed more than the
   # tier's measured budget fails with status 65. `-- --verbose` (or
-  # FWTH_VERBOSE=1) streams the run as well; it is still budgeted.
+  # OUTPUT_BUDGET_VERBOSE=1) streams the run as well; it is still budgeted.
   #
   # The commands are ci.yml's, word for word, and ci.yml runs them through
   # the same script, so a tier that goes over budget goes over it in both
