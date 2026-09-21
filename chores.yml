@@ -124,9 +124,10 @@ tasks:
     desc: Check out the sibling repos this crate builds against, at their pinned tags
     # WHY THIS EXISTS, AND WHY IT IS NOT `git submodule update`.
     #
-    # This crate needs two other repos: am-fs-core (a cargo path dep at
-    # `../rust-fs-core`) and fs-windows-test-harness (a tool the matrix
-    # scripts invoke). Both were git submodules under vendor/, and submodules
+    # This crate needs two other repos for coordinated development:
+    # rust-fs-core supplies the canonical budget wrapper and generated header,
+    # while fs-windows-test-harness is a tool the matrix scripts invoke.
+    # Both were git submodules under vendor/, and submodules
     # turned out to be the wrong shape for a constellation of crates
     # that depend on each other.
     #
@@ -254,8 +255,8 @@ tasks:
     # measured at about a second and a screen of output per run; this is
     # neither. Patterns are LITERAL for the reason given on staticlib.
     #
-    # ../rust-fs-core is here because it is a path dependency: its source
-    # is compiled into the binary, so a change there must rebuild it too.
+    # The core sibling is included because the generated header and the
+    # coordinated output-budget source are part of the family workflow.
     # rust-toolchain.toml because a toolchain bump changes the output.
     sources:
       - Cargo.toml
