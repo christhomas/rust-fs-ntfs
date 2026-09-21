@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Budgeted test tiers resolve the canonical wrapper from `rust-fs-core`.**
+  A full development checkout uses the sibling core directly; a standalone
+  checkout uses the packaged Cargo source. The wrapper is verified by API
+  version and SHA-256 before it runs, and a missing or stale source fails with
+  an actionable error. The Windows harness receives only a transient staged
+  copy for a test run; it does not own a second implementation.
+
 - **The fuzz harness runs, and covers more than three decoders.** Three
   `cargo-fuzz` targets were added on 2026-05-03 and no workflow ever ran
   them. They had also never *compiled*: `fuzz/Cargo.toml` named the
