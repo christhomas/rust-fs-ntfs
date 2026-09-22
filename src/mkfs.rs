@@ -1656,6 +1656,7 @@ fn build_system_record_with_parent(
         record_number,
         rec::SECURE | rec::REPARSE | rec::OBJID | rec::QUOTA
     );
+    let is_sparse = matches!(record_number, rec::BADCLUS | rec::SECURE);
     // VIEW_INDEX records need both 0x0004 (MFT_RECORD_HAS_VIEW_INDEX, indicating
     // a named non-$I30 index root is present) and 0x0008 (MFT_RECORD_IS_VIEW_INDEX).
     // Post-/f byte-diff (2026-05-24): slots 16/17 show 0x000D after /f fixes them.
@@ -1698,6 +1699,7 @@ fn build_system_record_with_parent(
         is_dir,
         true,
         is_view_index,
+        is_sparse,
         0x100,
     );
     let namespace = if parent_record == rec::EXTEND {
@@ -1715,6 +1717,7 @@ fn build_system_record_with_parent(
         is_dir,
         true,
         is_view_index,
+        is_sparse,
         fn_data_alloc,
         fn_data_real,
         namespace,
@@ -1795,6 +1798,7 @@ fn build_reserved_placeholder(layout: &MftLayout, record_number: u32) -> Result<
         false,
         true,
         false,
+        false,
         0x100,
     );
 
@@ -1832,6 +1836,7 @@ fn write_standard_information(
     is_dir: bool,
     is_system: bool,
     is_view_index: bool,
+    is_sparse: bool,
     security_id: u32,
 ) -> usize {
     // 72-byte NTFS 3.x $STANDARD_INFORMATION (MS-FSCC §2.4.2):
@@ -1886,6 +1891,9 @@ fn write_standard_information(
     if is_view_index {
         fa |= FA_NTFS_VIEW_INDEX;
     }
+    if is_sparse {
+        fa |= crate::sparse::FILE_ATTRIBUTE_SPARSE_FILE;
+    }
     rec[v + 32..v + 36].copy_from_slice(&fa.to_le_bytes());
     // SecurityId at value+0x34 (MS-FSCC §2.4.2). OwnerId (+0x30),
     // QuotaCharged (+0x38), USN (+0x40) stay zero (fresh-format defaults).
@@ -1903,6 +1911,7 @@ fn write_file_name(
     is_dir: bool,
     is_system: bool,
     is_view_index: bool,
+    is_sparse: bool,
     data_alloc: u64,
     data_real: u64,
     namespace: u8,
@@ -1965,6 +1974,9 @@ fn write_file_name(
     }
     if is_view_index {
         fa |= FA_NTFS_VIEW_INDEX;
+    }
+    if is_sparse {
+        fa |= crate::sparse::FILE_ATTRIBUTE_SPARSE_FILE;
     }
     rec[v + 56..v + 60].copy_from_slice(&fa.to_le_bytes());
     rec[v + 60..v + 64].copy_from_slice(&0u32.to_le_bytes());

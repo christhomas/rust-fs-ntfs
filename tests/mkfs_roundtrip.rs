@@ -62,7 +62,7 @@ impl BlockIo for MemDev {
     }
 }
 
-fn raw_named_data_attribute(dev: &MemDev, record_number: u64, name: &str) -> Vec<u8> {
+fn raw_attribute(dev: &MemDev, record_number: u64, attr_type: u32, name: &str) -> Vec<u8> {
     let bytes_per_sector = u16::from_le_bytes(dev.buf[0x0B..0x0D].try_into().unwrap()) as u64;
     let sectors_per_cluster = dev.buf[0x0D] as u64;
     let cluster_size = bytes_per_sector * sectors_per_cluster;
@@ -73,8 +73,11 @@ fn raw_named_data_attribute(dev: &MemDev, record_number: u64, name: &str) -> Vec
     let mut at = u16::from_le_bytes(record[0x14..0x16].try_into().unwrap()) as usize;
 
     loop {
-        let attr_type = u32::from_le_bytes(record[at..at + 4].try_into().unwrap());
-        assert_ne!(attr_type, 0xFFFF_FFFF, "named $DATA {name} not found");
+        let candidate_type = u32::from_le_bytes(record[at..at + 4].try_into().unwrap());
+        assert_ne!(
+            candidate_type, 0xFFFF_FFFF,
+            "attribute {attr_type:#x}:{name} not found"
+        );
         let attr_len = u32::from_le_bytes(record[at + 4..at + 8].try_into().unwrap()) as usize;
         assert!(attr_len >= 0x10 && at + attr_len <= record.len());
         let attr = &record[at..at + attr_len];
@@ -87,7 +90,7 @@ fn raw_named_data_attribute(dev: &MemDev, record_number: u64, name: &str) -> Vec
                 .collect::<Vec<_>>(),
         )
         .unwrap();
-        if attr_type == 0x80 && attr_name == name {
+        if candidate_type == attr_type && attr_name == name {
             return attr.to_vec();
         }
         at += attr_len;
@@ -496,7 +499,7 @@ fn sparse_system_streams_have_extended_headers_and_real_allocation_totals() {
     )
     .expect("format_filesystem");
 
-    let bad = raw_named_data_attribute(&dev, rec::BADCLUS as u64, stream::BAD);
+    let bad = raw_attribute(&dev, rec::BADCLUS as u64, 0x80, stream::BAD);
     assert_eq!(u16::from_le_bytes(bad[12..14].try_into().unwrap()), 0x8000);
     assert_eq!(u16::from_le_bytes(bad[10..12].try_into().unwrap()), 0x48);
     assert_eq!(u16::from_le_bytes(bad[32..34].try_into().unwrap()), 0x50);
@@ -506,7 +509,7 @@ fn sparse_system_streams_have_extended_headers_and_real_allocation_totals() {
     assert_eq!(bad_runs.len(), 1);
     assert_eq!(bad_runs[0].lcn, None);
 
-    let sds = raw_named_data_attribute(&dev, rec::SECURE as u64, stream::SDS);
+    let sds = raw_attribute(&dev, rec::SECURE as u64, 0x80, stream::SDS);
     assert_eq!(u16::from_le_bytes(sds[12..14].try_into().unwrap()), 0x8000);
     assert_eq!(u16::from_le_bytes(sds[10..12].try_into().unwrap()), 0x48);
     assert_eq!(u16::from_le_bytes(sds[32..34].try_into().unwrap()), 0x50);
@@ -521,6 +524,32 @@ fn sparse_system_streams_have_extended_headers_and_real_allocation_totals() {
     assert_eq!(sds_runs[1].lcn, None);
     assert_eq!(sds_runs[1].length, SDS_MIRROR_GAP / CLUSTER_SIZE - 1);
     assert!(sds_runs[2].lcn.is_some());
+
+    for record_number in [rec::BADCLUS, rec::SECURE] {
+        let standard_information = raw_attribute(&dev, record_number as u64, 0x10, "");
+        let si_value =
+            u16::from_le_bytes(standard_information[20..22].try_into().unwrap()) as usize;
+        let si_flags = u32::from_le_bytes(
+            standard_information[si_value + 32..si_value + 36]
+                .try_into()
+                .unwrap(),
+        );
+        assert_ne!(
+            si_flags & 0x200,
+            0,
+            "record {record_number} $STANDARD_INFORMATION must mark the file sparse"
+        );
+
+        let file_name = raw_attribute(&dev, record_number as u64, 0x30, "");
+        let fn_value = u16::from_le_bytes(file_name[20..22].try_into().unwrap()) as usize;
+        let fn_flags =
+            u32::from_le_bytes(file_name[fn_value + 56..fn_value + 60].try_into().unwrap());
+        assert_ne!(
+            fn_flags & 0x200,
+            0,
+            "record {record_number} $FILE_NAME must mark the file sparse"
+        );
+    }
 }
 
 /// Sub-PR S3 + Iter L final: rec 11 must be a directory shell named
