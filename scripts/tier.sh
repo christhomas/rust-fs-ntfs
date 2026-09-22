@@ -101,14 +101,17 @@ esac
 # because cargo made it.
 #
 # tmp/ is gitignored and is where the tier logs already live.
+set +e
 CORE_DIR="$(cargo metadata --format-version 1 --locked --manifest-path "$REPO/Cargo.toml" \
     2>/dev/null | python3 -c '
 import json, sys
 packages = json.load(sys.stdin)["packages"]
 print(next((p["manifest_path"].rsplit("/", 1)[0]
             for p in packages if p["name"] == "am-fs-core"), ""))
-')"
-if [ -z "$CORE_DIR" ] || [ ! -f "$CORE_DIR/scripts/output-budget.sh" ]; then
+')" 2>/dev/null
+metadata_status=$?
+set -e
+if [ "$metadata_status" -ne 0 ] || [ -z "$CORE_DIR" ] || [ ! -f "$CORE_DIR/scripts/output-budget.sh" ]; then
     echo "tier.sh: cargo could not say where am-fs-core is, or its copy has no" >&2
     echo "         scripts/output-budget.sh. The wrapper lives in rust-fs-core;" >&2
     echo "         check the am-fs-core dependency resolves and is at a version" >&2
@@ -118,8 +121,8 @@ fi
 
 BUDGET="$REPO/tmp/output-budget.$$.sh"
 mkdir -p "$REPO/tmp"
-cp "$CORE_DIR/scripts/output-budget.sh" "$BUDGET"
 trap 'rm -f "$BUDGET"' EXIT
+cp "$CORE_DIR/scripts/output-budget.sh" "$BUDGET"
 
 # `chore test:unit -- --verbose` arrives as CLI_ARGS. output-budget.sh reads
 # OUTPUT_BUDGET_VERBOSE itself, so mapping the flag onto it is all that is
