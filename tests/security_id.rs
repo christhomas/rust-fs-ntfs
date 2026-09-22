@@ -7,6 +7,8 @@ mod common;
 use fs_ntfs::facade::Filesystem;
 use fs_ntfs::write::{create_file, read_security_id, set_security_id};
 use fs_ntfs::{fs_ntfs_last_error, fs_ntfs_read_security_id, fs_ntfs_set_security_id};
+use ntfs::structured_values::NtfsStandardInformation;
+use ntfs::NtfsAttributeType;
 use std::ffi::{CStr, CString};
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
@@ -101,12 +103,27 @@ fn missing_file_errors_on_write() {
 }
 
 #[test]
-fn upstream_mounts_after_security_id_write() {
+fn remounts_and_upstream_reads_after_security_id_write() {
     let (img, path) = working_copy("upstream_mount");
     set_security_id(std::path::Path::new(&img), path, 0x100).unwrap();
-    // Re-mount via the upstream facade — proves we didn't corrupt the
-    // record's bytes_used / fixup / etc.
-    let _fs = Filesystem::mount(&img).expect("upstream re-mount");
+    let _fs = Filesystem::mount(&img).expect("fs_ntfs re-mount");
+
+    let (ntfs, mut reader) = common::open(&img);
+    let file = common::navigate(&ntfs, &mut reader, path);
+    let mut attributes = file.attributes();
+    let item = attributes
+        .next(&mut reader)
+        .expect("$STANDARD_INFORMATION exists")
+        .expect("upstream attribute");
+    let attribute = item.to_attribute().expect("upstream attribute body");
+    assert_eq!(
+        attribute.ty().unwrap(),
+        NtfsAttributeType::StandardInformation
+    );
+    let info = attribute
+        .resident_structured_value::<NtfsStandardInformation>()
+        .expect("upstream parses $STANDARD_INFORMATION");
+    assert_eq!(info.security_id(), Some(0x100));
 }
 
 #[test]
