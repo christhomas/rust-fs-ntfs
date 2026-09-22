@@ -27,8 +27,9 @@ Options:
   -L, --label <label>      Volume label (max 32 UTF-16 code units after encode).
   -c, --cluster-size <n>   Cluster size in bytes. Power of 2, 512..=65536.
                            Default: 4096.
-  --mft-record-size <n>    MFT record size in bytes. Power of 2, 512..=16384.
-                           Default: 4096.
+  --mft-record-size <n>    MFT record size in bytes. Power of 2, 2048..=16384.
+                           512 cannot hold $Secure; 1024 cannot hold the
+                           populated root metadata. Default: 4096.
   --serial <hex>           NTFS volume serial number (16 hex chars). Default:
                            random.
   -Q, --quick              Quick format. Accepted; the on-disk layout we
@@ -247,6 +248,33 @@ fn parse_args(args: Vec<String>, prog: &str) -> Result<Opts, String> {
                 let n: u32 = v
                     .parse()
                     .map_err(|_| format!("--mft-record-size: not a valid number: {v}"))?;
+                // The formatter's NTFS 3.1 `$Secure` record must contain
+                // `$STANDARD_INFORMATION`, `$FILE_NAME`, non-resident `$SDS`,
+                // and the resident `$SDH` / `$SII` view indexes. That layout
+                // is 120 bytes too large at 512 bytes. At 1024 bytes the
+                // populated root directory metadata is the next system record
+                // that cannot fit. Supporting either size would require a
+                // different, Windows-validated attribute-list layout;
+                // accepting the values and failing while formatting is not
+                // support. Reject them while parsing, before `--create-size`
+                // can create an image or the target is opened read-write.
+                let unsupported_reason = match n {
+                    512 => Some(
+                        "the mandatory $Secure metadata ($SDS, $SDH, and $SII) does not fit in \
+                         a 512-byte MFT record",
+                    ),
+                    1024 => Some(
+                        "the mandatory populated root directory metadata does not fit in a \
+                         1024-byte MFT record",
+                    ),
+                    _ => None,
+                };
+                if let Some(reason) = unsupported_reason {
+                    return Err(format!(
+                        "--mft-record-size {n} is unsupported: {reason}; the smallest supported \
+                         size is 2048 bytes"
+                    ));
+                }
                 opts.mft_record_size = Some(n);
             }
             "--serial" => {

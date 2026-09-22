@@ -158,3 +158,96 @@ fn mkfs_bin_dry_run_does_not_modify_file() {
 
     let _ = std::fs::remove_file(&img);
 }
+
+#[test]
+fn mkfs_bin_rejects_undersized_records_before_creating_the_target() {
+    let bin = env!("CARGO_BIN_EXE_rust-ntfs");
+    for (record_size, constraint) in [("512", "$Secure"), ("1024", "root directory")] {
+        let img = unique_tmp_path(&format!("record-{record_size}"));
+        let img_str = img.to_string_lossy().into_owned();
+        let _ = std::fs::remove_file(&img);
+
+        let out = Command::new(bin)
+            .args([
+                "format",
+                "--create-size",
+                "64M",
+                "--mft-record-size",
+                record_size,
+                &img_str,
+            ])
+            .output()
+            .expect("spawn rust-ntfs format with an undersized record");
+
+        assert!(
+            !out.status.success(),
+            "{record_size}-byte records must be rejected"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(constraint),
+            "the {record_size}-byte constraint is explained: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("does not fit in a {record_size}-byte MFT record")),
+            "failing geometry is named: {stderr}"
+        );
+        assert!(
+            stderr.contains("smallest supported size is 2048 bytes"),
+            "supported replacement is named: {stderr}"
+        );
+        assert!(
+            !img.exists(),
+            "argument validation must run before --create-size creates the target"
+        );
+    }
+}
+
+#[test]
+fn mkfs_bin_accepts_the_smallest_supported_2048_byte_record() {
+    let bin = env!("CARGO_BIN_EXE_rust-ntfs");
+    let img = unique_tmp_path("record-2048");
+    let img_str = img.to_string_lossy().into_owned();
+    let _ = std::fs::remove_file(&img);
+
+    let out = Command::new(bin)
+        .args([
+            "format",
+            "--create-size",
+            "64M",
+            "--mft-record-size",
+            "2048",
+            &img_str,
+        ])
+        .output()
+        .expect("spawn rust-ntfs format with 2048-byte records");
+
+    assert!(
+        out.status.success(),
+        "2048-byte records must remain supported: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let params = fs_ntfs::mft_io::read_boot_params(&img).expect("read formatted boot geometry");
+    assert_eq!(params.file_record_size, 2048);
+
+    let _ = std::fs::remove_file(&img);
+}
+
+#[test]
+fn mkfs_bin_help_advertises_only_record_sizes_the_formatter_can_build() {
+    let out = Command::new(env!("CARGO_BIN_EXE_rust-ntfs"))
+        .args(["format", "--help"])
+        .output()
+        .expect("spawn rust-ntfs format --help");
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Power of 2, 2048..=16384"),
+        "help must advertise the measured supported range: {stdout}"
+    );
+    assert!(
+        stdout.contains("512 cannot hold $Secure"),
+        "help must explain why the old documented value is gone: {stdout}"
+    );
+}
