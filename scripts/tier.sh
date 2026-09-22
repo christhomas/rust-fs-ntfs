@@ -108,7 +108,7 @@ import json, sys
 packages = json.load(sys.stdin)["packages"]
 print(next((p["manifest_path"].rsplit("/", 1)[0]
             for p in packages if p["name"] == "am-fs-core"), ""))
-')" 2>/dev/null
+' 2>/dev/null)"
 metadata_status=$?
 set -e
 if [ "$metadata_status" -ne 0 ] || [ -z "$CORE_DIR" ] || [ ! -f "$CORE_DIR/scripts/output-budget.sh" ]; then

@@ -70,8 +70,14 @@ ADAPTER_RECORD="$tmp/unreached" PATH="$bin:$PATH" \
     bash "$TIER" unit -- true >"$tmp/metadata.out" 2>"$tmp/metadata.err"
 metadata_status=$?
 check 'metadata failure uses adapter status' test "$metadata_status" -eq 1
-check 'metadata failure is concise and actionable' \
-    grep -q 'cargo could not say where am-fs-core is' "$tmp/metadata.err"
+cat > "$tmp/metadata.expected" <<'EOF'
+tier.sh: cargo could not say where am-fs-core is, or its copy has no
+         scripts/output-budget.sh. The wrapper lives in rust-fs-core;
+         check the am-fs-core dependency resolves and is at a version
+         that ships it (v0.2.11 or later).
+EOF
+check 'metadata failure is exactly the concise adapter diagnostic' \
+    cmp -s "$tmp/metadata.expected" "$tmp/metadata.err"
 check 'metadata failure creates no copy' no_copies
 
 cat > "$bin/cargo" <<'EOF'
