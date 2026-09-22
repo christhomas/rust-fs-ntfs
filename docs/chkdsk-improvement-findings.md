@@ -170,7 +170,7 @@ complete model of the differentiator (see
 
 `cargo test --release --lib mkfs --test mkfs_roundtrip --test
 mkfs_bin_smoke` MUST be green on every commit. The pre-commit hook
-([`scripts/install-hooks.sh`](../scripts/install-hooks.sh)) enforces
+(github-guard's, installed into `.git/hooks`) enforces
 `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
 **`--no-verify` was never used** in the multi-agent run.
 
@@ -2420,7 +2420,7 @@ cargo clippy --all-targets -- -D warnings   # clean
 ```
 
 The pre-commit hook
-([`scripts/install-hooks.sh`](../scripts/install-hooks.sh)) enforces
+(github-guard's, installed into `.git/hooks`) enforces
 the latter two. **No `--no-verify` was used.**
 
 ### 7.5 Tests updated only when intentionally fixing buggy assertions
