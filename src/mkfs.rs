@@ -124,16 +124,35 @@ const LOGFILE_CANONICAL: &[u8] = include_bytes!("logfile-canonical-12k.bin");
 /// * `WIN32_DOS` (3) is used on every name we currently ship: root,
 ///   the canonical 0..10 system files, and `$Extend` itself. All
 ///   these names fit DOS 8.3.
-/// * `POSIX` (0) is the value any future `$Extend` descendant must
-///   pass to `write_file_name` / `build_file_name_stream` — Iter L
-///   2026-05-22 byte truth (clean Windows-format reference) showed
-///   every `$Extend` child uses POSIX namespace, and shipping an
-///   11-char name like `$RmMetadata` with `WIN32_DOS` makes chkdsk
-///   Stage 2 reject it ("An invalid filename X (11) was found in
-///   directory B"). Defined here (despite no current call site) so
-///   the rule documented above is self-enforcing at the call site
-///   the day we re-introduce those records.
-#[allow(dead_code)] // Reserved for future $Extend descendants; see docstring above.
+/// * `POSIX` (0) is what Iter L's byte truth (2026-05-22, clean
+///   Windows-format reference) recorded for every `$Extend` child, and
+///   shipping an 11-char name like `$RmMetadata` with `WIN32_DOS` makes
+///   chkdsk Stage 2 reject it ("An invalid filename X (11) was found in
+///   directory B").
+///
+///   THIS CRATE SHIPS `WIN32_DOS` FOR ITS THREE `$Extend` CHILDREN, and
+///   that contradicts the measurement above. `$ObjId`, `$Reparse` and
+///   `$Quota` (records 16, 17, 18) are built and placed today, and both
+///   sites that stamp a namespace byte for them use `NAMESPACE_WIN32_DOS`
+///   -- three in-record `$FILE_NAME`s and three `$I30` index entries, on
+///   every volume this crate formats.
+///
+///   The names are 6, 8 and 6 characters, so they fit 8.3 and do not
+///   trip the length rule the measurement's example did. The 46-scenario
+///   matrix is green with the bytes as they are, so this is not a known
+///   failure -- it is a documented rule and its violation twenty lines
+///   apart, and a candidate for the unexplained residue in the chkdsk
+///   investigation. #182 holds the measured change: switch the two sites
+///   to POSIX and re-run the affected scenarios, or record why WIN32_DOS
+///   is right for these three. Either needs the VM, not an opinion.
+///
+///   The constant carried `#[allow(dead_code)]` and "despite no current
+///   call site", which told a reader the rule was dormant. It is not:
+///   the records exist and the sites that should consult it do not. The
+///   attribute stays because the constant really is unreferenced -- but
+///   the reason is now the true one, and it names the issue rather than
+///   implying there is nothing to check.
+#[allow(dead_code)] // Unreferenced BECAUSE the two sites that should use it do not: #182.
 const NAMESPACE_POSIX: u8 = 0;
 const NAMESPACE_WIN32_DOS: u8 = 3;
 

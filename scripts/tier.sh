@@ -7,9 +7,10 @@
 # its budget fails with status 65 -- told apart from a failing suite, which
 # exits with the suite's own status.
 #
-# The work is done by the harness's scripts/output-budget.sh (the pinned
-# ../fs-windows-test-harness sibling, v4.1.0 and later). This file only owns
-# the part that is ours: which tiers exist, and how much each may print.
+# The work is done by rust-fs-core's canonical scripts/output-budget.sh. This
+# file resolves that script from a coordinated sibling or the packaged Cargo
+# dependency, and owns only the part that is ours: which tiers exist and how
+# much each may print.
 #
 # WHY THE BUDGET IS PART OF THE TIER and not a CI-only check: the reader who
 # pays most for a noisy suite is the one running it -- a person scrolling, or
@@ -30,7 +31,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUDGET="$REPO/../fs-windows-test-harness/scripts/output-budget.sh"
+BUDGET=""
 
 [ $# -ge 3 ] || { echo "tier.sh: usage: tier.sh TIER -- COMMAND [ARG...]" >&2; exit 2; }
 TIER="$1"; shift
@@ -47,7 +48,7 @@ shift
 # only Linux can build) it does not pass, and a failing run is not budgeted.
 #
 #   tier        measured (lines / bytes)                          budget
-#   clippy      94 / 3,037 cold, 1 / 70 warm                      150 / 5,000
+#   clippy      196 / 8,654 (CI Linux, 2026-09-19)                260 / 11,500
 #   unit        744 / 47,145 cold (Mac), 653 / 44,386 (CI Linux)  1,000 / 64,000
 #   unit-debug  723 / 46,497 cold (Mac), 674 / 46,723 (CI Linux)  1,000 / 64,000
 #   mkfs        115 / 3,858 cold (Mac), 24 / 1,022 warm           160 / 5,200
@@ -56,6 +57,14 @@ shift
 #   scripts     56 / 1,180 (four shell tests)                      80 / 1,800
 #   matrix      633 / 35,311 green, 1,521 / 78,075 red (see below)  900 / 50,000
 #
+# THE CLIPPY ROW MOVED ON 2026-09-19, from 150/5,000 to 260/11,500. Adding
+# tests/fuzz_decoders.rs gave `--all-targets` another target to lint, and a
+# cold clippy prints a line per crate compiled: the measured figure went from
+# 94 lines to 196 on CI (run 35448280025, job 105910912877). Raised to that
+# plus a third, by the same rule as every other row. This is the "raise the
+# budget deliberately" the failure message asks for -- the run passed, it
+# simply printed more than the old measurement allowed.
+
 # THE MATRIX ROW is measured on a GREEN 46-scenario run (2026-09-18, 46 min,
 # max_parallel=4): 633 lines / 35,311 bytes, budgeted at that plus a third.
 # Only a passing run is budgeted, so the 1,521 lines the same matrix printed
@@ -64,7 +73,7 @@ shift
 # only tier whose length depends on a machine rather than on this repository,
 # so it is the one most likely to need raising -- do that with a measurement.
 case "$TIER" in
-    clippy)     MAX_LINES=150;  MAX_BYTES=5000 ;;
+    clippy)     MAX_LINES=260;  MAX_BYTES=11500 ;;
     unit)       MAX_LINES=1000; MAX_BYTES=64000 ;;
     unit-debug) MAX_LINES=1000; MAX_BYTES=64000 ;;
     mkfs)       MAX_LINES=160;  MAX_BYTES=5200 ;;
@@ -78,23 +87,19 @@ case "$TIER" in
         ;;
 esac
 
-if [ ! -x "$BUDGET" ]; then
-    echo "tier.sh: $BUDGET is missing." >&2
-    echo "         The harness is a pinned sibling -- run 'chore siblings'." >&2
-    exit 1
-fi
+BUDGET="$(bash "$REPO/scripts/resolve-output-budget.sh")"
 
 # `chore test:unit -- --verbose` arrives as CLI_ARGS. output-budget.sh reads
-# FWTH_VERBOSE itself, so mapping the flag onto it is all that is needed --
-# and the variable and the flag cannot disagree.
+# OUTPUT_BUDGET_VERBOSE itself, so mapping the flag onto it is all that is
+# needed -- and the variable and the flag cannot disagree.
 case " ${CLI_ARGS:-} " in
-    *" --verbose "*|*" -v "*) export FWTH_VERBOSE=1 ;;
+    *" --verbose "*|*" -v "*) export OUTPUT_BUDGET_VERBOSE=1 ;;
 esac
 
 LOG="$REPO/tmp/logs/$TIER.log"
 
 set +e
-"$BUDGET" \
+bash "$BUDGET" \
     --log "$LOG" \
     --max-lines "$MAX_LINES" \
     --max-bytes "$MAX_BYTES" \

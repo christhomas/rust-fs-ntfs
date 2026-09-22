@@ -88,7 +88,45 @@ fn run_inner(args: Vec<String>, prog: &str) -> Result<(), String> {
     let cluster_size = opts.cluster_size.unwrap_or(4096);
     let mft_record_size = opts.mft_record_size.unwrap_or(4096);
 
+    // THE CAP THE USAGE TEXT PROMISES, CHECKED BEFORE ANYTHING IS
+    // TOUCHED. `-L` documents "max 32 UTF-16 code units after encode"
+    // and nothing enforced it (#180): a longer label either shipped an
+    // out-of-spec volume or failed deep inside the formatter, after the
+    // device had already been partly written. Refusing here costs the
+    // user a retyped command instead of a half-formatted disk.
+    //
+    // Counted in UTF-16 code units, not characters: the cap is on what
+    // goes in `$VOLUME_NAME`, so an emoji is two and an accented letter
+    // may be one or two depending on how it is composed.
+    if let Some(label) = opts.label.as_deref() {
+        let units = label.encode_utf16().count();
+        if units > 32 {
+            return Err(format!(
+                "--label: {units} UTF-16 code units, and the limit is 32. NTFS stores the label \
+                 in $VOLUME_NAME, which is 64 bytes. Shorten it: {label:?}"
+            ));
+        }
+    }
+
     if let Some(n) = opts.create_size {
+        // -n IS A DRY RUN OF THE WHOLE COMMAND, not of the format step.
+        // `--create-size` used to run unconditionally, so `format -n
+        // --create-size 64M /tmp/new.img` created and sized a 64 MiB file
+        // and then said "no writes performed" (#181). Creating a file is
+        // a write, and the sentence was false about the only thing the
+        // command had done.
+        if opts.dry_run {
+            if !opts.quiet {
+                match std::fs::metadata(device) {
+                    Ok(meta) => eprintln!(
+                        "{prog}: dry-run — would leave existing {device} as-is ({} bytes)",
+                        meta.len()
+                    ),
+                    Err(_) => eprintln!("{prog}: dry-run — would create {device} ({n} bytes)"),
+                }
+            }
+            return Ok(());
+        }
         match std::fs::metadata(device) {
             Ok(meta) => {
                 let ft = meta.file_type();

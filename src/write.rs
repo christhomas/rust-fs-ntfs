@@ -1270,23 +1270,56 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
     // readme.txt to README.TXT finds the file's OWN entry under the new
     // name -- a case-only rename is the one case where the destination
     // legitimately collates equal to the source, and Windows allows it.
+    // THE FILE'S OWN ENTRY IS THE ONE BEING RENAMED, not any entry that
+    // happens to name the same file. Excluding by record number assumes
+    // a file has one name in a directory, and hard links break that: with
+    // `A.txt` and `B.txt` both pointing at record 42, renaming `A.txt` to
+    // `b.txt` found `B.txt`'s entry, saw the same record number, called it
+    // "the file's own entry" and renamed in place -- leaving two `$I30`
+    // entries with equal collation keys, which is the corruption this
+    // check exists to prevent (#219).
+    //
+    // `record_offset` identifies the entry itself, which is the
+    // distinction a record number cannot make. A case-only rename still
+    // works, because there the clash IS the same entry.
     if new_name != current_basename {
+        let own_in_root =
+            index_io::find_index_entry(&parent_record_bytes, &current_basename, Some(&upcase))?;
         if let Some(clash) =
             index_io::find_index_entry(&parent_record_bytes, new_name, Some(&upcase))?
         {
-            if clash.file_record_number != file_rec {
-                return Err(format!("'{new_name}' already exists"));
+            let is_own_entry = own_in_root
+                .as_ref()
+                .is_some_and(|own| own.record_offset == clash.record_offset);
+            if !is_own_entry {
+                return Err(format!(
+                    "'{new_name}' already exists (record {}), and it is a different index entry \
+                     from the one being renamed",
+                    clash.file_record_number
+                ));
             }
         }
         if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
             let ia = idx_block::load_for_directory_io(io, parent_rec)?;
             for vcn in ia.allocated_block_vcns() {
                 let blk = idx_block::read_indx_block_io(io, &ia, vcn)?;
+                let own_here =
+                    index_io::find_entry_in_indx_block(&blk, &current_basename, Some(&upcase))?;
                 if let Some(clash) =
                     index_io::find_entry_in_indx_block(&blk, new_name, Some(&upcase))?
                 {
-                    if clash.file_record_number != file_rec {
-                        return Err(format!("'{new_name}' already exists"));
+                    // Same block AND same offset: (vcn, offset) is the
+                    // entry's identity once the block is fixed.
+                    let is_own_entry = own_here
+                        .as_ref()
+                        .is_some_and(|own| own.record_offset == clash.record_offset);
+                    if !is_own_entry {
+                        return Err(format!(
+                            "'{new_name}' already exists in this directory (record {}, INDX block \
+                             VCN {vcn}), and it is a different index entry from the one being \
+                             renamed",
+                            clash.file_record_number
+                        ));
                     }
                 }
             }
@@ -1351,11 +1384,92 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
     }
 
     // 2) Patch the file's own $FILE_NAME attributes.
-    update_mft_record_io(io, file_rec, |record| {
+    //
+    // STEP 1 IS ALREADY ON DISK. Both branches above write and sync the
+    // parent's index entry under the NEW name, so returning the error
+    // here used to leave the directory saying one name and the file's
+    // own `$FILE_NAME` saying the other -- a torn rename, produced
+    // silently, and the inconsistency chkdsk reports (#140).
+    // `rename_replace_io` learned to undo its first step in 8021a3f;
+    // this path, which handles the more common case, did not.
+    //
+    // The undo is the same edit backwards, and it can fail too. If it
+    // does, both names are reported, because at that point neither this
+    // function nor the caller knows which one the volume will answer to.
+    if let Err(e) = update_mft_record_io(io, file_rec, |record| {
         index_io::rename_filename_attribute_same_length(record, &current_basename, new_name)
-    })?;
+    }) {
+        let undo = undo_index_rename_same_length(
+            io,
+            parent_rec,
+            ir_flags,
+            new_name,
+            &current_basename,
+            &upcase,
+        );
+        return Err(match undo {
+            Ok(()) => format!(
+                "renaming the file's own $FILE_NAME failed ({e}); the directory entry was put \
+                 back, so the file is still '{current_basename}'"
+            ),
+            Err(ue) => format!(
+                "renaming the file's own $FILE_NAME failed ({e}), and putting the directory \
+                 entry back failed too ({ue}): the directory now says '{new_name}' and the \
+                 file's own $FILE_NAME says '{current_basename}' — run chkdsk"
+            ),
+        });
+    }
 
     Ok(())
+}
+
+/// Put a same-length index-entry rename back, for the rollback above.
+///
+/// Renaming `from` to `to` in the parent's index is the same operation
+/// whichever direction it runs in, so this is step 1 again with the
+/// names swapped -- including the `$INDEX_ROOT` / INDX split, because a
+/// directory that spilled is exactly the one whose entry is hardest to
+/// find twice.
+fn undo_index_rename_same_length<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    ir_flags: u8,
+    from: &str,
+    to: &str,
+    upcase: &crate::upcase::UpcaseTable,
+) -> Result<(), String> {
+    update_mft_record_io(io, parent_rec, |record| {
+        match index_io::find_index_entry(record, from, Some(upcase))? {
+            Some(entry) => index_io::rename_index_entry_same_length(record, &entry, to),
+            None => Ok(()),
+        }
+    })?;
+    // Did the resident index hold it? If so, the update above did the
+    // work; otherwise look through the allocated blocks.
+    let (_params, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
+    if index_io::find_index_entry(&parent_record_bytes, to, Some(upcase))?.is_some() {
+        return Ok(());
+    }
+    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES == 0 {
+        return Err(format!(
+            "the entry for '{from}' is no longer in the parent's resident $INDEX_ROOT, and the \
+             directory has no $INDEX_ALLOCATION to look in"
+        ));
+    }
+    let ia = idx_block::load_for_directory_io(io, parent_rec)?;
+    for vcn in ia.allocated_block_vcns() {
+        let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+        if index_io::find_entry_in_indx_block(&block, from, Some(upcase))?.is_some() {
+            return idx_block::update_indx_block_io(io, &ia, vcn, |block| {
+                let entry = index_io::find_entry_in_indx_block(block, from, Some(upcase))?
+                    .ok_or_else(|| "race: INDX entry vanished during rollback".to_string())?;
+                index_io::rename_index_entry_same_length(block, &entry, to)
+            });
+        }
+    }
+    Err(format!(
+        "could not find the entry for '{from}' to put it back"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1373,9 +1487,44 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
 /// `rename_same_length_io` — tested only for a separator and emptiness.
 /// That path is public through `facade::rename_same_length` and through
 /// the C ABI as `fs_ntfs_rename_same_length`, with no guard downstream.
+/// The single gate every create, mkdir, link and rename passes through.
+///
+/// IT USED TO CHECK ONLY FOR PATH SEPARATORS, and this crate writes NTFS
+/// volumes, where the name rule is Windows'. `create_file("/", "a:b")`
+/// and `mkdir("/", "C:\\Windows")` both succeeded and wrote the
+/// character into `$FILE_NAME` (#151). The entry is then on the volume
+/// and enumerates, and Windows cannot address it: every Win32 path API
+/// reads `a:b` as the stream `b` of the file `a`, and `C:\Windows` as a
+/// path. Explorer lists such a file and then fails to open, rename, copy
+/// or delete it -- a file the user cannot get rid of without a low-level
+/// tool.
+///
+/// A host passing a name straight through from a POSIX API, where `:`
+/// and `\` are ordinary characters, produces these as a matter of
+/// course rather than as an edge case.
 fn validate_basename(name: &str) -> Result<(), String> {
-    if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+    if name.is_empty() || name == "." || name == ".." {
         return Err(format!("invalid basename: '{name}'"));
+    }
+    // The Win32 reserved set, and the control range. `/` is here as well
+    // as in the check above, because it is both "not a component" and a
+    // character NTFS refuses.
+    if let Some(bad) = name.chars().find(|c| {
+        matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (*c as u32) < 0x20
+    }) {
+        return Err(format!(
+            "invalid basename '{name}': Windows cannot address a name containing {bad:?}. \
+             Reserved: \\ / : * ? \" < > | and the control characters"
+        ));
+    }
+    // A TRAILING SPACE OR PERIOD IS UNADDRESSABLE FOR THE SAME REASON:
+    // Windows strips both when it parses a path, so "report." names the
+    // file "report" and can never reach the one actually on the volume.
+    if name.ends_with(' ') || name.ends_with('.') {
+        return Err(format!(
+            "invalid basename '{name}': Windows strips a trailing space or period when it \
+             parses a path, so this name could never be opened by the name it has"
+        ));
     }
     Ok(())
 }
@@ -1499,6 +1648,7 @@ fn undo_new_record_io<T: BlockIo + ?Sized>(
     cause: String,
 ) -> String {
     let mut failures: Vec<String> = Vec::new();
+    let mut in_use_cleared = state != NewRecordState::RecordWritten;
     if state == NewRecordState::RecordWritten {
         if let Err(e) = update_mft_record_io(io, new_rec, |record| {
             let cur = u16::from_le_bytes([record[0x16], record[0x17]]);
@@ -1507,19 +1657,48 @@ fn undo_new_record_io<T: BlockIo + ?Sized>(
             Ok(())
         }) {
             failures.push(format!("clearing IN_USE failed: {e}"));
+        } else {
+            in_use_cleared = true;
         }
     }
+    let mut bit_freed = true;
     if let Err(e) = mft_bitmap::free_io(io, mbm, new_rec) {
+        bit_freed = false;
         failures.push(format!("freeing the $MFT:$Bitmap bit failed: {e}"));
     }
     if failures.is_empty() {
-        cause
-    } else {
-        format!(
-            "{cause} (rollback incomplete, MFT record {new_rec} leaked: {})",
-            failures.join("; ")
-        )
+        return cause;
     }
+
+    // WHICH HALF FAILED DECIDES WHAT IS WRONG WITH THE VOLUME, and the
+    // message used to call every incomplete rollback a leak (#273).
+    // Only one of the three is:
+    //
+    //   * the bit is still set  -> the slot is spoken for and nothing
+    //     will reuse it. That is a leak.
+    //   * the bit was freed and IN_USE is still set -> the opposite of a
+    //     leak: the slot is available, and the next allocation will find
+    //     a record that still says it is in use. Whether that is
+    //     tolerated depends on the allocator, so it is named for what it
+    //     is rather than filed under the wrong word.
+    //   * both failed -> both descriptions apply.
+    let shape = match (bit_freed, in_use_cleared) {
+        (false, true) => format!("MFT record {new_rec} leaked: its $MFT:$Bitmap bit is still set"),
+        (true, false) => format!(
+            "MFT record {new_rec} is NOT leaked -- its $MFT:$Bitmap bit was freed -- but the \
+             record still has IN_USE set, so the next allocation of that slot meets a record \
+             that claims to be live"
+        ),
+        (false, false) => format!(
+            "MFT record {new_rec} leaked AND still says IN_USE: neither half of the rollback \
+             landed"
+        ),
+        (true, true) => unreachable!("failures is non-empty, so one of the two must have failed"),
+    };
+    format!(
+        "{cause} (rollback incomplete, {shape}: {})",
+        failures.join("; ")
+    )
 }
 
 pub fn create_file_io<T: BlockIo + ?Sized>(
@@ -1800,9 +1979,13 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
     // the sequence number exists to prevent. See
     // `mft_io::next_sequence_for_slot`.
     let new_seq = crate::mft_io::next_sequence_for_allocation_io(io, &params, new_rec)?;
-    // For a fresh directory, use cluster_size as the index block size —
-    // matches what NTFS formatter does for small volumes.
-    let index_block_size = params.cluster_size as u32;
+    // THE BOOT SECTOR DECIDES THE INDEX BLOCK SIZE, NOT THIS FUNCTION.
+    // This used to be `params.cluster_size`, while `mkfs` writes 4096 at
+    // boot+0x44 whatever the cluster size -- so `mkdir` on a volume with
+    // any cluster size other than 4096 produced a directory whose
+    // `$INDEX_ROOT` contradicted the boot sector, and chkdsk reports
+    // `Corrupt master file table` on that mismatch (#144).
+    let index_block_size = params.index_block_size;
     let mut new_record = crate::record_build::build_directory_record(
         params.file_record_size as usize,
         new_rec as u32,
@@ -1812,6 +1995,7 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
         nt_time,
         params.bytes_per_sector,
         index_block_size,
+        params.cluster_size as u32,
     )?;
     crate::mft_io::apply_fixup_on_write(&mut new_record, params.bytes_per_sector)?;
 
@@ -3066,11 +3250,67 @@ pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
         return Err("stream_name must be non-empty".to_string());
     }
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+
+    // A NON-RESIDENT STREAM OWNS CLUSTERS, and removing the attribute
+    // was the whole of the delete -- so the last reference to those
+    // clusters went with it and `$Bitmap` still called them allocated.
+    // Nothing on the volume pointed at them afterwards, so even `unlink`
+    // could not reclaim them: the loss was permanent, and it happened on
+    // every rewrite of a promoted stream too, because that path deletes
+    // the old attribute before inserting the new one (#142).
+    //
+    // The runs are read BEFORE the attribute is removed, and freed after
+    // the record is written -- the ordering `truncate` documents and
+    // `unlink` now follows (#141): a crash between the two leaves
+    // clusters marked allocated that nothing owns, never a live
+    // attribute pointing at free space.
+    let (_params, record_bytes) = read_mft_record_io(io, rec)?;
+    let runs_to_free =
+        match attr_io::find_attribute(&record_bytes, AttrType::Data, Some(stream_name)) {
+            Some(loc) if !loc.is_resident => {
+                let mapping_offset = loc
+                    .non_resident_mapping_pairs_offset
+                    .ok_or("non-resident named stream has no mapping-pairs offset")?
+                    as usize;
+                let start = loc.attr_offset + mapping_offset;
+                let end = loc.attr_offset + loc.attr_length;
+                if start >= end || end > record_bytes.len() {
+                    return Err(format!(
+                        "named stream '{stream_name}' has a mapping-pair range outside its record"
+                    ));
+                }
+                data_runs::decode_runs(&record_bytes[start..end])?
+                    .into_iter()
+                    .filter_map(|run| {
+                        run.lcn
+                            .filter(|_| run.length > 0)
+                            .map(|lcn| (lcn, run.length))
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+
     update_mft_record_io(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, Some(stream_name))
             .ok_or_else(|| format!("named stream '{stream_name}' not found"))?;
         remove_attribute_at(record, loc.attr_offset, loc.attr_length)
-    })
+    })?;
+
+    if !runs_to_free.is_empty() {
+        let bm = bitmap::locate_bitmap_io(io)?;
+        for (lcn, n) in runs_to_free {
+            bitmap::free_io(io, &bm, lcn, n).map_err(|e| {
+                format!(
+                    "the named stream '{stream_name}' was removed, but freeing its clusters \
+                     [{lcn}..{}] failed ({e}): those clusters are still marked allocated and \
+                     nothing owns them now",
+                    lcn + n
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -4308,15 +4548,22 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
         return Ok(());
     }
 
-    // 2) Free the clusters of EVERY non-resident attribute, not just the
-    //    unnamed $DATA: named non-resident $DATA streams and any attribute
-    //    promoted to non-resident own clusters in $Bitmap too. Freeing only
-    //    the unnamed $DATA (as this path used to) leaked theirs on every
-    //    last-link delete. Resident attributes live inside the MFT record
-    //    and are reclaimed when its bit is freed below.
-    free_all_nonresident_runs_io(io, &file_record_bytes)?;
-
-    // 3) Clear IN_USE flag in the file's MFT record.
+    // 2) RETIRE THE RECORD FIRST, THEN FREE THE CLUSTERS. This is the
+    //    ordering `truncate` documents, and this path used to run it
+    //    backwards (#141).
+    //
+    //    Freeing first opens a window where the record is still IN_USE,
+    //    its mapping pairs still name a set of clusters, and `$Bitmap`
+    //    says those clusters are free. A crash there -- power loss, the
+    //    device pulled, an I/O error in the next step -- leaves a live
+    //    file pointing at free space, and the next `create_file`, `grow`
+    //    or `promote` is handed those very clusters by
+    //    `bitmap::find_free_run_io` and writes over the surviving file's
+    //    contents. Two files, the same LCNs.
+    //
+    //    This way round the worst case is the one truncate's comment
+    //    describes: clusters still marked allocated that nothing owns.
+    //    Wasted space, recoverable by a scan, and nothing is overwritten.
     update_mft_record_io(io, file_rec, |record| {
         let flags_off = 0x16;
         let cur = u16::from_le_bytes([record[flags_off], record[flags_off + 1]]);
@@ -4324,6 +4571,17 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
         record[flags_off..flags_off + 2].copy_from_slice(&new.to_le_bytes());
         Ok(())
     })?;
+
+    // 3) Free the clusters of EVERY non-resident attribute, not just the
+    //    unnamed $DATA: named non-resident $DATA streams and any attribute
+    //    promoted to non-resident own clusters in $Bitmap too. Freeing only
+    //    the unnamed $DATA (as this path used to) leaked theirs on every
+    //    last-link delete. Resident attributes live inside the MFT record
+    //    and are reclaimed when its bit is freed below.
+    //
+    //    Read from `file_record_bytes`, the copy taken BEFORE the flag
+    //    was cleared, so the mapping pairs are the ones the file had.
+    free_all_nonresident_runs_io(io, &file_record_bytes)?;
 
     // 4) Free the MFT record bit.
     let mbm = mft_bitmap::locate_io(io)?;
@@ -6227,11 +6485,54 @@ mod basename_validation_tests {
     }
 
     /// Names that merely contain dots are fine — only the two special
-    /// components are not.
+    /// components are not, and only at the END does a dot matter.
     #[test]
     fn ordinary_names_pass() {
-        for ok in ["a", "ab", "..a", "a..", "a.b", "...", "file.txt"] {
+        for ok in ["a", "ab", "..a", "a.b", "file.txt", "a b", " lead"] {
             assert!(validate_basename(ok).is_ok(), "{ok:?} is a legal file name");
+        }
+    }
+
+    /// THE WIN32 RESERVED SET. NTFS stores these bytes happily; Windows
+    /// cannot address the result. `a:b` is read by every Win32 path API
+    /// as the stream `b` of the file `a`, so the entry lists in Explorer
+    /// and then cannot be opened, renamed, copied or deleted (#151).
+    #[test]
+    fn names_windows_cannot_address_are_rejected() {
+        for bad in [
+            "a:b",
+            "C:\\Windows",
+            "what?",
+            "star*",
+            "quote\"",
+            "less<",
+            "greater>",
+            "pipe|",
+            "ctrl\u{1}",
+        ] {
+            assert!(
+                validate_basename(bad).is_err(),
+                "{bad:?} contains a character Windows reserves"
+            );
+        }
+    }
+
+    /// A CONTRACT CHANGE, RECORDED. `a..` and `...` used to be asserted
+    /// legal, and they are legal NTFS names -- but Windows strips a
+    /// trailing period or space when it parses a path, so a file called
+    /// `a..` can only ever be opened as `a`. The name is on the volume
+    /// and unreachable by it, which is the same failure as the reserved
+    /// characters above and is why #151 asks for both.
+    ///
+    /// A LEADING dot or space is untouched and stays legal, which is
+    /// what `..a` and `" lead"` above check.
+    #[test]
+    fn a_trailing_dot_or_space_is_rejected() {
+        for bad in ["a..", "...", "report.", "trailing "] {
+            assert!(
+                validate_basename(bad).is_err(),
+                "{bad:?} ends in something Windows strips, so it could not be opened by name"
+            );
         }
     }
 }

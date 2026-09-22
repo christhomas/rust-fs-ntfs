@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Budgeted test tiers resolve the canonical wrapper from `rust-fs-core`.**
+  A full development checkout uses the sibling core directly; a standalone
+  checkout uses the packaged Cargo source. The wrapper is verified by API
+  version and SHA-256 before it runs, and a missing or stale source fails with
+  an actionable error. The Windows harness receives only a transient staged
+  copy for a test run; it does not own a second implementation.
+
+- **The fuzz harness runs, and covers more than three decoders.** Three
+  `cargo-fuzz` targets were added on 2026-05-03 and no workflow ever ran
+  them. They had also never *compiled*: `fuzz/Cargo.toml` named the
+  dependency `fs-ntfs` where the package is `am-fs-ntfs`. And
+  `fuzz/.gitignore` ignored `corpus`, so even had they built and run,
+  they would have started from nothing every time. A harness nothing runs
+  is indistinguishable from one that runs and finds nothing.
+
+  Fixed, plus four new targets — `image`, `boot_sector`, `index_block`
+  and `decompress_unit` — a nightly workflow that runs all seven on a
+  bounded budget, and `tests/fuzz_decoders.rs`, a deterministic gate that
+  replays and mutates the same corpus on the stable toolchain: 92,544
+  cases in under three seconds.
+
+  The corpus is two volumes `mkntfs` wrote, at 4 KiB and 512-byte
+  clusters — the cluster size is the unit every run list is measured in,
+  so a smaller one makes the lists longer and the numbers smaller.
+  `decode_runs`, `decode_eas`, `iter_attributes` and `decompress_unit`
+  share the MFT-record corpus rather than each keeping a copy, because
+  all four take a fragment of a record rather than a structure of their
+  own (#296).
+
 ### Fixed
 
 - One file-reference encoder, not two. `encode_file_reference` was defined

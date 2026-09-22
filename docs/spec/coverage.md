@@ -13,7 +13,7 @@ piece?"
 
 | Tag | Meaning |
 | --- | ------- |
-| **VERIFIED** | Confirmed by source code **and** by external behavioral testing — Windows mount, `chkdsk`, or 42/42 matrix pass. The claim has been stress-tested, not just written. |
+| **VERIFIED** | Confirmed by source code **and** by external behavioral testing — Windows mount, `chkdsk`, or a full matrix pass. The claim has been stress-tested, not just written. The matrix is 46 scenarios and its last full pass is 46/46 on 2026-09-19; the tag used to be defined against "42/42", a run of a scenario count this matrix has never had (#155). |
 | **OBSERVED** | Confirmed by reading `rust-fs-ntfs` source code. The implementation does it; it hasn't been independently stress-tested in isolation. |
 | **UNVERIFIED** | Documented in the spec but not yet confirmed by code or external test. We believe it is true; we haven't proved it. |
 | **UNKNOWN** | Known gap: the structure or feature is acknowledged to exist but its internal layout or behavior has not been documented here. |
@@ -61,7 +61,7 @@ implements the feature, independent of how well-documented it is:
 | 21 | Reserved zero bytes at `0x045`–`0x047` | `0x045` | ✅ | **OBSERVED** | Zero-filled |
 | 22 | `VolumeSerialNumber` | `0x048` | ✅ | **OBSERVED** | 64-bit random; not validated by spec |
 | 23 | `Checksum` | `0x050` | ✅ | **OBSERVED** | Written as `0`; Windows mounts without validating |
-| 24 | `BootCode` (426 bytes) | `0x054` | ✅ | **VERIFIED** | 3-byte halt loop sufficient; 42/42 matrix passes |
+| 24 | `BootCode` (426 bytes) | `0x054` | ✅ | **VERIFIED** | 3-byte halt loop sufficient; 46/46 matrix pass, 2026-09-19 |
 | 25 | `BootSignature` | `0x1FE` | ✅ | **VERIFIED** | `55 AA` — required at mount |
 
 ### Boot sector algorithms
@@ -463,7 +463,7 @@ implements the feature, independent of how well-documented it is:
 | 219 | File size `0x3B_0000` bytes (≈ 3.78 MiB) for 256 MiB / 4 KiB reference volume | ✅ | **VERIFIED** | Confirmed vs `format.com` |
 | 220 | `FileSize` in restart area must match on-disk allocated length | ✅ | **VERIFIED** | chkdsk "adjusting the size" diagnostic confirmed |
 | 221 | Two-page layout: page 0 = restart A, page 1 = restart B | ✅ | **VERIFIED** | Canonical 12 KiB blob confirmed |
-| 222 | Canonical "empty but valid" shape (RSTR × 2 + RCRD × 1 + `0xFF` fill) | ✅ | **VERIFIED** | 42/42 matrix passes with this shape |
+| 222 | Canonical "empty but valid" shape (RSTR × 2 + RCRD × 1 + `0xFF` fill) | ✅ | **VERIFIED** | 46/46 matrix pass with this shape, 2026-09-19 |
 
 ### LFS restart page (`RSTR`)
 

@@ -33,7 +33,17 @@ fn boot_image(tag: &str, bytes_per_sector: u16, spc_raw: u8) -> String {
     b[0x0B..0x0D].copy_from_slice(&bytes_per_sector.to_le_bytes());
     b[0x0D] = spc_raw;
     b[0x30..0x38].copy_from_slice(&4u64.to_le_bytes()); // mft_lcn
-    b[0x40] = (-10i8) as u8; // clusters_per_mft_record → 1024-byte records
+                                                        // THE RECORD MUST BE AT LEAST ONE SECTOR. The fixup stride is a
+                                                        // sector, so a record smaller than one has no stride and its
+                                                        // torn-write check can never fail -- a geometry Windows does not
+                                                        // write and the parse now refuses (#154). This used to be a flat
+                                                        // -10 (1024-byte records), which made the 4Kn case below an
+                                                        // impossible volume rather than the ordinary one it is testing.
+    b[0x40] = if bytes_per_sector > 1024 {
+        (-12i8) as u8 // 4096-byte records
+    } else {
+        (-10i8) as u8 // 1024-byte records
+    };
     std::fs::write(&path, &b).expect("write boot image");
     path
 }

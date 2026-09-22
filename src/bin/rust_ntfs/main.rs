@@ -1,25 +1,30 @@
 //! rust-ntfs — unified NTFS CLI (format, list, write, delete).
 //!
-//! Subcommand dispatcher for the four operations the matrix runner and
-//! one-off NTFS work both need:
+//! Subcommand dispatcher for the twelve operations the matrix runner and
+//! one-off NTFS work both need. (It said "the four operations" and then
+//! listed ten, for a binary that dispatches twelve -- #186.)
 //!
-//!   format  Build a fresh NTFS volume on a pre-sized image / device.
-//!   ls      Read-only recursive directory walk.
-//!   touch   Create an empty file.
-//!   mkdir   Create a directory.
-//!   write   Write bytes to an existing file's unnamed `$DATA`.
-//!   rm      Remove a regular file.
-//!   rmdir   Remove an empty directory.
-//!   link    Create a hard link to an existing file.
-//!   rename  Rename an entry within its parent directory.
-//!   remove  POSIX-style remove (dispatches file/dir by type).
+//!   format     Build a fresh NTFS volume on a pre-sized image / device.
+//!   ls         Read-only recursive directory walk.
+//!   touch      Create an empty file.
+//!   mkdir      Create a directory.
+//!   write      Write bytes to an existing file's unnamed `$DATA`.
+//!   sparse     Write a file's `$DATA` as a SPARSE stream.
+//!   rm         Remove a regular file.
+//!   rmdir      Remove an empty directory.
+//!   link       Create a hard link to an existing file.
+//!   rename     Rename an entry within its parent directory.
+//!   remove     POSIX-style remove (dispatches file/dir by type).
+//!   set-dirty  Mark a volume dirty (test-scenario helper).
 //!
 //! Single binary so distribution (GitHub releases, Homebrew taps) ships
 //! one artefact rather than four. Each subcommand lives in its own
 //! module so the per-command help / argv parsing stays small.
 //!
-//! Exit codes: 0 success, 1 failure, 2 usage error.
+//! Exit codes: 0 success, 1 failure, 2 usage error. Kept by every verb
+//! through `cli::finish`, not only by this dispatcher -- see `cli.rs`.
 
+mod cli;
 mod format;
 mod link;
 mod ls;
@@ -49,6 +54,7 @@ Subcommands:
   link    Create a hard link to an existing file.
   rename  Rename an entry within its parent directory.
   remove  POSIX-style remove (dispatches file/dir by type).
+  sparse  Write a file's $DATA as a SPARSE stream (holes, no clusters).
   set-dirty  Mark an NTFS volume as dirty (test-scenario helper).
 
 Run `rust-ntfs <subcommand> --help` for per-subcommand options.

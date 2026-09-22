@@ -94,6 +94,28 @@ fn parse_data_source(args: &mut Vec<String>) -> Result<Vec<u8>, String> {
             other => return Err(format!("unknown flag: {other}")),
         }
     }
+    // EXACTLY ONE, AS THE USAGE TEXT SAYS. The three were tried in
+    // order and the first one found won, so `--content hello --from
+    // big.bin` wrote "hello", reported success, and never mentioned the
+    // file it ignored (#185). Silently picking one of two contradictory
+    // instructions is the worst of the three options: a caller scripting
+    // this gets the wrong bytes on disk and a zero exit status.
+    let named: Vec<&str> = [
+        content.as_ref().map(|_| "--content"),
+        bytes.as_ref().map(|_| "--bytes"),
+        from_file.as_ref().map(|_| "--from"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if named.len() > 1 {
+        return Err(format!(
+            "write: {} were given together, and they are alternatives -- pick one. \
+             Data sources: --content, --bytes, --from.",
+            named.join(" and ")
+        ));
+    }
+
     if let Some(s) = content {
         return Ok(s.into_bytes());
     }

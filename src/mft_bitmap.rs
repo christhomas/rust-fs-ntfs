@@ -346,6 +346,7 @@ mod tests {
             // under test.
             total_sectors: 1 << 20,
             serial_number: 0,
+            index_block_size: 4096,
             oem_id: *b"NTFS    ",
         }
     }

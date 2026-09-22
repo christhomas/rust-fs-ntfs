@@ -318,6 +318,8 @@ pub fn clear_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
     io.write_all_at(flag_disk_offset, &new_flags.to_le_bytes())
         .map_err(|e| format!("write volume flags: {e}"))?;
     io.sync().map_err(|e| format!("fsync: {e}"))?;
+    // $Volume is record 3, which $MFTMirr mirrors (#145).
+    crate::mft_io::sync_mftmirr_record_io(io, VOLUME_RECORD_NUMBER)?;
     Ok(true)
 }
 
@@ -331,6 +333,7 @@ pub fn set_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
     io.write_all_at(flag_disk_offset, &new_flags.to_le_bytes())
         .map_err(|e| format!("write volume flags: {e}"))?;
     io.sync().map_err(|e| format!("fsync: {e}"))?;
+    crate::mft_io::sync_mftmirr_record_io(io, VOLUME_RECORD_NUMBER)?;
     Ok(true)
 }
 
@@ -382,6 +385,7 @@ pub fn upgrade_volume_version_io<T: FsckIo>(io: &mut T) -> Result<bool, String> 
     io.write_all_at(major_disk_offset, &new_bytes)
         .map_err(|e| format!("write volume version+flags: {e}"))?;
     io.sync().map_err(|e| format!("fsync: {e}"))?;
+    crate::mft_io::sync_mftmirr_record_io(io, VOLUME_RECORD_NUMBER)?;
     Ok(true)
 }
 
@@ -494,7 +498,6 @@ fn locate_volume_flags_io<T: FsckIo>(io: &mut T) -> Result<(u64, u16), String> {
 /// bytes it destroyed.
 fn forbidden_fill_ranges(
     params: &crate::mft_io::BootParams,
-    mft_bytes: u64,
     other: &[(u64, u64)],
 ) -> Vec<(u64, u64)> {
     // $BOOT IS NOT ONE SECTOR, and this range used to be one. `$Boot`
@@ -520,11 +523,24 @@ fn forbidden_fill_ranges(
             .max(u64::from(params.bytes_per_sector))
             .max(512),
     );
-    let mft_start = params.mft_lcn.saturating_mul(params.cluster_size);
-    let mft = (mft_start, mft_start.saturating_add(mft_bytes));
-    let mut ranges = Vec::with_capacity(2 + other.len());
+    // $MFT IS IN `other`, AND ITS RANGES THERE ARE BOUNDED. There used to
+    // be a second, separate `$MFT` range here, computed from
+    // `nonresident_contiguous_disk_range` -- which REFUSES a fragmented
+    // attribute -- with `params.volume_bytes()` as the fallback. A
+    // fragmented `$MFT` is ordinary (the `ntfs` crate's own testdata has
+    // six runs), so on those volumes the range ran from `$MFT`'s start,
+    // which is near LCN 0 on every measured layout, to past the end of
+    // the device. `$LogFile` sits after that start on any realistic
+    // layout, so the reset was refused with "the volume's own
+    // structures" on every volume with a fragmented `$MFT` (#249).
+    //
+    // `other_protected_metafile_ranges_io` already folds in
+    // `mft_ranges_io`'s bounded, three-tier answer for record 0 whenever
+    // the caller has not excluded it -- and this caller excludes record
+    // 2, not 0. So the separate computation was redundant on the healthy
+    // path and actively wrong on the fragmented one.
+    let mut ranges = Vec::with_capacity(1 + other.len());
     ranges.push(boot);
-    ranges.push(mft);
     ranges.extend_from_slice(other);
     ranges
 }
@@ -549,12 +565,6 @@ fn locate_logfile_data_io<T: FsckIo>(io: &mut T) -> Result<(u64, u64), String> {
     // Not over the boot sector, and not over $MFT. See
     // `forbidden_fill_ranges`.
     let params = crate::mft_io::read_boot_params_io(io)?;
-    let mft_bytes = crate::read::nonresident_contiguous_disk_range(io, 0, AttrType::Data, None)
-        .map(|(_, len)| len)
-        // A fragmented or unreadable $MFT gives no length to compare, so
-        // the record size times the records the volume could hold is the
-        // fallback: a smaller guess would leave part of $MFT unguarded.
-        .unwrap_or_else(|_| params.volume_bytes());
     // The other five system metafiles, by the same shared helper
     // `bitmap::locate_bitmap_io` uses -- best-effort per metafile: one
     // that cannot be located contributes no range rather than widening
@@ -566,7 +576,7 @@ fn locate_logfile_data_io<T: FsckIo>(io: &mut T) -> Result<(u64, u64), String> {
     // rust-fs-ntfs#157.
     let other = crate::read::other_protected_metafile_ranges_io(io, Some(LOGFILE_RECORD_NUMBER));
     let fill = (offset, offset.saturating_add(length));
-    for forbidden in forbidden_fill_ranges(&params, mft_bytes, &other) {
+    for forbidden in forbidden_fill_ranges(&params, &other) {
         if ranges_overlap(fill, forbidden) {
             return Err(format!(
                 "$LogFile says its data is at [{}, {}), which overlaps [{}, {}) -- the \
@@ -1192,6 +1202,7 @@ mod fill_range_tests {
             file_record_size: 1024,
             total_sectors: 1 << 20,
             serial_number: 0,
+            index_block_size: 4096,
             oem_id: *b"NTFS    ",
         }
     }
@@ -1207,7 +1218,12 @@ mod fill_range_tests {
         let p = params();
         let mft_at = 1024 * 4096;
         let mft_bytes = 16 * 1024 * 1024;
-        let forbidden = forbidden_fill_ranges(&p, mft_bytes, &[]);
+        // $MFT ARRIVES THROUGH `other` NOW, the way the other metafiles
+        // do: `other_protected_metafile_ranges_io` folds in
+        // `mft_ranges_io`'s bounded ranges. The separate, unbounded
+        // computation this used to take is gone (#249), so the test
+        // hands it the range the real caller would.
+        let forbidden = forbidden_fill_ranges(&p, &[(mft_at, mft_at + mft_bytes)]);
 
         // $Boot, and $MFT. THIS EXPECTATION WAS (0, 512) AND THAT WAS
         // THE DEFECT: one sector, where `$Boot`'s $DATA is 8192 bytes,
@@ -1261,7 +1277,7 @@ mod fill_range_tests {
         let mft_bytes = 16 * 1024 * 1024;
         // $MFTMirr, well clear of the boot sector and $MFT.
         let mftmirr = (64 * 1024 * 1024, 64 * 1024 * 1024 + 4 * 1024 * 1024);
-        let forbidden = forbidden_fill_ranges(&p, mft_bytes, &[mftmirr]);
+        let forbidden = forbidden_fill_ranges(&p, &[(mft_at, mft_at + mft_bytes), mftmirr]);
 
         let overlaps = |fill: (u64, u64)| forbidden.iter().any(|f| ranges_overlap(fill, *f));
 
@@ -1290,7 +1306,7 @@ mod fill_range_tests {
         let mft_at = 1024 * 4096;
         let mft_bytes = 16 * 1024 * 1024;
         let whole_volume = (0u64, p.volume_bytes());
-        let forbidden = forbidden_fill_ranges(&p, mft_bytes, &[whole_volume]);
+        let forbidden = forbidden_fill_ranges(&p, &[whole_volume]);
 
         let overlaps = |fill: (u64, u64)| forbidden.iter().any(|f| ranges_overlap(fill, *f));
 
