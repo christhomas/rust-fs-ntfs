@@ -3,9 +3,8 @@
 //! write path cannot produce (compressed `$DATA`, `$ATTRIBUTE_LIST` overflow).
 //!
 //! Fixtures live in `test-disks/` and are intentionally not committed (large,
-//! Windows-generated). Each test skips with a notice if its fixture is absent,
-//! so a fresh checkout still runs green — the fixtures are produced on the
-//! Windows VM (see the native-read-layer plan).
+//! Windows-generated). `build-windows-native-read-fixtures.ps1` creates them;
+//! CI publishes them from a Windows job to the full Linux integration suite.
 
 use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::block_io::PathIo;
@@ -19,18 +18,9 @@ const COMPRESSED_IMG: &str = "test-disks/ntfs-compressed.img";
 
 /// Open a fixture read-only, or return `None` (with a skip notice) if absent.
 ///
-/// THESE TWO ARE NOT BUILT ANYWHERE (#279). `ntfs-attrlist.img` and
-/// `ntfs-compressed.img` hold shapes this crate's writer cannot produce
-/// -- compressed `$DATA`, an `$ATTRIBUTE_LIST` overflow -- so they were
-/// made on the Windows VM by hand, and nothing in the repository or in
-/// CI regenerates them. Until something does, the skip has to stand:
-/// refusing it in CI (which is what #210 asks for, and what
-/// `all_images_rw_smoke.rs` now does) would fail every run for a fixture
-/// no workflow can make.
-///
-/// `NTFS_FIXTURES_REQUIRED=1` turns the skip into a failure. Set it in
-/// the job that builds these two, on the day one exists; the assertion
-/// is here so that day needs no change to this file.
+/// Local non-Windows runs may omit these fixtures. The full integration job
+/// sets `NTFS_FIXTURES_REQUIRED=1`, making absence a hard failure rather than
+/// reporting coverage that did not execute.
 fn open_fixture(path: &str) -> Option<PathIo> {
     if !Path::new(path).exists() {
         assert!(

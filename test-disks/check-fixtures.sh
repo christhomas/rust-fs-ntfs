@@ -8,9 +8,9 @@
 # output, every one of them the same missing file. `chore test:suite` runs
 # this first so the answer is two lines. It is a failure, not a skip.
 #
-# The list is build-ntfs-feature-images.sh's build_* functions. The two
-# Windows-authored fixtures (ntfs-attrlist, ntfs-compressed) are not on it:
-# nothing builds them, and tests/native_read_fixtures.rs skips without them.
+# The list below is build-ntfs-feature-images.sh's build_* functions. The two
+# Windows-only fixtures have their own PowerShell builder and are checked when
+# the integration gate sets NTFS_FIXTURES_REQUIRED=1.
 set -euo pipefail
 
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,8 +18,13 @@ missing=""
 for img in basic manyfiles large-file sparse ads unicode deep; do
     [ -f "$dir/ntfs-$img.img" ] || missing="$missing ntfs-$img.img"
 done
+if [ -n "${NTFS_FIXTURES_REQUIRED:-}" ]; then
+    for img in attrlist compressed; do
+        [ -f "$dir/ntfs-$img.img" ] || missing="$missing ntfs-$img.img"
+    done
+fi
 if [ -n "$missing" ]; then
     echo "missing fixtures in test-disks/:$missing" >&2
-    echo "build them with test-disks/build-ntfs-feature-images.sh (Linux: needs mkntfs and a mount)" >&2
+    echo "build portable fixtures with test-disks/build-ntfs-feature-images.sh; Windows-only fixtures with test-disks/build-windows-native-read-fixtures.ps1" >&2
     exit 1
 fi
