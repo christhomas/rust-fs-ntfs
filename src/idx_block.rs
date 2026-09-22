@@ -231,6 +231,111 @@ pub fn vcn_to_disk_offset(
     )
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MappedChunk {
+    disk_offset: u64,
+    cursor: usize,
+    len: usize,
+}
+
+/// Map one logical INDX block into transfers that never cross a data-run
+/// boundary. The complete mapping is validated before the caller performs
+/// any I/O, so a missing or sparse tail cannot leave a write half-finished.
+fn map_indx_block(
+    ia: &IndexAllocation,
+    vcn: u64,
+    device_bytes: u64,
+) -> Result<Vec<MappedChunk>, String> {
+    let cluster_size = ia.params.cluster_size;
+    if cluster_size == 0 {
+        return Err("$INDEX_ALLOCATION has a zero-byte cluster size".to_string());
+    }
+
+    let block_len = usize::try_from(ia.block_size)
+        .map_err(|_| format!("index block size {} does not fit in memory", ia.block_size))?;
+    if block_len == 0 {
+        return Err("index block size is zero".to_string());
+    }
+    let mut chunks = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < block_len {
+        let logical_cluster = vcn
+            .checked_add(cursor as u64 / cluster_size)
+            .ok_or_else(|| format!("an index block at VCN {vcn} has no end"))?;
+        let byte_in_cluster = cursor as u64 % cluster_size;
+        let run = ia
+            .runs
+            .iter()
+            .find(|r| {
+                r.starting_vcn
+                    .checked_add(r.length)
+                    .is_some_and(|end| logical_cluster >= r.starting_vcn && logical_cluster < end)
+            })
+            .ok_or_else(|| format!("VCN {logical_cluster} not mapped in $INDEX_ALLOCATION"))?;
+        let lcn = run
+            .lcn
+            .ok_or_else(|| format!("VCN {logical_cluster} in sparse run"))?;
+        let run_end_vcn = run.starting_vcn.checked_add(run.length).ok_or_else(|| {
+            format!(
+                "$INDEX_ALLOCATION run at VCN {} has no end",
+                run.starting_vcn
+            )
+        })?;
+        let bytes_in_run = run_end_vcn
+            .checked_sub(logical_cluster)
+            .and_then(|clusters| clusters.checked_mul(cluster_size))
+            .and_then(|bytes| bytes.checked_sub(byte_in_cluster))
+            .ok_or_else(|| {
+                format!(
+                    "$INDEX_ALLOCATION run at VCN {} cannot cover block byte {cursor}",
+                    run.starting_vcn
+                )
+            })?;
+        let len = usize::try_from(bytes_in_run.min((block_len - cursor) as u64))
+            .map_err(|_| "index block transfer does not fit in memory".to_string())?;
+        if len == 0 {
+            return Err(format!(
+                "$INDEX_ALLOCATION run at VCN {} contributes no bytes to the block",
+                run.starting_vcn
+            ));
+        }
+        let disk_offset = crate::mft_io::cluster_span(
+            &ia.params,
+            lcn,
+            logical_cluster - run.starting_vcn,
+            byte_in_cluster,
+            len as u64,
+            device_bytes,
+        )?;
+        chunks.push(MappedChunk {
+            disk_offset,
+            cursor,
+            len,
+        });
+        cursor += len;
+    }
+
+    Ok(chunks)
+}
+
+fn read_raw_indx_block_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    ia: &IndexAllocation,
+    vcn: u64,
+) -> Result<(Vec<u8>, Vec<MappedChunk>), String> {
+    let chunks = map_indx_block(ia, vcn, io.size())?;
+    let mut block = vec![0u8; ia.block_size as usize];
+    for chunk in &chunks {
+        io.read_exact_at(
+            chunk.disk_offset,
+            &mut block[chunk.cursor..chunk.cursor + chunk.len],
+        )
+        .map_err(|e| format!("read indx: {e}"))?;
+    }
+    Ok((block, chunks))
+}
+
 /// Read an INDX block at the given VCN, applying fixup. Returns the
 /// clean block bytes. The caller must know `block_size` from the
 /// `IndexAllocation` handle.
@@ -244,13 +349,11 @@ pub fn read_indx_block_io<T: BlockIo + ?Sized>(
     ia: &IndexAllocation,
     vcn: u64,
 ) -> Result<Vec<u8>, String> {
-    let disk_offset = vcn_to_disk_offset(ia, vcn, io.size())?;
-    let mut buf = vec![0u8; ia.block_size as usize];
-    io.read_exact_at(disk_offset, &mut buf)
-        .map_err(|e| format!("read indx: {e}"))?;
+    let (mut buf, chunks) = read_raw_indx_block_io(io, ia, vcn)?;
     if &buf[0..4] != b"INDX" {
         return Err(format!(
-            "block at VCN {vcn} (disk {disk_offset:#x}) is not an INDX record: {:02x?}",
+            "block at VCN {vcn} (disk {:#x}) is not an INDX record: {:02x?}",
+            chunks[0].disk_offset,
             &buf[0..4]
         ));
     }
@@ -284,13 +387,43 @@ where
     T: BlockIo + ?Sized,
     F: FnOnce(&mut [u8]) -> Result<(), String>,
 {
-    let mut block = read_indx_block_io(io, ia, vcn)?;
+    let (previous, chunks) = read_raw_indx_block_io(io, ia, vcn)?;
+    let mut block = previous.clone();
+    apply_fixup_on_read_magic(&mut block, ia.params.bytes_per_sector, b"INDX")?;
     mutate(&mut block)?;
     apply_fixup_on_write_magic(&mut block, ia.params.bytes_per_sector, b"INDX")?;
 
-    let disk_offset = vcn_to_disk_offset(ia, vcn, io.size())?;
-    io.write_all_at(disk_offset, &block)
-        .map_err(|e| format!("write indx: {e}"))?;
+    for (i, chunk) in chunks.iter().enumerate() {
+        if let Err(e) = io.write_all_at(
+            chunk.disk_offset,
+            &block[chunk.cursor..chunk.cursor + chunk.len],
+        ) {
+            let failure = format!("write indx: {e}");
+            let mut rollback_failure = None;
+            // The failing write may itself have written a prefix, so restore it
+            // along with every earlier chunk that definitely landed.
+            for touched in &chunks[..=i] {
+                if let Err(rollback) = io.write_all_at(
+                    touched.disk_offset,
+                    &previous[touched.cursor..touched.cursor + touched.len],
+                ) {
+                    if rollback_failure.is_none() {
+                        rollback_failure = Some(rollback);
+                    }
+                }
+            }
+            let sync_failure = io.sync().err();
+            return Err(match (rollback_failure, sync_failure) {
+                (None, None) => failure,
+                (Some(rollback), _) => format!(
+                    "{failure}; and rolling the INDX block back failed too ({rollback}) — run chkdsk"
+                ),
+                (None, Some(sync)) => format!(
+                    "{failure}; the INDX rollback was written but syncing it failed ({sync}) — run chkdsk"
+                ),
+            });
+        }
+    }
     io.sync()?;
     Ok(())
 }
@@ -621,64 +754,109 @@ mod tests {
         assert_eq!(readback[0x40], 0xAB);
     }
 
-    #[test]
-    fn a_straddling_block_is_neither_read_from_nor_written_over_the_neighbour() {
-        // A 4 KiB index block on a 512-byte-cluster volume is eight
-        // clusters. This attribute's run holds four of them, so the
-        // second half of the block's bytes belongs to the neighbouring
-        // file marked 0x4E below.
-        //
-        // The neighbour's sector tails are left carrying the same
-        // update-sequence number as the block, so the fixup check
-        // accepts the borrowed half. That is the coincidence the read
-        // path relies on NOT happening -- it is what makes a straddling
-        // block usually fail loudly instead of quietly -- and nothing
-        // guarantees it. When it does happen the read succeeds and the
-        // write that follows puts an index block over another file.
-        let cluster = 512usize;
-        let lcn = 100usize;
-        let mut storage = vec![0u8; (lcn + 16) * cluster];
-        storage[lcn * cluster..lcn * cluster + 4096].copy_from_slice(&valid_indx_block());
-        let neighbour_at = (lcn + 4) * cluster;
-        for b in &mut storage[neighbour_at..neighbour_at + 4 * cluster] {
-            *b = 0x4E;
-        }
-        for s in 0..4 {
-            let tail = neighbour_at + (s + 1) * cluster - 2;
-            storage[tail] = 0x01;
-            storage[tail + 1] = 0x00;
-        }
-        let neighbour_before = storage[neighbour_at..neighbour_at + 4 * cluster].to_vec();
-        let mut dev = MemDev(storage);
-        let ia = make_ia(
+    fn fragmented_ia() -> IndexAllocation {
+        make_ia(
             4096,
-            cluster as u64,
-            vec![DataRun {
-                starting_vcn: 0,
-                length: 4,
-                lcn: Some(lcn as u64),
-            }],
+            512,
+            vec![
+                DataRun {
+                    starting_vcn: 0,
+                    length: 4,
+                    lcn: Some(100),
+                },
+                DataRun {
+                    starting_vcn: 4,
+                    length: 4,
+                    lcn: Some(500),
+                },
+            ],
             vec![0x01],
             4096,
-        );
+        )
+    }
 
-        assert!(
-            read_indx_block_io(&mut dev, &ia, 0).is_err(),
-            "the read took its second half from the next file's clusters"
-        );
-        assert!(
-            update_indx_block_io(&mut dev, &ia, 0, |b| {
-                b[0x40] = 0xAB;
-                Ok(())
-            })
-            .is_err(),
-            "the write put an index block's tail over the next file's clusters"
-        );
+    fn fragmented_storage() -> Vec<u8> {
+        let cluster = 512usize;
+        let mut storage = vec![0x4Eu8; 510 * cluster];
+        let block = valid_indx_block();
+        storage[100 * cluster..104 * cluster].copy_from_slice(&block[..4 * cluster]);
+        storage[500 * cluster..504 * cluster].copy_from_slice(&block[4 * cluster..]);
+        storage
+    }
+
+    #[test]
+    fn a_4k_block_split_across_two_512_byte_cluster_runs_round_trips() {
+        let cluster = 512usize;
+        let storage = fragmented_storage();
+        let neighbour_after_first = storage[104 * cluster..108 * cluster].to_vec();
+        let neighbour_after_second = storage[504 * cluster..508 * cluster].to_vec();
+        let mut dev = MemDev(storage);
+        let ia = fragmented_ia();
+
+        let read = read_indx_block_io(&mut dev, &ia, 0).unwrap();
+        assert_eq!(&read[0..4], b"INDX");
+        update_indx_block_io(&mut dev, &ia, 0, |block| {
+            block[0x40] = 0xAB;
+            block[3000] = 0xCD;
+            Ok(())
+        })
+        .unwrap();
+        let readback = read_indx_block_io(&mut dev, &ia, 0).unwrap();
+        assert_eq!(readback[0x40], 0xAB);
+        assert_eq!(readback[3000], 0xCD);
+        assert_eq!(&dev.0[104 * cluster..108 * cluster], &neighbour_after_first);
         assert_eq!(
-            &dev.0[neighbour_at..neighbour_at + 4 * cluster],
-            &neighbour_before[..],
-            "the neighbouring file's clusters were modified"
+            &dev.0[504 * cluster..508 * cluster],
+            &neighbour_after_second
         );
+    }
+
+    struct FailSecondWrite {
+        inner: MemDev,
+        writes: usize,
+    }
+
+    impl BlockIo for FailSecondWrite {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            self.inner.read_exact_at(offset, buf)
+        }
+
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            self.writes += 1;
+            if self.writes == 2 {
+                // A failed write is allowed to have changed a prefix. The
+                // rollback must therefore include this chunk, not just the
+                // first chunk that completed.
+                let partial = 17usize.min(buf.len());
+                self.inner.write_all_at(offset, &buf[..partial])?;
+                return Err("injected second-piece failure".to_string());
+            }
+            self.inner.write_all_at(offset, buf)
+        }
+
+        fn size(&self) -> u64 {
+            self.inner.size()
+        }
+    }
+
+    #[test]
+    fn a_partial_piecewise_write_is_rolled_back_to_the_raw_preimage() {
+        let storage = fragmented_storage();
+        let before = storage.clone();
+        let mut dev = FailSecondWrite {
+            inner: MemDev(storage),
+            writes: 0,
+        };
+
+        let err = update_indx_block_io(&mut dev, &fragmented_ia(), 0, |block| {
+            block[0x40] = 0xAB;
+            block[3000] = 0xCD;
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(err.contains("injected second-piece failure"), "{err}");
+        assert_eq!(dev.inner.0, before);
     }
 
     #[test]
