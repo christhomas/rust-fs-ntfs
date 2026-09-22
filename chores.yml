@@ -376,8 +376,13 @@ tasks:
     # which is already the right shape. clippy prints a line per crate it
     # checks, so it runs as a quiet tier: a verdict line, the log in
     # tmp/logs/, and the tail on failure. `chore lint -- --verbose` streams it.
+    #
+    # agents-core-check is here rather than in a test tier because a stale
+    # agent guide is a lint problem: the file is still valid, it just no
+    # longer says what the rest of the family says. It prints one line.
     cmds:
       - cargo fmt --check
+      - scripts/agents-core-check.sh
       - scripts/tier.sh clippy -- cargo clippy --locked --all-targets -- -D warnings
 
   build:
