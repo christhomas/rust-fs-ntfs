@@ -4,9 +4,9 @@
 //! values are arbitrary bytes. On disk they're stored in `$EA` as a
 //! packed list of FILE_FULL_EA_INFORMATION entries, 4-byte aligned.
 //!
-//! References (no GPL code consulted): MS-FSCC 2.4.15
-//! FILE_FULL_EA_INFORMATION; $EA / $EA_INFORMATION attribute layout
-//! per Windows Internals 7th ed. ch. "NTFS On-Disk Structure".
+//! References: MS-FSCC 2.4.15 FILE_FULL_EA_INFORMATION; the
+//! `$EA_INFORMATION` field order is independently corroborated by ntfs-3g's
+//! `layout.h` and Linux ntfs3's `ntfs.h`.
 
 use crate::attr_io::{self, AttrType};
 
@@ -108,12 +108,15 @@ pub fn count_need_ea(eas: &[Ea]) -> u32 {
     eas.iter().filter(|e| e.flags & FLAG_NEED_EA != 0).count() as u32
 }
 
-/// Build the `$EA_INFORMATION` value (8 bytes).
+/// Build the `$EA_INFORMATION` value (8 bytes): packed length (`u16`),
+/// NEED_EA count (`u16`), and query-buffer length (`u32`).
 pub fn build_ea_information_value(packed_ea_length: u16, need_ea_count: u32) -> Vec<u8> {
+    let need_ea_count =
+        u16::try_from(need_ea_count).expect("NEED_EA count must fit the $EA_INFORMATION u16 field");
     let mut v = vec![0u8; 8];
     v[0..2].copy_from_slice(&packed_ea_length.to_le_bytes()); // ea_length
-    v[2..4].copy_from_slice(&packed_ea_length.to_le_bytes()); // ea_query_size (approximation)
-    v[4..8].copy_from_slice(&need_ea_count.to_le_bytes());
+    v[2..4].copy_from_slice(&need_ea_count.to_le_bytes());
+    v[4..8].copy_from_slice(&u32::from(packed_ea_length).to_le_bytes()); // query-size approximation
     v
 }
 
@@ -327,8 +330,8 @@ mod tests {
     fn build_ea_information_value_layout() {
         let val = build_ea_information_value(1234, 5);
         assert_eq!(u16::from_le_bytes([val[0], val[1]]), 1234); // ea_length
-        assert_eq!(u16::from_le_bytes([val[2], val[3]]), 1234); // ea_query_size
-        assert_eq!(u32::from_le_bytes([val[4], val[5], val[6], val[7]]), 5); // need_count
+        assert_eq!(u16::from_le_bytes([val[2], val[3]]), 5); // need_ea_count
+        assert_eq!(u32::from_le_bytes([val[4], val[5], val[6], val[7]]), 1234); // ea_query_size
     }
 
     #[test]

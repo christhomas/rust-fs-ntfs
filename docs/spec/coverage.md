@@ -617,7 +617,7 @@ implements the feature, independent of how well-documented it is:
 
 | # | Item | Impl | Evidence | Notes |
 | --: | ---- | :--: | -------- | ----- |
-| 300 | `$EA_INFORMATION` resident layout | ✅ | **VERIFIED** | `src/ea_io.rs` |
+| 300 | `$EA_INFORMATION` resident layout | ✅ | **OBSERVED** | Writer and raw-value tests match ntfs-3g and Linux ntfs3 headers; no Windows-authored EA fixture yet |
 | 301 | `$EA` resident layout | ✅ | **VERIFIED** | `src/ea_io.rs` |
 | 302 | Non-resident `$EA` | ⛔ | **UNVERIFIED** | Not implemented; resident-only MVP |
 | 303 | EA key enumeration API | ✅ | **VERIFIED** | `fs_ntfs_list_ea_keys` return code `-2` for buffer-too-small |
