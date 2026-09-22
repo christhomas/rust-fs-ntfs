@@ -27,6 +27,8 @@
 # 30 GiB of orphaned .img/.vhd behind. The real ceiling is the VM's
 # memory and its disk: every concurrent scenario holds a disk image plus
 # its VHD wrapper, and the largest scenario is 16 GiB.
+# The three 4/4/16 GiB cases also share `exclusive_group = "large-volume"`
+# in test-matrix.json, so only that resource-heavy subset is serialized.
 max_parallel = 4
 
 [groups]

@@ -53,7 +53,10 @@ vars:
   # The Windows-VM test harness. Not a cargo dependency — a tool this
   # repo's scripts invoke — so nothing but this pin governs which
   # version runs the matrix.
-  HARNESS_REF: v4.1.0
+  # Temporary branch pin for the harness-side dependency in
+  # antimatter-studios/fs-windows-test-harness#30. Replace with its release
+  # tag before this change merges.
+  HARNESS_REF: fix/large-scenario-scheduling
 
   # THE WINDOWS TEST VM is driven by scripts/vm.sh (vmrun, trove for the
   # encryption password, the fixed host-only address). See that file and
