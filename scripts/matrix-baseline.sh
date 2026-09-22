@@ -57,7 +57,7 @@ source .test-env
 #    `cargo build --release` of the same source produces different
 #    binaries from different paths (e.g. /Volumes/.../rust-fs-ntfs vs
 #    /Volumes/.../rust-fs-ntfs-s4). That breaks the seal-by-binary-hash
-#    property documented in .claude/skills/wtx/SKILL.md.
+#    property documented in .claude/skills/windows-test-skill/SKILL.md.
 echo "[matrix-baseline] cargo build --release (path-stable)"
 export RUSTFLAGS="${RUSTFLAGS:-} \
     --remap-path-prefix=$PWD=. \

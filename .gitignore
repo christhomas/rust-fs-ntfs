@@ -15,7 +15,7 @@ Cargo.lock.bak
 # Coding-agent local working dir (worktrees, scratch, prompts).
 # Per-checkout state, never worth committing — EXCEPT skills, which
 # encode project-wide workflow discipline that should ship with the
-# repo (e.g. .claude/skills/wtx/ for the Windows test matrix).
+# repo (e.g. .claude/skills/windows-test-skill/ for the Windows test matrix).
 .claude/*
 !.claude/skills/
 !.claude/skills/**
@@ -50,7 +50,7 @@ nfs-*.img
 # all reproducible from a re-run, none worth committing. EXCEPT
 # matrix-results.json, which is the per-commit seal (carries
 # tested_at_sha + binary_sha256 + per-scenario verdicts; see
-# .claude/skills/wtx/SKILL.md).
+# .claude/skills/windows-test-skill/SKILL.md).
 test-diagnostics/*
 !test-diagnostics/matrix-results.json
 diag/

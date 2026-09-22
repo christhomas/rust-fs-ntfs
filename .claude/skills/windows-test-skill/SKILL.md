@@ -1,5 +1,5 @@
 ---
-name: Windows Test Matrix (wtx)
+name: windows-test-skill
 description: |
   The discipline for testing NTFS write/read changes against a Windows VM
   using the 42-scenario test matrix. Covers tiered gates (cargo test →
@@ -7,10 +7,9 @@ description: |
   parallel development via worktrees, and the staging-branch integration
   workflow. Invoke when: starting a new feature branch, sealing a PR,
   diagnosing a matrix regression, or onboarding to the workflow.
-short_name: wtx
 ---
 
-# Windows Test Matrix (wtx) — discipline
+# Windows Test Matrix (windows-test-skill) — discipline
 
 This skill is the operating manual for the `rust-fs-ntfs` test matrix:
 how to run it, how to seal results into git commits, how to develop

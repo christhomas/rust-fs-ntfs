@@ -33,7 +33,7 @@ two new mac-side matrix scenarios added in `f92e78b`:
 
 All nine remaining gaps change **on-disk write structure** and therefore must
 be validated against Windows chkdsk via the 42-scenario matrix
-(`windows-test-matrix`) before they can land. The VM/chkdsk loop **is**
+(`windows-test-skill`) before they can land. The VM/chkdsk loop **is**
 available (VM `192.168.213.146`) and was used this session to validate the
 link/unlink + rename write paths — the two new scenarios above pass
 chkdsk-clean. They are **not** safe to implement blind; drive the matrix per
@@ -108,7 +108,7 @@ WSL/Docker case-sensitive-directory scenarios.
 
 ## How to close an outstanding gap safely
 
-1. Drive the Windows VM per the `windows-test-matrix` skill (the chkdsk oracle).
+1. Drive the Windows VM per the `windows-test-skill` skill (the chkdsk oracle).
 2. Implement against the matrix, not blind — every on-disk change must pass the
    relevant scenarios.
 3. Verify the round-trip with the upstream `ntfs` parser in a self-generated
