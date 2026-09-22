@@ -76,13 +76,69 @@ check problems-ansi-label ansi     "$PROBLEMS_LABEL" "PROBLEMS FOUND"
 check clean-utf8-label    ascii    "$CLEAN_LABEL"    "no problems"
 check clean-utf16-label   utf16    "$CLEAN_LABEL"    "no problems"
 
+printf '\nverdict_says\n'
+check_verdict() {
+    local name="$1" json="$2" want="$3" f got
+    f="$tmp/$name.json"
+    printf '%s\n' "$json" > "$f"
+    got="$(verdict_says "$f")"
+    if [ "$got" = "$want" ]; then
+        pass=$((pass + 1)); printf '  ok    %s\n' "$name"
+    else
+        fail=$((fail + 1)); printf '  FAIL  %s\n        got:  %s\n        want: %s\n' "$name" "$got" "$want"
+    fi
+}
+
+check_verdict clean-match \
+    '{"passed":true,"verdict_shape":"clean","modes":{"readonly":{"exit":0,"state":"scanned","reason":"ok"},"/scan":{"exit":11,"state":"scanned","reason":"accepted ceiling"}}}' \
+    'match'
+check_verdict dirty-match \
+    '{"passed":true,"verdict_shape":"repair-required","modes":{"readonly":{"exit":0,"state":"scanned","reason":"ok"},"/scan":{"exit":3,"state":"failed","reason":"dirty"},"/F /X":{"exit":0,"state":"scanned","reason":"fixed"},"/scan-post":{"exit":0,"state":"scanned","reason":"clean"}}}' \
+    'match'
+check_verdict clean-mismatch \
+    '{"passed":true,"verdict_shape":"clean","modes":{"/scan":{"exit":3,"state":"failed","reason":"errors"}}}' \
+    'mismatch: /scan=failed'
+check_verdict dirty-did-not-trigger \
+    '{"passed":true,"verdict_shape":"repair-required","modes":{"/scan":{"exit":0,"state":"scanned","reason":"clean"},"/F /X":{"exit":0,"state":"scanned","reason":"ok"},"/scan-post":{"exit":0,"state":"scanned","reason":"ok"}}}' \
+    'mismatch: /scan=scanned (expected failed)'
+check_verdict not-scanned-visible \
+    '{"passed":true,"verdict_shape":"clean","modes":{"/scan":{"exit":11,"state":"not-scanned","reason":"snapshot"},"/scan-offline-fallback":{"exit":0,"state":"scanned","reason":"fallback"}}}' \
+    'not-scanned: /scan'
+check_verdict unknown-state-visible \
+    '{"passed":true,"verdict_shape":"clean","modes":{"/scan":{"exit":0,"state":"maybe","reason":"new contract"}}}' \
+    'unknown: /scan has no recognised state'
+check_verdict malformed-mode-visible \
+    '{"passed":true,"verdict_shape":"clean","modes":{"/scan":{"exit":"zero","state":"scanned"}}}' \
+    'unknown: /scan has malformed exit or reason'
+check_verdict unknown-shape-visible \
+    '{"passed":true,"verdict_shape":"surprising","modes":{"/scan":{"exit":0,"state":"scanned","reason":"ok"}}}' \
+    "unknown: unsupported verdict shape 'surprising'"
+check_verdict malformed-json-visible \
+    '{"passed":true' \
+    'unknown: unreadable verdict.json'
+check_verdict malformed-root-visible \
+    '[]' \
+    'unknown: verdict.json is not an object'
+check_verdict legacy-visible \
+    '{"passed":true,"verdict_shape":"clean","exits":{"/scan":0}}' \
+    'unknown: verdict.json has no per-mode states'
+check_verdict failed-verdict-visible \
+    '{"passed":false,"verdict_shape":"clean","modes":{"/scan":{"exit":0,"state":"scanned","reason":"ok"}}}' \
+    'mismatch: verdict did not pass'
+missing_verdict="$(verdict_says "$tmp/missing-verdict.json")"
+if [ "$missing_verdict" = 'unknown: missing verdict.json' ]; then
+    pass=$((pass + 1)); printf '  ok    missing-verdict-visible\n'
+else
+    fail=$((fail + 1)); printf '  FAIL  missing-verdict-visible\n        got:  %s\n' "$missing_verdict"
+fi
+
 # looks_wrong decides which summary lines a run prints. A line it calls
 # fine is a line nobody will see, so the verdicts that mean trouble are
 # checked one by one rather than trusted to a pattern read once.
 printf '\nlooks_wrong\n'
 wrong() {
-    local name="$1" line="$2" want="$3" got=no
-    looks_wrong "$line" && got=yes
+    local name="$1" line="$2" want="$3" verdict="${4:-none}" got=no
+    looks_wrong "$line" "$verdict" && got=yes
     if [ "$got" = "$want" ]; then
         pass=$((pass + 1)); printf '  ok    %s\n' "$name"
     else
@@ -101,6 +157,10 @@ wrong no-diagnostics    "s: no VM diagnostics (nothing ran on the VM, or it is u
 # scenarios are host-only, and flagging them teaches the reader to skim.
 wrong host-only-quiet   "s: no VM steps (host-only scenario)"                        no
 wrong empty-report      "s: chkdsk -scan: empty report"                               yes
+wrong expected-dirty-quiet "s: chkdsk -scan: PROBLEMS FOUND; chkdsk -F--X: no problems" no match
+wrong clean-state-mismatch "s: chkdsk -scan: no problems"                             yes "mismatch: /scan=failed"
+wrong structured-not-scanned "s: chkdsk -scan: no problems"                           yes "not-scanned: /scan"
+wrong structured-unknown "s: chkdsk -scan: no problems"                               yes "unknown: /scan has no recognised state"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
