@@ -119,3 +119,9 @@ Docs-only and CI-only changes skip the matrix, and that is why it reports
   "the run-end bound is checked", not "check the run-end bound".
 - `main` takes **squash merges only**, and branch protection is declared in
   `.github-guard`, read from the server copy — not the working tree.
+- **Never grow a shared tool to solve a problem in this repository.** `chore` is a
+  general-purpose task runner this project merely consumes; the same goes for
+  `github-guard` and the agent-skills hooks. If something needed here looks like it
+  belongs inside one of them, it does not. Solve it here, or ask first. The tell is a
+  release: if a shared tool needs a new version cut whose only purpose is to unblock
+  this project, the code is in the wrong repository.
