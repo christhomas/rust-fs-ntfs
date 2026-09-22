@@ -44,7 +44,7 @@ jobs:
       # Linux only here, so none of ci.yml's Windows fallback is needed.
       - name: chore siblings
         run: |
-          curl -fsSL https://github.com/antimatter-studios/chore/releases/download/v0.11.0/chore-linux-amd64.tar.gz \
+          curl -fsSL https://github.com/antimatter-studios/chore/releases/download/v0.11.0/chore-0.11.0-linux-x86_64.tar.gz \
             | sudo tar xz -C /usr/local/bin chore
           chore siblings
 
