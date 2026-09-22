@@ -8,6 +8,7 @@ use std::os::raw::c_int;
 use std::sync::Mutex;
 
 use fs_ntfs::block_io::BlockIo;
+use fs_ntfs::data_runs::decode_runs;
 use fs_ntfs::mkfs::{format_filesystem, rec, stream};
 use fs_ntfs::{fs_ntfs_mkfs, FsNtfsBlockdevCfg};
 
@@ -58,6 +59,38 @@ impl BlockIo for MemDev {
     }
     fn size(&self) -> u64 {
         self.buf.len() as u64
+    }
+}
+
+fn raw_named_data_attribute(dev: &MemDev, record_number: u64, name: &str) -> Vec<u8> {
+    let bytes_per_sector = u16::from_le_bytes(dev.buf[0x0B..0x0D].try_into().unwrap()) as u64;
+    let sectors_per_cluster = dev.buf[0x0D] as u64;
+    let cluster_size = bytes_per_sector * sectors_per_cluster;
+    let mft_lcn = u64::from_le_bytes(dev.buf[0x30..0x38].try_into().unwrap());
+    let record_size = 4096usize;
+    let record_at = (mft_lcn * cluster_size) as usize + record_number as usize * record_size;
+    let record = &dev.buf[record_at..record_at + record_size];
+    let mut at = u16::from_le_bytes(record[0x14..0x16].try_into().unwrap()) as usize;
+
+    loop {
+        let attr_type = u32::from_le_bytes(record[at..at + 4].try_into().unwrap());
+        assert_ne!(attr_type, 0xFFFF_FFFF, "named $DATA {name} not found");
+        let attr_len = u32::from_le_bytes(record[at + 4..at + 8].try_into().unwrap()) as usize;
+        assert!(attr_len >= 0x10 && at + attr_len <= record.len());
+        let attr = &record[at..at + attr_len];
+        let name_len = attr[9] as usize;
+        let name_off = u16::from_le_bytes(attr[10..12].try_into().unwrap()) as usize;
+        let attr_name = String::from_utf16(
+            &attr[name_off..name_off + name_len * 2]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        if attr_type == 0x80 && attr_name == name {
+            return attr.to_vec();
+        }
+        at += attr_len;
     }
 }
 
@@ -445,6 +478,49 @@ fn secure_record_has_sds_sdh_sii_named_streams() {
         }
         assert!(found, "rec {rec_num} missing $STD_INFO");
     }
+}
+
+#[test]
+fn sparse_system_streams_have_extended_headers_and_real_allocation_totals() {
+    use fs_ntfs::sds::SDS_MIRROR_GAP;
+
+    const CLUSTER_SIZE: u64 = 4096;
+    let mut dev = MemDev::new(VOL_SIZE);
+    format_filesystem(
+        &mut dev,
+        VOL_SIZE,
+        CLUSTER_SIZE as u32,
+        4096,
+        Some("TESTVOL"),
+        None,
+    )
+    .expect("format_filesystem");
+
+    let bad = raw_named_data_attribute(&dev, rec::BADCLUS as u64, stream::BAD);
+    assert_eq!(u16::from_le_bytes(bad[12..14].try_into().unwrap()), 0x8000);
+    assert_eq!(u16::from_le_bytes(bad[10..12].try_into().unwrap()), 0x48);
+    assert_eq!(u16::from_le_bytes(bad[32..34].try_into().unwrap()), 0x50);
+    assert_eq!(u64::from_le_bytes(bad[64..72].try_into().unwrap()), 0);
+    let bad_mapping = u16::from_le_bytes(bad[32..34].try_into().unwrap()) as usize;
+    let bad_runs = decode_runs(&bad[bad_mapping..]).expect("decode $Bad mapping pairs");
+    assert_eq!(bad_runs.len(), 1);
+    assert_eq!(bad_runs[0].lcn, None);
+
+    let sds = raw_named_data_attribute(&dev, rec::SECURE as u64, stream::SDS);
+    assert_eq!(u16::from_le_bytes(sds[12..14].try_into().unwrap()), 0x8000);
+    assert_eq!(u16::from_le_bytes(sds[10..12].try_into().unwrap()), 0x48);
+    assert_eq!(u16::from_le_bytes(sds[32..34].try_into().unwrap()), 0x50);
+    assert_eq!(
+        u64::from_le_bytes(sds[64..72].try_into().unwrap()),
+        2 * CLUSTER_SIZE
+    );
+    let sds_mapping = u16::from_le_bytes(sds[32..34].try_into().unwrap()) as usize;
+    let sds_runs = decode_runs(&sds[sds_mapping..]).expect("decode $SDS mapping pairs");
+    assert_eq!(sds_runs.len(), 3);
+    assert!(sds_runs[0].lcn.is_some());
+    assert_eq!(sds_runs[1].lcn, None);
+    assert_eq!(sds_runs[1].length, SDS_MIRROR_GAP / CLUSTER_SIZE - 1);
+    assert!(sds_runs[2].lcn.is_some());
 }
 
 /// Sub-PR S3 + Iter L final: rec 11 must be a directory shell named

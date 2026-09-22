@@ -18,8 +18,9 @@ use crate::block_io::BlockIo;
 use crate::data_runs::{encode_runs, DataRun};
 use crate::mft_io::apply_fixup_on_write;
 use crate::record_build::{
-    align8, build_nonresident_attribute, build_nonresident_data_attribute, encode_file_reference,
-    nt_time_now, FA_ARCHIVE, FA_HIDDEN, FA_NTFS_DIRECTORY, FA_NTFS_VIEW_INDEX, FA_SYSTEM,
+    align8, build_nonresident_attribute, build_nonresident_data_attribute,
+    build_sparse_nonresident_data_attribute, encode_file_reference, nt_time_now, FA_ARCHIVE,
+    FA_HIDDEN, FA_NTFS_DIRECTORY, FA_NTFS_VIEW_INDEX, FA_SYSTEM,
 };
 use crate::upcase;
 
@@ -929,12 +930,12 @@ pub fn format_filesystem(
             lcn: None,
         }];
         let bad_mp = encode_runs(&bad_runs)?;
-        let bad_attr = build_nonresident_attribute(
-            ATTR_DATA,
+        let bad_attr = build_sparse_nonresident_data_attribute(
             Some(stream::BAD),
             4,
             bad_clusters * cluster_size as u64,
             bad_clusters * cluster_size as u64,
+            0,
             0,
             (bad_clusters as i64) - 1,
             &bad_mp,
@@ -1051,12 +1052,12 @@ pub fn format_filesystem(
             + SD_SYSFILE_RW.len() as u64;
         let sds_alloc_len = (gap_vcn + 1) * cluster_size as u64;
         let sds_last_vcn = gap_vcn as i64;
-        let sds_data = build_nonresident_attribute(
-            ATTR_DATA,
+        let sds_data = build_sparse_nonresident_data_attribute(
             Some(stream::SDS),
             4,
             sds_data_len,
             sds_alloc_len,
+            sds_real_clusters * cluster_size as u64,
             sds_data_len,
             sds_last_vcn,
             &sds_mp,

@@ -835,15 +835,16 @@ pub fn build_nonresident_data_attribute(
     Ok(buf)
 }
 
-/// Build a **sparse** non-resident `$DATA` attribute.
+/// Build a **sparse** non-resident `$DATA` attribute, optionally named.
 ///
 /// A sparse (or compressed) non-resident attribute uses the *extended*
 /// header: it carries an extra `total_allocated_size` u64 at `+0x40`
 /// (the real on-disk bytes, excluding holes), so its header is `0x48`
-/// bytes and `mapping_pairs_offset` is `0x48` — not the `0x40` of a plain
-/// non-resident attribute. chkdsk validates this layout strictly: setting
-/// the SPARSE flag (`0x8000`) on a plain `0x40` header makes chkdsk read
-/// past `data`/`initialized` into the mapping pairs and report the
+/// bytes. An unnamed stream therefore has `mapping_pairs_offset = 0x48`;
+/// a named stream stores its UTF-16 name at `0x48` and starts mapping pairs
+/// at the next aligned offset. chkdsk validates this layout strictly:
+/// setting the SPARSE flag (`0x8000`) on a plain `0x40` header makes chkdsk
+/// read past `data`/`initialized` into the mapping pairs and report the
 /// attribute corrupt.
 ///
 /// Field semantics for sparse:
@@ -853,6 +854,7 @@ pub fn build_nonresident_data_attribute(
 ///   bytes; this is the on-disk footprint.
 /// * `data_size` / `initialized_size` — the logical size as usual.
 pub fn build_sparse_nonresident_data_attribute(
+    attr_name: Option<&str>,
     attr_id: u16,
     data_length: u64,
     allocated_length: u64,
@@ -861,24 +863,33 @@ pub fn build_sparse_nonresident_data_attribute(
     last_vcn: i64,
     mapping_pairs: &[u8],
 ) -> Result<Vec<u8>, String> {
+    let name_u16: Vec<u16> = attr_name
+        .map(|s| s.encode_utf16().collect())
+        .unwrap_or_default();
+    if name_u16.len() > 255 {
+        return Err(format!("attribute name too long: {}", name_u16.len()));
+    }
+
     // Extended header: 0x40 standard fields + 8-byte total_allocated_size.
     let header_size = 0x48usize;
-    let mapping_offset = header_size;
-    let attr_length = align8(header_size + mapping_pairs.len());
+    let name_offset = header_size;
+    let name_bytes = name_u16.len() * 2;
+    let mapping_offset = align8(name_offset + name_bytes);
+    let attr_length = align8(mapping_offset + mapping_pairs.len());
 
     let mut buf = vec![0u8; attr_length];
 
     buf[0..4].copy_from_slice(&ATTR_DATA.to_le_bytes());
     buf[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
     buf[8] = 1; // non_resident
-    buf[9] = 0; // name_length (unnamed stream)
-    buf[10..12].copy_from_slice(&(mapping_offset as u16).to_le_bytes()); // name_offset
+    buf[9] = name_u16.len() as u8;
+    buf[10..12].copy_from_slice(&(name_offset as u16).to_le_bytes());
     buf[12..14].copy_from_slice(&0x8000u16.to_le_bytes()); // flags: SPARSE
     buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
 
     buf[16..24].copy_from_slice(&0u64.to_le_bytes()); // first_vcn
     buf[24..32].copy_from_slice(&last_vcn.to_le_bytes()); // last_vcn
-    buf[32..34].copy_from_slice(&(mapping_offset as u16).to_le_bytes()); // mapping_pairs_offset = 0x48
+    buf[32..34].copy_from_slice(&(mapping_offset as u16).to_le_bytes());
     buf[34..36].copy_from_slice(&0u16.to_le_bytes()); // compression_unit = 0 (sparse, not compressed)
     buf[36..40].copy_from_slice(&0u32.to_le_bytes()); // reserved
     buf[40..48].copy_from_slice(&allocated_length.to_le_bytes()); // 0x28 allocated (full span)
@@ -886,6 +897,10 @@ pub fn build_sparse_nonresident_data_attribute(
     buf[56..64].copy_from_slice(&initialized_length.to_le_bytes()); // 0x38 initialized
     buf[64..72].copy_from_slice(&total_allocated_length.to_le_bytes()); // 0x40 total_allocated
 
+    for (i, c) in name_u16.iter().enumerate() {
+        let off = name_offset + i * 2;
+        buf[off..off + 2].copy_from_slice(&c.to_le_bytes());
+    }
     buf[mapping_offset..mapping_offset + mapping_pairs.len()].copy_from_slice(mapping_pairs);
     Ok(buf)
 }
@@ -1672,6 +1687,48 @@ mod tests {
             build_nonresident_data_attribute(0, 8 * 4096, 8 * 4096, 8 * 4096, 7, &mp).unwrap();
         let mpo = u16::from_le_bytes([buf[32], buf[33]]) as usize;
         assert_eq!(&buf[mpo..mpo + mp.len()], &mp);
+    }
+
+    // --- build_sparse_nonresident_data_attribute ----------------------------
+
+    #[test]
+    fn sparse_unnamed_data_starts_mapping_pairs_at_extended_header_end() {
+        let mp = [0x01u8, 0x04, 0x00];
+        let buf =
+            build_sparse_nonresident_data_attribute(None, 4, 4 * 4096, 4 * 4096, 0, 0, 3, &mp)
+                .unwrap();
+
+        assert_eq!(u16::from_le_bytes(buf[12..14].try_into().unwrap()), 0x8000);
+        assert_eq!(u16::from_le_bytes(buf[32..34].try_into().unwrap()), 0x48);
+        assert_eq!(u64::from_le_bytes(buf[64..72].try_into().unwrap()), 0);
+        assert_eq!(&buf[0x48..0x48 + mp.len()], &mp);
+    }
+
+    #[test]
+    fn sparse_named_data_places_name_after_extended_header_and_pairs_after_name() {
+        let mp = [0x01u8, 0x04, 0x00];
+        let buf = build_sparse_nonresident_data_attribute(
+            Some("$Bad"),
+            4,
+            4 * 4096,
+            4 * 4096,
+            0,
+            0,
+            3,
+            &mp,
+        )
+        .unwrap();
+
+        assert_eq!(buf[9], 4, "UTF-16 code-unit count");
+        assert_eq!(u16::from_le_bytes(buf[10..12].try_into().unwrap()), 0x48);
+        assert_eq!(u16::from_le_bytes(buf[12..14].try_into().unwrap()), 0x8000);
+        assert_eq!(u16::from_le_bytes(buf[32..34].try_into().unwrap()), 0x50);
+        assert_eq!(u64::from_le_bytes(buf[64..72].try_into().unwrap()), 0);
+        assert_eq!(
+            &buf[0x48..0x50],
+            &[0x24, 0x00, 0x42, 0x00, 0x61, 0x00, 0x64, 0x00]
+        );
+        assert_eq!(&buf[0x50..0x50 + mp.len()], &mp);
     }
 
     // --- build_nonresident_attribute (named stream) --------------------------
