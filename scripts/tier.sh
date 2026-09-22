@@ -52,7 +52,7 @@ shift
 #   mkfs        115 / 3,858 cold (Mac), 24 / 1,022 warm           160 / 5,200
 #   suite       2,143 / 108,930 (CI Linux, fixtures built)        2,900 / 150,000
 #   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
-#   scripts     56 / 1,180 (four shell tests)                      80 / 1,800
+#   scripts     72 / 1,809 (five shell tests)                     100 / 2,400
 #   matrix      633 / 35,311 green, 1,521 / 78,075 red (see below)  900 / 50,000
 #
 # THE CLIPPY ROW MOVED ON 2026-09-19, from 150/5,000 to 260/11,500. Adding
@@ -77,7 +77,7 @@ case "$TIER" in
     mkfs)       MAX_LINES=160;  MAX_BYTES=5200 ;;
     suite)      MAX_LINES=2900; MAX_BYTES=150000 ;;
     asan)       MAX_LINES=1100; MAX_BYTES=72000 ;;
-    scripts)    MAX_LINES=80;   MAX_BYTES=1800 ;;
+    scripts)    MAX_LINES=100;  MAX_BYTES=2400 ;;
     matrix)     MAX_LINES=900;  MAX_BYTES=50000 ;;
     *)
         echo "tier.sh: '$TIER' has no budget. Add a measured row to scripts/tier.sh." >&2
@@ -100,9 +100,15 @@ esac
 # the pinned release. There is no sibling-versus-crate decision to make,
 # because cargo made it.
 #
+# Compilation flags belong to the wrapped command, not this discovery probe.
+# In particular the ASan tier supplies nightly-only -Z flags while this plain
+# `cargo metadata` uses the default stable toolchain. Clearing them here keeps
+# discovery toolchain-neutral; the command below still inherits them intact.
+#
 # tmp/ is gitignored and is where the tier logs already live.
 set +e
-CORE_DIR="$(cargo metadata --format-version 1 --locked --manifest-path "$REPO/Cargo.toml" \
+CORE_DIR="$(RUSTFLAGS= RUSTDOCFLAGS= \
+    cargo metadata --format-version 1 --locked --manifest-path "$REPO/Cargo.toml" \
     2>/dev/null | python3 -c '
 import json, sys
 packages = json.load(sys.stdin)["packages"]

@@ -14,6 +14,12 @@ of core's canonical `scripts/output-budget.sh`. The copy is removed when the
 tier exits. This keeps the wrapper version tied to Cargo resolution without a
 stale repository copy.
 
+`cargo metadata --locked` also fetches and unpacks a missing registry source,
+so a separate fetch step is unnecessary even with an empty Cargo cache. The
+discovery probe clears `RUSTFLAGS` and `RUSTDOCFLAGS` only for metadata; this
+keeps it on the default toolchain when an ASan tier supplies nightly-only
+flags, while the wrapped test command still receives those flags unchanged.
+
 On success, the command's output stays in `tmp/logs/<tier>.log`. The terminal
 gets one verdict containing the tier, line and byte counts, and full log path:
 
