@@ -74,6 +74,13 @@ pub struct Attr {
     pub attributes: u32,
 }
 
+/// One entry returned by [`Filesystem::read_dir`].
+///
+/// Real entries are decoded from the directory index without reading their
+/// target records. `file_type` is therefore the index's duplicated type and
+/// can be stale; a subsequent operation by name may reject the entry if its
+/// file-reference sequence no longer matches the target record. `.` and `..`
+/// are synthesized as directories.
 #[derive(Debug, Clone)]
 pub struct DirEntry {
     pub file_record_number: u64,
@@ -263,6 +270,13 @@ impl Filesystem {
         Ok(attr)
     }
 
+    /// Enumerate `path` from its `$I30` directory index.
+    ///
+    /// This intentionally avoids one target-record read per entry. A stale
+    /// index row can therefore be listed, with the type copied into that row,
+    /// and then be refused by `stat`, `read_file`, or another path-based call.
+    /// Callers must handle that race/consistency boundary just as they would a
+    /// file disappearing after an ordinary directory enumeration.
     pub fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>, Error> {
         let mut io = PathIo::open_ro(&self.image).map_err(Error)?;
         let current_rn = read::resolve_path(&mut io, path).map_err(Error)?;

@@ -1480,6 +1480,11 @@ pub fn other_protected_metafile_ranges_io<T: BlockIo + ?Sized>(
 }
 
 /// One entry in a directory listing.
+///
+/// This is an `$I30` index snapshot, not a stat of the target record. In
+/// particular, [`DirEntry::is_dir`] is the duplicated
+/// `$FILE_NAME.file_attributes` directory bit stored in the index entry.
+/// See [`read_dir_entries`] for the stale-entry contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
     pub name: String,
@@ -1490,9 +1495,19 @@ pub struct DirEntry {
 /// Enumerate a directory's entries natively (no upstream `ntfs` crate),
 /// merging the resident `$INDEX_ROOT` with any spilled `$INDEX_ALLOCATION`
 /// (INDX) blocks. DOS-namespace-only entries (the 8.3 shadow names) are
-/// skipped, matching the canonical Win32 listing; `is_dir` is read from each
-/// target record's flags. Order follows index/B-tree order, which is not a
-/// global sort across blocks — callers that need sorted output should sort.
+/// skipped, matching the canonical Win32 listing. Order follows index/B-tree
+/// order, which is not a global sort across blocks — callers that need sorted
+/// output should sort.
+///
+/// This function deliberately does not read each target MFT record: every
+/// returned field comes from the directory's `$I30` index entry, including
+/// `is_dir`, which is the entry's duplicated `$FILE_NAME.file_attributes`
+/// directory bit. Consequently an interrupted metadata update can leave a
+/// stale entry that is returned here (possibly with a stale type) but that a
+/// later path lookup refuses when the entry's sequence does not match the
+/// target record. Callers must treat listing entries as enumeration hints and
+/// handle lookup/open failure; use [`read_stat`] after lookup when authoritative
+/// target metadata is required.
 pub fn read_dir_entries<T: BlockIo + ?Sized>(
     io: &mut T,
     dir_record: u64,
