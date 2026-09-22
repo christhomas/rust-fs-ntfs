@@ -14,7 +14,9 @@ use crate::data_runs::{self, DataRun};
 use crate::idx_block;
 use crate::index_io;
 use crate::mft_bitmap;
-use crate::mft_io::{read_mft_record_io, update_mft_record_io, MFT_FLAG_DIRECTORY};
+use crate::mft_io::{
+    read_mft_record_io, update_mft_record_io, update_mft_record_io_typed, MFT_FLAG_DIRECTORY,
+};
 
 use std::path::Path;
 
@@ -3101,6 +3103,37 @@ fn set_si_file_attributes_bit(record: &mut [u8], bit: u32, set: bool) -> Result<
 // W4.1: Alternate Data Streams (named $DATA)
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResidentWriteError {
+    NeedsPromotion(String),
+    Other(String),
+}
+
+impl ResidentWriteError {
+    fn into_string(self) -> String {
+        match self {
+            Self::NeedsPromotion(message) | Self::Other(message) => message,
+        }
+    }
+}
+
+impl From<String> for ResidentWriteError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+impl From<crate::attr_resize::ResidentResizeError> for ResidentWriteError {
+    fn from(error: crate::attr_resize::ResidentResizeError) -> Self {
+        match error {
+            crate::attr_resize::ResidentResizeError::Capacity(message) => {
+                Self::NeedsPromotion(message)
+            }
+            crate::attr_resize::ResidentResizeError::Other(message) => Self::Other(message),
+        }
+    }
+}
+
 /// Create or replace a named `$DATA` stream (an Alternate Data Stream
 /// in NTFS parlance) with resident data. If the stream already exists,
 /// its body is overwritten (resizing the attribute as needed).
@@ -3128,20 +3161,33 @@ pub fn write_named_stream_resident_io<T: BlockIo + ?Sized>(
     stream_name: &str,
     data: &[u8],
 ) -> Result<(), String> {
+    write_named_stream_resident_attempt_io(io, file_path, stream_name, data)
+        .map_err(ResidentWriteError::into_string)
+}
+
+fn write_named_stream_resident_attempt_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    stream_name: &str,
+    data: &[u8],
+) -> Result<(), ResidentWriteError> {
     if stream_name.is_empty() {
-        return Err("stream_name must be non-empty".to_string());
+        return Err(ResidentWriteError::Other(
+            "stream_name must be non-empty".to_string(),
+        ));
     }
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    update_mft_record_io(io, rec, |record| {
+    update_mft_record_io_typed(io, rec, |record| {
         // Existing stream?
         let existing = attr_io::find_attribute(record, AttrType::Data, Some(stream_name));
         if let Some(loc) = existing {
             if !loc.is_resident {
-                return Err(format!(
+                return Err(ResidentWriteError::NeedsPromotion(format!(
                     "named stream '{stream_name}' is non-resident; use write_at + grow instead"
-                ));
+                )));
             }
-            crate::attr_resize::set_resident_value(record, loc.attr_offset, data)
+            crate::attr_resize::set_resident_value_typed(record, loc.attr_offset, data)
+                .map_err(ResidentWriteError::from)
         } else {
             let attr_id = crate::attr_resize::allocate_attribute_id(record);
             let new_attr = crate::record_build::build_named_resident_data_attribute(
@@ -3149,7 +3195,8 @@ pub fn write_named_stream_resident_io<T: BlockIo + ?Sized>(
                 stream_name,
                 data,
             )?;
-            crate::attr_resize::insert_attribute_sorted(record, &new_attr)
+            crate::attr_resize::insert_attribute_sorted_typed(record, &new_attr)
+                .map_err(ResidentWriteError::from)
         }
     })
 }
@@ -3174,14 +3221,9 @@ pub fn write_named_stream_io<T: BlockIo + ?Sized>(
     stream_name: &str,
     data: &[u8],
 ) -> Result<(), String> {
-    match write_named_stream_resident_io(io, file_path, stream_name, data) {
+    match write_named_stream_resident_attempt_io(io, file_path, stream_name, data) {
         Ok(()) => Ok(()),
-        Err(e)
-            if e.contains("capacity")
-                || e.contains("exceeds")
-                || e.contains("no room")
-                || e.contains("non-resident") =>
-        {
+        Err(ResidentWriteError::NeedsPromotion(_)) => {
             // If a resident version exists, remove it first so the
             // non-resident replacement inserts cleanly.
             let _ = delete_named_stream_io(io, file_path, stream_name);
@@ -3193,7 +3235,7 @@ pub fn write_named_stream_io<T: BlockIo + ?Sized>(
                 data,
             )
         }
-        Err(e) => Err(e),
+        Err(ResidentWriteError::Other(error)) => Err(error),
     }
 }
 
@@ -3689,8 +3731,8 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
 /// Dispatches between resident rewrite and promotion-to-non-resident
 /// based on whether the data still fits inside the MFT record.
 ///
-/// The heuristic is: attempt resident write first. If it fails with a
-/// record-capacity error, retry with promotion.
+/// The dispatcher attempts a resident write first and retries with promotion
+/// only when the resident writer returns its typed capacity outcome.
 pub fn write_file_contents(image: &Path, file_path: &str, new_data: &[u8]) -> Result<u64, String> {
     let mut io = PathIo::open_rw(image)?;
     write_file_contents_io(&mut io, file_path, new_data)
@@ -3701,13 +3743,13 @@ pub fn write_file_contents_io<T: BlockIo + ?Sized>(
     file_path: &str,
     new_data: &[u8],
 ) -> Result<u64, String> {
-    match write_resident_contents_io(io, file_path, new_data) {
+    match write_resident_contents_attempt_io(io, file_path, new_data) {
         Ok(n) => Ok(n),
-        Err(e) if e.contains("capacity") || e.contains("exceeds") => {
+        Err(ResidentWriteError::NeedsPromotion(_)) => {
             promote_resident_data_to_nonresident_io(io, file_path, new_data)?;
             Ok(new_data.len() as u64)
         }
-        Err(e) => Err(e),
+        Err(ResidentWriteError::Other(error)) => Err(error),
     }
 }
 
@@ -4016,14 +4058,26 @@ pub fn write_resident_contents_io<T: BlockIo + ?Sized>(
     file_path: &str,
     new_data: &[u8],
 ) -> Result<u64, String> {
+    write_resident_contents_attempt_io(io, file_path, new_data)
+        .map_err(ResidentWriteError::into_string)
+}
+
+fn write_resident_contents_attempt_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    new_data: &[u8],
+) -> Result<u64, ResidentWriteError> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    update_mft_record_io(io, rec, |record| {
+    update_mft_record_io_typed(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, None)
             .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
         if !loc.is_resident {
-            return Err("$DATA is already non-resident; use write_at + grow instead".to_string());
+            return Err(ResidentWriteError::NeedsPromotion(
+                "$DATA is already non-resident; use write_at + grow instead".to_string(),
+            ));
         }
-        crate::attr_resize::set_resident_value(record, loc.attr_offset, new_data)
+        crate::attr_resize::set_resident_value_typed(record, loc.attr_offset, new_data)
+            .map_err(ResidentWriteError::from)
     })?;
     Ok(new_data.len() as u64)
 }
@@ -4681,6 +4735,35 @@ mod tests {
         }
         fn size(&self) -> u64 {
             self.buf.len() as u64
+        }
+    }
+
+    struct RejectsWritesWithPromotionWords {
+        inner: MemDev,
+        writes_attempted: usize,
+    }
+
+    impl RejectsWritesWithPromotionWords {
+        fn new(inner: MemDev) -> Self {
+            Self {
+                inner,
+                writes_attempted: 0,
+            }
+        }
+    }
+
+    impl BlockIo for RejectsWritesWithPromotionWords {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            self.inner.read_exact_at(offset, buf)
+        }
+
+        fn write_all_at(&mut self, _offset: u64, _buf: &[u8]) -> Result<(), String> {
+            self.writes_attempted += 1;
+            Err("injected non-resident capacity transport failure".to_string())
+        }
+
+        fn size(&self) -> u64 {
+            self.inner.size()
         }
     }
 
@@ -6400,6 +6483,67 @@ mod tests {
         write_named_stream_io(&mut dev, "/ads.txt", "small", b"tiny").unwrap();
         let names = list_named_streams_io(&mut dev, "/ads.txt").unwrap();
         assert!(names.contains(&"small".to_string()));
+    }
+
+    #[test]
+    fn named_stream_promotes_only_the_typed_capacity_outcome() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "ads.txt").unwrap();
+
+        write_named_stream_io(&mut dev, "/ads.txt", "big", &[0xA5; 16_384]).unwrap();
+
+        let rec = resolve_path_to_record_number_io(&mut dev, "/ads.txt").unwrap();
+        let (_, record) = read_mft_record_io(&mut dev, rec).unwrap();
+        let stream = attr_io::find_attribute(&record, AttrType::Data, Some("big")).unwrap();
+        assert!(!stream.is_resident, "capacity must trigger promotion");
+    }
+
+    #[test]
+    fn file_contents_promotes_only_the_typed_capacity_outcome() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "file.txt").unwrap();
+
+        assert_eq!(
+            write_file_contents_io(&mut dev, "/file.txt", &[0x5A; 16_384]).unwrap(),
+            16_384
+        );
+
+        let rec = resolve_path_to_record_number_io(&mut dev, "/file.txt").unwrap();
+        let (_, record) = read_mft_record_io(&mut dev, rec).unwrap();
+        let data = attr_io::find_attribute(&record, AttrType::Data, None).unwrap();
+        assert!(!data.is_resident, "capacity must trigger promotion");
+    }
+
+    #[test]
+    fn named_stream_does_not_promote_an_unrelated_error_with_capacity_words() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "ads.txt").unwrap();
+        let mut failing = RejectsWritesWithPromotionWords::new(dev);
+
+        let error = write_named_stream_io(&mut failing, "/ads.txt", "small", b"tiny")
+            .expect_err("the injected record write must propagate");
+
+        assert!(error.contains("injected non-resident capacity transport failure"));
+        assert_eq!(
+            failing.writes_attempted, 1,
+            "an ordinary error must not enter delete/allocate/promote"
+        );
+    }
+
+    #[test]
+    fn file_contents_does_not_promote_an_unrelated_error_with_capacity_words() {
+        let mut dev = fresh_vol();
+        create_file_io(&mut dev, "/", "file.txt").unwrap();
+        let mut failing = RejectsWritesWithPromotionWords::new(dev);
+
+        let error = write_file_contents_io(&mut failing, "/file.txt", b"tiny")
+            .expect_err("the injected record write must propagate");
+
+        assert!(error.contains("injected non-resident capacity transport failure"));
+        assert_eq!(
+            failing.writes_attempted, 1,
+            "an ordinary error must not allocate/promote"
+        );
     }
 
     #[test]

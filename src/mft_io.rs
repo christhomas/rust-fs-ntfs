@@ -722,20 +722,37 @@ where
     T: BlockIo + ?Sized,
     F: FnOnce(&mut [u8]) -> Result<(), String>,
 {
-    let (params, mut record) = read_mft_record_io(io, record_number)?;
+    update_mft_record_io_typed(io, record_number, mutate)
+}
+
+/// Typed-error equivalent of [`update_mft_record_io`] for callers whose
+/// mutator has a control-flow outcome that must not be encoded in prose.
+/// Device and record errors are converted with `E::from(String)`; the
+/// mutator's own variant survives unchanged.
+pub(crate) fn update_mft_record_io_typed<T, F, E>(
+    io: &mut T,
+    record_number: u64,
+    mutate: F,
+) -> Result<(), E>
+where
+    T: BlockIo + ?Sized,
+    F: FnOnce(&mut [u8]) -> Result<(), E>,
+    E: From<String>,
+{
+    let (params, mut record) = read_mft_record_io(io, record_number).map_err(E::from)?;
     if record_flags(&record) & MFT_FLAG_IN_USE == 0 {
-        return Err(format!(
+        return Err(E::from(format!(
             "refusing to write to MFT record {record_number}: IN_USE flag is clear"
-        ));
+        )));
     }
 
     mutate(&mut record)?;
-    apply_fixup_on_write(&mut record, params.bytes_per_sector)?;
+    apply_fixup_on_write(&mut record, params.bytes_per_sector).map_err(E::from)?;
 
     let offset = mft_record_offset(&params, record_number);
     io.write_all_at(offset, &record)
-        .map_err(|e| format!("write record {record_number}: {e}"))?;
-    io.sync()?;
+        .map_err(|e| E::from(format!("write record {record_number}: {e}")))?;
+    io.sync().map_err(E::from)?;
     Ok(())
 }
 
