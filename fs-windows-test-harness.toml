@@ -142,6 +142,14 @@ host = "host"
 command = "{binary} touch {image_dir}/{run_id}/{scenario.image} {step.parent} {step.basename}"
 expect_exit = 0
 
+[ops.mac-touch-index-allocation-rejected]
+# This is deliberately an expected failure: a Windows-created wide directory
+# has an `$INDEX_ALLOCATION` overflow, and the Mac-side writer must refuse the
+# unsupported split/routing operation before changing the image.
+host = "host"
+command = "{binary} touch {image_dir}/{run_id}/{scenario.image} {step.parent} {step.basename}"
+expect_exit = 1
+
 [ops.mac-write]
 # rust-ntfs write takes the full path and content via --content.
 # `{step.content}` is single-quoted so payloads with spaces (e.g.

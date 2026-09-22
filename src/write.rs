@@ -1535,14 +1535,10 @@ fn validate_basename(name: &str) -> Result<(), String> {
 /// at `parent_path`. Returns the new file's MFT record number.
 ///
 /// **Limitations (MVP):**
-/// * A parent WITH `$INDEX_ALLOCATION` is handled, but not correctly:
-///   `insert_entry_in_parent_io` takes the first leaf block with room
-///   rather than the leaf the name collates into, and writes no routing
-///   entry. The entry lands in a real block, in sorted order within that
-///   block, on the wrong side of the parent's routing keys. See #301;
-///   this line used to claim the case was refused, and nothing refuses
-///   it. Creates in a root directory laid out by another formatter --
-///   which is split even when small -- take this path.
+/// * A parent with one fitting `$INDEX_ALLOCATION` leaf is supported. A tree
+///   with multiple leaves, an interior target, or a full leaf is refused
+///   before the new record is allocated because B+tree routing and splitting
+///   are W3.2 work (see #301).
 /// * MFT must have a free record. Growing `$MFT` itself is W2.6.
 /// * Filename collation is case-insensitive ASCII-only (proper
 ///   NTFS upcase-table collation is future work).
@@ -1716,7 +1712,8 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
 
     let parent_rec = resolve_path_to_record_number_io(io, parent_path)?;
 
-    // Read parent; check it's a directory with a resident-only index.
+    // Read parent; check it's a directory and remember whether its index
+    // has an $INDEX_ALLOCATION child tree.
     let (params, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let parent_flags = crate::mft_io::record_flags(&parent_record_bytes);
     if parent_flags & crate::mft_io::MFT_FLAG_DIRECTORY == 0 {
@@ -1822,10 +1819,13 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
     Ok(new_rec)
 }
 
-/// Insert a new index entry into a parent directory, dispatching
-/// between resident `$INDEX_ROOT` and `$INDEX_ALLOCATION` INDX blocks.
-/// For overflowed parents, scans allocated INDX blocks for one with
-/// room and inserts there.
+/// Insert a new index entry into a parent directory.
+///
+/// Insert into a resident `$INDEX_ROOT`, or into the only leaf of a
+/// `$INDEX_ALLOCATION` tree when that leaf has room. Selecting among several
+/// leaves, splitting a full leaf, and updating parent routing entries are
+/// W3.2 work; writing to an arbitrary block would create an index that a
+/// descending NTFS reader cannot reliably find.
 #[allow(dead_code)]
 fn insert_entry_in_parent(
     image: &Path,
@@ -1866,55 +1866,41 @@ fn insert_entry_in_parent_io<T: BlockIo + ?Sized>(
             )
         });
     }
-    // Parent has $INDEX_ALLOCATION: find an INDX block with room.
+
     let ia = idx_block::load_for_directory_io(io, parent_rec)?;
-    for vcn in ia.allocated_block_vcns() {
-        // Peek at free space — avoid unnecessary RMW work for blocks
-        // that can't fit the entry.
-        let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
-        let ih_start = idx_block::INDX_INDEX_HEADER_OFFSET;
-        let total_size = u32::from_le_bytes([
-            block[ih_start + 4],
-            block[ih_start + 5],
-            block[ih_start + 6],
-            block[ih_start + 7],
-        ]) as usize;
-        let allocated_size = u32::from_le_bytes([
-            block[ih_start + 8],
-            block[ih_start + 9],
-            block[ih_start + 10],
-            block[ih_start + 11],
-        ]) as usize;
-        if total_size + entry_bytes.len() > allocated_size {
-            continue;
-        }
-        // ROOM IS NOT THE ONLY THING THAT MAKES A BLOCK ELIGIBLE. The
-        // $I30 bitmap marks interior and leaf blocks alike, so this walk
-        // will otherwise hand an interior node to an insert that can only
-        // build leaf entries. `insert_entry_into_indx_block` refuses that
-        // now, but failing the create when a leaf further down the list
-        // would have taken the entry is a worse answer than looking on.
-        if block
-            .get(ih_start + index_io::IH_FLAGS_OFFSET)
-            .is_some_and(|f| f & index_io::IH_FLAG_HAS_SUBNODES != 0)
-        {
-            continue;
-        }
-        // This block is a leaf and has room. RMW + insert.
-        return idx_block::update_indx_block_io(io, &ia, vcn, |block| {
-            index_io::insert_entry_into_indx_block_with_collation(
-                block,
-                entry_bytes,
-                basename,
-                upcase.as_ref(),
-            )
-        });
+    let vcns = ia.allocated_block_vcns();
+    if vcns.len() != 1 {
+        return Err(
+            "$INDEX_ALLOCATION insertion is not supported: selecting the correct B+tree leaf \
+             and updating root routing across multiple leaves (W3.2) are not implemented"
+                .to_string(),
+        );
     }
-    Err(
-        "no leaf INDX block with room for the new entry (would need B+ tree split / new block \
-         allocation)"
-            .to_string(),
-    )
+
+    let vcn = vcns[0];
+    let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+    let flags = block[idx_block::INDX_INDEX_HEADER_OFFSET + index_io::IH_FLAGS_OFFSET];
+    if flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
+        return Err(
+            "$INDEX_ALLOCATION insertion is not supported: the target is an interior B+tree \
+             node and leaf routing (W3.2) is not implemented"
+                .to_string(),
+        );
+    }
+    idx_block::update_indx_block_io(io, &ia, vcn, |block| {
+        index_io::insert_entry_into_indx_block_with_collation(
+            block,
+            entry_bytes,
+            basename,
+            upcase.as_ref(),
+        )
+        .map_err(|e| {
+            format!(
+                "$INDEX_ALLOCATION insertion is not supported: the target leaf cannot fit \
+                 the entry (W3.2): {e}"
+            )
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1924,9 +1910,10 @@ fn insert_entry_in_parent_io<T: BlockIo + ?Sized>(
 /// Create a new empty directory `basename` inside `parent_path`.
 /// Returns the new directory's MFT record number on success.
 ///
-/// Shares the limitation set of [`create_file`], including the
-/// `$INDEX_ALLOCATION` placement defect (#301): a parent whose index has
-/// overflowed is not refused, it is inserted into wrongly.
+/// Shares the limitation set of [`create_file`]: one fitting allocation leaf
+/// is supported, while multiple leaves, an interior target, and a full leaf
+/// are refused until the corresponding B+tree routing/splitting work is
+/// implemented (W3.2, #301).
 pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, String> {
     let mut io = PathIo::open_rw(image)?;
     mkdir_io(&mut io, parent_path, basename)
@@ -4988,28 +4975,18 @@ mod tests {
         }
     }
 
-    /// THE $I30 BITMAP DOES NOT SAY WHICH BLOCKS ARE LEAVES.
+    /// `$I30`'s allocated-block bitmap does not encode enough information for
+    /// selecting among multiple leaves. The former implementation chose the
+    /// first block with room, which could be the wrong leaf (or an interior
+    /// node) and never maintained the parent routing entries. Until W3.2
+    /// implements the complete B+tree operation, that shape must be rejected;
+    /// a single fitting leaf remains a valid insertion target.
     ///
-    /// `insert_entry_in_parent_io` walks every allocated INDX block and
-    /// takes the first with room. An interior node has room like any
-    /// other, and the insert can only build leaf entries, so the walk has
-    /// to skip interior blocks rather than hand one over.
-    ///
-    /// The guard inside the insert makes that safe — it refuses — but a
-    /// refusal is a failed `create`, and there may be a leaf further down
-    /// the list that would have taken the entry. This is the test for the
-    /// skip, not for the guard: the create must SUCCEED, and the entry
-    /// must land in the leaf.
-    ///
-    /// A volume this driver formats never reaches the path at all, because
-    /// it cannot grow a directory past its `$INDEX_ROOT` — 24 files in the
-    /// root is the ceiling. So the directory is built here: two clusters
-    /// of `$INDEX_ALLOCATION`, a `$Bitmap:$I30` marking both blocks live,
-    /// the `HAS_SUBNODES` flag the overflow path is gated on, and two INDX
-    /// blocks written into those clusters, the interior one first in walk
-    /// order.
+    /// This synthetic directory has two allocated blocks, including an
+    /// interior block with room, so it proves the refusal is based on the
+    /// overflow shape rather than on the particular block contents.
     #[test]
-    fn a_create_skips_an_interior_indx_block_and_lands_in_a_leaf() {
+    fn a_create_refuses_index_allocation_without_changing_the_index() {
         const BS: usize = 4096;
         const ROOT: u64 = 5;
         let mut dev = fresh_vol();
@@ -5063,7 +5040,8 @@ mod tests {
         .expect("give the root an $INDEX_ALLOCATION");
 
         // Write the two blocks: VCN 0 interior, VCN 1 leaf. Both empty
-        // apart from their sentinel, so both have room.
+        // apart from their sentinel, so both have room — exactly the shape
+        // that the old free-space scan mishandled.
         let params = crate::mft_io::read_boot_params_io(&mut dev).expect("boot params");
         for (i, interior) in [true, false].into_iter().enumerate() {
             let mut block = empty_indx_block(BS, interior);
@@ -5073,30 +5051,43 @@ mod tests {
                 .expect("write indx block");
         }
 
-        create_file_io(&mut dev, "/", "target.txt")
-            .expect("the create must find the leaf block, not stop at the interior one");
-
+        let (_, before_root) = crate::mft_io::read_mft_record_io(&mut dev, ROOT).expect("root");
         let ia = crate::idx_block::load_for_directory_io(&mut dev, ROOT).expect("load $I30");
+        let before_blocks: Vec<Vec<u8>> = ia
+            .allocated_block_vcns()
+            .into_iter()
+            .map(|vcn| crate::idx_block::read_indx_block_io(&mut dev, &ia, vcn).expect("read"))
+            .collect();
+
+        let err = create_file_io(&mut dev, "/", "target.txt")
+            .expect_err("overflowed parents need the unimplemented B+tree operation");
+        assert!(err.contains("$INDEX_ALLOCATION insertion is not supported"));
+        assert!(err.contains("W3.2"));
+
+        let (_, after_root) = crate::mft_io::read_mft_record_io(&mut dev, ROOT).expect("root");
+        assert_eq!(
+            after_root, before_root,
+            "the parent record must not be mutated"
+        );
+        let after_blocks: Vec<Vec<u8>> = ia
+            .allocated_block_vcns()
+            .into_iter()
+            .map(|vcn| crate::idx_block::read_indx_block_io(&mut dev, &ia, vcn).expect("read"))
+            .collect();
+        assert_eq!(after_blocks, before_blocks, "no INDX block may be written");
         assert_eq!(
             ia.allocated_block_vcns().len(),
             2,
             "the fixture must present two blocks for the walk to choose between"
         );
-        let interior = crate::idx_block::read_indx_block_io(&mut dev, &ia, 0).expect("read vcn 0");
-        let leaf = crate::idx_block::read_indx_block_io(&mut dev, &ia, 1).expect("read vcn 1");
-
-        assert!(
-            index_io::find_entry_in_indx_block(&leaf, "target.txt", None)
-                .expect("search the leaf")
-                .is_some(),
-            "the entry must land in the leaf block"
-        );
-        assert!(
-            index_io::find_entry_in_indx_block(&interior, "target.txt", None)
-                .expect("search the interior block")
-                .is_none(),
-            "the entry must not be in the interior block"
-        );
+        for block in after_blocks {
+            assert!(
+                index_io::find_entry_in_indx_block(&block, "target.txt", None)
+                    .expect("search block")
+                    .is_none(),
+                "the rejected entry must not appear on disk"
+            );
+        }
     }
 
     /// A resident attribute of any type with a stream name.
@@ -5155,7 +5146,7 @@ mod tests {
     }
 
     #[test]
-    fn create_file_io_creates_findable_file() {
+    fn create_file_io_accepts_a_resident_index() {
         let mut dev = fresh_vol();
         let rec_num = create_file_io(&mut dev, "/", "hello.txt").unwrap();
         assert!(rec_num >= 24, "user files start at record 24+");
