@@ -170,6 +170,157 @@ pub fn find_free_record_io<T: BlockIo + ?Sized>(
     Ok(None)
 }
 
+/// Return a free record, extending `$MFT` when its current record range is full.
+pub fn find_or_grow_free_record_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    hint: u64,
+) -> Result<(MftBitmap, u64), String> {
+    let current = locate_io(io)?;
+    if let Some(record) = find_free_record_io(io, &current, hint)? {
+        return Ok((current, record));
+    }
+    grow_io(io, &current)?;
+    let grown = locate_io(io)?;
+    let record = find_free_record_io(io, &grown, current.total_bits())?
+        .ok_or("$MFT growth exposed no free records")?;
+    Ok((grown, record))
+}
+
+/// Append storage for 64 records and extend `$MFT:$Bitmap` to describe them.
+fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), String> {
+    const RECORDS_PER_GROWTH: u64 = 64;
+    let params = old.params;
+    let bytes = params
+        .file_record_size
+        .checked_mul(RECORDS_PER_GROWTH)
+        .ok_or("$MFT growth size overflows")?;
+    let clusters = bytes.div_ceil(params.cluster_size);
+    let volume_bitmap = crate::bitmap::locate_bitmap_io(io)?;
+    let lcn = crate::bitmap::find_free_run_io(io, &volume_bitmap, clusters, params.mft_lcn)?
+        .ok_or_else(|| format!("no contiguous free run of {clusters} clusters for $MFT growth"))?;
+    crate::bitmap::allocate_io(io, &volume_bitmap, lcn, clusters)?;
+
+    let result = (|| {
+        let span = clusters
+            .checked_mul(params.cluster_size)
+            .ok_or("$MFT growth span overflows")?;
+        let at = crate::mft_io::cluster_span(&params, lcn, 0, 0, span, io.size())?;
+        io.write_all_at(at, &vec![0u8; span as usize])?;
+        io.sync()?;
+
+        let old_bitmap_bytes = old.total_bits().div_ceil(8);
+        let new_bitmap_bytes = (old.total_bits() + RECORDS_PER_GROWTH).div_ceil(8);
+        match &old.layout {
+            MftBitmapLayout::NonResident { .. } => {
+                for byte in old_bitmap_bytes..new_bitmap_bytes {
+                    write_bitmap_byte_io(io, old, byte, 0)?;
+                }
+            }
+            MftBitmapLayout::Resident { .. } => {
+                return Err("growing a resident $MFT:$Bitmap is not supported".to_string())
+            }
+        }
+
+        crate::mft_io::update_mft_record_io(io, MFT_RECORD_NUMBER, |record| {
+            let data = attr_io::find_attribute(record, AttrType::Data, None)
+                .ok_or("$MFT has no unnamed $DATA")?;
+            if data.is_resident {
+                return Err("$MFT's unnamed $DATA is resident".to_string());
+            }
+            let mpo = data
+                .non_resident_mapping_pairs_offset
+                .ok_or("$MFT:$DATA has no mapping-pairs offset")? as usize;
+            let mapping_start = data.attr_offset + mpo;
+            let mapping_end = data.attr_offset + data.attr_length;
+            let mut runs = data_runs::decode_runs(&record[mapping_start..mapping_end])?;
+            let next_vcn = runs
+                .iter()
+                .map(|r| r.starting_vcn + r.length)
+                .max()
+                .unwrap_or(0);
+            if let Some(last) = runs
+                .last_mut()
+                .filter(|run| run.lcn.is_some_and(|old_lcn| old_lcn + run.length == lcn))
+            {
+                last.length += clusters;
+            } else {
+                runs.push(DataRun {
+                    starting_vcn: next_vcn,
+                    length: clusters,
+                    lcn: Some(lcn),
+                });
+            }
+            let encoded = data_runs::encode_runs(&runs)?;
+            if encoded.len() > mapping_end - mapping_start {
+                return Err("$MFT growth does not fit its mapping-pairs field".to_string());
+            }
+            record[mapping_start..mapping_start + encoded.len()].copy_from_slice(&encoded);
+            record[mapping_start + encoded.len()..mapping_end].fill(0);
+            let new_bytes = next_vcn
+                .checked_add(clusters)
+                .and_then(|n| n.checked_mul(params.cluster_size))
+                .ok_or("grown $MFT length overflows")?;
+            record[data.attr_offset + 0x18..data.attr_offset + 0x20]
+                .copy_from_slice(&((next_vcn + clusters - 1) as i64).to_le_bytes());
+            for off in [0x28usize, 0x30, 0x38] {
+                record[data.attr_offset + off..data.attr_offset + off + 8]
+                    .copy_from_slice(&new_bytes.to_le_bytes());
+            }
+
+            // `$MFT`'s `$FILE_NAME` duplicates its stream sizes. Leaving
+            // these at the initial extent makes the record internally
+            // inconsistent even though its `$DATA` run list is correct.
+            let file_names: Vec<_> = attr_io::iter_attributes(record)
+                .filter(|attr| attr.type_code == AttrType::FileName as u32 && attr.is_resident)
+                .collect();
+            for file_name in file_names {
+                let value = file_name.attr_offset
+                    + file_name
+                        .resident_value_offset
+                        .ok_or("$MFT:$FILE_NAME has no resident value offset")?
+                        as usize;
+                if value + 56 > record.len() {
+                    return Err("$MFT:$FILE_NAME value is truncated".to_string());
+                }
+                record[value + 40..value + 48].copy_from_slice(&new_bytes.to_le_bytes());
+                record[value + 48..value + 56].copy_from_slice(&new_bytes.to_le_bytes());
+            }
+
+            let bitmap = attr_io::find_attribute(record, AttrType::Bitmap, None)
+                .ok_or("$MFT has no unnamed $Bitmap")?;
+            if bitmap.is_resident {
+                return Err("growing a resident $MFT:$Bitmap is not supported".to_string());
+            }
+            let allocated = u64::from_le_bytes(
+                record[bitmap.attr_offset + 0x28..bitmap.attr_offset + 0x30]
+                    .try_into()
+                    .expect("eight bytes"),
+            );
+            if new_bitmap_bytes > allocated {
+                return Err("$MFT:$Bitmap backing allocation is full".to_string());
+            }
+            for off in [0x30usize, 0x38] {
+                record[bitmap.attr_offset + off..bitmap.attr_offset + off + 8]
+                    .copy_from_slice(&new_bitmap_bytes.to_le_bytes());
+            }
+            Ok(())
+        })
+    })();
+
+    if let Err(error) = result {
+        if let Err(rollback) = crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters) {
+            return Err(format!(
+                "{error}; also failed to release $MFT growth: {rollback}"
+            ));
+        }
+        return Err(error);
+    }
+    // Record zero now owns the new extent. Never free it after this point;
+    // a mirror-sync error is reportable, but rolling back only the cluster
+    // bits would make the live run list point at free space.
+    crate::mft_io::sync_mftmirr_record_io(io, MFT_RECORD_NUMBER)
+}
+
 /// Count free MFT record slots in `$MFT:$Bitmap`.
 pub fn count_free(image: &Path, bm: &MftBitmap) -> Result<u64, String> {
     let mut io = PathIo::open_ro(image)?;

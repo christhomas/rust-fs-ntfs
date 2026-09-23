@@ -1539,7 +1539,6 @@ fn validate_basename(name: &str) -> Result<(), String> {
 ///   with multiple leaves, an interior target, or a full leaf is refused
 ///   before the new record is allocated because B+tree routing and splitting
 ///   are W3.2 work (see #301).
-/// * MFT must have a free record. Growing `$MFT` itself is W2.6.
 /// * Filename collation is case-insensitive ASCII-only (proper
 ///   NTFS upcase-table collation is future work).
 pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u64, String> {
@@ -1738,9 +1737,7 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
     }
 
     // Allocate a free MFT record.
-    let mbm = crate::mft_bitmap::locate_io(io)?;
-    let new_rec = crate::mft_bitmap::find_free_record_io(io, &mbm, 24)?
-        .ok_or_else(|| "MFT has no free records (and we don't grow it yet)".to_string())?;
+    let (mbm, new_rec) = crate::mft_bitmap::find_or_grow_free_record_io(io, 24)?;
 
     // Get the parent's sequence number for the file-name attribute's
     // parent_reference. Sequence is at record header offset +0x10.
@@ -1775,7 +1772,7 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
     crate::mft_bitmap::allocate_io(io, &mbm, new_rec)?;
 
     // Write the record bytes at the correct disk offset.
-    let rec_offset = crate::mft_io::mft_record_offset(&params, new_rec);
+    let rec_offset = crate::mft_io::mft_record_offset_io(io, &params, new_rec)?;
     if let Err(e) = io.write_all_at(rec_offset, &new_record) {
         return Err(undo_new_record_io(
             io,
@@ -2208,9 +2205,7 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
         }
     }
 
-    let mbm = crate::mft_bitmap::locate_io(io)?;
-    let new_rec = crate::mft_bitmap::find_free_record_io(io, &mbm, 24)?
-        .ok_or_else(|| "MFT full — would need to grow $MFT (W2.6)".to_string())?;
+    let (mbm, new_rec) = crate::mft_bitmap::find_or_grow_free_record_io(io, 24)?;
 
     let parent_seq = crate::mft_io::record_sequence(&parent_record_bytes);
     let parent_reference = crate::record_build::encode_file_reference(parent_rec, parent_seq);
@@ -2245,7 +2240,7 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
 
     crate::mft_bitmap::allocate_io(io, &mbm, new_rec)?;
 
-    let rec_offset = crate::mft_io::mft_record_offset(&params, new_rec);
+    let rec_offset = crate::mft_io::mft_record_offset_io(io, &params, new_rec)?;
     if let Err(e) = io.write_all_at(rec_offset, &new_record) {
         return Err(undo_new_record_io(
             io,
@@ -5534,6 +5529,52 @@ mod tests {
         let (_, root_rec) = crate::mft_io::read_mft_record_io(&mut dev, 5).unwrap();
         let loc = crate::index_io::find_index_entry(&root_rec, "hello.txt", None).unwrap();
         assert!(loc.is_some(), "file must appear in root $INDEX_ROOT");
+    }
+
+    /// A full `$MFT` is a capacity boundary, not an end-of-volume error.
+    /// The next create must extend `$MFT`, expose new record bits through
+    /// `$MFT:$Bitmap`, and consume exactly one of those new slots.
+    #[test]
+    fn create_file_grows_a_full_mft_and_updates_free_record_accounting() {
+        let mut dev = fresh_vol();
+        let bm = crate::mft_bitmap::locate_io(&mut dev).unwrap();
+        let old_total = bm.total_bits();
+        for record in 0..old_total {
+            if !crate::mft_bitmap::is_allocated_io(&mut dev, &bm, record).unwrap() {
+                crate::mft_bitmap::allocate_io(&mut dev, &bm, record).unwrap();
+            }
+        }
+        assert_eq!(crate::mft_bitmap::count_free_io(&mut dev, &bm).unwrap(), 0);
+
+        let record = create_file_io(&mut dev, "/", "after-full.txt")
+            .expect("a full MFT must grow for the next file");
+
+        let grown = crate::mft_bitmap::locate_io(&mut dev).unwrap();
+        assert!(grown.total_bits() > old_total, "the MFT bitmap must grow");
+        assert!(
+            record >= old_total,
+            "the new file must use the grown extent"
+        );
+        assert!(crate::mft_bitmap::is_allocated_io(&mut dev, &grown, record).unwrap());
+        assert_eq!(
+            crate::mft_bitmap::count_free_io(&mut dev, &grown).unwrap(),
+            grown.total_bits() - old_total - 1,
+            "growth adds free records and the create consumes exactly one"
+        );
+        let (_, root) = crate::mft_io::read_mft_record_io(&mut dev, 5).unwrap();
+        assert!(
+            crate::index_io::find_index_entry(&root, "after-full.txt", None)
+                .unwrap()
+                .is_some()
+        );
+
+        unlink_io(&mut dev, "/after-full.txt").expect("the grown record must be freeable");
+        let after_free = crate::mft_bitmap::locate_io(&mut dev).unwrap();
+        assert_eq!(
+            crate::mft_bitmap::count_free_io(&mut dev, &after_free).unwrap(),
+            after_free.total_bits() - old_total,
+            "freeing the file must return its grown MFT record"
+        );
     }
 
     #[test]
