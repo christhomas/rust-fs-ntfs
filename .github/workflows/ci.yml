@@ -458,8 +458,9 @@ jobs:
   # the raw-byte buffer manipulations (mft_io / data_runs / attr_io /
   # ea_io) that the regular test suite would otherwise let through
   # silently. Nightly toolchain (ASan needs -Zsanitizer=address);
-  # non-blocking via continue-on-error so nightly toolchain breakage
-  # doesn't block PRs against stable.
+  # advisory because branch protection does not require this job. Only the
+  # nightly-install step tolerates failure; sanitizer findings turn the job
+  # red and remain visible to reviewers.
   #
   # THE NAME SAYS WHAT THE JOB IS, WHICH IT DID NOT USED TO (#278).
   #

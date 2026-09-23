@@ -24,17 +24,17 @@
 #      matrix, below. A reviewer reading a green `unit tests` tick was reading
 #      a tick that says nothing about `cargo test --lib`.
 #
-#      It is also declared NON-GATING by its own YAML: `continue-on-error:
-#      true`. That key exists so nightly toolchain breakage cannot block a PR
-#      against stable, which is a defensible decision — and it is flatly
-#      contradicted by naming the job in branch protection, which re-arms the
-#      gate the key disclaims. tests/ci_profile.rs already encodes the same
-#      rule for its own scan: `NON_GATING_KEYS = ["if", "continue-on-error"]`,
-#      and `a_job_carrying_continue_on_error_does_not_gate` pins it. A job the
-#      test suite refuses to count as a gate must not be one here either.
+#      The old job-level `continue-on-error: true` also hid sanitizer
+#      findings. It was removed in #303 when the nightly was pinned. Only
+#      the toolchain-install step now tolerates failure; a sanitizer finding
+#      makes the job red. tests/ci_profile.rs treats a JOB carrying
+#      `continue-on-error` as non-gating, but `asan` no longer carries it.
+#      Step-level tolerance does not change the job's result.
 #
-#      So `unit tests` is deliberately ABSENT from the list below, and the
-#      job's `name:` says what it is instead. Declaring the set is the ONLY
+#      ASan remains advisory by decision: a pinned nightly can still break
+#      independently of stable, while a red ASan job is visible to reviewers.
+#      So `unit tests under ASan (nightly toolchain, advisory)` is deliberately
+#      ABSENT from the list below. Declaring the set is the ONLY
 #      way to remove a required check — discovery is additive by construction
 #      and would keep re-adding it — which is why this file, and not a click
 #      in the settings page, is the fix.
