@@ -2893,7 +2893,12 @@ pub fn set_volume_label_io<T: BlockIo + ?Sized>(io: &mut T, label: &str) -> Resu
             crate::attr_resize::insert_attribute_sorted(record, &new_attr)?;
         }
         Ok(())
-    })
+    })?;
+    // `$Volume` is one of the first four records carried by `$MFTMirr`.
+    // Leaving the mirror at the previous label makes the two recovery
+    // copies disagree even though the primary update reported success.
+    crate::mft_io::sync_mftmirr_record_io(io, 3)?;
+    Ok(())
 }
 
 /// Read the 16-byte object ID (`$OBJECT_ID` attribute value) for a
@@ -4411,13 +4416,19 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
                 .to_string(),
         );
     }
-    // As in rename_same_length_io: the file's own entry is not a clash.
-    // A collated lookup finds it whenever the new name differs from the
-    // old only by case.
+    // As in rename_same_length_io: the file's own ENTRY is not a clash.
+    // Identify it by its offset, not by the record number it references:
+    // two hard links in one directory legitimately point at the same MFT
+    // record, but they are still distinct index entries. Treating every
+    // entry for `file_rec` as the source allowed a variable-length rename
+    // onto the file's other hard link and inserted a duplicate collation
+    // key into $I30.
+    let own_entry = index_io::find_index_entry(&parent_record_bytes, &old_basename, Some(&upcase))?
+        .ok_or_else(|| format!("old entry '{old_basename}' not found"))?;
     if let Some(clash) =
         index_io::find_index_entry(&parent_record_bytes, new_basename, Some(&upcase))?
     {
-        if clash.file_record_number != file_rec {
+        if clash.record_offset != own_entry.record_offset {
             return Err(format!("'{new_basename}' already exists"));
         }
     }
