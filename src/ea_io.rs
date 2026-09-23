@@ -31,6 +31,27 @@ pub fn entry_encoded_size(name_len: usize, value_len: usize) -> usize {
     align4(8 + name_len + 1 + value_len)
 }
 
+/// Return the compact size used by `$EA_INFORMATION.EaPackedLength`.
+///
+/// This is the size of each entry without its four-byte `NextEntryOffset`
+/// field or alignment padding: flags, name length, value length, name NUL,
+/// and value.
+pub fn packed_ea_length(eas: &[Ea]) -> Result<u16, String> {
+    let mut total = 0usize;
+    for ea in eas {
+        if ea.name.len() > 254 {
+            return Err(format!("ea name too long: {}", ea.name.len()));
+        }
+        if ea.value.len() > u16::MAX as usize {
+            return Err(format!("ea value too large: {}", ea.value.len()));
+        }
+        total = total
+            .checked_add(4 + ea.name.len() + 1 + ea.value.len())
+            .ok_or_else(|| "packed EA length overflow".to_string())?;
+    }
+    u16::try_from(total).map_err(|_| format!("packed EA length too large: {total}"))
+}
+
 /// Pack a list of EAs into a `$EA` blob.
 pub fn encode(eas: &[Ea]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
@@ -110,13 +131,15 @@ pub fn count_need_ea(eas: &[Ea]) -> u32 {
 
 /// Build the `$EA_INFORMATION` value (8 bytes): packed length (`u16`),
 /// NEED_EA count (`u16`), and query-buffer length (`u32`).
-pub fn build_ea_information_value(packed_ea_length: u16, need_ea_count: u32) -> Vec<u8> {
-    let need_ea_count =
-        u16::try_from(need_ea_count).expect("NEED_EA count must fit the $EA_INFORMATION u16 field");
+pub fn build_ea_information_value(
+    packed_ea_length: u16,
+    need_ea_count: u16,
+    ea_query_length: u32,
+) -> Vec<u8> {
     let mut v = vec![0u8; 8];
     v[0..2].copy_from_slice(&packed_ea_length.to_le_bytes()); // ea_length
     v[2..4].copy_from_slice(&need_ea_count.to_le_bytes());
-    v[4..8].copy_from_slice(&u32::from(packed_ea_length).to_le_bytes()); // query-size approximation
+    v[4..8].copy_from_slice(&ea_query_length.to_le_bytes());
     v
 }
 
@@ -321,22 +344,37 @@ mod tests {
     // --- build_ea_information_value ---
 
     #[test]
+    fn ea_information_lengths_distinguish_packed_from_query_form() {
+        let eas = vec![ea(b"A", b"aaa"), ea_need(b"LONG", b"x")];
+        let query_length = encode(&eas).unwrap().len() as u32;
+        let packed_length = packed_ea_length(&eas).unwrap();
+
+        // Packed entries omit the four-byte NextEntryOffset and alignment
+        // padding from each FILE_FULL_EA_INFORMATION entry.
+        assert_eq!(packed_length, 19);
+        assert_eq!(query_length, 32);
+
+        let val = build_ea_information_value(packed_length, 1, query_length);
+        assert_eq!(&val, &[19, 0, 1, 0, 32, 0, 0, 0]);
+    }
+
+    #[test]
     fn build_ea_information_value_is_8_bytes() {
-        assert_eq!(build_ea_information_value(0, 0).len(), 8);
-        assert_eq!(build_ea_information_value(1000, 3).len(), 8);
+        assert_eq!(build_ea_information_value(0, 0, 0).len(), 8);
+        assert_eq!(build_ea_information_value(1000, 3, 2000).len(), 8);
     }
 
     #[test]
     fn build_ea_information_value_layout() {
-        let val = build_ea_information_value(1234, 5);
+        let val = build_ea_information_value(1234, 5, 5678);
         assert_eq!(u16::from_le_bytes([val[0], val[1]]), 1234); // ea_length
         assert_eq!(u16::from_le_bytes([val[2], val[3]]), 5); // need_ea_count
-        assert_eq!(u32::from_le_bytes([val[4], val[5], val[6], val[7]]), 1234); // ea_query_size
+        assert_eq!(u32::from_le_bytes([val[4], val[5], val[6], val[7]]), 5678); // ea_query_size
     }
 
     #[test]
     fn build_ea_information_value_zeros() {
-        assert_eq!(build_ea_information_value(0, 0), vec![0u8; 8]);
+        assert_eq!(build_ea_information_value(0, 0, 0), vec![0u8; 8]);
     }
 
     // --- upsert ---

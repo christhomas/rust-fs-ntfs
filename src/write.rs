@@ -2136,8 +2136,12 @@ pub fn list_ea_keys_io<T: BlockIo + ?Sized>(
 /// Rewrite `$EA` + `$EA_INFORMATION`. Empty list ⇒ both removed.
 fn commit_eas(record: &mut [u8], eas: &[crate::ea_io::Ea]) -> Result<(), String> {
     let packed = crate::ea_io::encode(eas)?;
-    let need = crate::ea_io::count_need_ea(eas);
-    let ea_info_value = crate::ea_io::build_ea_information_value(packed.len() as u16, need);
+    let packed_length = crate::ea_io::packed_ea_length(eas)?;
+    let need = u16::try_from(crate::ea_io::count_need_ea(eas))
+        .map_err(|_| "NEED_EA count too large".to_string())?;
+    let query_length = u32::try_from(packed.len())
+        .map_err(|_| format!("EA query length too large: {}", packed.len()))?;
+    let ea_info_value = crate::ea_io::build_ea_information_value(packed_length, need, query_length);
 
     if eas.is_empty() {
         remove_unnamed_attr(record, AttrType::ExtendedAttribute)?;

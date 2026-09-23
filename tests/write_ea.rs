@@ -81,7 +81,8 @@ fn write_multiple_eas() {
     // Read the raw summary through the independent `ntfs` crate. With exactly
     // one NEED_EA entry, this distinguishes the u16 count at 0x02 from both
     // length fields.
-    let packed_len = ea_io::encode(&eas).unwrap().len() as u16;
+    let query_len = ea_io::encode(&eas).unwrap().len() as u32;
+    let packed_len = ea_io::packed_ea_length(&eas).unwrap();
     let (ntfs, mut reader) = common::open(&img);
     let file = common::navigate(&ntfs, &mut reader, "/Documents/readme.txt");
     let mut attributes = file.attributes();
@@ -106,8 +107,9 @@ fn write_multiple_eas() {
     assert_eq!(u16::from_le_bytes(information[2..4].try_into().unwrap()), 1);
     assert_eq!(
         u32::from_le_bytes(information[4..8].try_into().unwrap()),
-        u32::from(packed_len)
+        query_len
     );
+    assert_ne!(u32::from(packed_len), query_len);
 }
 
 #[test]
