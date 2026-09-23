@@ -212,20 +212,11 @@ typedef struct {
 
 /*
  * Mount an NTFS filesystem from the given device/image path.
- * Returns NULL on failure. Read-only.
+ * Returns NULL on failure. The returned handle permits writes.
  *
- * Dirty-volume note: this driver parses dirty volumes (the
- * VOLUME_IS_DIRTY flag is informational here, not a refusal). Stale
- * data is possible if the volume hasn't been cleanly dismounted —
- * a file mid-rename may surface with the old name pointing at the
- * new file reference, etc.
- *
- * Callers that need to detect this should invoke `fs_ntfs_is_dirty`
- * (or `fs_ntfs_is_dirty_with_callbacks`) AFTER a successful mount
- * and decide policy themselves: refuse to surface the volume,
- * surface read-only, or surface with a warning. The driver does NOT
- * auto-warn or auto-refuse — the quiet-by-default contract FSKit
- * relies on stays intact.
+ * Dirty volumes are refused before any write. For read-only access to
+ * a dirty volume, use fs_ntfs_mount_with_callbacks with cfg->write=NULL
+ * or fs_ntfs_mount_with_fs_core_device.
  */
 fs_ntfs_fs_t *fs_ntfs_mount(const char *device_path);
 
@@ -238,8 +229,8 @@ fs_ntfs_fs_t *fs_ntfs_mount(const char *device_path);
  * (see "Handle-based mutation API" below). Pass NULL to mount
  * read-only — `_h` mutators will then fail with -1 / EINVAL.
  *
- * Dirty-volume note: same contract as `fs_ntfs_mount`. Use
- * `fs_ntfs_is_dirty_with_callbacks` post-mount to decide policy.
+ * Dirty volumes mount with cfg->write=NULL. A non-NULL write callback
+ * requests a writable mount and causes a dirty volume to be refused.
  */
 fs_ntfs_fs_t *fs_ntfs_mount_with_callbacks(
     const fs_ntfs_blockdev_cfg_t *cfg);
@@ -272,6 +263,7 @@ fs_ntfs_fs_t *fs_ntfs_mount_with_fs_core_device(struct FsCoreDevice *handle);
  * (`fs_ntfs_create_file_h`, `fs_ntfs_mkdir_h`,
  * `fs_ntfs_write_file_contents_h`, `fs_ntfs_unlink_h`, …) can write
  * through it.
+ * Dirty volumes are refused before any mount-time write.
  *
  * The supplied device should report `is_writable=true` (see
  * `fs_core_device_is_writable`); a non-writable device still mounts
@@ -503,7 +495,8 @@ int fs_ntfs_remove_object_id(const char *image,
 /*
  * Clear the VOLUME_IS_DIRTY flag on an NTFS image so Windows / FSKit /
  * other NTFS drivers will remount it. Must NOT be called on a volume
- * that is currently mounted.
+ * that is currently mounted. Only use after independently establishing
+ * metadata consistency; this call does not inspect or replay $LogFile.
  *
  * Returns:
  *   1  — flag was set and has been cleared
@@ -516,16 +509,17 @@ int fs_ntfs_clear_dirty(const char *path);
  * Overwrite $LogFile with the NTFS "empty log" pattern (all 0xFF bytes).
  * Causes the NTFS driver on next mount to treat the log as having no
  * pending transactions and reinitialize it. In-progress transactions
- * are discarded — any uncommitted metadata changes are lost.
+ * are discarded. Use only after independently establishing consistency.
  *
  * Returns the number of bytes overwritten on success, -1 on error.
  */
 int64_t fs_ntfs_reset_logfile(const char *path);
 
 /*
- * Combined recovery: reset $LogFile and clear the dirty flag, in that
- * order. If either out-param is non-NULL it is filled on success with
- * the corresponding sub-result. Returns 0 on success, -1 on error.
+ * Reset $LogFile and clear the dirty flag, in that order. If a dirty
+ * volume has any non-0xFF log byte, returns -1 before writing. This
+ * does not replay transactions or validate metadata consistency.
+ * Out-params are filled only on success.
  */
 int fs_ntfs_fsck(const char *path,
                  uint64_t *out_logfile_bytes,
@@ -579,6 +573,8 @@ typedef int (*fs_ntfs_fsck_progress_fn)(void *context, const char *phase,
 
 /*
  * Combined recovery via callbacks: reset $LogFile + clear the dirty bit.
+ * Refuses a dirty volume with any non-0xFF log byte before writing;
+ * no transaction replay is performed.
  *
  * `cfg->read` and `cfg->write` must both be set (fsck needs to
  * overwrite `$LogFile` and patch `$Volume`'s flags). `progress_cb` may

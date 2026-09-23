@@ -134,6 +134,18 @@ fn read_logfile_first_page(path: &str) -> Vec<u8> {
     buf
 }
 
+fn empty_logfile(path: &str) {
+    let (pos, len) = upstream_logfile_data_start(path);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open image");
+    file.seek(SeekFrom::Start(pos)).expect("seek log");
+    file.write_all(&vec![0xFF; len as usize])
+        .expect("empty log");
+    file.sync_all().expect("sync log");
+}
+
 /// Snapshot the thread-local last_error string via the C ABI.
 fn last_error() -> String {
     unsafe {
@@ -207,7 +219,8 @@ fn reset_logfile_returns_bytes_written() {
 
 #[test]
 fn fsck_fills_out_params() {
-    let img = dirty_copy("fsck_out", true, true);
+    let img = dirty_copy("fsck_out", true, false);
+    empty_logfile(&img);
     let c = CString::new(img.as_str()).unwrap();
     let mut bytes: u64 = 0;
     let mut cleared: u8 = 0;
@@ -221,10 +234,25 @@ fn fsck_fills_out_params() {
 }
 
 #[test]
+fn fsck_rejects_dirty_nonempty_log_without_writing_or_out_params() {
+    let img = dirty_copy("refuse_pending", true, true);
+    let before = std::fs::read(&img).expect("snapshot image");
+    let c = CString::new(img.as_str()).expect("CString");
+    let mut bytes = 77_u64;
+    let mut cleared = 9_u8;
+    let rc = fs_ntfs_fsck(c.as_ptr(), &mut bytes, &mut cleared);
+    assert_eq!(rc, -1);
+    assert!(last_error().contains("$LogFile"));
+    assert_eq!((bytes, cleared), (77, 9));
+    assert_eq!(std::fs::read(&img).expect("read image"), before);
+}
+
+#[test]
 fn fsck_accepts_null_out_params() {
     // Consumers that only want the repair and don't care about details
     // should be able to pass NULL for both out-params.
-    let img = dirty_copy("fsck_null_out", true, true);
+    let img = dirty_copy("fsck_null_out", true, false);
+    empty_logfile(&img);
     let c = CString::new(img.as_str()).unwrap();
     let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut()) };
     assert_eq!(rc, 0);
@@ -235,7 +263,8 @@ fn fsck_accepts_null_out_params() {
 fn fsck_end_to_end_with_upstream_mount() {
     // The whole point: a dirty image goes through fsck, then upstream
     // parses + reads it fine (matching what FSKit would do on re-mount).
-    let img = dirty_copy("fsck_e2e", true, true);
+    let img = dirty_copy("fsck_e2e", true, false);
+    empty_logfile(&img);
     let c = CString::new(img.as_str()).unwrap();
     let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut()) };
     assert_eq!(rc, 0);

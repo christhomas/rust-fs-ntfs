@@ -10,7 +10,7 @@ mod common;
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use fs_ntfs::fsck;
+use fs_ntfs::{facade::Filesystem, fs_ntfs_mount, fsck};
 use ntfs::structured_values::NtfsVolumeFlags;
 use ntfs::{KnownNtfsFileRecordNumber, Ntfs, NtfsAttributeType};
 
@@ -143,6 +143,18 @@ fn read_logfile_first_page(path: &str) -> Vec<u8> {
     buf
 }
 
+fn empty_logfile(path: &str) {
+    let (pos, len) = upstream_logfile_data_start(path);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open image");
+    file.seek(SeekFrom::Start(pos)).expect("seek log");
+    file.write_all(&vec![0xFF; len as usize])
+        .expect("empty log");
+    file.sync_all().expect("sync log");
+}
+
 // ---------- tests ----------
 
 #[test]
@@ -154,6 +166,63 @@ fn is_dirty_returns_false_on_clean_fixture() {
 fn is_dirty_returns_true_after_synth_dirty() {
     let img = dirty_copy("is_dirty_probe", true, false);
     assert!(fsck::is_dirty(&img).unwrap());
+}
+
+#[test]
+fn dirty_rw_mount_refuses_before_upgrade_and_ro_mount_still_works() {
+    let img = dirty_copy("dirty_rw_mount", true, false);
+    let flags_offset = upstream_volume_flags_offset(&img);
+    patch_u16_le(&img, flags_offset, |flags| flags | 0x0004);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&img)
+        .expect("open image");
+    file.seek(SeekFrom::Start(flags_offset - 2))
+        .expect("seek version");
+    file.write_all(&[1, 2]).expect("set upgradeable version");
+    file.sync_all().expect("sync version");
+
+    let before = std::fs::read(&img).expect("snapshot image");
+    let ro = Filesystem::mount(&img).expect("dirty read-only mount");
+    assert!(ro.is_dirty().expect("dirty flag"));
+    let err = Filesystem::mount_rw(&img).expect_err("dirty RW mount must fail");
+    assert!(err.0.contains("dirty"), "unexpected error: {err}");
+    let c_path = std::ffi::CString::new(img.as_str()).expect("CString");
+    assert!(
+        fs_ntfs_mount(c_path.as_ptr()).is_null(),
+        "writable C path mount must reject dirty volume"
+    );
+    assert_eq!(std::fs::read(&img).expect("read image"), before);
+}
+
+#[test]
+fn fsck_preserves_dirty_volume_with_nonempty_log() {
+    let img = dirty_copy("refuse_nonempty_log", true, true);
+    let before = std::fs::read(&img).expect("snapshot image");
+    let err = fsck::fsck(&img).expect_err("fsck must refuse pending log data");
+    assert!(err.contains("$LogFile"), "unexpected error: {err}");
+    assert_eq!(std::fs::read(&img).expect("read image"), before);
+    assert!(read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
+}
+
+#[test]
+fn fsck_checks_entire_dirty_log_before_writing() {
+    let img = dirty_copy("late_nonempty_log", true, false);
+    empty_logfile(&img);
+    let (offset, len) = upstream_logfile_data_start(&img);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&img)
+        .expect("open image");
+    file.seek(SeekFrom::Start(offset + len - 1))
+        .expect("seek log tail");
+    file.write_all(&[0]).expect("write log tail");
+    file.sync_all().expect("sync log");
+    let before = std::fs::read(&img).expect("snapshot image");
+
+    let err = fsck::fsck(&img).expect_err("late log data must be preserved");
+    assert!(err.contains("$LogFile"), "unexpected error: {err}");
+    assert_eq!(std::fs::read(&img).expect("read image"), before);
 }
 
 #[test]
@@ -255,7 +324,8 @@ fn reset_logfile_fills_entire_logfile() {
 
 #[test]
 fn fsck_convenience_resets_both() {
-    let img = dirty_copy("fsck_both", true, true);
+    let img = dirty_copy("fsck_both", true, false);
+    empty_logfile(&img);
     assert!(read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
 
     let report = fsck::fsck(&img).expect("fsck");
@@ -269,7 +339,8 @@ fn fsck_convenience_resets_both() {
 #[test]
 fn repaired_image_is_readable_via_upstream() {
     // End-to-end: synth dirty → fsck → upstream mounts → content intact.
-    let img = dirty_copy("e2e", true, true);
+    let img = dirty_copy("e2e", true, false);
+    empty_logfile(&img);
     fsck::fsck(&img).expect("fsck");
 
     let (ntfs, mut reader) = common::open(&img);

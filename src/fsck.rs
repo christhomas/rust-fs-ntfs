@@ -15,10 +15,11 @@
 //!    reinitialize on mount" signal documented in Windows Internals
 //!    7th ed. ch. "NTFS Logging".
 //!
-//! Neither operation replays in-progress transactions. If the crash
-//! happened mid-MFT-update, whatever metadata hit the disk survives; the
-//! log is discarded. This is the weakest possible recovery; it trades
-//! some data recoverability for the ability to remount at all.
+//! Neither operation replays in-progress transactions. `fsck` refuses to
+//! reset a dirty volume whose log contains non-empty bytes. The explicit
+//! `reset_logfile` and `clear_dirty` operations require the caller to know
+//! independently that metadata is consistent; using them on a crashed
+//! volume can destroy recoverable changes.
 //!
 //! All writes are bounded, well-located, and immediately `fsync`'d. No
 //! MFT-record USA fixup recompute is required here because:
@@ -210,6 +211,9 @@ pub fn is_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
 
 /// Clear the `VOLUME_IS_DIRTY` flag on the given NTFS image.
 ///
+/// Only call after independently establishing metadata consistency; this
+/// direct operation does not inspect or replay `$LogFile`.
+///
 /// Returns `Ok(true)` if the flag was set and has been cleared,
 /// `Ok(false)` if the volume was already clean, `Err` otherwise.
 pub fn clear_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
@@ -255,18 +259,17 @@ pub fn upgrade_volume_version(path: impl AsRef<Path>) -> Result<bool, String> {
     upgrade_volume_version_io(&mut io)
 }
 
-/// Overwrite `$LogFile` with `0xFF` bytes so Windows / NTFS driver reinitialize
-/// it on next mount (matches comparable recovery behaviour). Returns the number of bytes
-/// overwritten.
+/// Explicitly overwrite `$LogFile` with `0xFF` bytes. Only use after an
+/// independent repair has made the volume consistent: this discards records
+/// and does not replay them. Returns the number of bytes overwritten.
 pub fn reset_logfile(path: impl AsRef<Path>) -> Result<u64, String> {
     let mut io = PathIo::open(path.as_ref())?;
     reset_logfile_io(&mut io, None)
 }
 
-/// Convenience: run both [`clear_dirty`] and [`reset_logfile`] on the same
-/// image. `reset_logfile` runs first because clearing the dirty bit without
-/// also resetting the log would leave Windows thinking "clean volume" but
-/// still finding stale log records on mount.
+/// Reset the log and clear dirty on the same image only when a dirty volume's
+/// log is entirely `0xFF`. A dirty volume with any other log byte is refused
+/// before either write. A clean volume is treated as already consistent.
 pub fn fsck(path: impl AsRef<Path>) -> Result<FsckReport, String> {
     let p = path.as_ref();
     log::info!(target: "fs_ntfs::fsck", "fsck path={}", p.display());
@@ -427,6 +430,24 @@ pub fn fsck_io<'cb, T: FsckIo>(
     io: &mut T,
     mut progress: Option<&mut (dyn FnMut(&str, u64, u64) + 'cb)>,
 ) -> Result<FsckReport, String> {
+    if is_dirty_io(io)? {
+        let (logfile_disk_offset, logfile_size) = locate_logfile_data_io(io)?;
+        let mut buf = [0u8; LOGFILE_CHUNK];
+        let mut checked = 0;
+        while checked < logfile_size {
+            let n = std::cmp::min(logfile_size - checked, LOGFILE_CHUNK as u64) as usize;
+            io.read_exact_at(logfile_disk_offset + checked, &mut buf[..n])
+                .map_err(|e| format!("read $LogFile: {e}"))?;
+            if buf[..n].iter().any(|&byte| byte != LOGFILE_EMPTY_FILL) {
+                return Err(
+                    "dirty volume has nonempty $LogFile; fsck refuses to discard unreplayed records"
+                        .to_string(),
+                );
+            }
+            checked += n as u64;
+        }
+    }
+
     let logfile_bytes = reset_logfile_io(io, progress.as_deref_mut())?;
 
     if let Some(cb) = progress
@@ -1040,6 +1061,9 @@ mod tests {
     #[test]
     fn fsck_io_clears_dirty_flag_when_set() {
         let mut dev = fresh_dev();
+        // The formatter's canonical log has restart/record pages. Make the
+        // log empty before simulating a dirty flag with no pending records.
+        reset_logfile_io(&mut dev, None::<&mut dyn FnMut(&str, u64, u64)>).unwrap();
         set_dirty_io(&mut dev).unwrap();
         let report = fsck_io(&mut dev, None::<&mut dyn FnMut(&str, u64, u64)>).unwrap();
         assert!(report.dirty_cleared, "fsck should clear the dirty flag");

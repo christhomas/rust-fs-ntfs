@@ -69,6 +69,17 @@ pub mod sparse;
 pub mod upcase;
 pub mod write;
 
+const DIRTY_RW_MOUNT_ERROR: &str =
+    "dirty NTFS volume: read-write mount refused because $LogFile replay is unavailable";
+
+pub(crate) fn require_clean_rw_mount(flags: u16) -> Result<(), &'static str> {
+    if flags & read::VOLUME_IS_DIRTY != 0 {
+        Err(DIRTY_RW_MOUNT_ERROR)
+    } else {
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Thread-local error string
 // ---------------------------------------------------------------------------
@@ -525,6 +536,8 @@ fn make_dirent(file_record_number: u64, file_type: u8, name: &[u8]) -> FsNtfsDir
 /// other writer touches the same image for the handle's lifetime (e.g.
 /// no concurrent CLI invocations on the same path). See the module-level
 /// "Device exclusivity contract" for the full rationale.
+/// Dirty volumes are refused because the handle permits writes and this
+/// driver cannot replay `$LogFile`.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle {
     ffi_guard("fs_ntfs_mount", std::ptr::null_mut(), move || {
@@ -551,8 +564,15 @@ pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle
                     return std::ptr::null_mut();
                 }
             };
-            if let Err(e) = read::read_volume_info(&mut io) {
-                set_error(&format!("ntfs init: {e}"));
+            let info = match read::read_volume_info(&mut io) {
+                Ok(info) => info,
+                Err(e) => {
+                    set_error(&format!("ntfs init: {e}"));
+                    return std::ptr::null_mut();
+                }
+            };
+            if let Err(e) = require_clean_rw_mount(info.flags) {
+                set_error(e);
                 return std::ptr::null_mut();
             }
         }
@@ -588,6 +608,8 @@ pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle
 /// block-layer abstraction).  Returns NULL on error; call
 /// [`fs_ntfs_last_error`] for the message.  The resulting handle supports
 /// the full read API; mutators work when a `write` callback is provided.
+/// Dirty volumes remain readable when `write` is `None`; writable mounts
+/// are refused until the dirty flag is cleared by an independent repair.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) -> *mut FsNtfsHandle {
     ffi_guard(
@@ -610,8 +632,15 @@ pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) ->
                     context: cfg.context,
                     size: cfg.size_bytes,
                 };
-                if let Err(e) = read::read_volume_info(&mut io) {
-                    set_error(&format!("ntfs init: {e}"));
+                let info = match read::read_volume_info(&mut io) {
+                    Ok(info) => info,
+                    Err(e) => {
+                        set_error(&format!("ntfs init: {e}"));
+                        return std::ptr::null_mut();
+                    }
+                };
+                if let Some(Err(e)) = cfg.write.map(|_| require_clean_rw_mount(info.flags)) {
+                    set_error(e);
                     return std::ptr::null_mut();
                 }
             }
@@ -725,6 +754,7 @@ pub extern "C" fn fs_ntfs_mount_with_fs_core_device(
 /// `_h` mutator family (`fs_ntfs_create_file_h`, `fs_ntfs_mkdir_h`,
 /// `fs_ntfs_write_file_contents_h`, `fs_ntfs_unlink_h`, …) can write
 /// through it.
+/// Dirty volumes are refused before any mount-time version upgrade.
 ///
 /// The supplied device must report `is_writable() == true`; otherwise
 /// the mount succeeds (the device itself is parsable) but the first
@@ -766,8 +796,15 @@ pub extern "C" fn fs_ntfs_mount_rw_with_fs_core_device(
                     device: device.clone(),
                     size,
                 };
-                if let Err(e) = read::read_volume_info(&mut io) {
-                    set_error(&format!("ntfs init: {e}"));
+                let info = match read::read_volume_info(&mut io) {
+                    Ok(info) => info,
+                    Err(e) => {
+                        set_error(&format!("ntfs init: {e}"));
+                        return std::ptr::null_mut();
+                    }
+                };
+                if let Err(e) = require_clean_rw_mount(info.flags) {
+                    set_error(e);
                     return std::ptr::null_mut();
                 }
             }
@@ -3160,7 +3197,9 @@ pub extern "C" fn fs_ntfs_set_object_id_extended_h(
     })
 }
 
-/// Combined recovery: reset `$LogFile` and clear the dirty flag.
+/// Reset `$LogFile` and clear dirty only when a dirty volume's log is empty.
+/// A dirty volume with non-`0xFF` log data is refused without writes; no
+/// transaction replay or metadata consistency check is performed.
 ///
 /// Optional out-params report what the call did:
 /// * `out_logfile_bytes`: bytes of `$LogFile` overwritten (non-null to receive)
@@ -3418,10 +3457,11 @@ pub extern "C" fn fs_ntfs_is_dirty_with_fs_core_device(
     })
 }
 
-/// `fs_core` counterpart of [`fs_ntfs_fsck_with_callbacks`]. Replays
+/// `fs_core` counterpart of [`fs_ntfs_fsck_with_callbacks`]. Resets
 /// `$LogFile` and clears the dirty bit through an `FsCoreDevice`
 /// handle. The device must report `is_writable() == true`; otherwise
-/// the call fails up front.
+/// the call fails up front. Dirty volumes with nonempty logs are refused;
+/// this entry point does not replay transactions.
 ///
 /// On success `out_logfile_bytes` (if non-NULL) receives the byte
 /// count overwritten in `$LogFile` during recovery, and

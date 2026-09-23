@@ -23,7 +23,7 @@ use std::sync::Mutex;
 use fs_ntfs::{
     fs_ntfs_clear_last_error, fs_ntfs_create_file_h, fs_ntfs_last_errno,
     fs_ntfs_mount_with_callbacks, fs_ntfs_umount, fs_ntfs_unlink_h, fs_ntfs_write_file_contents_h,
-    FsNtfsBlockdevCfg,
+    fsck, FsNtfsBlockdevCfg,
 };
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
@@ -87,6 +87,29 @@ fn make_ctx(path: &str) -> (FileCtx, u64) {
         },
         size,
     )
+}
+
+#[test]
+fn callback_dirty_volume_mounts_ro_but_refuses_rw_without_writes() {
+    let img = copy_fixture("dirty_refuse");
+    fsck::set_dirty(&img).expect("mark dirty");
+    let before = std::fs::read(&img).expect("snapshot image");
+    let (ctx, size) = make_ctx(&img);
+    let mut cfg = FsNtfsBlockdevCfg {
+        read: read_cb,
+        context: &ctx as *const FileCtx as *mut c_void,
+        size_bytes: size,
+        write: None,
+    };
+    let ro = fs_ntfs_mount_with_callbacks(&cfg);
+    assert!(!ro.is_null(), "dirty read-only callback mount");
+    fs_ntfs_umount(ro);
+
+    cfg.write = Some(write_cb);
+    let rw = fs_ntfs_mount_with_callbacks(&cfg);
+    assert!(rw.is_null(), "dirty read-write callback mount must fail");
+    drop(ctx);
+    assert_eq!(std::fs::read(&img).expect("read image"), before);
 }
 
 #[test]
