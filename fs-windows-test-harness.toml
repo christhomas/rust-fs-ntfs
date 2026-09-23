@@ -102,9 +102,10 @@ packages = []
 # {image_dir}/{run_id}/{scenario.image} on the host. image_dir defaults to
 # `diskimages` and can be overridden via HOST_IMAGE_DIR in .test-env (see [vm].image_dir).
 # The `mkdir -p` ensures the directory exists. Cleanup of .img files
-# happens in `scripts/run-matrix.sh` via an EXIT trap.
+# happens in `scripts/run-matrix.sh` via an EXIT trap. Invoke the helper
+# through bash so Windows hosts use Git Bash rather than cmd.exe.
 host = "host"
-command = "mkdir -p {image_dir}/{run_id} && dd if=/dev/zero of={image_dir}/{run_id}/{scenario.image} bs=1m count={scenario.volume_params.size_mib} status=none"
+command = "bash scripts/init-image.sh {image_dir}/{run_id}/{scenario.image} {scenario.volume_params.size_mib}"
 expect_exit = 0
 
 [ops.mac-format]
