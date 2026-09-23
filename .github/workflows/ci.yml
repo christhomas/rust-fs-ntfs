@@ -740,8 +740,28 @@ jobs:
           # `version = "0.2"` requirement.
           git clone --depth 1 --branch v0.2.11 https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
           cargo install --path $env:RUNNER_TEMP/rust-img-vhd --bin vhd_tool
+      - name: Make this runner its own Windows VM (sshd, key auth, PowerShell)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "$env:ProgramFiles\Git\bin\bash.exe" -c 'mkdir -p ~/.ssh && ssh-keygen -t ed25519 -N "" -f ~/.ssh/rust-ntfs-matrix -q'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $keys = "$env:ProgramData\ssh\administrators_authorized_keys"
+          Get-Content "$env:USERPROFILE\.ssh\rust-ntfs-matrix.pub" | Set-Content -Encoding ascii $keys
+          icacls $keys /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
+          New-ItemProperty -Path HKLM:\SOFTWARE\OpenSSH -Name DefaultShell `
+            -Value "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+            -PropertyType String -Force | Out-Null
+          Restart-Service sshd
       - name: Build rust-ntfs (Windows)
         run: cargo build --release --locked --bin rust-ntfs
+      - name: Validate rmdir matrix scenarios
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh mac-format-mkdir-rmdir-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       - name: Generate raw image and wrap in GPT-partitioned VHD
         shell: pwsh
         run: |
@@ -905,7 +925,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ntfs-windows-diag-${{ github.run_id }}
-          path: diag/
+          path: |
+            diag/
+            test-diagnostics/matrix/
           if-no-files-found: warn
       - name: Fail the job if chkdsk or the round-trip found issues
         # We deferred failure earlier (continue-on-error) so the
