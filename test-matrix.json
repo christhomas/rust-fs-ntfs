@@ -488,6 +488,82 @@
       "image": "nfs-mac-format-mac-write-win-repeat-mount-3-win-chkdsk.img",
       "_notes": "Tier-3 repeat-mount with mac-side content. Verifies our writer's metadata stays valid across multiple dismount/remount cycles after we've added a file."
     },
+    "mac-format-mkdir-rmdir-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "RMDIR",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-mkdir",
+          "parent": "/",
+          "basename": "empty"
+        },
+        {
+          "op": "mac-rmdir",
+          "path": "/empty"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-mac-format-mkdir-rmdir-win-chkdsk.img",
+      "_notes": "Creates and removes an empty directory with the default 4 KiB cluster geometry, then requires Windows chkdsk to accept the retired record and parent index update as clean."
+    },
+    "mac-format-mkdir-rmdir-win-chkdsk-64k": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 1024,
+        "label": "RMDIR64K",
+        "alloc_unit_size": 65536
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-mkdir",
+          "parent": "/",
+          "basename": "empty"
+        },
+        {
+          "op": "mac-rmdir",
+          "path": "/empty"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-mac-format-mkdir-rmdir-win-chkdsk-64k.img",
+      "_notes": "Repeats empty-directory removal with 64 KiB clusters, where the 4 KiB index-block geometry diverges from the allocation-unit size, then requires a clean Windows chkdsk verdict."
+    },
     "mac-format-mkdir-set-dirty-win-chkdsk": {
       "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
