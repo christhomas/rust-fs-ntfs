@@ -27,7 +27,8 @@ fn bypasses_temp_image_primitive(source: &str) -> bool {
         .collect();
     let compact = compact.replace("test-disks/_does_not_exist.img", "");
 
-    if compact.contains("test-disks/_") {
+    // OS temporary paths lack the shared guard just as fixed test-disks paths do.
+    if compact.contains("test-disks/_") || compact.contains("temp_dir()") {
         return true;
     }
 
@@ -99,6 +100,9 @@ fn policy_scan_covers_nested_multiline_and_dynamic_paths() {
     ));
     assert!(bypasses_temp_image_primitive(
         r#"// Do not create test-disks/_documented_but_unsafe.img"#
+    ));
+    assert!(bypasses_temp_image_primitive(
+        r#"let path = std::env::temp_dir().join("scratch.img");"#
     ));
 }
 
