@@ -216,7 +216,7 @@ main() {
             done
             [ "${#parts[@]}" -gt 0 ] || parts=("files: $(ls "$dir/vm" | tr '\n' ' ')")
             line="$name: $(IFS=';'; printf '%s' "${parts[*]}" | sed 's/;/; /g')"
-            if [ "$has_chkdsk" = 1 ]; then
+            if [ "$has_chkdsk" = 1 ] || [ -e "$dir/vm/verdict.json" ]; then
                 verdict_status="$(verdict_says "$dir/vm/verdict.json")"
                 [ "$verdict_status" = match ] || line="$line; verdict: $verdict_status"
             fi
