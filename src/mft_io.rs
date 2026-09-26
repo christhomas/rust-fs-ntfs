@@ -338,6 +338,78 @@ pub fn mft_record_offset(params: &BootParams, record_number: u64) -> u64 {
         .saturating_add(record_number.saturating_mul(params.file_record_size))
 }
 
+/// Resolve an MFT record through `$MFT`'s own run list.
+///
+/// Record zero is the bootstrap: the boot sector points directly at it.
+/// Every later record may live in an extent appended when the original MFT
+/// filled, so treating the boot-sector LCN as one indefinitely contiguous
+/// array would write into the metadata that follows the initial extent.
+pub fn mft_record_offset_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    params: &BootParams,
+    record_number: u64,
+) -> Result<u64, String> {
+    mft_record_offset_maybe_io(io, params, record_number)?
+        .ok_or_else(|| format!("MFT record {record_number} is not mapped"))
+}
+
+fn mft_record_offset_maybe_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    params: &BootParams,
+    record_number: u64,
+) -> Result<Option<u64>, String> {
+    if record_number == 0 {
+        return Ok(Some(mft_record_offset(params, 0)));
+    }
+    let mut record0 = vec![0u8; params.file_record_size as usize];
+    io.read_exact_at(mft_record_offset(params, 0), &mut record0)
+        .map_err(|e| format!("read $MFT record: {e}"))?;
+    // Keep the boot-sector contiguous fallback for recovery paths: record 1
+    // is `$MFTMirr`, and it must remain reachable when record 0 is damaged.
+    if apply_fixup_on_read(&mut record0, params.bytes_per_sector).is_err() {
+        return Ok(Some(mft_record_offset(params, record_number)));
+    }
+    let data = crate::attr_io::find_attribute(&record0, crate::attr_io::AttrType::Data, None)
+        .ok_or("$MFT has no unnamed $DATA")?;
+    if data.is_resident {
+        return Err("$MFT's unnamed $DATA is resident".to_string());
+    }
+    let mpo = data
+        .non_resident_mapping_pairs_offset
+        .ok_or("$MFT:$DATA has no mapping-pairs offset")? as usize;
+    let runs = crate::data_runs::decode_runs(
+        &record0[data.attr_offset + mpo..data.attr_offset + data.attr_length],
+    )?;
+    let byte = record_number
+        .checked_mul(params.file_record_size)
+        .ok_or("MFT record byte offset overflows")?;
+    let vcn = byte / params.cluster_size;
+    let within = byte % params.cluster_size;
+    let run = runs
+        .iter()
+        .find(|run| vcn >= run.starting_vcn && vcn < run.starting_vcn + run.length);
+    let Some(run) = run else {
+        return Ok(None);
+    };
+    let lcn = run.lcn.ok_or("MFT record lies in a sparse run")?;
+    let clusters_needed = within
+        .checked_add(params.file_record_size)
+        .ok_or("MFT record span overflows")?
+        .div_ceil(params.cluster_size);
+    if vcn - run.starting_vcn + clusters_needed > run.length {
+        return Err(format!("MFT record {record_number} crosses a run boundary"));
+    }
+    cluster_span(
+        params,
+        lcn,
+        vcn - run.starting_vcn,
+        within,
+        params.file_record_size,
+        io.size(),
+    )
+    .map(Some)
+}
+
 /// Where a run of clusters lands on the device, or a refusal.
 ///
 /// `lcn`, `vcn` and the run's own start all come out of a mapping-pair
@@ -459,7 +531,7 @@ pub fn next_sequence_for_allocation_io<T: BlockIo + ?Sized>(
     params: &BootParams,
     record_number: u64,
 ) -> Result<u16, String> {
-    let offset = mft_record_offset(params, record_number);
+    let offset = mft_record_offset_io(io, params, record_number)?;
     let mut slot = vec![0u8; params.file_record_size as usize];
     io.read_exact_at(offset, &mut slot)
         .map_err(|e| format!("read record {record_number} for its sequence: {e}"))?;
@@ -637,7 +709,7 @@ pub fn read_mft_record_io<T: BlockIo + ?Sized>(
     record_number: u64,
 ) -> Result<(BootParams, Vec<u8>), String> {
     let params = read_boot_params_io(io)?;
-    let offset = mft_record_offset(&params, record_number);
+    let offset = mft_record_offset_io(io, &params, record_number)?;
     let size = params.file_record_size as usize;
     let mut buf = vec![0u8; size];
     io.read_exact_at(offset, &mut buf)
@@ -739,7 +811,18 @@ where
     F: FnOnce(&mut [u8]) -> Result<(), E>,
     E: From<String>,
 {
-    let (params, mut record) = read_mft_record_io(io, record_number).map_err(E::from)?;
+    let params = read_boot_params_io(io).map_err(E::from)?;
+    let Some(offset) = mft_record_offset_maybe_io(io, &params, record_number).map_err(E::from)?
+    else {
+        return Err(E::from(format!(
+            "refusing to write to MFT record {record_number}: IN_USE flag is clear"
+        )));
+    };
+    let mut record = vec![0u8; params.file_record_size as usize];
+    io.read_exact_at(offset, &mut record)
+        .map_err(|e| E::from(format!("read record {record_number}: {e}")))?;
+    apply_fixup_on_read(&mut record, params.bytes_per_sector).map_err(E::from)?;
+    check_record_header(&record, record_number).map_err(E::from)?;
     if record_flags(&record) & MFT_FLAG_IN_USE == 0 {
         return Err(E::from(format!(
             "refusing to write to MFT record {record_number}: IN_USE flag is clear"
@@ -749,7 +832,6 @@ where
     mutate(&mut record)?;
     apply_fixup_on_write(&mut record, params.bytes_per_sector).map_err(E::from)?;
 
-    let offset = mft_record_offset(&params, record_number);
     io.write_all_at(offset, &record)
         .map_err(|e| E::from(format!("write record {record_number}: {e}")))?;
     io.sync().map_err(E::from)?;
@@ -839,7 +921,7 @@ pub fn sync_mftmirr_record_io<T: BlockIo + ?Sized>(
         io.size(),
     )?;
     let mut raw = vec![0u8; params.file_record_size as usize];
-    let source_at = mft_record_offset(&params, record_number);
+    let source_at = mft_record_offset_io(io, &params, record_number)?;
     io.read_exact_at(source_at, &mut raw)?;
     io.write_all_at(mirror_at, &raw)?;
     io.sync()
@@ -1533,5 +1615,22 @@ mod tests {
         // Record must be unchanged.
         let (_, rec_after) = read_mft_record_io(&mut dev, 3).unwrap();
         assert_eq!(rec_before, rec_after);
+    }
+
+    #[test]
+    fn update_unmapped_record_reports_free_before_mapping_error() {
+        let mut dev = formatted_dev();
+        let mut mutated = false;
+        let err = update_mft_record_io(&mut dev, 1000, |_| {
+            mutated = true;
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(err.contains("IN_USE flag is clear"), "{err}");
+        assert!(!mutated, "an unmapped record must never reach the mutator");
+
+        let read_err = read_mft_record_io(&mut dev, 1000).unwrap_err();
+        assert!(read_err.contains("not mapped"), "{read_err}");
     }
 }
