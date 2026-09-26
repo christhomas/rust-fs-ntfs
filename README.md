@@ -58,6 +58,13 @@ What's still landing:
 | `$OBJECT_ID` (16-byte GUID) | yes |
 | Volume statistics (`$Bitmap`, `$MFT:$Bitmap`) | yes |
 
+Directory listings are cheap `$I30` index snapshots: they do not stat every
+target record. A stale index row may therefore be returned (including its
+duplicated file/directory type) and then be refused by a path lookup whose
+sequence check finds that the MFT slot now holds a different file. Callers
+must handle lookup/open failure after enumeration; this is the documented
+consistency boundary, not a promise that every listed name remains openable.
+
 ### Write
 
 | Operation | Status |

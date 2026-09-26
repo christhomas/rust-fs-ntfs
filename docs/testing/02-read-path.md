@@ -45,7 +45,7 @@ Every box above has tests pointed directly at it. Here is the map.
 | **`stat` / attribute enumeration** | Every attribute on a record is listed with correct type code, name, offset, length; resident *and* non-resident | `read_attributes.rs`, `read_si_full.rs` |
 | **`$STANDARD_INFORMATION`** | All MS-FSCC §2.4.2 fields: 4 timestamps, DOS attribute bits, and the v3.x trailer (owner_id, security_id, quota, USN) | `read_si_full.rs`, `security_id.rs` |
 | **`$FILE_NAME`** | Name decoding, namespace flags (POSIX/Win32/DOS), case preservation, multi-name (8.3 + long) files | `read_file_names.rs`, `long_names.rs` |
-| **`readdir` (`$INDEX_ROOT` + `$INDEX_ALLOCATION`)** | Directory entries enumerated; `.`/`..` handled; deep nesting traversed | `facade.rs`, `readdir_dots.rs`, `deep.rs`, `path_dots.rs` |
+| **`readdir` (`$INDEX_ROOT` + `$INDEX_ALLOCATION`)** | Directory entries enumerated; `.`/`..` handled; deep nesting traversed; a stale index row is listed from its own bytes (including type) but refused if later followed | `facade.rs`, `readdir_dots.rs`, `deep.rs`, `path_dots.rs`, `stale_index_entry.rs` |
 | **`read` file content** | Resident (in-MFT), non-resident, and fragmented `$DATA` all return exact bytes | `facade.rs`, `integration.rs` |
 | **Sparse files** | Holes (unallocated ranges) read back as zeros without consuming storage | `sparse.rs` |
 | **Alternate Data Streams (named `$DATA`)** | Streams enumerated and read independently of the main stream | `list_named_streams.rs`, `ads.rs`, `ads_combinatorics.rs`, `ads_comprehensive.rs` |

@@ -75,7 +75,15 @@ typedef struct {
  */
 #define FS_NTFS_DIRENT_NAME_BYTES 1024
 
-/* Directory entry (returned during iteration) */
+/* Directory entry (returned during iteration).
+ *
+ * Real entries are snapshots of the directory's $I30 index, not stats of
+ * their target MFT records. `file_type` is the duplicated type stored in the
+ * index entry and can be stale. A later path operation may reject an entry
+ * returned here when its file-reference sequence no longer matches the target
+ * record; callers must handle that lookup/open failure. `.` and `..` are
+ * synthesized and always report FS_NTFS_FT_DIR.
+ */
 typedef struct {
     uint64_t file_record_number;
     uint8_t  file_type;     /* fs_ntfs_file_type_t */
@@ -341,6 +349,12 @@ int fs_ntfs_stat(fs_ntfs_fs_t *fs, const char *path,
 
 typedef struct fs_ntfs_dir_iter fs_ntfs_dir_iter_t;
 
+/*
+ * Open an $I30-backed directory snapshot. Enumeration deliberately does not
+ * read every target MFT record. Consequently it may return a stale name/type
+ * that a later fs_ntfs_stat/fs_ntfs_read_file/path operation refuses. This is
+ * an allowed result, not evidence that the later operation must succeed.
+ */
 fs_ntfs_dir_iter_t *fs_ntfs_dir_open(fs_ntfs_fs_t *fs,
                                               const char *path);
 

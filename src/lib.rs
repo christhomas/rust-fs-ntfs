@@ -466,6 +466,10 @@ pub struct FsNtfsBlockdevCfg {
 /// and stays valid only until the next `fs_ntfs_dir_next` call (or
 /// `fs_ntfs_dir_close`) — the documented readdir contract, and the same
 /// scratch-buffer lifetime the previous index-walk implementation had.
+///
+/// Real entries retain the directory-index snapshot contract documented on
+/// [`read::read_dir_entries`]: they are not target-record stats, their type can
+/// be stale, and a later path lookup can refuse an entry returned here.
 pub struct FsNtfsDirIter {
     /// The full listing: synthesized `.`/`..` first, then the real entries.
     /// Lightweight records — widened to `current` per `fs_ntfs_dir_next`.
@@ -1265,6 +1269,11 @@ pub extern "C" fn fs_ntfs_stat(
 /// synthesized `"."` and `".."`.  Advance with [`fs_ntfs_dir_next`]; free
 /// with [`fs_ntfs_dir_close`].  Check [`fs_ntfs_dir_skipped`] after
 /// exhaustion to detect corrupt index rows that were silently skipped.
+///
+/// Real entries come from the directory index without reading each target
+/// record. Their type is the index's duplicated type and can be stale; a later
+/// path operation can reject an entry whose file-reference sequence no longer
+/// matches the target record. Callers must handle that lookup/open failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_dir_open(
     fs: *mut FsNtfsHandle,
