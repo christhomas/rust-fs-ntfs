@@ -183,6 +183,141 @@ fn entry_name(buf: &[u8], cursor: usize, length: usize) -> Result<Vec<u16>, Stri
         .collect())
 }
 
+/// Result of comparing one lookup key against a single `$I30` B+tree node.
+pub(crate) enum IndexNodeLookup {
+    Found { record_number: u64, sequence: u16 },
+    Descend(u64),
+    NotFound,
+}
+
+/// Search one sorted `$I30` node. Internal entries route keys smaller than
+/// their own through the child VCN stored in their tail; the LAST entry routes
+/// keys larger than every key through the right-most child.
+fn lookup_node(
+    buf: &[u8],
+    ih_start: usize,
+    limit: usize,
+    wanted: &[u16],
+    upcase: &crate::upcase::UpcaseTable,
+) -> Result<IndexNodeLookup, String> {
+    if ih_start.saturating_add(INDEX_HEADER_SIZE) > limit || limit > buf.len() {
+        return Err("index node is too short for an index header".to_string());
+    }
+    let first_entry_rel = read_u32_le(buf, ih_start + IH_FIRST_ENTRY_OFFSET)
+        .ok_or("index node is too short to read first_entry_offset")?
+        as usize;
+    let total_size = read_u32_le(buf, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
+        .ok_or("index node is too short to read total_size")? as usize;
+    if first_entry_rel < INDEX_HEADER_SIZE || !first_entry_rel.is_multiple_of(8) {
+        return Err(format!(
+            "index node says its first entry is {first_entry_rel} bytes into the index header, \
+             which is not an entry boundary"
+        ));
+    }
+    let end = ih_start
+        .checked_add(total_size)
+        .filter(|&end| end <= limit)
+        .ok_or_else(|| "index node entries run past their container".to_string())?;
+    let mut cursor = ih_start
+        .checked_add(first_entry_rel)
+        .filter(|&cursor| cursor <= end)
+        .ok_or_else(|| "index node first entry runs past its entries".to_string())?;
+
+    while cursor < end {
+        if cursor.saturating_add(IE_KEY_START) > end {
+            return Err(format!("index entry header at {cursor} runs past the node"));
+        }
+        let length =
+            u16::from_le_bytes([buf[cursor + IE_LENGTH], buf[cursor + IE_LENGTH + 1]]) as usize;
+        let key_length =
+            u16::from_le_bytes([buf[cursor + IE_KEY_LENGTH], buf[cursor + IE_KEY_LENGTH + 1]])
+                as usize;
+        let flags = u16::from_le_bytes([buf[cursor + IE_FLAGS], buf[cursor + IE_FLAGS + 1]]);
+        let entry_end = cursor
+            .checked_add(length)
+            .filter(|&entry_end| length >= IE_KEY_START && entry_end <= end)
+            .ok_or_else(|| format!("malformed index entry at {cursor}"))?;
+        let child_vcn = if flags & IE_FLAG_HAS_SUBNODE != 0 {
+            if length < IE_KEY_START + 8 {
+                return Err(format!(
+                    "index entry at {cursor} is too short for its child VCN"
+                ));
+            }
+            Some(u64::from_le_bytes(
+                buf[entry_end - 8..entry_end].try_into().unwrap(),
+            ))
+        } else {
+            None
+        };
+
+        if flags & IE_FLAG_LAST != 0 {
+            return Ok(child_vcn.map_or(IndexNodeLookup::NotFound, IndexNodeLookup::Descend));
+        }
+        if key_length < FN_NAME_OFFSET || cursor + IE_KEY_START + key_length > entry_end {
+            return Err(format!(
+                "malformed $FILE_NAME key in index entry at {cursor}"
+            ));
+        }
+        let indexed_name = entry_name(buf, cursor, length)?;
+        match upcase.cmp_names(wanted, &indexed_name) {
+            std::cmp::Ordering::Equal => {
+                let file_ref = u64::from_le_bytes(
+                    buf[cursor + IE_FILE_REFERENCE..cursor + IE_FILE_REFERENCE + 8]
+                        .try_into()
+                        .unwrap(),
+                );
+                return Ok(IndexNodeLookup::Found {
+                    record_number: file_ref & 0x0000_FFFF_FFFF_FFFF,
+                    sequence: (file_ref >> 48) as u16,
+                });
+            }
+            std::cmp::Ordering::Less => {
+                return Ok(child_vcn.map_or(IndexNodeLookup::NotFound, IndexNodeLookup::Descend));
+            }
+            std::cmp::Ordering::Greater => cursor = entry_end,
+        }
+    }
+    Err("index node has no LAST entry".to_string())
+}
+
+pub(crate) fn lookup_index_root_node(
+    record: &[u8],
+    wanted: &[u16],
+    upcase: &crate::upcase::UpcaseTable,
+) -> Result<IndexNodeLookup, String> {
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
+        .ok_or_else(|| "$INDEX_ROOT:$I30 not found".to_string())?;
+    if !ir.is_resident {
+        return Err("$INDEX_ROOT is non-resident (impossible per spec)".to_string());
+    }
+    let value_offset = ir.resident_value_offset.ok_or("no value_offset")? as usize;
+    let ih_start = ir.attr_offset + value_offset + IR_INDEX_HEADER_OFFSET;
+    lookup_node(
+        record,
+        ih_start,
+        index_root_value_end(record, &ir)?,
+        wanted,
+        upcase,
+    )
+}
+
+pub(crate) fn lookup_indx_node(
+    block: &[u8],
+    wanted: &[u16],
+    upcase: &crate::upcase::UpcaseTable,
+) -> Result<IndexNodeLookup, String> {
+    if block.len() < 4 || &block[..4] != b"INDX" {
+        return Err("not an INDX block (fixup missing?)".to_string());
+    }
+    lookup_node(
+        block,
+        crate::idx_block::INDX_INDEX_HEADER_OFFSET,
+        block.len(),
+        wanted,
+        upcase,
+    )
+}
+
 /// One located index entry inside an `$INDEX_ROOT`.
 ///
 /// `#[non_exhaustive]`: this type is returned, not built, by anyone
