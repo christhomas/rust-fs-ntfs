@@ -34,6 +34,36 @@ permissions:
   contents: read
 
 jobs:
+  windows-native-read-fixtures:
+    name: Windows-authored native read fixtures
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - name: Install vhd_tool from rust-img-vhd
+        shell: pwsh
+        run: |
+          $core = (Select-String -Path chores.yml -Pattern '^\s*FS_CORE_REF:\s*(\S+)').Matches[0].Groups[1].Value
+          git clone --depth 1 --branch v0.3.5 https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
+          git clone --depth 1 --branch $core https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
+          cargo install --path $env:RUNNER_TEMP/rust-img-vhd --bin vhd_tool
+      - name: Build Windows-authored fixtures
+        shell: pwsh
+        run: pwsh -File test-disks/build-windows-native-read-fixtures.ps1
+      - name: Upload Windows-authored fixtures
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-windows-native-read-fixtures
+          path: |
+            test-disks/ntfs-attrlist.img
+            test-disks/ntfs-compressed.img
+          if-no-files-found: error
+          retention-days: 1
+
   # ---------------------------------------------------------------------------
   # Full Rust test gate (Linux). Generates the read-path fixtures first so the
   # fixture-driven integration tests run for real — NOT trimmed to --lib.
@@ -42,6 +72,7 @@ jobs:
     name: full test suite (fixtures + integration)
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    needs: [windows-native-read-fixtures]
     steps:
       - uses: actions/checkout@v4
       - name: check out sibling repos
@@ -114,13 +145,15 @@ jobs:
           sudo apt-get install -y ntfs-3g
 
       # Generate the read-path .img fixtures. With these present the fixture-
-      # driven integration tests (tests/ads.rs, tests/unicode.rs, …) run
-      # instead of panicking at tests/common/mod.rs. The two Windows-authored
-      # fixtures (ntfs-attrlist / ntfs-compressed — LZNT1 compression and
-      # $ATTRIBUTE_LIST overflow, which mkntfs cannot produce) are self-
-      # skipped by tests/native_read_fixtures.rs when absent.
+      # driven integration tests (tests/ads.rs, tests/unicode.rs, …) run.
+      # The Windows-authored images arrive from the producer job.
       - name: Generate NTFS read-path fixtures
         run: bash test-disks/build-ntfs-feature-images.sh
+      - name: Download Windows-authored native read fixtures
+        uses: actions/download-artifact@v4
+        with:
+          name: ntfs-windows-native-read-fixtures
+          path: test-disks
 
       # FULL suite — every unit test AND every integration test (the fixtures
       # above make the read-path tests live). Deliberately NOT trimmed to

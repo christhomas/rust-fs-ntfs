@@ -191,13 +191,8 @@ set -e
 #     returned early -- it is counted as passed;
 #   * libtest's own `N ignored`, from `#[ignore]`.
 #
-# Both are reported here and the first one fails the tier. Nothing on this
-# branch is expected to print SKIP: the fixture-driven files panic when
-# their images are missing (#289), and the only self-skipping file is
-# `tests/native_read_fixtures.rs`, whose two Windows-authored fixtures
-# nothing currently builds (#279). If that file skips in CI, this gate is
-# how it becomes visible instead of passing quietly -- raise the ceiling
-# WITH the measurement and the issue, the way the budgets above are set.
+# Both are reported here and the first one fails the tier. Fixture-driven
+# tests require their images and panic when one is missing.
 if [ -f "$LOG" ]; then
     # `|| true` on BOTH, and for two different reasons under `set -o
     # pipefail`: grep exits 1 when it matches nothing, which is the

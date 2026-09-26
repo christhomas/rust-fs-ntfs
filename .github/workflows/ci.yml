@@ -310,8 +310,9 @@ jobs:
       - name: Install vhd_tool from rust-img-vhd
         shell: pwsh
         run: |
+          $core = (Select-String -Path chores.yml -Pattern '^\s*FS_CORE_REF:\s*(\S+)').Matches[0].Groups[1].Value
           git clone --depth 1 --branch v0.3.5 https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
-          git clone --depth 1 --branch v0.2.11 https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
+          git clone --depth 1 --branch $core https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
           cargo install --path $env:RUNNER_TEMP/rust-img-vhd --bin vhd_tool
       - name: Build Windows-authored fixtures
         shell: pwsh
@@ -435,9 +436,8 @@ jobs:
       # --release --locked --no-fail-fast` exits 101 with 414 FAILED lines,
       # because `tests/common/mod.rs`'s `open` panics ("did you run
       # test-disks/build-ntfs-feature-images.sh?") and files like
-      # `tests/attr_resize.rs` panic in `std::fs::copy`. Only the two
-      # Windows-authored fixtures (ntfs-attrlist / ntfs-compressed) self-skip.
-      # So a half-failed fixture builder turns this job red through the
+      # `tests/attr_resize.rs` panic in `std::fs::copy`. The Windows-authored
+      # fixtures also fail when missing. A half-failed builder turns this job red through the
       # suite's own exit status, before the floor is ever read.
       #
       # THE FLOOR IS FOR THE OTHER CASE: a selection that stops matching. A
@@ -460,8 +460,6 @@ jobs:
         run: chore test:ignored
 
       - name: full suite with an executed-test floor
-        env:
-          NTFS_FIXTURES_REQUIRED: "1"
         run: |
           scripts/tier.sh suite -- cargo test --release --locked --no-fail-fast
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
