@@ -62,7 +62,7 @@ shift
 #   mkfs        115 / 3,858 cold (Mac), 24 / 1,022 warm           160 / 5,200
 #   suite       2,143 / 108,930 (CI Linux, fixtures built)        2,900 / 150,000
 #   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
-#   scripts     100 / 2,595 (ten shell tests, 2026-09-26)         135 / 3,500
+#   scripts     101 / 2,669 (11 shell tests, rebased 2026-09-26)  135 / 3,500
 #   matrix      633 / 35,311 green, 1,521 / 78,075 red (see below)  900 / 50,000
 #
 # THE CLIPPY ROW MOVED ON 2026-09-19, from 150/5,000 to 260/11,500. Adding
@@ -78,8 +78,9 @@ shift
 # 82 lines / 1,831 bytes from six shell tests, including 13 new verdict
 # cases in tests/scripts/matrix-fetch-diag.sh. Both limits are that passing
 # measurement plus roughly a third; every test verdict remains in the log.
-# With the CI PR trigger regression test added, a fresh run measured 100 lines
-# and 2,595 bytes across ten scripts. The new limits are that plus a third.
+# The combined shell suite, including the CI PR-trigger and routed-path
+# regression tests, measured 101 lines and 2,669 bytes after rebase on
+# 2026-09-26. The cap is 135 lines / 3,500 bytes, about one third of headroom.
 
 # THE MATRIX ROW is measured on a GREEN 46-scenario run (2026-09-18, 46 min,
 # max_parallel=4): 633 lines / 35,311 bytes, budgeted at that plus a third.

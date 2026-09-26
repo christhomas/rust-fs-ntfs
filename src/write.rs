@@ -1535,10 +1535,9 @@ fn validate_basename(name: &str) -> Result<(), String> {
 /// at `parent_path`. Returns the new file's MFT record number.
 ///
 /// **Limitations (MVP):**
-/// * A parent with one fitting `$INDEX_ALLOCATION` leaf is supported. A tree
-///   with multiple leaves, an interior target, or a full leaf is refused
-///   before the new record is allocated because B+tree routing and splitting
-///   are W3.2 work (see #301).
+/// * Routed `$INDEX_ALLOCATION` leaves can split while their resident parent
+///   has space for another separator. Growth to a deeper interior tree is
+///   refused before the new record is allocated.
 /// * Filename collation is case-insensitive ASCII-only (proper
 ///   NTFS upcase-table collation is future work).
 pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u64, String> {
@@ -1734,6 +1733,14 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
                 return Err(format!("'{basename}' already exists in '{parent_path}'"));
             }
         }
+        preflight_parent_insert_io(
+            io,
+            parent_rec,
+            &parent_record_bytes,
+            basename,
+            false,
+            &upcase,
+        )?;
     }
 
     // Allocate a free MFT record.
@@ -1818,11 +1825,8 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
 
 /// Insert a new index entry into a parent directory.
 ///
-/// Insert into a resident `$INDEX_ROOT`, or into the only leaf of a
-/// `$INDEX_ALLOCATION` tree when that leaf has room. Selecting among several
-/// leaves, splitting a full leaf, and updating parent routing entries are
-/// W3.2 work; writing to an arbitrary block would create an index that a
-/// descending NTFS reader cannot reliably find.
+/// Insert into a resident `$INDEX_ROOT` or the leaf selected by its routing
+/// keys. A full leaf is split and its resident parent receives the separator.
 #[allow(dead_code)]
 fn insert_entry_in_parent(
     image: &Path,
@@ -1876,9 +1880,37 @@ fn insert_entry_in_parent_io<T: BlockIo + ?Sized>(
         );
     }
 
-    let ia = idx_block::load_for_directory_io(io, parent_rec)?;
     let (_, root) = read_mft_record_io(io, parent_rec)?;
-    let mut vcn = index_io::index_root_child_vcn(&root, basename, upcase.as_ref())?;
+    let (ia, vcn, _) = routed_leaf_io(io, parent_rec, &root, basename, upcase.as_ref())?;
+    let insert = idx_block::update_indx_block_io(io, &ia, vcn, |block| {
+        index_io::insert_entry_into_indx_block_with_collation(
+            block,
+            entry_bytes,
+            basename,
+            upcase.as_ref(),
+        )
+    });
+    match insert {
+        Ok(()) => Ok(()),
+        Err(e) if e.contains("INDX block has no room") => {
+            split_index_leaf_io(io, parent_rec, &ia, vcn, entry_bytes, upcase.as_ref())
+        }
+        Err(e) => Err(format!(
+            "$INDEX_ALLOCATION insertion is not supported: the target leaf cannot fit \
+             the entry (W3.2): {e}"
+        )),
+    }
+}
+
+fn routed_leaf_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    root: &[u8],
+    basename: &str,
+    upcase: Option<&crate::upcase::UpcaseTable>,
+) -> Result<(idx_block::IndexAllocation, u64, Vec<u8>), String> {
+    let ia = idx_block::load_for_directory_io(io, parent_rec)?;
+    let mut vcn = index_io::index_root_child_vcn(root, basename, upcase)?;
     let allocated = ia.allocated_block_vcns();
     let mut visited = std::collections::HashSet::new();
     loop {
@@ -1890,46 +1922,87 @@ fn insert_entry_in_parent_io<T: BlockIo + ?Sized>(
         let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
         let flags = block[idx_block::INDX_INDEX_HEADER_OFFSET + index_io::IH_FLAGS_OFFSET];
         if flags & index_io::IH_FLAG_HAS_SUBNODES == 0 {
-            break;
+            return Ok((ia, vcn, block));
         }
-        vcn = index_io::indx_child_vcn(&block, basename, upcase.as_ref())?;
-    }
-    let insert = idx_block::update_indx_block_io(io, &ia, vcn, |block| {
-        index_io::insert_entry_into_indx_block_with_collation(
-            block,
-            entry_bytes,
-            basename,
-            upcase.as_ref(),
-        )
-    });
-    match insert {
-        Ok(()) => Ok(()),
-        Err(e) if e.contains("INDX block has no room") && vcn == 0 && allocated == [0] => {
-            split_first_index_leaf_io(io, parent_rec, &ia, entry_bytes, upcase.as_ref())
-        }
-        Err(e) => Err(format!(
-            "$INDEX_ALLOCATION insertion is not supported: the target leaf cannot fit \
-             the entry (W3.2): {e}"
-        )),
+        vcn = index_io::indx_child_vcn(&block, basename, upcase)?;
     }
 }
 
-fn split_first_index_leaf_io<T: BlockIo + ?Sized>(
+/// Check the chosen leaf and its parent before a new MFT slot is written.
+/// The insert path can roll back its bitmap bit but not old slot bytes.
+fn preflight_parent_insert_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    root: &[u8],
+    basename: &str,
+    is_dir: bool,
+    upcase: &crate::upcase::UpcaseTable,
+) -> Result<(), String> {
+    let entry = index_io::build_file_name_index_entry(0, 0, basename, 0, is_dir)?;
+    let (ia, vcn, mut leaf) = routed_leaf_io(io, parent_rec, root, basename, Some(upcase))?;
+    match index_io::insert_entry_into_indx_block_with_collation(
+        &mut leaf,
+        &entry,
+        basename,
+        Some(upcase),
+    ) {
+        Ok(()) => Ok(()),
+        Err(e) if e.contains("INDX block has no room") => {
+            let clusters = ia.block_size.div_ceil(ia.params.cluster_size);
+            let vcns = ia.allocated_block_vcns();
+            let right_vcn = vcns
+                .last()
+                .copied()
+                .ok_or("index has no allocated blocks")?
+                + clusters;
+            let old_leaf = idx_block::read_indx_block_io(io, &ia, vcn)?;
+            let (_, _, separator) =
+                index_io::split_indx_leaf(&old_leaf, &entry, vcn, right_vcn, Some(upcase))?;
+            let mut parent = root.to_vec();
+            if vcns == [0] {
+                index_io::route_split_in_index_root(&mut parent, &separator, vcn, right_vcn)?;
+            } else {
+                index_io::route_add_split_in_index_root(
+                    &mut parent,
+                    &separator,
+                    vcn,
+                    right_vcn,
+                    Some(upcase),
+                )?;
+            }
+            let bitmap =
+                attr_io::find_attribute(&parent, AttrType::Bitmap, Some(crate::mkfs::stream::I30))
+                    .ok_or("$Bitmap:$I30 missing")?;
+            let bit = (right_vcn / clusters) as usize;
+            if !bitmap.is_resident || bit >= bitmap.resident_value_length.unwrap_or(0) as usize * 8
+            {
+                return Err("index capacity: resident bitmap growth required".to_string());
+            }
+            let volume_bitmap = crate::bitmap::locate_bitmap_io(io)?;
+            crate::bitmap::find_free_run_io(io, &volume_bitmap, clusters, ia.params.mft_lcn)?
+                .ok_or_else(|| "index capacity: no free run for a new INDX block".to_string())?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn split_index_leaf_io<T: BlockIo + ?Sized>(
     io: &mut T,
     parent_rec: u64,
     ia: &idx_block::IndexAllocation,
+    left_vcn: u64,
     entry_bytes: &[u8],
     upcase: Option<&crate::upcase::UpcaseTable>,
 ) -> Result<(), String> {
     let vcns = ia.allocated_block_vcns();
-    if vcns != [0] {
-        return Err(
-            "index capacity reached: splitting a multi-block tree is not yet supported".to_string(),
-        );
-    }
-    let old_left = idx_block::read_indx_block_io(io, ia, 0)?;
+    let old_left = idx_block::read_indx_block_io(io, ia, left_vcn)?;
     let clusters = ia.block_size.div_ceil(ia.params.cluster_size);
-    let right_vcn = clusters;
+    let right_vcn = vcns
+        .last()
+        .copied()
+        .ok_or("index has no allocated blocks")?
+        + clusters;
     let volume_bitmap = crate::bitmap::locate_bitmap_io(io)?;
     let lcn = crate::bitmap::find_free_run_io(io, &volume_bitmap, clusters, ia.params.mft_lcn)?
         .ok_or_else(|| format!("index capacity: no {clusters}-cluster run for a new INDX block"))?;
@@ -1937,9 +2010,19 @@ fn split_first_index_leaf_io<T: BlockIo + ?Sized>(
 
     let prepared = (|| -> Result<index_io::SplitIndxLeaves, String> {
         let (mut left, right, separator) =
-            index_io::split_first_indx_leaf(&old_left, entry_bytes, right_vcn, upcase)?;
+            index_io::split_indx_leaf(&old_left, entry_bytes, left_vcn, right_vcn, upcase)?;
         let (_, mut parent) = read_mft_record_io(io, parent_rec)?;
-        index_io::route_split_in_index_root(&mut parent, &separator, 0, right_vcn)?;
+        if vcns == [0] {
+            index_io::route_split_in_index_root(&mut parent, &separator, left_vcn, right_vcn)?;
+        } else {
+            index_io::route_add_split_in_index_root(
+                &mut parent,
+                &separator,
+                left_vcn,
+                right_vcn,
+                upcase,
+            )?;
+        }
 
         let mut runs = ia.runs.clone();
         if let Some(last) = runs
@@ -1979,14 +2062,14 @@ fn split_first_index_leaf_io<T: BlockIo + ?Sized>(
             return Err("index capacity: unsupported $Bitmap:$I30 layout".to_string());
         }
         let bit = (right_vcn / clusters) as usize;
-        if bit >= 8 {
+        if bit >= bitmap.resident_value_length.unwrap_or(0) as usize * 8 {
             return Err("index capacity: resident bitmap growth required".to_string());
         }
         let bitmap_value = bitmap.attr_offset
             + bitmap
                 .resident_value_offset
                 .ok_or("bitmap value offset missing")? as usize;
-        parent[bitmap_value] |= 1u8 << bit;
+        parent[bitmap_value + bit / 8] |= 1u8 << (bit % 8);
 
         crate::mft_io::apply_fixup_on_write_magic(&mut left, ia.params.bytes_per_sector, b"INDX")?;
         let mut right = right;
@@ -2011,7 +2094,7 @@ fn split_first_index_leaf_io<T: BlockIo + ?Sized>(
         crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
         return Err(format!("write new INDX block: {e}"));
     }
-    let left_offset = idx_block::vcn_to_disk_offset(ia, 0, io.size())?;
+    let left_offset = idx_block::vcn_to_disk_offset(ia, left_vcn, io.size())?;
     if let Err(e) = io.write_all_at(left_offset, &left).and_then(|_| io.sync()) {
         crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
         return Err(format!("write split left INDX block: {e}"));
@@ -2162,10 +2245,7 @@ fn build_named_resident_attribute(
 /// Create a new empty directory `basename` inside `parent_path`.
 /// Returns the new directory's MFT record number on success.
 ///
-/// Shares the limitation set of [`create_file`]: one fitting allocation leaf
-/// is supported, while multiple leaves, an interior target, and a full leaf
-/// are refused until the corresponding B+tree routing/splitting work is
-/// implemented (W3.2, #301).
+/// Shares the index growth limits of [`create_file`].
 pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, String> {
     let mut io = PathIo::open_rw(image)?;
     mkdir_io(&mut io, parent_path, basename)
@@ -2203,6 +2283,14 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
                 return Err(format!("'{basename}' already exists in '{parent_path}'"));
             }
         }
+        preflight_parent_insert_io(
+            io,
+            parent_rec,
+            &parent_record_bytes,
+            basename,
+            true,
+            &upcase,
+        )?;
     }
 
     let (mbm, new_rec) = crate::mft_bitmap::find_or_grow_free_record_io(io, 24)?;
@@ -5452,9 +5540,8 @@ mod tests {
             }
         }
 
-        // The routed leaf is full while the other leaf still has room.
-        // Refuse safely until splitting is implemented; never scan for a
-        // different leaf with free space.
+        // Fill the chosen leaf. The other leaf still has room, but inserting
+        // here must split the chosen leaf and add a root separator.
         let ia = idx_block::load_for_directory_io(&mut dev, parent).expect("allocation");
         idx_block::update_indx_block_io(&mut dev, &ia, 0, |block| {
             let ih = idx_block::INDX_INDEX_HEADER_OFFSET;
@@ -5466,14 +5553,34 @@ mod tests {
         let before_other = idx_block::read_indx_block_io(&mut dev, &ia, 1).expect("other leaf");
         let entry =
             index_io::build_file_name_index_entry(102, parent, "b.txt", 0, false).expect("entry");
-        let error = insert_entry_in_parent_io(&mut dev, parent, true, &entry, "b.txt")
-            .expect_err("a full routed leaf needs a split");
-        assert!(error.contains("no room"), "{error}");
+        insert_entry_in_parent_io(&mut dev, parent, true, &entry, "b.txt")
+            .expect("a full routed leaf splits");
+        let ia_after = idx_block::load_for_directory_io(&mut dev, parent).expect("allocation");
+        assert_eq!(ia_after.allocated_block_vcns().len(), 3);
+        let (_, root_after) = read_mft_record_io(&mut dev, parent).expect("parent");
+        assert!(
+            index_io::find_index_entry(&root_after, "b.txt", None)
+                .expect("root lookup")
+                .is_some(),
+            "split separator must be present in the parent"
+        );
         let after_other = idx_block::read_indx_block_io(&mut dev, &ia, 1).expect("other leaf");
         assert_eq!(
             before_other, after_other,
             "free space in other leaf is irrelevant"
         );
+        // A longer key sorts into the same constrained leaf but cannot fit
+        // even after a split. Preflight must refuse it without writing.
+        let oversized_name = format!("0{}", "x".repeat(100));
+        let before = dev.buf.clone();
+        let error = create_file_io(&mut dev, "/routed", &oversized_name)
+            .expect_err("preflight must reject an impossible split");
+        assert!(error.contains("split leaf does not fit"), "{error}");
+        assert_eq!(dev.buf, before, "failed create changed the volume");
+        let error = mkdir_io(&mut dev, "/routed", &oversized_name)
+            .expect_err("preflight must reject an impossible split");
+        assert!(error.contains("split leaf does not fit"), "{error}");
+        assert_eq!(dev.buf, before, "failed mkdir changed the volume");
     }
 
     /// A resident attribute of any type with a stream name.

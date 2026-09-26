@@ -1947,6 +1947,30 @@
       "image": "nfs-win-format-win-write-many-mac-reject-index-allocation-win-chkdsk.img",
       "_notes": "Windows first creates a wide root directory that uses $INDEX_ALLOCATION. The Mac-side touch is expected to fail with the W3.2 bounded refusal; the image is then sent back to Windows, where chkdsk must remain Clean and the existing files remain enumerable."
     },
+    "mac-format-mac-split-routed-leaf-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "ROUTED",
+        "alloc_unit_size": 4096
+      },
+      "image": "nfs-mac-format-mac-split-routed-leaf-win-chkdsk.img",
+      "recipe": [
+        { "op": "init-image" },
+        { "op": "mac-format" },
+        { "op": "mac-mkdir", "parent": "/", "basename": "routed" },
+        { "op": "mac-touch-many", "parent": "/routed", "prefix": "f_", "count": "80" },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        { "op": "win-chkdsk", "modes": "readonly,/scan", "verdict_shape": "Clean", "keep_image": "true" },
+        { "op": "win-enumerate", "keep_image": "false" },
+        { "op": "win-assert-routed-names", "directory": "routed", "count": "80" }
+      ],
+      "_notes": "Mac writes 80 sorted names, forcing a second split of the routed INDX leaf. Windows must enumerate and chkdsk the result."
+    },
     "mac-format-mac-write-sparse-zeros-win-chkdsk": {
       "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
