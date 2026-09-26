@@ -3,15 +3,10 @@
 //! These format a fresh volume at runtime (no prebuilt fixture) and stress
 //! the directory-index insert path that lives in `index_io`.
 //!
-//! KNOWN LIMITATION (documented, not a bug to "fix" blindly): the create
-//! path inserts entries into the directory's *resident* `$INDEX_ROOT` only.
-//! It does NOT yet grow the index into `$INDEX_ALLOCATION` (no B-tree block
-//! split). So a directory fills up when its `$INDEX_ROOT` exhausts the MFT
-//! record — empirically ~24 entries in the root and ~36 in a freshly-made
-//! subdirectory at a 4 KiB record size. The 1000/10000-entry, multi-level
-//! B-tree scenarios from the test plan are therefore deferred until
-//! `$INDEX_ALLOCATION` growth-on-insert is implemented; testing them now
-//! would assert behavior the code does not yet provide.
+//! The create path promotes a full resident `$INDEX_ROOT` into one
+//! `$INDEX_ALLOCATION` leaf. Multi-level splitting is tested separately when
+//! implemented; this file pins the first shape transition that makes an
+//! ordinary directory larger than one MFT record.
 //!
 //! What these tests DO guarantee at the current ceiling:
 //!   * every inserted entry is independently findable (via the upstream
@@ -207,6 +202,23 @@ fn upstream_mounts_after_filling_subdir() {
     // Independent parser must accept the volume and list all 15.
     let names = list_subdir(&img, "d");
     assert_eq!(names.len(), 15);
+}
+
+#[test]
+fn an_overflowed_directory_can_gain_and_lose_a_name() {
+    let img = fresh_vol("overflow_mutation");
+    write::mkdir(Path::new(&img), "/", "d").expect("mkdir");
+
+    for i in 0..50 {
+        write::create_file(Path::new(&img), "/d", &format!("f_{i:04}.txt"))
+            .unwrap_or_else(|e| panic!("create {i} across the root-to-allocation transition: {e}"));
+    }
+    write::unlink(Path::new(&img), "/d/f_0007.txt").expect("unlink from allocation leaf");
+
+    let names = list_subdir(&img, "d");
+    assert_eq!(names.len(), 49);
+    assert!(!names.iter().any(|name| name == "f_0007.txt"));
+    assert!(names.iter().any(|name| name == "f_0049.txt"));
 }
 
 /// Find `name` directly in the ROOT directory's index via the upstream
