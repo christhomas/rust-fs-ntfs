@@ -251,20 +251,21 @@ fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), Strin
                 });
             }
             let encoded = data_runs::encode_runs(&runs)?;
-            if encoded.len() > mapping_end - mapping_start {
-                return Err("$MFT growth does not fit its mapping-pairs field".to_string());
-            }
-            record[mapping_start..mapping_start + encoded.len()].copy_from_slice(&encoded);
-            record[mapping_start + encoded.len()..mapping_end].fill(0);
             let new_bytes = next_vcn
                 .checked_add(clusters)
                 .and_then(|n| n.checked_mul(params.cluster_size))
                 .ok_or("grown $MFT length overflows")?;
-            record[data.attr_offset + 0x18..data.attr_offset + 0x20]
-                .copy_from_slice(&((next_vcn + clusters - 1) as i64).to_le_bytes());
+            // A new run often needs more mapping-pairs bytes than the
+            // formatter reserved. Grow the attribute within record zero,
+            // moving the following $Bitmap attribute with it.
+            let new_attr_len = crate::record_build::align8(mpo + encoded.len());
+            let mut new_data = vec![0u8; new_attr_len];
+            new_data[..mpo].copy_from_slice(&record[data.attr_offset..mapping_start]);
+            new_data[4..8].copy_from_slice(&(new_attr_len as u32).to_le_bytes());
+            new_data[mpo..mpo + encoded.len()].copy_from_slice(&encoded);
+            new_data[0x18..0x20].copy_from_slice(&((next_vcn + clusters - 1) as i64).to_le_bytes());
             for off in [0x28usize, 0x30, 0x38] {
-                record[data.attr_offset + off..data.attr_offset + off + 8]
-                    .copy_from_slice(&new_bytes.to_le_bytes());
+                new_data[off..off + 8].copy_from_slice(&new_bytes.to_le_bytes());
             }
 
             // `$MFT`'s `$FILE_NAME` duplicates its stream sizes. Leaving
@@ -285,6 +286,8 @@ fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), Strin
                 record[value + 40..value + 48].copy_from_slice(&new_bytes.to_le_bytes());
                 record[value + 48..value + 56].copy_from_slice(&new_bytes.to_le_bytes());
             }
+
+            crate::attr_resize::replace_attribute(record, data.attr_offset, &new_data)?;
 
             let bitmap = attr_io::find_attribute(record, AttrType::Bitmap, None)
                 .ok_or("$MFT has no unnamed $Bitmap")?;
