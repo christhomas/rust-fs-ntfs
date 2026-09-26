@@ -88,17 +88,28 @@ fn write_unicode_label() {
 }
 
 #[test]
-fn upstream_mounts_after_label_write() {
+fn remounts_and_upstream_reads_after_label_write() {
     let img = working_copy("upstream_mount");
     set_volume_label(std::path::Path::new(&img), "REMOUNT").unwrap();
-    let _fs = Filesystem::mount(&img).expect("upstream re-mount");
+    let _fs = Filesystem::mount(&img).expect("fs_ntfs re-mount");
+    let (ntfs, mut reader) = common::open(&img);
+    let label = ntfs
+        .volume_name(&mut reader)
+        .expect("upstream finds $VOLUME_NAME")
+        .expect("upstream parses $VOLUME_NAME");
+    assert_eq!(label.name(), "REMOUNT");
 }
 
 #[test]
-fn upstream_mounts_after_label_remove() {
+fn remounts_and_upstream_reads_after_label_remove() {
     let img = working_copy("upstream_mount_empty");
     set_volume_label(std::path::Path::new(&img), "").unwrap();
-    let _fs = Filesystem::mount(&img).expect("upstream re-mount");
+    let _fs = Filesystem::mount(&img).expect("fs_ntfs re-mount");
+    let (ntfs, mut reader) = common::open(&img);
+    assert!(
+        ntfs.volume_name(&mut reader).is_none(),
+        "upstream still finds $VOLUME_NAME after removal"
+    );
 }
 
 #[test]

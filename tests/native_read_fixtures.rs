@@ -3,45 +3,28 @@
 //! write path cannot produce (compressed `$DATA`, `$ATTRIBUTE_LIST` overflow).
 //!
 //! Fixtures live in `test-disks/` and are intentionally not committed (large,
-//! Windows-generated). Each test skips with a notice if its fixture is absent,
-//! so a fresh checkout still runs green — the fixtures are produced on the
-//! Windows VM (see the native-read-layer plan).
+//! Windows-generated). `build-windows-native-read-fixtures.ps1` creates them;
+//! CI publishes them from a Windows job to the full Linux integration suite.
+
+mod common;
 
 use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::block_io::PathIo;
 use fs_ntfs::read::{parse_attribute_list, read_attribute_value, resolve_path};
-use ntfs::{Ntfs, NtfsReadSeek};
+use ntfs::{Ntfs, NtfsAttributeFlags, NtfsReadSeek};
 use std::io::BufReader;
 use std::path::Path;
 
 const ATTRLIST_IMG: &str = "test-disks/ntfs-attrlist.img";
 const COMPRESSED_IMG: &str = "test-disks/ntfs-compressed.img";
 
-/// Open a fixture read-only, or return `None` (with a skip notice) if absent.
-///
-/// THESE TWO ARE NOT BUILT ANYWHERE (#279). `ntfs-attrlist.img` and
-/// `ntfs-compressed.img` hold shapes this crate's writer cannot produce
-/// -- compressed `$DATA`, an `$ATTRIBUTE_LIST` overflow -- so they were
-/// made on the Windows VM by hand, and nothing in the repository or in
-/// CI regenerates them. Until something does, the skip has to stand:
-/// refusing it in CI (which is what #210 asks for, and what
-/// `all_images_rw_smoke.rs` now does) would fail every run for a fixture
-/// no workflow can make.
-///
-/// `NTFS_FIXTURES_REQUIRED=1` turns the skip into a failure. Set it in
-/// the job that builds these two, on the day one exists; the assertion
-/// is here so that day needs no change to this file.
-fn open_fixture(path: &str) -> Option<PathIo> {
-    if !Path::new(path).exists() {
-        assert!(
-            std::env::var_os("NTFS_FIXTURES_REQUIRED").is_none(),
-            "{path} is missing and NTFS_FIXTURES_REQUIRED is set: this run was supposed to \
-             have the Windows-authored fixtures, and without them these tests compare nothing"
-        );
-        eprintln!("SKIP: fixture {path} not present (generate on the Windows VM, see #279)");
-        return None;
-    }
-    Some(PathIo::open_ro(Path::new(path)).expect("open_ro fixture"))
+/// These tests only count when Windows produced the fixtures.
+fn open_fixture(path: &str) -> PathIo {
+    assert!(
+        Path::new(path).exists(),
+        "missing {path}; run test-disks/build-windows-native-read-fixtures.ps1 on Windows"
+    );
+    PathIo::open_ro(Path::new(path)).expect("open_ro fixture")
 }
 
 /// Upstream oracle: read named `$DATA` stream `stream` of `path`.
@@ -80,9 +63,7 @@ fn upstream_read_named_data(img: &str, path: &str, stream: &str) -> Vec<u8> {
 
 #[test]
 fn attribute_list_ads_in_extension_record_matches_upstream() {
-    let Some(mut io) = open_fixture(ATTRLIST_IMG) else {
-        return;
-    };
+    let mut io = open_fixture(ATTRLIST_IMG);
     let rec = resolve_path(&mut io, "/many.bin").expect("resolve /many.bin");
 
     // Parse the file's $ATTRIBUTE_LIST and find a *named* $DATA stream whose
@@ -108,7 +89,7 @@ fn attribute_list_ads_in_extension_record_matches_upstream() {
         .expect("native read of overflowed ADS");
     let oracle = upstream_read_named_data(ATTRLIST_IMG, "/many.bin", &stream);
 
-    assert!(!native.is_empty(), "stream should have content");
+    assert_eq!(native, format!("payload-{stream}").as_bytes());
     assert_eq!(
         native, oracle,
         "native vs upstream mismatch for overflowed ADS '{stream}'"
@@ -117,9 +98,7 @@ fn attribute_list_ads_in_extension_record_matches_upstream() {
 
 #[test]
 fn many_named_streams_all_match_upstream() {
-    let Some(mut io) = open_fixture(ATTRLIST_IMG) else {
-        return;
-    };
+    let mut io = open_fixture(ATTRLIST_IMG);
     let rec = resolve_path(&mut io, "/many.bin").expect("resolve");
     let al = read_attribute_value(&mut io, rec, AttrType::AttributeList, None).expect("attrlist");
     let entries = parse_attribute_list(&al).expect("parse");
@@ -135,6 +114,7 @@ fn many_named_streams_all_match_upstream() {
         let native = read_attribute_value(&mut io, rec, AttrType::Data, Some(stream))
             .unwrap_or_else(|err| panic!("native read of '{stream}': {err}"));
         let oracle = upstream_read_named_data(ATTRLIST_IMG, "/many.bin", stream);
+        assert_eq!(native, format!("payload-{stream}").as_bytes());
         assert_eq!(native, oracle, "mismatch for stream '{stream}'");
         checked += 1;
     }
@@ -144,10 +124,21 @@ fn many_named_streams_all_match_upstream() {
 
 #[test]
 fn compressed_data_decompresses_to_known_content() {
-    let Some(mut io) = open_fixture(COMPRESSED_IMG) else {
-        return;
-    };
+    let mut io = open_fixture(COMPRESSED_IMG);
     let rec = resolve_path(&mut io, "/comp.txt").expect("resolve /comp.txt");
+
+    let (ntfs, mut reader) = common::open(COMPRESSED_IMG);
+    let file = common::navigate(&ntfs, &mut reader, "/comp.txt");
+    let item = file
+        .data(&mut reader, "")
+        .expect("unnamed $DATA")
+        .expect("data item");
+    let attr = item.to_attribute().expect("data attribute");
+    assert!(!attr.is_resident(), "fixture must use nonresident $DATA");
+    assert!(
+        attr.flags().contains(NtfsAttributeFlags::COMPRESSED),
+        "fixture must exercise the LZNT1 read path"
+    );
 
     // \comp.txt is a Windows-compressed file (LZNT1) of exactly 200000 bytes
     // of the repeating ASCII pattern "ABC" (byte[i] = "ABC"[i % 3]). Upstream

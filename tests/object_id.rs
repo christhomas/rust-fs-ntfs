@@ -13,6 +13,8 @@ use fs_ntfs::{
     fs_ntfs_last_error, fs_ntfs_read_object_id, fs_ntfs_read_object_id_extended,
     fs_ntfs_remove_object_id, fs_ntfs_write_object_id, fs_ntfs_write_object_id_extended,
 };
+use ntfs::structured_values::NtfsObjectId;
+use ntfs::NtfsAttributeType;
 use std::ffi::{CStr, CString};
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
@@ -231,7 +233,7 @@ fn short_read_still_works_after_extended_write() {
 }
 
 #[test]
-fn upstream_mounts_after_extended_write() {
+fn remounts_and_upstream_reads_after_extended_write() {
     let img = working_copy("ext_upstream_mount");
     write_object_id_extended(
         std::path::Path::new(&img),
@@ -242,7 +244,29 @@ fn upstream_mounts_after_extended_write() {
         &[0x01; 16],
     )
     .unwrap();
-    let _fs = Filesystem::mount(&img).expect("upstream re-mount");
+    let _fs = Filesystem::mount(&img).expect("fs_ntfs re-mount");
+
+    let (ntfs, mut reader) = common::open(&img);
+    let file = common::navigate(&ntfs, &mut reader, "/hello.txt");
+    let mut attributes = file.attributes();
+    let mut object_id = None;
+    while let Some(item) = attributes.next(&mut reader) {
+        let item = item.expect("upstream attribute");
+        let attribute = item.to_attribute().unwrap();
+        if attribute.ty().unwrap() == NtfsAttributeType::ObjectId {
+            object_id = Some(
+                attribute
+                    .resident_structured_value::<NtfsObjectId>()
+                    .expect("upstream parses $OBJECT_ID"),
+            );
+            break;
+        }
+    }
+    let object_id = object_id.expect("upstream finds $OBJECT_ID");
+    assert_eq!(object_id.object_id().data1, 0xABAB_ABAB);
+    assert_eq!(object_id.birth_volume_id().unwrap().data1, 0xCDCD_CDCD);
+    assert_eq!(object_id.birth_object_id().unwrap().data1, 0xEFEF_EFEF);
+    assert_eq!(object_id.domain_id().unwrap().data1, 0x0101_0101);
 }
 
 #[test]
