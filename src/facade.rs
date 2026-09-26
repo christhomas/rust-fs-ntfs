@@ -138,6 +138,9 @@ impl Filesystem {
     /// mount; the volume is still usable in its pre-upgrade form.
     pub fn mount_rw(path: impl AsRef<Path>) -> Result<Self, Error> {
         let fs = Self::mount(path)?;
+        let mut io = PathIo::open_ro(&fs.image).map_err(Error)?;
+        let info = read::read_volume_info(&mut io).map_err(Error)?;
+        crate::require_clean_rw_mount(info.flags).map_err(|e| Error(e.to_string()))?;
         match fs.upgrade_volume_version() {
             Ok(true) => log::info!(
                 target: "fs_ntfs::facade",
