@@ -13,9 +13,9 @@ dependencies = [
 
 [[package]]
 name = "am-fs-core"
-version = "0.2.11"
+version = "0.2.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c93db810a800622b11ed8e551351be9aa072551fb1682689d1be2ffe756d89af"
+checksum = "da6291fceae2064cfcd753174bd64d89584b4927ba62b918c14da6f8614089d8"
 
 [[package]]
 name = "am-fs-ntfs"

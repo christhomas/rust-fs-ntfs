@@ -171,10 +171,16 @@ failing, which is why they can merge without a VM run.
 ## How the budget is wired here
 
 `scripts/tier.sh` owns the table of tiers and their measured budgets. The
-wrapper doing the work belongs to `rust-fs-core` and is resolved by
-`scripts/resolve-output-budget.sh`, which validates it by SHA-256 and API
-version, preferring the `../rust-fs-core` sibling and falling back to the
-packaged Cargo dependency. **Never copy that wrapper into this repository.**
+wrapper doing the work belongs to `rust-fs-core`: `tier.sh` asks cargo where
+the resolved `am-fs-core` package is, checks that its
+`scripts/output-budget.sh` answers `--version` with
+`rust-fs-core-output-budget 1`, and copies it into `tmp/` for the run.
+**Never copy that wrapper into this repository.**
+
+It used to be a separate `scripts/resolve-output-budget.sh` pinning the
+script's SHA-256. The digest is gone on purpose: pinned in every consumer, it
+meant a comment added in core broke each of them until the digest was chased,
+which is the lockstep one canonical copy exists to remove.
 
 Three exit statuses are worth knowing apart:
 
@@ -182,8 +188,13 @@ Three exit statuses are worth knowing apart:
 - **66** — a test printed `SKIP:` and was counted as passing.
 - anything else — the suite's own status, passed straight through.
 
-`FWTH_VERBOSE=1` streams the run as well as logging it, and does not lift the
-budget.
+`OUTPUT_BUDGET_VERBOSE=1` streams the run as well as logging it, and does not
+lift the budget. It was `FWTH_VERBOSE` while the wrapper was the Windows
+harness's; the old name is not read, and setting it does nothing.
+
+A **failing** tier is quiet too, from core v0.2.13: the verdict, the exit
+status and the log's path. `--tail N`, or `OUTPUT_BUDGET_FAIL_TAIL=N`, prints
+the tail for whoever is watching.
 
 ## What gates a merge
 
