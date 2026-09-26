@@ -579,7 +579,8 @@ mod tests {
         }];
         let ia = make_ia(4096, 4096, runs, vec![], 4 * 4096);
         let err = vcn_to_disk_offset(&ia, 99, u64::MAX).unwrap_err();
-        assert!(err.contains("not mapped"), "{err}");
+        assert!(err.contains("VCN 99"), "{err}");
+        assert!(err.contains("past $INDEX_ALLOCATION length 16384"), "{err}");
     }
 
     // --- additional edge cases -------------------------------------------
