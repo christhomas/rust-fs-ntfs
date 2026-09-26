@@ -5540,8 +5540,8 @@ mod tests {
             }
         }
 
-        // Give the routed leaf a declared capacity too small to hold even
-        // its present entries after a split. The other leaf still has room.
+        // Fill the chosen leaf. The other leaf still has room, but inserting
+        // here must split the chosen leaf and add a root separator.
         let ia = idx_block::load_for_directory_io(&mut dev, parent).expect("allocation");
         idx_block::update_indx_block_io(&mut dev, &ia, 0, |block| {
             let ih = idx_block::INDX_INDEX_HEADER_OFFSET;
@@ -5553,20 +5553,31 @@ mod tests {
         let before_other = idx_block::read_indx_block_io(&mut dev, &ia, 1).expect("other leaf");
         let entry =
             index_io::build_file_name_index_entry(102, parent, "b.txt", 0, false).expect("entry");
-        let error = insert_entry_in_parent_io(&mut dev, parent, true, &entry, "b.txt")
-            .expect_err("a full routed leaf needs a split");
-        assert!(error.contains("no room"), "{error}");
+        insert_entry_in_parent_io(&mut dev, parent, true, &entry, "b.txt")
+            .expect("a full routed leaf splits");
+        let ia_after = idx_block::load_for_directory_io(&mut dev, parent).expect("allocation");
+        assert_eq!(ia_after.allocated_block_vcns().len(), 3);
+        let (_, root_after) = read_mft_record_io(&mut dev, parent).expect("parent");
+        assert!(
+            index_io::find_index_entry(&root_after, "b.txt", None)
+                .expect("root lookup")
+                .is_some(),
+            "split separator must be present in the parent"
+        );
         let after_other = idx_block::read_indx_block_io(&mut dev, &ia, 1).expect("other leaf");
         assert_eq!(
             before_other, after_other,
             "free space in other leaf is irrelevant"
         );
+        // A longer key sorts into the same constrained leaf but cannot fit
+        // even after a split. Preflight must refuse it without writing.
+        let oversized_name = format!("0{}", "x".repeat(100));
         let before = dev.buf.clone();
-        let error = create_file_io(&mut dev, "/routed", "b.txt")
+        let error = create_file_io(&mut dev, "/routed", &oversized_name)
             .expect_err("preflight must reject an impossible split");
         assert!(error.contains("split leaf does not fit"), "{error}");
         assert_eq!(dev.buf, before, "failed create changed the volume");
-        let error = mkdir_io(&mut dev, "/routed", "b.txt")
+        let error = mkdir_io(&mut dev, "/routed", &oversized_name)
             .expect_err("preflight must reject an impossible split");
         assert!(error.contains("split leaf does not fit"), "{error}");
         assert_eq!(dev.buf, before, "failed mkdir changed the volume");
