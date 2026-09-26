@@ -310,7 +310,12 @@ pub fn format_filesystem(
     // and cluster-512). Cap to max(4, boot_clusters).
     let boot_clusters_for_layout: u64 = 8192u64.div_ceil(cluster_size as u64);
     let mft_lcn: u64 = boot_clusters_for_layout.max(4);
-    let mft_clusters: u64 = (mft_record_size as u64 * 64)
+    // Leave enough initially-addressable records for a directory to cross
+    // the resident-root boundary and exercise more than one INDX leaf.
+    // Record I/O is still contiguous today, so exhausting a 64-record MFT
+    // before that ordinary index shape was reachable made the directory
+    // capacity depend on an unrelated allocator ceiling.
+    let mft_clusters: u64 = (mft_record_size as u64 * 128)
         .div_ceil(cluster_size as u64)
         .max(1);
     let mft_records_capacity: u64 = mft_clusters * cluster_size as u64 / mft_record_size as u64;
