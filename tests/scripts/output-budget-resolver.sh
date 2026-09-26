@@ -41,6 +41,9 @@ bin="$tmp/bin"
 mkdir -p "$core/scripts" "$bin"
 cat > "$core/scripts/output-budget.sh" <<'EOF'
 #!/usr/bin/env bash
+# --version is answered first and exits, because the adapter asks the
+# resolved script to identify itself before it copies or runs anything.
+[ "${1-}" = --version ] && { echo 'rust-fs-core-output-budget 1'; exit 0; }
 printf '%s\n' "$0" > "$ADAPTER_RECORD"
 printf '%s\n%s\n' "${RUSTFLAGS-}" "${RUSTDOCFLAGS-}" > "$ADAPTER_ENV_RECORD"
 while [ "$1" != -- ]; do shift; done
@@ -91,7 +94,7 @@ cat > "$tmp/metadata.expected" <<'EOF'
 tier.sh: cargo could not say where am-fs-core is, or its copy has no
          scripts/output-budget.sh. The wrapper lives in rust-fs-core;
          check the am-fs-core dependency resolves and is at a version
-         that ships it (v0.2.11 or later).
+         that ships it (v0.2.13 or later).
 EOF
 check 'metadata failure is exactly the concise adapter diagnostic' \
     cmp -s "$tmp/metadata.expected" "$tmp/metadata.err"
@@ -110,6 +113,26 @@ check 'missing wrapper uses adapter status' test "$missing_status" -eq 1
 check 'missing wrapper names the required script' \
     grep -q 'scripts/output-budget.sh' "$tmp/missing.err"
 check 'missing wrapper creates no copy' no_new_copies
+
+# A script that IS at the resolved path and is NOT core's wrapper. Resolution
+# finding a file there is not the same as finding the right file, and the
+# adapter must refuse rather than run it -- "core is broken" reported as "core
+# ran fine" is the quietest failure available here.
+cat > "$bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+printf '{"packages":[{"name":"am-fs-core","manifest_path":"%s"}]}\n' "$CORE_MANIFEST"
+EOF
+impostor="$tmp/core-with-impostor"
+mkdir -p "$impostor/scripts"
+printf '#!/usr/bin/env bash\necho "some-other-wrapper 9"\n' \
+    > "$impostor/scripts/output-budget.sh"
+chmod +x "$impostor/scripts/output-budget.sh"
+CORE_MANIFEST="$impostor/Cargo.toml" PATH="$bin:$PATH" \
+    bash "$TIER" unit -- true >"$tmp/impostor.out" 2>"$tmp/impostor.err"
+impostor_status=$?
+check "a wrapper that is not rust-fs-core's is refused" test "$impostor_status" -eq 1
+check 'the refusal names the version check' grep -q -- '--version' "$tmp/impostor.err"
+check 'the refused wrapper creates no copy' no_new_copies
 
 real_cp="$(command -v cp)"
 cat > "$bin/cp" <<EOF

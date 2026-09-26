@@ -1,6 +1,40 @@
 {
   "_doc": "Multi-agent NTFS test work list. See docs/multi-agent-test-protocol.md. Each scenario name is unique. status starts at 'pending'; agents transition via scripts/claim-scenario.sh.",
   "scenarios": {
+    "foreign-fragmented-indx-512-win-enumerate-chkdsk": {
+      "status": "pending",
+      "image": "foreign-fragmented-indx-512.img",
+      "volume_params": {
+        "size_mib": 32,
+        "label": "FRAGINDX",
+        "alloc_unit_size": 512
+      },
+      "_notes": "ntfs-3g-authored 512-byte-cluster image. /fragdir has 80 files; its first 4096-byte INDX block crosses nonadjacent $INDEX_ALLOCATION runs at VCN 4. The fixture is committed as a 163 KiB gzip file. Windows enumeration must find files on both sides of the split before chkdsk scans the image.",
+      "recipe": [
+        {
+          "op": "stage-fragmented-indx"
+        },
+        {
+          "op": "mac-enumerate"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-enumerate",
+          "required_paths": "fragdir/file_01.txt,fragdir/file_80.txt",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ]
+    },
     "mac-format-basic-256mib": {
       "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
@@ -700,6 +734,7 @@
     },
     "mac-format-volume-16gib-cluster-4k": {
       "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
+      "exclusive_group": "large-volume",
       "volume_params": {
         "size_mib": 16384,
         "label": "SIXTEEN_GIB",
@@ -758,6 +793,7 @@
     },
     "mac-format-volume-4gib-cluster-4k": {
       "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
+      "exclusive_group": "large-volume",
       "volume_params": {
         "size_mib": 4096,
         "label": "FOUR_GIB_4K",
@@ -787,6 +823,7 @@
     },
     "mac-format-volume-4gib-cluster-64k": {
       "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
+      "exclusive_group": "large-volume",
       "volume_params": {
         "size_mib": 4096,
         "label": "FOUR_GIB_64K",

@@ -1260,6 +1260,229 @@ pub fn insert_entry_into_index_root_with_collation(
     Ok(())
 }
 
+/// Move a full resident `$INDEX_ROOT` into the first `$INDEX_ALLOCATION`
+/// leaf and leave a single routed sentinel in the root.
+///
+/// The returned INDX block is post-fixup (clean) bytes. The caller owns its
+/// cluster allocation, writes it with USA protection, and adds the named
+/// `$INDEX_ALLOCATION` and `$Bitmap` attributes to the same record.
+pub(crate) fn promote_index_root_to_first_indx(
+    record: &mut [u8],
+    block_size: usize,
+    bytes_per_sector: u16,
+) -> Result<Vec<u8>, String> {
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
+        .ok_or_else(|| "$INDEX_ROOT:$I30 missing".to_string())?;
+    let value_offset = ir.resident_value_offset.ok_or("no value_offset")? as usize;
+    let value_length = ir.resident_value_length.ok_or("no value_length")? as usize;
+    let value_start = ir.attr_offset + value_offset;
+    let value_end = index_root_value_end(record, &ir)?;
+    let ih = value_start + IR_INDEX_HEADER_OFFSET;
+    if value_length < IR_INDEX_HEADER_OFFSET + INDEX_HEADER_SIZE {
+        return Err("$INDEX_ROOT is too short to promote".to_string());
+    }
+    refuse_if_interior(record[ih + IH_FLAGS_OFFSET], "$INDEX_ROOT")?;
+
+    let first = read_u32_le(record, ih + IH_FIRST_ENTRY_OFFSET)
+        .ok_or("$INDEX_ROOT has no first-entry offset")? as usize;
+    let total = read_u32_le(record, ih + IH_TOTAL_SIZE_OF_ENTRIES)
+        .ok_or("$INDEX_ROOT has no total size")? as usize;
+    if first < INDEX_HEADER_SIZE || !first.is_multiple_of(8) || first > total {
+        return Err("$INDEX_ROOT has an invalid first-entry offset".to_string());
+    }
+    let entries_start = ih
+        .checked_add(first)
+        .ok_or("$INDEX_ROOT entry offset overflow")?;
+    let entries_end = ih.checked_add(total).ok_or("$INDEX_ROOT size overflow")?;
+    if entries_end > value_end || entries_start > entries_end {
+        return Err("$INDEX_ROOT entries run past the resident value".to_string());
+    }
+    let entries = record[entries_start..entries_end].to_vec();
+
+    let sector_size = usize::from(bytes_per_sector);
+    if sector_size == 0 || block_size < sector_size || !block_size.is_multiple_of(sector_size) {
+        return Err("index block size is incompatible with the sector size".to_string());
+    }
+    let usa_count = block_size / sector_size + 1;
+    let usa_offset = 0x28usize;
+    let first_rel = (usa_offset + usa_count * 2 + 7) & !7;
+    let block_ih = crate::idx_block::INDX_INDEX_HEADER_OFFSET;
+    let block_total = first_rel
+        .checked_add(entries.len())
+        .ok_or("INDX entry size overflow")?;
+    if block_ih + block_total > block_size {
+        return Err("resident index entries do not fit in one INDX block".to_string());
+    }
+    let mut block = vec![0u8; block_size];
+    block[0..4].copy_from_slice(b"INDX");
+    block[4..6].copy_from_slice(&(usa_offset as u16).to_le_bytes());
+    block[6..8].copy_from_slice(&(usa_count as u16).to_le_bytes());
+    block[0x10..0x18].copy_from_slice(&0u64.to_le_bytes());
+    block[block_ih..block_ih + 4].copy_from_slice(&(first_rel as u32).to_le_bytes());
+    block[block_ih + 4..block_ih + 8].copy_from_slice(&(block_total as u32).to_le_bytes());
+    block[block_ih + 8..block_ih + 12]
+        .copy_from_slice(&((block_size - block_ih) as u32).to_le_bytes());
+    let block_entries = block_ih + first_rel;
+    block[block_entries..block_entries + entries.len()].copy_from_slice(&entries);
+
+    // The root becomes an interior node with one LAST entry whose child is
+    // VCN 0. No separator key is needed for a one-child tree.
+    let root_entry = ih + INDEX_HEADER_SIZE;
+    record[root_entry..root_entry + 24].fill(0);
+    record[root_entry + IE_LENGTH..root_entry + IE_LENGTH + 2]
+        .copy_from_slice(&24u16.to_le_bytes());
+    record[root_entry + IE_FLAGS..root_entry + IE_FLAGS + 2]
+        .copy_from_slice(&(IE_FLAG_LAST | IE_FLAG_HAS_SUBNODE).to_le_bytes());
+    record[ih + IH_FIRST_ENTRY_OFFSET..ih + IH_FIRST_ENTRY_OFFSET + 4]
+        .copy_from_slice(&(INDEX_HEADER_SIZE as u32).to_le_bytes());
+    record[ih + IH_TOTAL_SIZE_OF_ENTRIES..ih + IH_TOTAL_SIZE_OF_ENTRIES + 4]
+        .copy_from_slice(&40u32.to_le_bytes());
+    record[ih + IH_ALLOCATED_SIZE_OF_ENTRIES..ih + IH_ALLOCATED_SIZE_OF_ENTRIES + 4]
+        .copy_from_slice(&40u32.to_le_bytes());
+    record[ih + IH_FLAGS_OFFSET] = IH_FLAG_HAS_SUBNODES;
+    crate::attr_resize::resize_resident_value(record, ir.attr_offset, 56)?;
+    Ok(block)
+}
+
+/// Split a full, single leaf after including `entry_bytes`, returning the
+/// rewritten left leaf, a new right leaf, and the separator promoted to the
+/// resident root. This is the first B+ tree growth step (one leaf to two).
+pub(crate) type SplitIndxLeaves = (Vec<u8>, Vec<u8>, Vec<u8>);
+
+pub(crate) fn split_first_indx_leaf(
+    block: &[u8],
+    entry_bytes: &[u8],
+    right_vcn: u64,
+    upcase: Option<&crate::upcase::UpcaseTable>,
+) -> Result<SplitIndxLeaves, String> {
+    let ih = crate::idx_block::INDX_INDEX_HEADER_OFFSET;
+    if block.get(0..4) != Some(b"INDX") {
+        return Err("not an INDX block".to_string());
+    }
+    refuse_if_interior(
+        *block.get(ih + IH_FLAGS_OFFSET).ok_or("short INDX header")?,
+        "this INDX block",
+    )?;
+    let first = read_u32_le(block, ih + IH_FIRST_ENTRY_OFFSET).ok_or("short INDX header")? as usize;
+    let total =
+        read_u32_le(block, ih + IH_TOTAL_SIZE_OF_ENTRIES).ok_or("short INDX header")? as usize;
+    let end = ih.checked_add(total).ok_or("INDX size overflow")?;
+    if first < INDEX_HEADER_SIZE || !first.is_multiple_of(8) || end > block.len() {
+        return Err("invalid INDX entry bounds".to_string());
+    }
+
+    let mut entries: Vec<Vec<u8>> = Vec::new();
+    let mut cursor = ih + first;
+    while cursor < end {
+        if cursor + IE_KEY_START > end {
+            return Err("truncated INDX entry".to_string());
+        }
+        let len =
+            u16::from_le_bytes([block[cursor + IE_LENGTH], block[cursor + IE_LENGTH + 1]]) as usize;
+        let flags = u16::from_le_bytes([block[cursor + IE_FLAGS], block[cursor + IE_FLAGS + 1]]);
+        if len == 0 || cursor.checked_add(len).is_none_or(|e| e > end) {
+            return Err("malformed INDX entry during split".to_string());
+        }
+        if flags & IE_FLAG_LAST != 0 {
+            break;
+        }
+        entries.push(block[cursor..cursor + len].to_vec());
+        cursor += len;
+    }
+    entries.push(entry_bytes.to_vec());
+    let mut named_entries = entries
+        .into_iter()
+        .map(|entry| entry_name(&entry, 0, entry.len()).map(|name| (name, entry)))
+        .collect::<Result<Vec<_>, _>>()?;
+    named_entries.sort_by(|(a, _), (b, _)| compare_names(a, b, upcase));
+    let entries = named_entries
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect::<Vec<_>>();
+    let mid = entries.len() / 2;
+    let separator = entries[mid].clone();
+    let left_entries = &entries[..mid];
+    let right_entries = &entries[mid + 1..];
+
+    fn rewrite_leaf(template: &[u8], entries: &[Vec<u8>], vcn: u64) -> Result<Vec<u8>, String> {
+        let ih = crate::idx_block::INDX_INDEX_HEADER_OFFSET;
+        let first =
+            read_u32_le(template, ih + IH_FIRST_ENTRY_OFFSET).ok_or("short INDX header")? as usize;
+        let allocated = read_u32_le(template, ih + IH_ALLOCATED_SIZE_OF_ENTRIES)
+            .ok_or("short INDX header")? as usize;
+        let mut out = template.to_vec();
+        let start = ih + first;
+        let sentinel_len = 16usize;
+        let used = first + entries.iter().map(Vec::len).sum::<usize>() + sentinel_len;
+        if used > allocated || ih + allocated > out.len() {
+            return Err("split leaf does not fit in its INDX block".to_string());
+        }
+        out[start..ih + allocated].fill(0);
+        let mut at = start;
+        for entry in entries {
+            out[at..at + entry.len()].copy_from_slice(entry);
+            at += entry.len();
+        }
+        out[at + IE_LENGTH..at + IE_LENGTH + 2]
+            .copy_from_slice(&(sentinel_len as u16).to_le_bytes());
+        out[at + IE_FLAGS..at + IE_FLAGS + 2].copy_from_slice(&IE_FLAG_LAST.to_le_bytes());
+        out[ih + IH_TOTAL_SIZE_OF_ENTRIES..ih + IH_TOTAL_SIZE_OF_ENTRIES + 4]
+            .copy_from_slice(&(used as u32).to_le_bytes());
+        out[ih + IH_FLAGS_OFFSET] = 0;
+        out[0x10..0x18].copy_from_slice(&vcn.to_le_bytes());
+        Ok(out)
+    }
+
+    Ok((
+        rewrite_leaf(block, left_entries, 0)?,
+        rewrite_leaf(block, right_entries, right_vcn)?,
+        separator,
+    ))
+}
+
+/// Replace the one-child promoted root with a separator routing to `left_vcn`
+/// and a LAST entry routing to `right_vcn`.
+pub(crate) fn route_split_in_index_root(
+    record: &mut [u8],
+    separator: &[u8],
+    left_vcn: u64,
+    right_vcn: u64,
+) -> Result<(), String> {
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
+        .ok_or("$INDEX_ROOT:$I30 missing")?;
+    let old_offset = ir.attr_offset;
+    let sep_len = separator
+        .len()
+        .checked_add(8)
+        .ok_or("separator size overflow")?;
+    let new_value_len = 56usize.checked_add(sep_len).ok_or("root size overflow")?;
+    crate::attr_resize::resize_resident_value(record, old_offset, new_value_len as u32)?;
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
+        .ok_or("$INDEX_ROOT vanished")?;
+    let value = ir.attr_offset + ir.resident_value_offset.ok_or("no value offset")? as usize;
+    let ih = value + IR_INDEX_HEADER_OFFSET;
+    let at = ih + INDEX_HEADER_SIZE;
+    let mut routed = vec![0u8; sep_len];
+    routed[..separator.len()].copy_from_slice(separator);
+    routed[IE_LENGTH..IE_LENGTH + 2].copy_from_slice(&(sep_len as u16).to_le_bytes());
+    routed[IE_FLAGS..IE_FLAGS + 2].copy_from_slice(&IE_FLAG_HAS_SUBNODE.to_le_bytes());
+    routed[sep_len - 8..].copy_from_slice(&left_vcn.to_le_bytes());
+    record[at..at + sep_len].copy_from_slice(&routed);
+    let last = at + sep_len;
+    record[last..last + 24].fill(0);
+    record[last + IE_LENGTH..last + IE_LENGTH + 2].copy_from_slice(&24u16.to_le_bytes());
+    record[last + IE_FLAGS..last + IE_FLAGS + 2]
+        .copy_from_slice(&(IE_FLAG_LAST | IE_FLAG_HAS_SUBNODE).to_le_bytes());
+    record[last + 16..last + 24].copy_from_slice(&right_vcn.to_le_bytes());
+    let total = INDEX_HEADER_SIZE + sep_len + 24;
+    record[ih + IH_TOTAL_SIZE_OF_ENTRIES..ih + IH_TOTAL_SIZE_OF_ENTRIES + 4]
+        .copy_from_slice(&(total as u32).to_le_bytes());
+    record[ih + IH_ALLOCATED_SIZE_OF_ENTRIES..ih + IH_ALLOCATED_SIZE_OF_ENTRIES + 4]
+        .copy_from_slice(&(total as u32).to_le_bytes());
+    record[ih + IH_FLAGS_OFFSET] = IH_FLAG_HAS_SUBNODES;
+    Ok(())
+}
+
 /// Insert a new `$FILE_NAME` index entry into an INDX block at the
 /// correct sorted position. Fails if the block doesn't have room.
 ///

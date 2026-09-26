@@ -23,10 +23,20 @@
 # deliberately when a tier grows, and say where the new number came from; a
 # budget nobody can breach measures nothing.
 #
-# VERBOSE. `FWTH_VERBOSE=1`, or `--verbose`/`-v` in a chore invocation's
-# CLI_ARGS (`chore test:unit -- --verbose`), streams the run as it happens as
-# well as logging it. It does NOT lift the budget: the log is the same size
-# either way.
+# VERBOSE. `OUTPUT_BUDGET_VERBOSE=1`, or `--verbose`/`-v` in a chore
+# invocation's CLI_ARGS (`chore test:unit -- --verbose`), streams the run as it
+# happens as well as logging it. It does NOT lift the budget: the log is the
+# same size either way.
+#
+# THE VARIABLE WAS `FWTH_VERBOSE` while the wrapper was the Windows harness's.
+# The canonical script does not read that name, and a rename like this fails
+# silently -- nothing errors, the run simply stays quiet. Core names the
+# replacement on stderr when it sees an `FWTH_*` or `FLTH_*` variable; nothing
+# else does, which is why it is written down here too.
+#
+# A FAILING TIER IS QUIET TOO, from core v0.2.13: the verdict, the exit status
+# and the log's path, not forty lines of tail. `--tail N`, or
+# OUTPUT_BUDGET_FAIL_TAIL=N, brings the tail back for whoever is watching.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -127,7 +137,26 @@ if [ "$metadata_status" -ne 0 ] || [ -z "$CORE_DIR" ] || [ ! -f "$CORE_DIR/scrip
     echo "tier.sh: cargo could not say where am-fs-core is, or its copy has no" >&2
     echo "         scripts/output-budget.sh. The wrapper lives in rust-fs-core;" >&2
     echo "         check the am-fs-core dependency resolves and is at a version" >&2
-    echo "         that ships it (v0.2.11 or later)." >&2
+    echo "         that ships it (v0.2.13 or later)." >&2
+    exit 1
+fi
+
+# WHAT CARGO POINTED AT IS ASKED TO IDENTIFY ITSELF. Resolution finding *a*
+# file at that path is not the same as finding CORE's wrapper: a stale vendor
+# directory, a half-written override or a package that renamed the script all
+# produce a path that exists and does not behave. `--version` is the contract
+# the script publishes for exactly this, and it is what the resolver this
+# replaced used to check.
+#
+# A DIGEST IS DELIBERATELY NOT CHECKED. The earlier resolver pinned the
+# script's SHA-256, which meant every comment core added to it broke this
+# repository until the digest was chased; the same pin in seven consumers is
+# the lockstep the move to one canonical copy exists to remove.
+EXPECTED_API="rust-fs-core-output-budget 1"
+if [ "$(bash "$CORE_DIR/scripts/output-budget.sh" --version 2>/dev/null || true)" != "$EXPECTED_API" ]; then
+    echo "tier.sh: $CORE_DIR/scripts/output-budget.sh is there, but does not" >&2
+    echo "         answer --version with '$EXPECTED_API'. That is a broken or" >&2
+    echo "         far too old rust-fs-core, not an absent one." >&2
     exit 1
 fi
 
