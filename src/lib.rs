@@ -41,7 +41,6 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
-use std::path::PathBuf;
 use std::slice;
 
 use crate::attr_io::AttrType;
@@ -284,9 +283,8 @@ pub struct FsNtfsHandle {
     /// both the native read path and the handle-based mutator API. Populated
     /// by every mount entry point (including read-only mounts — writes are
     /// gated by `writable`, not by a missing source). Every read/stat/volume
-    /// operation builds a fresh `BlockIo` from this via `handle_to_ro_io`; the
-    /// handle no longer holds an upstream `ntfs::Ntfs` parser or a long-lived
-    /// reader.
+    /// operation builds a lightweight `BlockIo` adapter over this via
+    /// `handle_to_ro_io`; the cached device itself lives for the whole mount.
     source: Option<MountSource>,
     /// Whether mutations are permitted. `false` for read-only mounts (RO
     /// fs-core, or callbacks with a NULL write fn). The mutator API checks
@@ -298,17 +296,17 @@ pub struct FsNtfsHandle {
 /// Tracks whether the handle was mounted from a filesystem path
 /// (`Path`), a caller-supplied callback pair (`Callbacks`), or a shared
 /// `fs_core::BlockDevice` handle (`FsCore`). Used by the handle-based
-/// mutator API to construct a fresh `BlockIo`-impl for each mutation
-/// call without duplicating the underlying device.
+/// mutator API to construct a fresh `BlockIo` adapter for each call while the
+/// cached underlying device remains shared.
 enum MountSource {
-    Path(PathBuf),
+    Path {
+        device: std::sync::Arc<fs_core::CachingDevice>,
+    },
     Callbacks {
-        read_fn: ReadCallback,
         /// `None` ⇒ handle was mounted read-only via callbacks (cfg.write
         /// was NULL). Mutation calls return EINVAL in that case.
         write_fn: Option<WriteCallback>,
-        context: *mut c_void,
-        size: u64,
+        device: std::sync::Arc<fs_core::CachingDevice>,
     },
     /// Mount sourced from a shared `fs_core::BlockDevice` (a qcow2
     /// reader, a partition slice, an in-process file device, …). The
@@ -319,31 +317,70 @@ enum MountSource {
     /// behave the same way as RO-via-callbacks: mutators surface
     /// EINVAL with a descriptive error string.
     FsCore {
-        device: std::sync::Arc<dyn fs_core::BlockDevice>,
+        device: std::sync::Arc<fs_core::CachingDevice>,
     },
 }
 
-// Safety: ONE FIELD IS THE REASON THIS IS UNSAFE. `Path(PathBuf)` and
-// `FsCore { device }` are already `Send + Sync` -- `fs_core::BlockRead`,
-// which `BlockDevice` requires, is declared `Send + Sync`, so the `Arc`
-// carries that. `Callbacks` holds `context: *mut c_void`, and a raw
-// pointer is neither, which is what these impls assert past.
-//
-// What they assert: the context is OPAQUE TO US. We never dereference it,
-// never read through it, and only ever hand it straight back to the
-// caller's own `read_fn` / `write_fn`. Its validity, its lifetime and any
-// synchronisation it needs are the caller's, and the C header says so
-// (include/fs_ntfs.h, "Guarantees and obligations": a single process and
-// thread mounting one volume is the supported shape, two concurrent
-// writers against one image is undefined behaviour, and the caller must
-// quiesce the device for the duration of a mutation).
-//
-// So this is not a claim that the context is thread-safe. It is the claim
-// that moving the handle between threads cannot make it less safe than
-// the header already permits, because nothing on this side of the
-// boundary touches the pointer at all.
-unsafe impl Send for MountSource {}
-unsafe impl Sync for MountSource {}
+const CACHE_BLOCK_SIZE: u64 = 4096;
+const CACHE_BLOCKS: usize = 1024;
+
+fn cache_device(
+    device: std::sync::Arc<dyn fs_core::BlockDevice>,
+    writable: bool,
+) -> std::sync::Arc<fs_core::CachingDevice> {
+    if writable {
+        fs_core::CachingDevice::new(device, CACHE_BLOCK_SIZE, CACHE_BLOCKS)
+    } else {
+        fs_core::CachingDevice::read_only(device, CACHE_BLOCK_SIZE, CACHE_BLOCKS)
+    }
+}
+
+fn callback_device(
+    read_fn: ReadCallback,
+    write_fn: Option<WriteCallback>,
+    context: *mut c_void,
+    size: u64,
+) -> std::sync::Arc<dyn fs_core::BlockDevice> {
+    // Store the opaque address as an integer so the closures carry no raw
+    // pointer type. The mount contract already requires the pointed-to
+    // context to remain valid and thread-safe for the handle's lifetime.
+    let read_context = context as usize;
+    let read = Box::new(move |offset: u64, buf: &mut [u8]| {
+        let rc = unsafe {
+            read_fn(
+                read_context as *mut c_void,
+                buf.as_mut_ptr().cast(),
+                offset,
+                buf.len() as u64,
+            )
+        };
+        (rc == 0).then_some(()).ok_or_else(|| {
+            std::io::Error::other(format!("read callback failed: rc={rc} @{offset}"))
+        })
+    });
+    let write = write_fn.map(|write_fn| {
+        let write_context = context as usize;
+        Box::new(move |offset: u64, buf: &[u8]| {
+            let rc = unsafe {
+                write_fn(
+                    write_context as *mut c_void,
+                    buf.as_ptr().cast(),
+                    offset,
+                    buf.len() as u64,
+                )
+            };
+            (rc == 0).then_some(()).ok_or_else(|| {
+                std::io::Error::other(format!("write callback failed: rc={rc} @{offset}"))
+            })
+        }) as fs_core::WriteCb
+    });
+    std::sync::Arc::new(fs_core::CallbackDevice {
+        size,
+        read,
+        write,
+        flush: None,
+    })
+}
 
 // ---------------------------------------------------------------------------
 // C types matching fs_ntfs.h
@@ -573,8 +610,15 @@ pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle
             }
         }
 
+        let mounted = match fs_core::FileDevice::open_best_effort(path) {
+            Ok(device) => cache_device(std::sync::Arc::new(device), true),
+            Err(e) => {
+                set_error(&format!("open '{path}' for mounted cache: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
         let bridge = Box::new(FsNtfsHandle {
-            source: Some(MountSource::Path(PathBuf::from(path))),
+            source: Some(MountSource::Path { device: mounted }),
             writable: true,
         });
         log::info!(target: "fs_ntfs", "mount path={path}");
@@ -640,12 +684,14 @@ pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) ->
                 }
             }
 
+            let mounted = cache_device(
+                callback_device(cfg.read, cfg.write, cfg.context, cfg.size_bytes),
+                cfg.write.is_some(),
+            );
             let bridge = Box::new(FsNtfsHandle {
                 source: Some(MountSource::Callbacks {
-                    read_fn: cfg.read,
                     write_fn: cfg.write,
-                    context: cfg.context,
-                    size: cfg.size_bytes,
+                    device: mounted,
                 }),
                 writable: cfg.write.is_some(),
             });
@@ -710,7 +756,9 @@ pub extern "C" fn fs_ntfs_mount_with_fs_core_device(
                 // writable `BlockIo`, even though the device may be physically
                 // writable. RW callers must use
                 // `fs_ntfs_mount_rw_with_fs_core_device` instead.
-                source: Some(MountSource::FsCore { device: inner }),
+                source: Some(MountSource::FsCore {
+                    device: cache_device(inner, false),
+                }),
                 writable: false,
             });
             log::info!(target: "fs_ntfs", "mount via fs_core handle (size={size})");
@@ -800,7 +848,9 @@ pub extern "C" fn fs_ntfs_mount_rw_with_fs_core_device(
             }
 
             let bridge = Box::new(FsNtfsHandle {
-                source: Some(MountSource::FsCore { device }),
+                source: Some(MountSource::FsCore {
+                    device: cache_device(device, true),
+                }),
                 writable: true,
             });
             log::info!(target: "fs_ntfs", "mount rw via fs_core handle (size={size})");
@@ -812,16 +862,10 @@ pub extern "C" fn fs_ntfs_mount_rw_with_fs_core_device(
 /// Owned `BlockIo` constructed from a [`FsNtfsHandle`] for the
 /// duration of a single mutator call.
 ///
-/// Path-mounted handles open the file RW for each mutation; the
-/// kernel page cache amortises the cost so the open isn't observably
-/// slower than threading a long-lived `File` through the call stack.
-/// Callback-mounted handles wrap the existing read/write callback
-/// pair without touching the underlying device.
-enum HandleIo {
-    Path(RwPathIo),
-    Callback(CallbackBlockIo),
-    FsCore(FsCoreBlockIo),
-}
+/// Every source is held behind the mount's shared cache. Writable mounts use
+/// the cache's write-through path, which invalidates overlapping blocks before
+/// later metadata reads can observe them.
+type HandleIo = FsCoreBlockIo;
 
 /// `BlockIo` adapter over a shared `Arc<dyn fs_core::BlockDevice>`.
 ///
@@ -857,40 +901,8 @@ impl BlockIoTrait for FsCoreBlockIo {
     }
 }
 
-// `FsCoreBlockIo` and `CallbackBlockIo` both implement `BlockIo`
-// (`BlockIoTrait`) above, so the blanket `impl<T: BlockIo> FsckIo for T` in
-// `src/fsck.rs` already makes them usable as `FsckIo`. No separate impls.
-
-impl BlockIoTrait for HandleIo {
-    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
-        match self {
-            HandleIo::Path(p) => p.read_exact_at(offset, buf),
-            HandleIo::Callback(c) => c.read_exact_at(offset, buf),
-            HandleIo::FsCore(f) => f.read_exact_at(offset, buf),
-        }
-    }
-    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
-        match self {
-            HandleIo::Path(p) => p.write_all_at(offset, buf),
-            HandleIo::Callback(c) => c.write_all_at(offset, buf),
-            HandleIo::FsCore(f) => f.write_all_at(offset, buf),
-        }
-    }
-    fn size(&self) -> u64 {
-        match self {
-            HandleIo::Path(p) => p.size(),
-            HandleIo::Callback(c) => c.size(),
-            HandleIo::FsCore(f) => f.size(),
-        }
-    }
-    fn sync(&mut self) -> Result<(), String> {
-        match self {
-            HandleIo::Path(p) => p.sync(),
-            HandleIo::Callback(c) => c.sync(),
-            HandleIo::FsCore(f) => f.sync(),
-        }
-    }
-}
+// The blanket `impl<T: BlockIo> FsckIo for T` in `src/fsck.rs` makes this
+// adapter usable as `FsckIo`; no separate implementation is needed.
 
 /// Build a `HandleIo` from a `FsNtfsHandle` ready for a mutation call.
 /// Returns `Err(message)` if the handle was mounted read-only via
@@ -900,24 +912,22 @@ fn handle_to_rw_io(handle: &FsNtfsHandle) -> Result<HandleIo, String> {
         return Err("handle mounted read-only".to_string());
     }
     match &handle.source {
-        Some(MountSource::Path(p)) => RwPathIo::open_rw(p).map(HandleIo::Path),
+        Some(MountSource::Path { device, .. }) => Ok(FsCoreBlockIo {
+            size: fs_core::BlockRead::size_bytes(device),
+            device: device.clone(),
+        }),
         Some(MountSource::Callbacks {
-            read_fn,
-            write_fn,
-            context,
-            size,
+            write_fn, device, ..
         }) => {
             if write_fn.is_none() {
                 return Err(
                     "handle mounted read-only via callbacks (cfg.write was NULL)".to_string(),
                 );
             }
-            Ok(HandleIo::Callback(CallbackBlockIo {
-                read_fn: *read_fn,
-                write_fn: *write_fn,
-                context: *context,
-                size: *size,
-            }))
+            Ok(FsCoreBlockIo {
+                size: fs_core::BlockRead::size_bytes(device),
+                device: device.clone(),
+            })
         }
         Some(MountSource::FsCore { device }) => {
             if !fs_core::BlockDevice::is_writable(device) {
@@ -926,10 +936,10 @@ fn handle_to_rw_io(handle: &FsNtfsHandle) -> Result<HandleIo, String> {
                 );
             }
             let size = fs_core::BlockRead::size_bytes(device);
-            Ok(HandleIo::FsCore(FsCoreBlockIo {
+            Ok(FsCoreBlockIo {
                 device: device.clone(),
                 size,
-            }))
+            })
         }
         None => Err("handle has no recorded mount source".to_string()),
     }
@@ -947,24 +957,18 @@ fn handle_to_rw_io(handle: &FsNtfsHandle) -> Result<HandleIo, String> {
 /// touch it; fs-core mounts clone the shared device.
 fn handle_to_ro_io(handle: &FsNtfsHandle) -> Result<HandleIo, String> {
     match &handle.source {
-        Some(MountSource::Path(p)) => RwPathIo::open_ro(p).map(HandleIo::Path),
-        Some(MountSource::Callbacks {
-            read_fn,
-            write_fn,
-            context,
-            size,
-        }) => Ok(HandleIo::Callback(CallbackBlockIo {
-            read_fn: *read_fn,
-            write_fn: *write_fn,
-            context: *context,
-            size: *size,
-        })),
+        Some(MountSource::Path { device, .. }) | Some(MountSource::Callbacks { device, .. }) => {
+            Ok(FsCoreBlockIo {
+                size: fs_core::BlockRead::size_bytes(device),
+                device: device.clone(),
+            })
+        }
         Some(MountSource::FsCore { device }) => {
             let size = fs_core::BlockRead::size_bytes(device);
-            Ok(HandleIo::FsCore(FsCoreBlockIo {
+            Ok(FsCoreBlockIo {
                 device: device.clone(),
                 size,
-            }))
+            })
         }
         None => Err("handle has no recorded mount source".to_string()),
     }
@@ -2863,13 +2867,9 @@ pub extern "C" fn fs_ntfs_set_file_attributes(
 //
 // These mirror the path-based mutators above but take an already-mounted
 // `*mut FsNtfsHandle` instead of a `const char *image`. They construct a
-// fresh `BlockIo` impl from the handle's recorded `MountSource` for the
-// duration of one call — for path-mounted handles this means a per-call
-// `OpenOptions::read.write.open` (kernel page-cache amortizes); for
-// callback-mounted handles it wraps the existing `(read_fn, write_fn,
-// context, size)` tuple. Sandboxed FSKit hosts can only use the
-// callback path — the path-based siblings will fail under the FSKit
-// sandbox because they re-open `/dev/diskN`.
+// lightweight `BlockIo` adapter over the cached device recorded in the
+// handle. Path and callback mounts therefore keep both the device and cache
+// alive instead of reopening or rebuilding them for every call.
 //
 // Callback-mounted handles must have been mounted with a non-NULL
 // `cfg.write`; otherwise `_h` mutators return -1 with EINVAL-flavored
@@ -3928,12 +3928,14 @@ mod capi_read_tests {
     //! (`fs_ntfs_stat` / `fs_ntfs_read_file` / `fs_ntfs_dir_*`) so a later
     //! flip of that surface onto the native read layer is guarded.
     use super::{
-        fs_ntfs_dir_close, fs_ntfs_dir_next, fs_ntfs_dir_open, fs_ntfs_mount, fs_ntfs_read_file,
-        fs_ntfs_stat, fs_ntfs_umount, FsNtfsAttr,
+        fs_ntfs_dir_close, fs_ntfs_dir_next, fs_ntfs_dir_open, fs_ntfs_mount,
+        fs_ntfs_mount_with_fs_core_device, fs_ntfs_read_file, fs_ntfs_stat, fs_ntfs_umount,
+        FsNtfsAttr,
     };
     use crate::block_io::PathIo;
     use std::ffi::{c_void, CString};
     use std::path::Path;
+    use std::sync::Arc;
 
     /// Owns a scratch image path and removes the file on drop — so even a
     /// panicking test cleans up (the crate builds `panic = "unwind"`, so Drop
@@ -4059,6 +4061,43 @@ mod capi_read_tests {
         assert!(names.iter().any(|n| n == "sub"), "names: {names:?}");
         fs_ntfs_umount(h);
         // `img` (ImageGuard) removes the file when it drops at end of scope.
+    }
+
+    #[test]
+    fn mounted_metadata_is_not_read_from_the_device_twice() {
+        let img = fresh_image("metadata_cache");
+        let file = Arc::new(fs_core::FileDevice::open(&*img).expect("open fs-core device"));
+        let counted = Arc::new(fs_core::CountingDevice::new(file));
+        let device: Arc<dyn fs_core::BlockDevice> =
+            Arc::new(fs_core::ReadOnlyDevice::new(counted.clone()));
+        let raw = fs_core::ffi::FsCoreDevice::into_handle(device);
+        let h = fs_ntfs_mount_with_fs_core_device(raw);
+        assert!(!h.is_null(), "mount the counted device");
+
+        let path = CString::new("/hello.txt").unwrap();
+        let mut attr: FsNtfsAttr = unsafe { std::mem::zeroed() };
+        let after_mount = counted.reads();
+        assert_eq!(fs_ntfs_stat(h, path.as_ptr(), &mut attr), 0);
+        let after_first = counted.reads();
+        assert_eq!(fs_ntfs_stat(h, path.as_ptr(), &mut attr), 0);
+        let second_reads = counted.reads() - after_first;
+        let first_reads = after_first - after_mount;
+
+        let measurement = format!(
+            "metadata-cache first_stat_reads={first_reads} repeated_stat_reads={second_reads}\n"
+        );
+        let log_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/logs");
+        std::fs::create_dir_all(&log_dir).expect("create measurement directory");
+        std::fs::write(log_dir.join("metadata-cache-cost.txt"), measurement)
+            .expect("record cache measurement");
+
+        fs_ntfs_umount(h);
+        unsafe { fs_core::ffi::fs_core_device_close(raw) };
+        assert!(first_reads > 0, "the first lookup must populate the cache");
+        assert_eq!(
+            second_reads, 0,
+            "the second identical metadata lookup reached the backing device"
+        );
     }
 }
 

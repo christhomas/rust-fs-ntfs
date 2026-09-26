@@ -9,6 +9,42 @@ every time — so they can be compared across months and asserted on.
 Wall time is printed beside them because it is what a user feels. It is
 not what anything is judged by.
 
+## 2026-09-23 — mounted metadata cache
+
+Issue #131 puts `am-fs-core` 0.2.11's `CachingDevice` at the NTFS mount
+boundary. The focused regression formats a 32 MiB volume, mounts it through a
+`CountingDevice`, and stats `/hello.txt` twice through the same C ABI handle.
+The count is taken below the cache, so it records requests that reached the
+backing device rather than cache lookups:
+
+| operation | before cache | after cache |
+|---|---:|---:|
+| first stat after mount | 44 reads | 36 reads |
+| identical repeated stat | 44 reads | 0 reads |
+
+The before figure is the red regression run; the after figure is written by a
+green run to `tmp/logs/metadata-cache-cost.txt`. The first stat also benefits
+from blocks warmed during mount. The repeated operation eliminates all 44
+device reads, which is the result this cache exists to preserve.
+
+### Placement and geometry
+
+The cache belongs to each mounted NTFS handle, not to `PathIo` and not to a
+process-global device boundary. A per-operation `PathIo` cache would die before
+the next walk, while a global cache would impose one block geometry on drivers
+with different metadata layouts. All three NTFS mount sources (path, callbacks,
+and fs-core devices) now feed one cache held for the handle's lifetime.
+
+The cache uses 4 KiB blocks and 1024 entries: at most 4 MiB per mount. Four KiB
+matches the common NTFS cluster and index-block size while covering four common
+1 KiB MFT records per fetch. Writable mounts use `CachingDevice::new`, so every
+write goes through the same layer and invalidates overlapping cached blocks;
+read-only mounts use `CachingDevice::read_only`.
+
+This is read-path behavior only. It changes neither the bytes written to an
+NTFS volume nor their ordering, so the Windows `chkdsk` matrix is not an
+applicable gate under this repository's write-side matrix rule.
+
 ## 2026-09-19 — measured on the named fixture
 
 Fixture: `test-disks/ntfs-large-file.img`, named in the test rather than
