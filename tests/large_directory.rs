@@ -1,18 +1,16 @@
-//! Phase 3.4 — directory index boundary tests (resident `$INDEX_ROOT`).
+//! Directory index boundary tests, including routed `$INDEX_ALLOCATION` leaves.
 //!
 //! These format a fresh volume at runtime (no prebuilt fixture) and stress
 //! the directory-index insert path that lives in `index_io`.
 //!
-//! The create path promotes a full resident `$INDEX_ROOT` into one
-//! `$INDEX_ALLOCATION` leaf. Multi-level splitting is tested separately when
-//! implemented; this file pins the first shape transition that makes an
-//! ordinary directory larger than one MFT record.
+//! The create path promotes a full resident `$INDEX_ROOT` into allocated
+//! leaves. This file covers subsequent routed-leaf splits too.
 //!
-//! What these tests DO guarantee at the current ceiling:
+//! These tests guarantee:
 //!   * every inserted entry is independently findable (via the upstream
 //!     `ntfs` parser, not our own read path),
 //!   * entries collate in NTFS upcase order,
-//!   * hitting the ceiling fails gracefully (clear error, no panic) and
+//!   * hitting a capacity limit fails gracefully (clear error, no panic) and
 //!     leaves the directory readable and consistent.
 
 mod common;
@@ -99,22 +97,22 @@ fn fill_until_full(img: &str, dir: &str, prefix: &str) -> (usize, String) {
 }
 
 #[test]
-fn subdir_fills_gracefully_at_resident_ceiling() {
+fn subdir_fills_gracefully_at_capacity() {
     let img = fresh_vol("ceiling");
     write::mkdir(Path::new(&img), "/", "d").expect("mkdir");
     let (created, err) = fill_until_full(&img, "d", "f_");
 
-    // The exact ceiling depends on record size + name length; assert it is
-    // in the empirically-observed band and that it DID hit a ceiling (i.e.
-    // the limitation is real and the loop didn't just run out).
+    // Index growth now proceeds past the old one-leaf ceiling. A later
+    // capacity limit (often the fixed-size MFT) must be a clean refusal.
     assert!(
-        (16..=60).contains(&created),
-        "expected resident-INDEX_ROOT ceiling in 16..=60, got {created}"
+        (80..1000).contains(&created),
+        "expected growth past two leaves before a capacity limit, got {created}"
     );
     assert!(
         err.contains("exceeds record capacity")
             || err.contains("no room")
-            || err.contains("capacity"),
+            || err.contains("capacity")
+            || err.contains("MFT has no free records"),
         "ceiling failure must be a graceful capacity error, got: {err:?}"
     );
 }
@@ -221,6 +219,46 @@ fn an_overflowed_directory_can_gain_and_lose_a_name() {
     assert!(names.iter().any(|name| name == "f_0049.txt"));
 }
 
+#[test]
+fn routed_leaf_splits_again_after_the_first_two_leaf_tree() {
+    let img = fresh_vol("routed_leaf_split");
+    write::mkdir(Path::new(&img), "/", "d").expect("mkdir");
+
+    // Sorted inserts fill the right-hand leaf after the first split. The
+    // next split must add another separator to the resident parent index.
+    for i in 0..80 {
+        let name = format!("f_{i:04}.txt");
+        write::create_file(Path::new(&img), "/d", &name)
+            .unwrap_or_else(|e| panic!("create {name} in routed leaf: {e}"));
+    }
+
+    let names = list_subdir(&img, "d");
+    assert_eq!(names.len(), 80, "independent parser lost entries");
+    for i in 0..80 {
+        assert!(names.contains(&format!("f_{i:04}.txt")), "missing {i}");
+    }
+}
+
+#[test]
+fn left_routed_leaf_split_updates_the_existing_parent_child() {
+    let img = fresh_vol("left_routed_leaf_split");
+    write::mkdir(Path::new(&img), "/", "d").expect("mkdir");
+
+    // Descending inserts fill the left leaf. Its old parent entry must be
+    // retargeted to the new right leaf when a separator is inserted before it.
+    for i in (0..80).rev() {
+        let name = format!("f_{i:04}.txt");
+        write::create_file(Path::new(&img), "/d", &name)
+            .unwrap_or_else(|e| panic!("create {name} in left leaf: {e}"));
+    }
+
+    let names = list_subdir(&img, "d");
+    assert_eq!(names.len(), 80, "independent parser lost entries");
+    for i in 0..80 {
+        assert!(names.contains(&format!("f_{i:04}.txt")), "missing {i}");
+    }
+}
+
 /// Find `name` directly in the ROOT directory's index via the upstream
 /// `ntfs` parser.
 fn found_in_root(img: &str, name: &str) -> bool {
@@ -246,7 +284,7 @@ fn found_in_root(img: &str, name: &str) -> bool {
 /// guarantees hold: a graceful stop at the ceiling (clear error, no panic)
 /// and every created entry still independently findable (no silent loss).
 #[test]
-fn root_dir_fills_gracefully_at_resident_ceiling() {
+fn root_dir_fills_gracefully_at_capacity() {
     let img = fresh_vol("root_ceiling");
     let mut created = 0usize;
     let mut err = String::new();
@@ -261,13 +299,13 @@ fn root_dir_fills_gracefully_at_resident_ceiling() {
         }
     }
     assert!(created >= 1, "must create at least one root entry");
-    // The stop must be the resident-$INDEX_ROOT capacity ceiling specifically
-    // (mirrors subdir_fills_gracefully_at_resident_ceiling), not some other
-    // error — otherwise the "graceful stop at the ceiling" claim isn't proven.
+    // A fixed-size MFT can run out before the index does. Both capacity
+    // refusals must preserve the names already committed.
     assert!(
         err.contains("exceeds record capacity")
             || err.contains("no room")
-            || err.contains("capacity"),
+            || err.contains("capacity")
+            || err.contains("MFT has no free records"),
         "root ceiling failure must be a graceful capacity error, got: {err:?}"
     );
     // Spot-check first / middle / last created entries remain findable in the
