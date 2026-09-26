@@ -52,7 +52,7 @@ shift
 #   mkfs        115 / 3,858 cold (Mac), 24 / 1,022 warm           160 / 5,200
 #   suite       2,143 / 108,930 (CI Linux, fixtures built)        2,900 / 150,000
 #   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
-#   scripts     72 / 1,809 (five shell tests)                     100 / 2,400
+#   scripts     82 / 1,831 (six shell tests, 2026-09-26)          110 / 2,500
 #   matrix      633 / 35,311 green, 1,521 / 78,075 red (see below)  900 / 50,000
 #
 # THE CLIPPY ROW MOVED ON 2026-09-19, from 150/5,000 to 260/11,500. Adding
@@ -62,6 +62,12 @@ shift
 # plus a third, by the same rule as every other row. This is the "raise the
 # budget deliberately" the failure message asks for -- the run passed, it
 # simply printed more than the old measurement allowed.
+
+# THE SCRIPTS ROW MOVED ON 2026-09-26, from 80/1,800 to 110/2,500.
+# `chore test:scripts` on fix/diagnostics-verdict-shape at b815f12 printed
+# 82 lines / 1,831 bytes from six shell tests, including 13 new verdict
+# cases in tests/scripts/matrix-fetch-diag.sh. Both limits are that passing
+# measurement plus roughly a third; every test verdict remains in the log.
 
 # THE MATRIX ROW is measured on a GREEN 46-scenario run (2026-09-18, 46 min,
 # max_parallel=4): 633 lines / 35,311 bytes, budgeted at that plus a third.
@@ -77,7 +83,7 @@ case "$TIER" in
     mkfs)       MAX_LINES=160;  MAX_BYTES=5200 ;;
     suite)      MAX_LINES=2900; MAX_BYTES=150000 ;;
     asan)       MAX_LINES=1100; MAX_BYTES=72000 ;;
-    scripts)    MAX_LINES=100;  MAX_BYTES=2400 ;;
+    scripts)    MAX_LINES=110;  MAX_BYTES=2500 ;;
     matrix)     MAX_LINES=900;  MAX_BYTES=50000 ;;
     *)
         echo "tier.sh: '$TIER' has no budget. Add a measured row to scripts/tier.sh." >&2
