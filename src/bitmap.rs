@@ -1501,12 +1501,12 @@ mod tests {
         let params = crate::mft_io::read_boot_params_io(&mut dev).unwrap();
         let healthy = locate_bitmap_io(&mut dev).unwrap();
         assert_eq!(
-            healthy.mft_clusters, 64,
-            "control: a contiguous $MFT is 64 clusters on this fixture"
+            healthy.mft_clusters, 128,
+            "control: a contiguous $MFT is 128 clusters on this fixture"
         );
 
         // Re-encode record 0's own run list as TWO runs covering the
-        // same 64 clusters: 32 at LCN 4, then 32 at LCN 36. The
+        // same 128 clusters: 64 at LCN 4, then 64 at LCN 68. The
         // physical layout does not move -- only the encoding
         // fragments -- so the volume stays readable and the difference
         // measured is the guard's, not the fixture's.
@@ -1521,7 +1521,7 @@ mod tests {
         let at = loc.attr_offset + mpo;
         // header 0x11 = one length byte, one offset byte; the second
         // run's offset is a DELTA from the first's LCN.
-        let pairs = [0x11u8, 0x20, 0x04, 0x11, 0x20, 0x20, 0x00, 0x00];
+        let pairs = [0x11u8, 0x40, 0x04, 0x11, 0x40, 0x40, 0x00, 0x00];
         assert!(
             at + pairs.len() <= loc.attr_offset + loc.attr_length,
             "precondition: two runs must fit in $MFT's mapping-pairs space"
@@ -1537,9 +1537,9 @@ mod tests {
              test is no longer exercising the multi-run path it is named for"
         );
         assert!(
-            bm.other_protected.contains(&(4, 36)) && bm.other_protected.contains(&(36, 68)),
+            bm.other_protected.contains(&(4, 68)) && bm.other_protected.contains(&(68, 132)),
             "both of record 0's runs must be protected SEPARATELY, got {:?}. One range \
-             (4, 68) means the answer came from the mirror's single-run copy, not from \
+             (4, 132) means the answer came from the mirror's single-run copy, not from \
              record 0's own fragmented list.",
             bm.other_protected
         );
@@ -1596,16 +1596,16 @@ mod tests {
         // reserved records, which is 4..8.
         assert!(
             bm.other_protected
-                .contains(&(params.mft_lcn, params.mft_lcn + 64)),
+                .contains(&(params.mft_lcn, params.mft_lcn + 128)),
             "the mirror must recover $MFT's FULL extent ({}..{}), not just the bounded \
              floor -- got {:?}. Asserting only that mft_lcn is refused cannot tell the \
              mirror tier from the floor beneath it.",
             params.mft_lcn,
-            params.mft_lcn + 64,
+            params.mft_lcn + 128,
             bm.other_protected
         );
         assert!(
-            bm.covers_the_volumes_own(params.mft_lcn + 63, 1),
+            bm.covers_the_volumes_own(params.mft_lcn + 127, 1),
             "$MFT's LAST cluster must be refused too, which the floor alone does not reach"
         );
         assert!(
@@ -1670,7 +1670,7 @@ mod tests {
     fn secures_sds_clusters_are_protected() {
         let mut dev = formatted_dev();
         let bm = locate_bitmap_io(&mut dev).unwrap();
-        for expected in [(1047u64, 1048u64), (1048, 1049)] {
+        for expected in [(1111u64, 1112u64), (1112, 1113)] {
             assert!(
                 bm.other_protected.contains(&expected),
                 "$Secure's $SDS range {expected:?} must be in the protected set; got {:?}. \
@@ -1679,7 +1679,7 @@ mod tests {
             );
         }
         assert!(
-            bm.covers_the_volumes_own(1047, 2),
+            bm.covers_the_volumes_own(1111, 2),
             "and those clusters must be refused by the guard itself"
         );
     }
