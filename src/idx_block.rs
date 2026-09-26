@@ -162,7 +162,9 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
 }
 
 /// Translate a VCN (relative to the start of `$INDEX_ALLOCATION`) to
-/// the on-disk byte offset of the whole index block that starts there.
+/// the on-disk byte offset of a whole index block that starts there.
+/// This helper returns an offset only when the entire block occupies one
+/// run. Callers handling fragmented blocks must use piecewise block I/O.
 ///
 /// THE WHOLE BLOCK HAS TO BE IN ONE RUN.
 ///
@@ -194,10 +196,15 @@ pub fn vcn_to_disk_offset(
     vcn: u64,
     device_bytes: u64,
 ) -> Result<u64, String> {
+    check_declared_block_extent(ia, vcn)?;
     let run = ia
         .runs
         .iter()
-        .find(|r| vcn >= r.starting_vcn && vcn < r.starting_vcn + r.length)
+        .find(|r| {
+            r.starting_vcn
+                .checked_add(r.length)
+                .is_some_and(|end| vcn >= r.starting_vcn && vcn < end)
+        })
         .ok_or_else(|| format!("VCN {vcn} not mapped in $INDEX_ALLOCATION"))?;
     let lcn = run.lcn.ok_or_else(|| format!("VCN {vcn} in sparse run"))?;
 
@@ -238,6 +245,20 @@ struct MappedChunk {
     len: usize,
 }
 
+fn check_declared_block_extent(ia: &IndexAllocation, vcn: u64) -> Result<(), String> {
+    let end = vcn
+        .checked_mul(ia.params.cluster_size)
+        .and_then(|start| start.checked_add(ia.block_size))
+        .ok_or_else(|| format!("index block at VCN {vcn} has no byte end"))?;
+    if end > ia.data_length {
+        return Err(format!(
+            "index block at VCN {vcn} ends at byte {end}, past $INDEX_ALLOCATION length {}",
+            ia.data_length
+        ));
+    }
+    Ok(())
+}
+
 /// Map one logical INDX block into transfers that never cross a data-run
 /// boundary. The complete mapping is validated before the caller performs
 /// any I/O, so a missing or sparse tail cannot leave a write half-finished.
@@ -246,6 +267,7 @@ fn map_indx_block(
     vcn: u64,
     device_bytes: u64,
 ) -> Result<Vec<MappedChunk>, String> {
+    check_declared_block_extent(ia, vcn)?;
     let cluster_size = ia.params.cluster_size;
     if cluster_size == 0 {
         return Err("$INDEX_ALLOCATION has a zero-byte cluster size".to_string());
@@ -508,7 +530,7 @@ mod tests {
             length: 4,
             lcn: Some(10),
         }];
-        let ia = make_ia(4096, 4096, runs, vec![], 0);
+        let ia = make_ia(4096, 4096, runs, vec![], 4 * 4096);
         // VCN 0 → LCN 10 → byte offset 10 * 4096.
         assert_eq!(vcn_to_disk_offset(&ia, 0, u64::MAX).unwrap(), 10 * 4096);
         // VCN 3 → LCN 13 → byte offset 13 * 4096.
@@ -529,7 +551,7 @@ mod tests {
                 lcn: Some(20),
             },
         ];
-        let ia = make_ia(4096, 4096, runs, vec![], 0);
+        let ia = make_ia(4096, 4096, runs, vec![], 5 * 4096);
         // VCN 2 maps to LCN 20 + (2-2) = 20.
         assert_eq!(vcn_to_disk_offset(&ia, 2, u64::MAX).unwrap(), 20 * 4096);
         // VCN 4 → LCN 22.
@@ -543,7 +565,7 @@ mod tests {
             length: 4,
             lcn: None,
         }];
-        let ia = make_ia(4096, 4096, runs, vec![], 0);
+        let ia = make_ia(4096, 4096, runs, vec![], 4 * 4096);
         let err = vcn_to_disk_offset(&ia, 1, u64::MAX).unwrap_err();
         assert!(err.contains("sparse"), "{err}");
     }
@@ -555,7 +577,7 @@ mod tests {
             length: 4,
             lcn: Some(10),
         }];
-        let ia = make_ia(4096, 4096, runs, vec![], 0);
+        let ia = make_ia(4096, 4096, runs, vec![], 4 * 4096);
         let err = vcn_to_disk_offset(&ia, 99, u64::MAX).unwrap_err();
         assert!(err.contains("not mapped"), "{err}");
     }
@@ -598,7 +620,7 @@ mod tests {
             length: 16,
             lcn: Some(100),
         }];
-        let ia = make_ia(4096, 512, runs, vec![], 0);
+        let ia = make_ia(4096, 512, runs, vec![], 16 * 512);
         assert_eq!(vcn_to_disk_offset(&ia, 0, u64::MAX).unwrap(), 100 * 512);
         assert_eq!(vcn_to_disk_offset(&ia, 1, u64::MAX).unwrap(), 101 * 512);
     }
@@ -639,6 +661,29 @@ mod tests {
     }
 
     #[test]
+    fn a_mapped_block_past_the_declared_allocation_length_is_refused() {
+        let runs = vec![DataRun {
+            starting_vcn: 0,
+            length: 8,
+            lcn: Some(100),
+        }];
+        // Eight clusters are physically mapped, but only four belong to
+        // the declared value. The remaining clusters cannot be read or
+        // written as part of an INDX block.
+        let ia = make_ia(4096, 512, runs, vec![0x01], 2048);
+        let mut dev = MemDev(vec![0; 110 * 512]);
+        assert!(map_indx_block(&ia, 0, dev.size())
+            .unwrap_err()
+            .contains("length"));
+        assert!(vcn_to_disk_offset(&ia, 0, dev.size())
+            .unwrap_err()
+            .contains("length"));
+        assert!(read_indx_block_io(&mut dev, &ia, 0)
+            .unwrap_err()
+            .contains("length"));
+    }
+
+    #[test]
     fn vcn_to_disk_offset_at_run_boundary_is_exact() {
         // Run covers VCNs 0..4. VCN 3 (last) is inside; VCN 4 (first of next) errors.
         let runs = vec![DataRun {
@@ -646,7 +691,7 @@ mod tests {
             length: 4,
             lcn: Some(10),
         }];
-        let ia = make_ia(4096, 4096, runs, vec![], 0);
+        let ia = make_ia(4096, 4096, runs, vec![], 4 * 4096);
         assert!(vcn_to_disk_offset(&ia, 3, u64::MAX).is_ok());
         assert!(vcn_to_disk_offset(&ia, 4, u64::MAX).is_err());
     }
