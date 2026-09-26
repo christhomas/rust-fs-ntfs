@@ -52,6 +52,108 @@ const FN_NAME_LENGTH_OFFSET: usize = 0x40;
 const FN_NAMESPACE_OFFSET: usize = 0x41;
 const FN_NAME_OFFSET: usize = 0x42;
 
+/// Follow one interior $I30 node. Each key's child holds names below that
+/// key; the LAST entry's child holds names above every key in the node.
+fn child_vcn_in_node(
+    buf: &[u8],
+    ih: usize,
+    value_end: usize,
+    wanted: &str,
+    upcase: Option<&crate::upcase::UpcaseTable>,
+) -> Result<u64, String> {
+    let header_end = ih
+        .checked_add(INDEX_HEADER_SIZE)
+        .ok_or("index header overflow")?;
+    if header_end > value_end || value_end > buf.len() {
+        return Err("interior index header exceeds its value".to_string());
+    }
+    if buf[ih + IH_FLAGS_OFFSET] & IH_FLAG_HAS_SUBNODES == 0 {
+        return Err("index node has no child pointers".to_string());
+    }
+    let first = read_u32_le(buf, ih + IH_FIRST_ENTRY_OFFSET).ok_or("missing first entry")? as usize;
+    let total =
+        read_u32_le(buf, ih + IH_TOTAL_SIZE_OF_ENTRIES).ok_or("missing index size")? as usize;
+    if first < INDEX_HEADER_SIZE || !first.is_multiple_of(8) || first > total {
+        return Err("invalid interior index first-entry offset".to_string());
+    }
+    let end = ih
+        .checked_add(total)
+        .ok_or("interior index size overflow")?;
+    if end > value_end {
+        return Err("interior index entries exceed their value".to_string());
+    }
+    let mut cursor = ih + first;
+    let wanted_utf16: Vec<u16> = wanted.encode_utf16().collect();
+    while cursor < end {
+        if cursor + IE_KEY_START > end {
+            return Err("truncated interior index entry".to_string());
+        }
+        let len =
+            u16::from_le_bytes([buf[cursor + IE_LENGTH], buf[cursor + IE_LENGTH + 1]]) as usize;
+        let key_len =
+            u16::from_le_bytes([buf[cursor + IE_KEY_LENGTH], buf[cursor + IE_KEY_LENGTH + 1]])
+                as usize;
+        let flags = u16::from_le_bytes([buf[cursor + IE_FLAGS], buf[cursor + IE_FLAGS + 1]]);
+        if len < IE_KEY_START + 8 || !len.is_multiple_of(8) || cursor + len > end {
+            return Err("invalid interior index entry length".to_string());
+        }
+        if flags & IE_FLAG_HAS_SUBNODE == 0 {
+            return Err("interior index entry has no child VCN".to_string());
+        }
+        let descend = if flags & IE_FLAG_LAST != 0 {
+            if cursor + len != end {
+                return Err("interior index LAST entry is not last".to_string());
+            }
+            true
+        } else {
+            if IE_KEY_START + key_len + 8 > len {
+                return Err("interior index key overlaps child VCN".to_string());
+            }
+            let key = entry_name(buf, cursor, len - 8)?;
+            match compare_names(&wanted_utf16, &key, upcase) {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Equal => {
+                    return Err("index key already exists in an interior node".to_string());
+                }
+                std::cmp::Ordering::Greater => false,
+            }
+        };
+        if descend {
+            return Ok(u64::from_le_bytes(
+                buf[cursor + len - 8..cursor + len].try_into().unwrap(),
+            ));
+        }
+        cursor += len;
+    }
+    Err("interior index has no LAST child".to_string())
+}
+
+pub(crate) fn index_root_child_vcn(
+    record: &[u8],
+    wanted: &str,
+    upcase: Option<&crate::upcase::UpcaseTable>,
+) -> Result<u64, String> {
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
+        .ok_or("$INDEX_ROOT:$I30 not found")?;
+    let start = ir.attr_offset + ir.resident_value_offset.ok_or("no value_offset")? as usize;
+    let end = index_root_value_end(record, &ir)?;
+    child_vcn_in_node(record, start + IR_INDEX_HEADER_OFFSET, end, wanted, upcase)
+}
+
+pub(crate) fn indx_child_vcn(
+    block: &[u8],
+    wanted: &str,
+    upcase: Option<&crate::upcase::UpcaseTable>,
+) -> Result<u64, String> {
+    child_vcn_in_node(
+        block,
+        crate::idx_block::INDX_INDEX_HEADER_OFFSET,
+        block.len(),
+        wanted,
+        upcase,
+    )
+}
+
 /// The UTF-16 name of the index entry at `cursor`, bounded by the entry.
 ///
 /// `name_length` is one unvalidated byte, so the name it describes can

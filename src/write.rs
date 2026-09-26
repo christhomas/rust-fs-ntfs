@@ -1868,24 +1868,22 @@ fn insert_entry_in_parent_io<T: BlockIo + ?Sized>(
     }
 
     let ia = idx_block::load_for_directory_io(io, parent_rec)?;
-    let vcns = ia.allocated_block_vcns();
-    if vcns.len() != 1 {
-        return Err(
-            "$INDEX_ALLOCATION insertion is not supported: selecting the correct B+tree leaf \
-             and updating root routing across multiple leaves (W3.2) are not implemented"
-                .to_string(),
-        );
-    }
-
-    let vcn = vcns[0];
-    let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
-    let flags = block[idx_block::INDX_INDEX_HEADER_OFFSET + index_io::IH_FLAGS_OFFSET];
-    if flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
-        return Err(
-            "$INDEX_ALLOCATION insertion is not supported: the target is an interior B+tree \
-             node and leaf routing (W3.2) is not implemented"
-                .to_string(),
-        );
+    let (_, root) = read_mft_record_io(io, parent_rec)?;
+    let mut vcn = index_io::index_root_child_vcn(&root, basename, upcase.as_ref())?;
+    let allocated = ia.allocated_block_vcns();
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if !allocated.contains(&vcn) || !visited.insert(vcn) {
+            return Err(format!(
+                "$INDEX_ALLOCATION routing points to unallocated or repeated VCN {vcn}"
+            ));
+        }
+        let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+        let flags = block[idx_block::INDX_INDEX_HEADER_OFFSET + index_io::IH_FLAGS_OFFSET];
+        if flags & index_io::IH_FLAG_HAS_SUBNODES == 0 {
+            break;
+        }
+        vcn = index_io::indx_child_vcn(&block, basename, upcase.as_ref())?;
     }
     idx_block::update_indx_block_io(io, &ia, vcn, |block| {
         index_io::insert_entry_into_indx_block_with_collation(
@@ -5061,8 +5059,7 @@ mod tests {
 
         let err = create_file_io(&mut dev, "/", "target.txt")
             .expect_err("overflowed parents need the unimplemented B+tree operation");
-        assert!(err.contains("$INDEX_ALLOCATION insertion is not supported"));
-        assert!(err.contains("W3.2"));
+        assert!(err.contains("index"));
 
         let (_, after_root) = crate::mft_io::read_mft_record_io(&mut dev, ROOT).expect("root");
         assert_eq!(
@@ -5088,6 +5085,127 @@ mod tests {
                 "the rejected entry must not appear on disk"
             );
         }
+    }
+
+    #[test]
+    fn insertion_follows_root_key_to_the_correct_leaf() {
+        const BS: usize = 4096;
+        let mut dev = fresh_vol();
+        let parent = mkdir_io(&mut dev, "/", "routed").expect("directory");
+        let bm = crate::bitmap::locate_bitmap_io(&mut dev).expect("bitmap");
+        let lcn = crate::bitmap::find_free_run_io(&mut dev, &bm, 2, 0)
+            .expect("scan")
+            .expect("two clusters");
+        crate::bitmap::allocate_io(&mut dev, &bm, lcn, 2).expect("allocate");
+        let mapping = crate::data_runs::encode_runs(&[DataRun {
+            starting_vcn: 0,
+            length: 2,
+            lcn: Some(lcn),
+        }])
+        .expect("runs");
+
+        update_mft_record_io(&mut dev, parent, |rec| {
+            let ir =
+                attr_io::find_attribute(rec, AttrType::IndexRoot, Some(crate::mkfs::stream::I30))
+                    .ok_or("no root")?;
+            let mut separator =
+                index_io::build_file_name_index_entry(100, parent, "m.txt", 0, false)?;
+            let key_len = separator.len() + 8;
+            separator.resize(key_len, 0);
+            separator[8..10].copy_from_slice(&(key_len as u16).to_le_bytes());
+            separator[12..14].copy_from_slice(&1u16.to_le_bytes());
+            let mut last = vec![0u8; 24];
+            last[8..10].copy_from_slice(&24u16.to_le_bytes());
+            last[12..14].copy_from_slice(&3u16.to_le_bytes());
+            last[16..24].copy_from_slice(&1u64.to_le_bytes());
+            let value_len = 32 + separator.len() + last.len();
+            crate::attr_resize::resize_resident_value(rec, ir.attr_offset, value_len as u32)?;
+            let ir =
+                attr_io::find_attribute(rec, AttrType::IndexRoot, Some(crate::mkfs::stream::I30))
+                    .ok_or("resized root missing")?;
+            let start =
+                ir.attr_offset + ir.resident_value_offset.ok_or("no value offset")? as usize;
+            let ih = start + 16;
+            let total = (16 + separator.len() + last.len()) as u32;
+            rec[ih..ih + 4].copy_from_slice(&16u32.to_le_bytes());
+            rec[ih + 4..ih + 8].copy_from_slice(&total.to_le_bytes());
+            rec[ih + 8..ih + 12].copy_from_slice(&total.to_le_bytes());
+            rec[ih + 12] = index_io::IH_FLAG_HAS_SUBNODES;
+            rec[ih + 16..ih + 16 + separator.len()].copy_from_slice(&separator);
+            rec[ih + 16 + separator.len()..ih + 16 + separator.len() + last.len()]
+                .copy_from_slice(&last);
+
+            let id = crate::attr_resize::allocate_attribute_id(rec);
+            let ia = crate::record_build::build_nonresident_attribute(
+                AttrType::IndexAllocation as u32,
+                Some(crate::mkfs::stream::I30),
+                id,
+                (2 * BS) as u64,
+                (2 * BS) as u64,
+                (2 * BS) as u64,
+                1,
+                &mapping,
+            )?;
+            crate::attr_resize::insert_attribute_sorted(rec, &ia)?;
+            let id = crate::attr_resize::allocate_attribute_id(rec);
+            let bitmap = named_resident_attribute(
+                AttrType::Bitmap as u32,
+                crate::mkfs::stream::I30,
+                id,
+                &[0b11],
+            );
+            crate::attr_resize::insert_attribute_sorted(rec, &bitmap)
+        })
+        .expect("routed index");
+
+        let params = crate::mft_io::read_boot_params_io(&mut dev).expect("boot");
+        for i in 0..2 {
+            let mut block = empty_indx_block(BS, false);
+            crate::mft_io::apply_fixup_on_write_magic(&mut block, params.bytes_per_sector, b"INDX")
+                .expect("fixup");
+            dev.write_all_at((lcn + i) * BS as u64, &block)
+                .expect("block");
+        }
+
+        for (name, expected_vcn) in [("z.txt", 1), ("a.txt", 0)] {
+            let entry =
+                index_io::build_file_name_index_entry(101, parent, name, 0, false).expect("entry");
+            insert_entry_in_parent_io(&mut dev, parent, true, &entry, name).expect("insert");
+            let ia = idx_block::load_for_directory_io(&mut dev, parent).expect("allocation");
+            for vcn in 0..2 {
+                let block = idx_block::read_indx_block_io(&mut dev, &ia, vcn).expect("block");
+                assert_eq!(
+                    index_io::find_entry_in_indx_block(&block, name, None)
+                        .expect("lookup")
+                        .is_some(),
+                    vcn == expected_vcn,
+                    "{name} in wrong leaf {vcn}"
+                );
+            }
+        }
+
+        // The routed leaf is full while the other leaf still has room.
+        // Refuse safely until splitting is implemented; never scan for a
+        // different leaf with free space.
+        let ia = idx_block::load_for_directory_io(&mut dev, parent).expect("allocation");
+        idx_block::update_indx_block_io(&mut dev, &ia, 0, |block| {
+            let ih = idx_block::INDX_INDEX_HEADER_OFFSET;
+            let total = block[ih + 4..ih + 8].to_vec();
+            block[ih + 8..ih + 12].copy_from_slice(&total);
+            Ok(())
+        })
+        .expect("mark selected leaf full");
+        let before_other = idx_block::read_indx_block_io(&mut dev, &ia, 1).expect("other leaf");
+        let entry =
+            index_io::build_file_name_index_entry(102, parent, "b.txt", 0, false).expect("entry");
+        let error = insert_entry_in_parent_io(&mut dev, parent, true, &entry, "b.txt")
+            .expect_err("a full routed leaf needs a split");
+        assert!(error.contains("no room"), "{error}");
+        let after_other = idx_block::read_indx_block_io(&mut dev, &ia, 1).expect("other leaf");
+        assert_eq!(
+            before_other, after_other,
+            "free space in other leaf is irrelevant"
+        );
     }
 
     /// A resident attribute of any type with a stream name.
