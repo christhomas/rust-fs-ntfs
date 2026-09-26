@@ -35,6 +35,11 @@
 
 ### Fixed
 
+- `$ObjId`, `$Reparse`, and `$Quota` now use the measured POSIX namespace in
+  both their in-record `$FILE_NAME` attributes and their `$Extend` index
+  entries. Previously all six namespace bytes were stamped `WIN32_DOS` even
+  though the formatter's own Windows byte measurement documented POSIX. (#182)
+
 - One file-reference encoder, not two. `encode_file_reference` was defined
   twice — public in `record_build`, private in `mkfs` — with its own tests
   on each copy, and mkfs used its own. Two copies of a packing rule is how
