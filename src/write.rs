@@ -1857,14 +1857,26 @@ fn insert_entry_in_parent_io<T: BlockIo + ?Sized>(
     // happen on a well-formed volume).
     let upcase = crate::upcase::UpcaseTable::load_io(io).ok();
     if !parent_has_overflow {
-        return update_mft_record_io(io, parent_rec, |record| {
-            index_io::insert_entry_into_index_root_with_collation(
-                record,
-                entry_bytes,
-                basename,
-                upcase.as_ref(),
-            )
-        });
+        let (params, mut parent) = read_mft_record_io(io, parent_rec)?;
+        match index_io::insert_entry_into_index_root_with_collation(
+            &mut parent,
+            entry_bytes,
+            basename,
+            upcase.as_ref(),
+        ) {
+            Ok(()) => return crate::mft_io::restore_mft_record_io(io, parent_rec, &parent),
+            Err(e) if e.contains("exceeds record capacity") => {}
+            Err(e) => return Err(e),
+        }
+
+        return promote_parent_index_io(
+            io,
+            parent_rec,
+            &params,
+            entry_bytes,
+            basename,
+            upcase.as_ref(),
+        );
     }
 
     let ia = idx_block::load_for_directory_io(io, parent_rec)?;
@@ -1885,20 +1897,265 @@ fn insert_entry_in_parent_io<T: BlockIo + ?Sized>(
         }
         vcn = index_io::indx_child_vcn(&block, basename, upcase.as_ref())?;
     }
-    idx_block::update_indx_block_io(io, &ia, vcn, |block| {
+    let insert = idx_block::update_indx_block_io(io, &ia, vcn, |block| {
         index_io::insert_entry_into_indx_block_with_collation(
             block,
             entry_bytes,
             basename,
             upcase.as_ref(),
         )
-        .map_err(|e| {
-            format!(
-                "$INDEX_ALLOCATION insertion is not supported: the target leaf cannot fit \
-                 the entry (W3.2): {e}"
-            )
+    });
+    match insert {
+        Ok(()) => Ok(()),
+        Err(e) if e.contains("INDX block has no room") && vcn == 0 && allocated == [0] => {
+            split_first_index_leaf_io(io, parent_rec, &ia, entry_bytes, upcase.as_ref())
+        }
+        Err(e) => Err(format!(
+            "$INDEX_ALLOCATION insertion is not supported: the target leaf cannot fit \
+             the entry (W3.2): {e}"
+        )),
+    }
+}
+
+fn split_first_index_leaf_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    ia: &idx_block::IndexAllocation,
+    entry_bytes: &[u8],
+    upcase: Option<&crate::upcase::UpcaseTable>,
+) -> Result<(), String> {
+    let vcns = ia.allocated_block_vcns();
+    if vcns != [0] {
+        return Err(
+            "index capacity reached: splitting a multi-block tree is not yet supported".to_string(),
+        );
+    }
+    let old_left = idx_block::read_indx_block_io(io, ia, 0)?;
+    let clusters = ia.block_size.div_ceil(ia.params.cluster_size);
+    let right_vcn = clusters;
+    let volume_bitmap = crate::bitmap::locate_bitmap_io(io)?;
+    let lcn = crate::bitmap::find_free_run_io(io, &volume_bitmap, clusters, ia.params.mft_lcn)?
+        .ok_or_else(|| format!("index capacity: no {clusters}-cluster run for a new INDX block"))?;
+    crate::bitmap::allocate_io(io, &volume_bitmap, lcn, clusters)?;
+
+    let prepared = (|| -> Result<index_io::SplitIndxLeaves, String> {
+        let (mut left, right, separator) =
+            index_io::split_first_indx_leaf(&old_left, entry_bytes, right_vcn, upcase)?;
+        let (_, mut parent) = read_mft_record_io(io, parent_rec)?;
+        index_io::route_split_in_index_root(&mut parent, &separator, 0, right_vcn)?;
+
+        let mut runs = ia.runs.clone();
+        if let Some(last) = runs
+            .last_mut()
+            .filter(|r| r.lcn.is_some_and(|base| base + r.length == lcn))
+        {
+            last.length += clusters;
+        } else {
+            runs.push(DataRun {
+                starting_vcn: right_vcn,
+                length: clusters,
+                lcn: Some(lcn),
+            });
+        }
+        let mapping = crate::data_runs::encode_runs(&runs)?;
+        let allocation = attr_io::find_attribute(
+            &parent,
+            AttrType::IndexAllocation,
+            Some(crate::mkfs::stream::I30),
+        )
+        .ok_or("$INDEX_ALLOCATION:$I30 disappeared")?;
+        let replacement = crate::record_build::build_nonresident_attribute(
+            AttrType::IndexAllocation as u32,
+            Some(crate::mkfs::stream::I30),
+            allocation.attribute_id,
+            ia.data_length + ia.block_size,
+            (right_vcn + clusters) * ia.params.cluster_size,
+            ia.data_length + ia.block_size,
+            i64::try_from(right_vcn + clusters - 1).map_err(|_| "INDX VCN does not fit i64")?,
+            &mapping,
+        )?;
+        crate::attr_resize::replace_attribute(&mut parent, allocation.attr_offset, &replacement)?;
+        let bitmap =
+            attr_io::find_attribute(&parent, AttrType::Bitmap, Some(crate::mkfs::stream::I30))
+                .ok_or("$Bitmap:$I30 disappeared")?;
+        if !bitmap.is_resident || bitmap.resident_value_length.unwrap_or(0) < 1 {
+            return Err("index capacity: unsupported $Bitmap:$I30 layout".to_string());
+        }
+        let bit = (right_vcn / clusters) as usize;
+        if bit >= 8 {
+            return Err("index capacity: resident bitmap growth required".to_string());
+        }
+        let bitmap_value = bitmap.attr_offset
+            + bitmap
+                .resident_value_offset
+                .ok_or("bitmap value offset missing")? as usize;
+        parent[bitmap_value] |= 1u8 << bit;
+
+        crate::mft_io::apply_fixup_on_write_magic(&mut left, ia.params.bytes_per_sector, b"INDX")?;
+        let mut right = right;
+        crate::mft_io::apply_fixup_on_write_magic(&mut right, ia.params.bytes_per_sector, b"INDX")?;
+        Ok((parent, left, right))
+    })();
+    let (parent, left, right) = match prepared {
+        Ok(v) => v,
+        Err(e) => {
+            crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
+            return Err(e);
+        }
+    };
+
+    let right_offset = lcn
+        .checked_mul(ia.params.cluster_size)
+        .ok_or("right INDX offset overflow")?;
+    if let Err(e) = io
+        .write_all_at(right_offset, &right)
+        .and_then(|_| io.sync())
+    {
+        crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
+        return Err(format!("write new INDX block: {e}"));
+    }
+    let left_offset = idx_block::vcn_to_disk_offset(ia, 0, io.size())?;
+    if let Err(e) = io.write_all_at(left_offset, &left).and_then(|_| io.sync()) {
+        crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
+        return Err(format!("write split left INDX block: {e}"));
+    }
+    if let Err(e) = crate::mft_io::restore_mft_record_io(io, parent_rec, &parent) {
+        let mut rollback = old_left.clone();
+        let rollback_result = crate::mft_io::apply_fixup_on_write_magic(
+            &mut rollback,
+            ia.params.bytes_per_sector,
+            b"INDX",
+        )
+        .and_then(|_| {
+            io.write_all_at(left_offset, &rollback)
+                .map_err(|e| e.to_string())
         })
+        .and_then(|_| io.sync());
+        if rollback_result.is_ok() {
+            crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
+        }
+        return Err(format!(
+            "commit split root: {e}; {}",
+            if rollback_result.is_ok() {
+                "the old leaf was restored"
+            } else {
+                "the new allocation was left allocated for safety"
+            }
+        ));
+    }
+    Ok(())
+}
+
+/// Promote a full resident directory index into one allocated INDX leaf and
+/// insert the entry which triggered the promotion.
+fn promote_parent_index_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    params: &crate::mft_io::BootParams,
+    entry_bytes: &[u8],
+    basename: &str,
+    upcase: Option<&crate::upcase::UpcaseTable>,
+) -> Result<(), String> {
+    let block_size = usize::try_from(params.index_block_size)
+        .map_err(|_| "index block size does not fit usize".to_string())?;
+    let clusters = u64::from(params.index_block_size).div_ceil(params.cluster_size);
+    let volume_bitmap = crate::bitmap::locate_bitmap_io(io)?;
+    let lcn = crate::bitmap::find_free_run_io(io, &volume_bitmap, clusters, params.mft_lcn)?
+        .ok_or_else(|| format!("no {clusters}-cluster run for the first INDX block"))?;
+    crate::bitmap::allocate_io(io, &volume_bitmap, lcn, clusters)?;
+
+    let prepared = (|| -> Result<(Vec<u8>, Vec<u8>), String> {
+        let (_, mut parent) = read_mft_record_io(io, parent_rec)?;
+        let mut block = index_io::promote_index_root_to_first_indx(
+            &mut parent,
+            block_size,
+            params.bytes_per_sector,
+        )?;
+        index_io::insert_entry_into_indx_block_with_collation(
+            &mut block,
+            entry_bytes,
+            basename,
+            upcase,
+        )?;
+
+        let mapping = crate::data_runs::encode_runs(&[DataRun {
+            starting_vcn: 0,
+            length: clusters,
+            lcn: Some(lcn),
+        }])?;
+        let allocation_id = crate::attr_resize::allocate_attribute_id(&mut parent);
+        let allocation = crate::record_build::build_nonresident_attribute(
+            AttrType::IndexAllocation as u32,
+            Some(crate::mkfs::stream::I30),
+            allocation_id,
+            u64::from(params.index_block_size),
+            clusters * params.cluster_size,
+            u64::from(params.index_block_size),
+            i64::try_from(clusters - 1).map_err(|_| "INDX VCN does not fit i64")?,
+            &mapping,
+        )?;
+        crate::attr_resize::insert_attribute_sorted(&mut parent, &allocation)?;
+        let bitmap_id = crate::attr_resize::allocate_attribute_id(&mut parent);
+        let bitmap = build_named_resident_attribute(
+            AttrType::Bitmap as u32,
+            crate::mkfs::stream::I30,
+            bitmap_id,
+            &[1],
+        );
+        crate::attr_resize::insert_attribute_sorted(&mut parent, &bitmap)?;
+        Ok((parent, block))
+    })();
+
+    let (parent, mut block) = match prepared {
+        Ok(v) => v,
+        Err(e) => {
+            crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
+            return Err(e);
+        }
+    };
+
+    crate::mft_io::apply_fixup_on_write_magic(&mut block, params.bytes_per_sector, b"INDX")?;
+    let block_offset = lcn
+        .checked_mul(params.cluster_size)
+        .ok_or("INDX block offset overflow")?;
+    if let Err(e) = io
+        .write_all_at(block_offset, &block)
+        .and_then(|_| io.sync())
+    {
+        crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
+        return Err(format!("write first INDX block: {e}"));
+    }
+    crate::mft_io::restore_mft_record_io(io, parent_rec, &parent).map_err(|e| {
+        format!(
+            "the first INDX block is allocated and written but parent record {parent_rec} could \
+             not be promoted ({e}); its clusters were left allocated for safety"
+        )
     })
+}
+
+fn build_named_resident_attribute(
+    attr_type: u32,
+    name: &str,
+    attr_id: u16,
+    value: &[u8],
+) -> Vec<u8> {
+    let name: Vec<u16> = name.encode_utf16().collect();
+    let name_offset = 24usize;
+    let value_offset = crate::record_build::align8(name_offset + name.len() * 2);
+    let attr_length = crate::record_build::align8(value_offset + value.len());
+    let mut attr = vec![0u8; attr_length];
+    attr[0..4].copy_from_slice(&attr_type.to_le_bytes());
+    attr[4..8].copy_from_slice(&(attr_length as u32).to_le_bytes());
+    attr[9] = name.len() as u8;
+    attr[10..12].copy_from_slice(&(name_offset as u16).to_le_bytes());
+    attr[14..16].copy_from_slice(&attr_id.to_le_bytes());
+    attr[16..20].copy_from_slice(&(value.len() as u32).to_le_bytes());
+    attr[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes());
+    for (i, c) in name.iter().enumerate() {
+        attr[name_offset + i * 2..name_offset + i * 2 + 2].copy_from_slice(&c.to_le_bytes());
+    }
+    attr[value_offset..value_offset + value.len()].copy_from_slice(value);
+    attr
 }
 
 // ---------------------------------------------------------------------------
@@ -2136,8 +2393,12 @@ pub fn list_ea_keys_io<T: BlockIo + ?Sized>(
 /// Rewrite `$EA` + `$EA_INFORMATION`. Empty list ⇒ both removed.
 fn commit_eas(record: &mut [u8], eas: &[crate::ea_io::Ea]) -> Result<(), String> {
     let packed = crate::ea_io::encode(eas)?;
-    let need = crate::ea_io::count_need_ea(eas);
-    let ea_info_value = crate::ea_io::build_ea_information_value(packed.len() as u16, need);
+    let packed_length = crate::ea_io::packed_ea_length(eas)?;
+    let need = u16::try_from(crate::ea_io::count_need_ea(eas))
+        .map_err(|_| "NEED_EA count too large".to_string())?;
+    let query_length = u32::try_from(packed.len())
+        .map_err(|_| format!("EA query length too large: {}", packed.len()))?;
+    let ea_info_value = crate::ea_io::build_ea_information_value(packed_length, need, query_length);
 
     if eas.is_empty() {
         remove_unnamed_attr(record, AttrType::ExtendedAttribute)?;

@@ -28,7 +28,7 @@ use std::ffi::{c_char, c_void, CString};
 use fs_ntfs::{
     fs_ntfs_clear_last_error, fs_ntfs_create_file_h, fs_ntfs_last_errno, fs_ntfs_last_error,
     fs_ntfs_mount_rw_with_fs_core_device, fs_ntfs_mount_with_fs_core_device, fs_ntfs_read_file,
-    fs_ntfs_umount, fs_ntfs_write_file_contents_h,
+    fs_ntfs_umount, fs_ntfs_write_file_contents_h, fsck,
 };
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
@@ -47,6 +47,25 @@ fn last_error() -> String {
         }
         std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
     }
+}
+
+#[test]
+fn fs_core_dirty_volume_mounts_ro_but_refuses_rw_without_writes() {
+    let img = copy_fixture("dirty_refuse");
+    fsck::set_dirty(&img).expect("mark dirty");
+    let before = std::fs::read(&img).expect("snapshot image");
+    let c_path = CString::new(img.as_str()).expect("CString");
+    let dev = unsafe { fs_core::ffi::fs_core_file_open(c_path.as_ptr(), true) };
+    assert!(!dev.is_null(), "open fs-core device");
+
+    let ro = fs_ntfs_mount_with_fs_core_device(dev);
+    assert!(!ro.is_null(), "dirty read-only mount: {}", last_error());
+    fs_ntfs_umount(ro);
+    let rw = fs_ntfs_mount_rw_with_fs_core_device(dev);
+    assert!(rw.is_null(), "dirty read-write mount must fail");
+    assert!(last_error().contains("dirty"));
+    unsafe { fs_core::ffi::fs_core_device_close(dev) };
+    assert_eq!(std::fs::read(&img).expect("read image"), before);
 }
 
 #[test]

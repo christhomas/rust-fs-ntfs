@@ -492,8 +492,9 @@ jobs:
   # the raw-byte buffer manipulations (mft_io / data_runs / attr_io /
   # ea_io) that the regular test suite would otherwise let through
   # silently. Nightly toolchain (ASan needs -Zsanitizer=address);
-  # non-blocking via continue-on-error so nightly toolchain breakage
-  # doesn't block PRs against stable.
+  # advisory because branch protection does not require this job. Only the
+  # nightly-install step tolerates failure; sanitizer findings turn the job
+  # red and remain visible to reviewers.
   #
   # THE NAME SAYS WHAT THE JOB IS, WHICH IT DID NOT USED TO (#278).
   #
@@ -665,14 +666,14 @@ jobs:
   changes:
     name: what this pull request touches
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     outputs:
-      mkfs: ${{ steps.filter.outputs.mkfs }}
+      mkfs: ${{ steps.filter.outputs.mkfs || steps.unfiltered.outputs.mkfs }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - id: filter
+        if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
@@ -690,20 +691,16 @@ jobs:
           else
               echo "mkfs=false" >> "$GITHUB_OUTPUT"
           fi
+      # Tags, main pushes and manual dispatches validate on Windows.
+      - id: unfiltered
+        if: github.event_name != 'pull_request'
+        run: echo 'mkfs=true' >> "$GITHUB_OUTPUT"
 
-  validate-mkfs-windows:
-    name: validate rust-ntfs format (Windows chkdsk)
+  validate-mkfs-windows-run:
+    name: Windows chkdsk execution
     runs-on: windows-latest
     needs: [changes]
-    # `always()` because `needs: [changes]` would otherwise skip this job
-    # whenever `changes` itself was skipped -- which is every tag push and
-    # every manual run, the two cases that must always validate.
-    if: >-
-      always() && (
-        startsWith(github.ref, 'refs/tags/v') ||
-        github.event_name == 'workflow_dispatch' ||
-        needs.changes.outputs.mkfs == 'true'
-      )
+    if: needs.changes.outputs.mkfs == 'true'
     steps:
       - uses: actions/checkout@v4
       - name: check out sibling repos
@@ -1013,3 +1010,30 @@ jobs:
           roundtrip_outcome: ${{ steps.roundtrip.outcome }}
           chkdsk_after_outcome: ${{ steps.chkdsk_after.outcome }}
           chkdsk_after_exit: ${{ steps.chkdsk_after.outputs.scan_exit }}
+
+  # Keep the existing required-check name while making an intentional Windows
+  # skip report as success. A failed or missing run must report failure.
+  validate-mkfs-windows:
+    name: validate rust-ntfs format (Windows chkdsk)
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [changes, validate-mkfs-windows-run]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the Windows verdict
+        env:
+          GATE_NEEDS_JSON: ${{ toJSON(needs) }}
+        run: bash scripts/ci-verdict.sh windows
+
+  # ASan stays advisory: it is deliberately not a dependency here.
+  ci-ok:
+    name: ci-ok
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [test, integration, changes, validate-mkfs-windows]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check every gating job
+        env:
+          GATE_NEEDS_JSON: ${{ toJSON(needs) }}
+        run: bash scripts/ci-verdict.sh aggregate

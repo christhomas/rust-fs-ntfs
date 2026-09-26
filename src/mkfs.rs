@@ -124,35 +124,11 @@ const LOGFILE_CANONICAL: &[u8] = include_bytes!("logfile-canonical-12k.bin");
 /// * `WIN32_DOS` (3) is used on every name we currently ship: root,
 ///   the canonical 0..10 system files, and `$Extend` itself. All
 ///   these names fit DOS 8.3.
-/// * `POSIX` (0) is what Iter L's byte truth (2026-05-22, clean
-///   Windows-format reference) recorded for every `$Extend` child, and
-///   shipping an 11-char name like `$RmMetadata` with `WIN32_DOS` makes
-///   chkdsk Stage 2 reject it ("An invalid filename X (11) was found in
-///   directory B").
-///
-///   THIS CRATE SHIPS `WIN32_DOS` FOR ITS THREE `$Extend` CHILDREN, and
-///   that contradicts the measurement above. `$ObjId`, `$Reparse` and
-///   `$Quota` (records 16, 17, 18) are built and placed today, and both
-///   sites that stamp a namespace byte for them use `NAMESPACE_WIN32_DOS`
-///   -- three in-record `$FILE_NAME`s and three `$I30` index entries, on
-///   every volume this crate formats.
-///
-///   The names are 6, 8 and 6 characters, so they fit 8.3 and do not
-///   trip the length rule the measurement's example did. The 46-scenario
-///   matrix is green with the bytes as they are, so this is not a known
-///   failure -- it is a documented rule and its violation twenty lines
-///   apart, and a candidate for the unexplained residue in the chkdsk
-///   investigation. #182 holds the measured change: switch the two sites
-///   to POSIX and re-run the affected scenarios, or record why WIN32_DOS
-///   is right for these three. Either needs the VM, not an opinion.
-///
-///   The constant carried `#[allow(dead_code)]` and "despite no current
-///   call site", which told a reader the rule was dormant. It is not:
-///   the records exist and the sites that should consult it do not. The
-///   attribute stays because the constant really is unreferenced -- but
-///   the reason is now the true one, and it names the issue rather than
-///   implying there is nothing to check.
-#[allow(dead_code)] // Unreferenced BECAUSE the two sites that should use it do not: #182.
+/// * `POSIX` (0) is used for every `$Extend` child, in both its in-record
+///   `$FILE_NAME` and its `$I30` entry. Iter L's byte truth (2026-05-22,
+///   clean Windows-format reference) measured this namespace for every
+///   child; chkdsk Stage 2 rejects longer names such as `$RmMetadata` when
+///   they are incorrectly stamped `WIN32_DOS`.
 const NAMESPACE_POSIX: u8 = 0;
 const NAMESPACE_WIN32_DOS: u8 = 3;
 
@@ -334,7 +310,12 @@ pub fn format_filesystem(
     // and cluster-512). Cap to max(4, boot_clusters).
     let boot_clusters_for_layout: u64 = 8192u64.div_ceil(cluster_size as u64);
     let mft_lcn: u64 = boot_clusters_for_layout.max(4);
-    let mft_clusters: u64 = (mft_record_size as u64 * 64)
+    // Leave enough initially-addressable records for a directory to cross
+    // the resident-root boundary and exercise more than one INDX leaf.
+    // Record I/O is still contiguous today, so exhausting a 64-record MFT
+    // before that ordinary index shape was reachable made the directory
+    // capacity depend on an unrelated allocator ceiling.
+    let mft_clusters: u64 = (mft_record_size as u64 * 128)
         .div_ceil(cluster_size as u64)
         .max(1);
     let mft_records_capacity: u64 = mft_clusters * cluster_size as u64 / mft_record_size as u64;
@@ -1231,7 +1212,7 @@ pub fn format_filesystem(
         for &(child_rec, child_name) in &extend_children {
             let child_seq: u16 = child_rec as u16;
             let child_ref = encode_file_reference(child_rec as u64, child_seq);
-            let stream = build_skeleton_fn_stream(extend_ref, child_name)?;
+            let stream = build_skeleton_fn_stream(extend_ref, child_name, NAMESPACE_POSIX)?;
             entries_blob.extend_from_slice(&build_index_entry(child_ref, &stream, false));
         }
         entries_blob.extend_from_slice(&build_index_entry(0, &[], true));
@@ -1422,7 +1403,7 @@ pub fn format_filesystem(
                     NAMESPACE_WIN32_DOS,
                 )?
             } else {
-                build_skeleton_fn_stream(parent_ref, name)?
+                build_skeleton_fn_stream(parent_ref, name, NAMESPACE_WIN32_DOS)?
             };
             let entry =
                 build_index_entry(encode_file_reference(rec_num as u64, seq), &stream, false);
@@ -1718,6 +1699,11 @@ fn build_system_record_with_parent(
         is_view_index,
         0x100,
     );
+    let namespace = if parent_record == rec::EXTEND {
+        NAMESPACE_POSIX
+    } else {
+        NAMESPACE_WIN32_DOS
+    };
     cursor = write_file_name(
         &mut rec,
         cursor,
@@ -1730,7 +1716,7 @@ fn build_system_record_with_parent(
         is_view_index,
         fn_data_alloc,
         fn_data_real,
-        NAMESPACE_WIN32_DOS,
+        namespace,
     )?;
 
     for attr in extra_attrs {
@@ -2287,7 +2273,11 @@ fn build_file_name_stream(
 /// Byte-corroboration: run-20260503-011545/mac-format-label-empty,
 /// reference-mft-16recs.bin rec 5 entries 0..4,6..10. See
 /// `docs/spec/sections/04-indexes-directories.md#i30-system-skeleton`.
-fn build_skeleton_fn_stream(parent_reference: u64, name: &str) -> Result<Vec<u8>, String> {
+fn build_skeleton_fn_stream(
+    parent_reference: u64,
+    name: &str,
+    namespace: u8,
+) -> Result<Vec<u8>, String> {
     let utf16: Vec<u16> = name.encode_utf16().collect();
     if utf16.is_empty() || utf16.len() > 255 {
         return Err(format!("invalid name length {}", utf16.len()));
@@ -2297,7 +2287,7 @@ fn build_skeleton_fn_stream(parent_reference: u64, name: &str) -> Result<Vec<u8>
     buf[0..8].copy_from_slice(&parent_reference.to_le_bytes());
     // Bytes 0x08..0x40 left zero — that's the whole point.
     buf[64] = utf16.len() as u8;
-    buf[65] = NAMESPACE_WIN32_DOS;
+    buf[65] = namespace;
     for (i, c) in utf16.iter().enumerate() {
         let off = 66 + i * 2;
         buf[off..off + 2].copy_from_slice(&c.to_le_bytes());

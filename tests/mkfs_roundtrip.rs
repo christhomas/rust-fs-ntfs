@@ -534,6 +534,67 @@ fn extend_record_is_empty_directory() {
     );
 }
 
+/// Windows-format byte measurements use namespace byte 0 (POSIX) for both
+/// copies of every `$Extend` child name: the child's in-record `$FILE_NAME`
+/// and its key in `$Extend`'s `$I30`. Exercise geometries on both sides of a
+/// 4 KiB cluster so the assertion is not accidentally tied to one MFT layout.
+#[test]
+fn extend_child_names_use_posix_namespace_across_geometries() {
+    for (cluster_size, record_size) in [(512, 4096), (4096, 4096), (8192, 4096)] {
+        let mut dev = MemDev::new(VOL_SIZE);
+        format_filesystem(
+            &mut dev,
+            VOL_SIZE,
+            cluster_size,
+            record_size,
+            Some("EXTENDNS"),
+            Some(0x182),
+        )
+        .expect("format_filesystem");
+
+        let mut cursor = std::io::Cursor::new(&dev.buf);
+        let ntfs = Ntfs::new(&mut cursor).expect("open freshly formatted volume");
+
+        for record_number in [rec::OBJID, rec::REPARSE, rec::QUOTA] {
+            let child = ntfs
+                .file(&mut cursor, record_number as u64)
+                .expect("open $Extend child");
+            let name = child
+                .name(&mut cursor, Some(NtfsFileNamespace::Posix), None)
+                .expect("child has a POSIX $FILE_NAME")
+                .expect("read child $FILE_NAME");
+            assert_eq!(
+                name.parent_directory_reference().file_record_number(),
+                rec::EXTEND as u64,
+                "record {record_number} parent at cluster={cluster_size} record={record_size}"
+            );
+        }
+
+        let extend = ntfs
+            .file(&mut cursor, rec::EXTEND as u64)
+            .expect("open $Extend");
+        let index = extend
+            .directory_index(&mut cursor)
+            .expect("$Extend has an $I30");
+        let mut entries = index.entries();
+        let mut namespaces = Vec::new();
+        while let Some(entry) = entries.next(&mut cursor) {
+            let entry = entry.expect("read $Extend index entry");
+            if let Some(key) = entry.key() {
+                let key = key.expect("decode $Extend index key");
+                namespaces.push((key.name().to_string_lossy(), key.namespace()));
+            }
+        }
+        assert_eq!(namespaces.len(), 3, "$Extend child entry count");
+        assert!(
+            namespaces
+                .iter()
+                .all(|(_, namespace)| *namespace == NtfsFileNamespace::Posix),
+            "$Extend index namespace bytes at cluster={cluster_size} record={record_size}: {namespaces:?}"
+        );
+    }
+}
+
 /// Read the MFT base offset + record size from the BPB so the
 /// zero-slot assertions below stay load-bearing if the test's
 /// cluster/record params ever drift. NTFS BPB (sector 0):

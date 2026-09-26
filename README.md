@@ -24,8 +24,9 @@ What's solid today:
   promotion, grow / truncate, create / unlink / mkdir / rmdir,
   rename (same- and variable-length), hard links, ADS write/delete,
   reparse points, EAs, timestamps, file-attribute flag toggling.
-- **Recovery** — dirty-flag detect + clear, `$LogFile` reset,
-  end-to-end fsck. Both path-based and callback-transport APIs.
+- **Recovery controls** — dirty-flag detection, explicit clear and
+  `$LogFile` reset. `fsck` refuses a dirty volume with nonempty log data.
+  Both path-based and callback-transport APIs.
 - **mkfs** — pure-Rust formatter that produces volumes Microsoft's
   `chkdsk /scan` accepts and Windows `ntfs.sys` mounts and writes
   to. This was the multi-month wall the project broke through on
@@ -82,7 +83,7 @@ consistency boundary, not a promise that every listed name remains openable.
 | Timestamp writes (atime / mtime / ctime / crtime) | yes |
 | File-attribute flag toggling | yes |
 | mkfs (format a blank image to NTFS) | yes |
-| fsck (clear dirty flag + `$LogFile` reset) | yes |
+| fsck (clear dirty + reset log) | only when dirty log is empty |
 | `$INDEX_ALLOCATION` insert / delete (overflowed dirs) | insert runs but places the entry by free space, not by key — #301. Delete: not yet (W3.3) |
 | `$MFT` self-growth (full `$MFT:$Bitmap`) | not yet — W2.6 |
 
@@ -127,9 +128,9 @@ Concrete user-observable list, end-to-end:
 - Add / remove ADS, reparse points, EAs; create symlinks.
 - Patch any combination of the four NT timestamps in
   `$STANDARD_INFORMATION`; toggle `FILE_ATTRIBUTE_*` flags.
-- Detect a dirty volume and clean it (`fs_ntfs_fsck`) — including
-  through a callback-only block-device transport with progress
-  callbacks for long `$LogFile` resets.
+- Detect dirty volumes and refuse writable mounts. `fs_ntfs_fsck`
+  can clear dirty when `$LogFile` is empty; callback transport reports
+  progress during a permitted reset.
 - Drive everything from C, Go (cgo), or Swift via the stable
   `fs_ntfs_*` C ABI in `include/fs_ntfs.h`.
 
@@ -137,6 +138,11 @@ Concrete user-observable list, end-to-end:
 
 Specific limits, current as of HEAD:
 
+- **`$LogFile` replay.** Not implemented. A dirty volume remains
+  readable, but writable mounts are refused. `fsck` refuses a dirty
+  volume with nonempty log data and does not validate metadata
+  consistency. Explicit log reset is only for volumes independently
+  known consistent.
 - **Overflowed directories.** Once a directory has more entries
   than fit in `$INDEX_ROOT`, writes that would touch its index
   (`create_file`, `mkdir`, `rmdir`, `unlink`, `rename`) refuse with

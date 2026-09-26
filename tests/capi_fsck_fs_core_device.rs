@@ -102,6 +102,18 @@ fn upstream_logfile_data_start(path: &str) -> (u64, u64) {
     panic!("no unnamed $DATA on $LogFile");
 }
 
+fn empty_logfile(path: &str) {
+    let (pos, len) = upstream_logfile_data_start(path);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open image");
+    file.seek(SeekFrom::Start(pos)).expect("seek log");
+    file.write_all(&vec![0xFF; len as usize])
+        .expect("empty log");
+    file.sync_all().expect("sync log");
+}
+
 fn read_u16_le_at(path: &str, offset: u64) -> u16 {
     let mut f = std::fs::File::open(path).expect("open");
     f.seek(SeekFrom::Start(offset)).expect("seek");
@@ -179,7 +191,8 @@ fn is_dirty_with_fs_core_device_neg1_on_null() {
 
 #[test]
 fn fsck_with_fs_core_device_clears_dirty_and_resets_log() {
-    let img = dirty_copy("full", true, true);
+    let img = dirty_copy("full", true, false);
+    empty_logfile(&img);
     let h = open_dev(&img, true); // writable
 
     let mut bytes: u64 = 0;
@@ -199,6 +212,24 @@ fn fsck_with_fs_core_device_clears_dirty_and_resets_log() {
         !flags.contains(NtfsVolumeFlags::IS_DIRTY),
         "dirty bit should be cleared on disk after fsck; flags={flags:?}"
     );
+}
+
+#[test]
+fn fsck_with_fs_core_device_refuses_dirty_nonempty_log_without_writes() {
+    let img = dirty_copy("refuse_pending", true, true);
+    let before = std::fs::read(&img).expect("snapshot image");
+    let h = open_dev(&img, true);
+    let rc = fs_ntfs_fsck_with_fs_core_device(
+        h,
+        None,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+    );
+    unsafe { fs_core_device_close(h) };
+    assert_eq!(rc, -1);
+    assert!(last_error().contains("$LogFile"));
+    assert_eq!(std::fs::read(&img).expect("read image"), before);
 }
 
 #[test]
@@ -276,7 +307,8 @@ fn fsck_with_fs_core_device_progress_callback_fires() {
         0
     }
 
-    let img = dirty_copy("progress", true, true);
+    let img = dirty_copy("progress", true, false);
+    empty_logfile(&img);
     let h = open_dev(&img, true);
 
     EVENTS.lock().expect("lock").clear();

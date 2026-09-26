@@ -136,6 +136,18 @@ fn read_logfile_first_page(path: &str) -> Vec<u8> {
     buf
 }
 
+fn empty_logfile(path: &str) {
+    let (pos, len) = upstream_logfile_data_start(path);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open image");
+    file.seek(SeekFrom::Start(pos)).expect("seek log");
+    file.write_all(&vec![0xFF; len as usize])
+        .expect("empty log");
+    file.sync_all().expect("sync log");
+}
+
 fn last_error() -> String {
     unsafe {
         let p = fs_ntfs_last_error();
@@ -253,7 +265,8 @@ fn is_dirty_with_callbacks_neg1_on_null_cfg() {
 
 #[test]
 fn fsck_with_callbacks_clears_dirty_and_resets_log() {
-    let img = dirty_copy("cb_full", true, true);
+    let img = dirty_copy("cb_full", true, false);
+    empty_logfile(&img);
     let (ctx, size) = make_ctx(&img);
     let cfg = FsNtfsBlockdevCfg {
         read: read_cb,
@@ -276,6 +289,30 @@ fn fsck_with_callbacks_clears_dirty_and_resets_log() {
     drop(ctx); // release the file handle so the verification reads see the final state
     assert!(!read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
     assert!(read_logfile_first_page(&img).iter().all(|&b| b == 0xFF));
+}
+
+#[test]
+fn fsck_with_callbacks_refuses_dirty_nonempty_log_without_writes() {
+    let img = dirty_copy("cb_refuse_pending", true, true);
+    let before = std::fs::read(&img).expect("snapshot image");
+    let (ctx, size) = make_ctx(&img);
+    let cfg = FsNtfsBlockdevCfg {
+        read: read_cb,
+        context: &ctx as *const FileCtx as *mut c_void,
+        size_bytes: size,
+        write: Some(write_cb),
+    };
+    let rc = fs_ntfs_fsck_with_callbacks(
+        &cfg,
+        None,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+    );
+    assert_eq!(rc, -1);
+    assert!(last_error().contains("$LogFile"));
+    drop(ctx);
+    assert_eq!(std::fs::read(&img).expect("read image"), before);
 }
 
 #[test]
@@ -327,7 +364,8 @@ unsafe extern "C" fn progress_cb(
 
 #[test]
 fn fsck_with_callbacks_emits_progress() {
-    let img = dirty_copy("cb_progress", true, true);
+    let img = dirty_copy("cb_progress", true, false);
+    empty_logfile(&img);
     let (ctx, size) = make_ctx(&img);
     let cfg = FsNtfsBlockdevCfg {
         read: read_cb,
