@@ -108,6 +108,12 @@ host = "host"
 command = "bash scripts/init-image.sh {image_dir}/{run_id}/{scenario.image} {scenario.volume_params.size_mib}"
 expect_exit = 0
 
+[ops.stage-fragmented-indx]
+# Decompress the committed foreign fixture into this run's image directory.
+host = "host"
+command = "bash scripts/stage-fragmented-indx.sh {image_dir}/{run_id}/{scenario.image}"
+expect_exit = 0
+
 [ops.mac-format]
 # Format an existing pre-sized image with the rust-ntfs formatter.
 # The serial is fixed across the matrix today; future scenarios may
@@ -255,7 +261,7 @@ expect_exit = 0
 #                 multi-op recipe should omit this so cleanup runs.
 #   diag        — vm-side directory for enumerate.txt + wrapper-create.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-enumerate.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-enumerate.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -KeepImage '{step.keep_image?}' -RequiredPaths '{step.required_paths?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-write-content]
