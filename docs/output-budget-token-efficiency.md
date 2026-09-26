@@ -29,7 +29,7 @@ unit: ok (653 lines, 44377 bytes) — …/tmp/logs/unit.log
 
 A successful command that exceeds its tier budget exits 65 and points to the
 full log. A log containing `SKIP:` exits 66; ignored-test counts remain visible.
-`FWTH_VERBOSE=1` or the supported verbose CLI flag streams the same output as
+`OUTPUT_BUDGET_VERBOSE=1` or the supported verbose CLI flag streams the same output as
 well as retaining it, but does not relax the budget.
 
 ## Logs and CI artifacts
@@ -52,7 +52,8 @@ manufacture an empty log.
 For a failed wrapped command, the canonical wrapper emits a compact capsule:
 
 - the tier label and exact underlying exit status;
-- the last 40 log lines by default, bounded by the wrapper's `--tail` value;
+- no log lines at all by default, and the last N when `--tail N` or
+  `OUTPUT_BUDGET_FAIL_TAIL=N` asks for them;
 - the total log line count; and
 - the full local log path.
 
