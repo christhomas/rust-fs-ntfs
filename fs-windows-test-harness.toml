@@ -27,6 +27,8 @@
 # 30 GiB of orphaned .img/.vhd behind. The real ceiling is the VM's
 # memory and its disk: every concurrent scenario holds a disk image plus
 # its VHD wrapper, and the largest scenario is 16 GiB.
+# The three 4/4/16 GiB cases also share `exclusive_group = "large-volume"`
+# in test-matrix.json, so only that resource-heavy subset is serialized.
 max_parallel = 4
 
 [groups]
@@ -106,6 +108,12 @@ packages = []
 # through bash so Windows hosts use Git Bash rather than cmd.exe.
 host = "host"
 command = "bash scripts/init-image.sh {image_dir}/{run_id}/{scenario.image} {scenario.volume_params.size_mib}"
+expect_exit = 0
+
+[ops.stage-fragmented-indx]
+# Decompress the committed foreign fixture into this run's image directory.
+host = "host"
+command = "bash scripts/stage-fragmented-indx.sh {image_dir}/{run_id}/{scenario.image}"
 expect_exit = 0
 
 [ops.mac-format]
@@ -255,7 +263,7 @@ expect_exit = 0
 #                 multi-op recipe should omit this so cleanup runs.
 #   diag        — vm-side directory for enumerate.txt + wrapper-create.txt
 host = "vm"
-command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-enumerate.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-enumerate.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -KeepImage '{step.keep_image?}' -RequiredPaths '{step.required_paths?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-write-content]

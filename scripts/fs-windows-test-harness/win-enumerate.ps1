@@ -29,7 +29,8 @@
 param(
     [Parameter(Mandatory=$true)] [string]$ImagePath,
     [Parameter(Mandatory=$true)] [string]$Diag,
-    [string]$KeepImage = 'false'
+    [string]$KeepImage = 'false',
+    [string]$RequiredPaths = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,9 +54,15 @@ try {
         # `-Force` so System / Hidden NTFS metadata files are surfaced
         # alongside user content; v1's enumerate verdict comparisons
         # historically included them.
-        Get-ChildItem -LiteralPath "${letter}:\" -Recurse -Force -EA SilentlyContinue |
-            Select-Object -ExpandProperty FullName |
-            Out-File "$Diag\enumerate.txt" -Encoding UTF8
+        $entries = @(Get-ChildItem -LiteralPath "${letter}:\" -Recurse -Force -EA SilentlyContinue |
+            Select-Object -ExpandProperty FullName)
+        $entries | Out-File "$Diag\enumerate.txt" -Encoding UTF8
+        foreach ($relative in $RequiredPaths.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries)) {
+            $expected = Join-Path -Path "${letter}:\" -ChildPath ($relative -replace '/', '\')
+            if ($entries -notcontains $expected) {
+                throw "Windows enumeration did not find $expected"
+            }
+        }
     } catch {
         # Don't rethrow — the script's contract (and harness's
         # `expect_exit = 0`) is "always exit 0; enumeration is an
@@ -63,6 +70,7 @@ try {
         # let the run continue. Future verdict shapes that gate on the
         # listing's content can flip this.
         $_.Exception.Message | Out-File "$Diag\enumerate-error.txt" -Encoding UTF8
+        if ($RequiredPaths) { throw }
     }
 
     exit 0
