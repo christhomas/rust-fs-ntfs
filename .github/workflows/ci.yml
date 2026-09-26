@@ -762,6 +762,13 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      - name: Validate routed leaf split on Windows
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh mac-format-mac-split-routed-leaf-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       - name: Generate raw image and wrap in GPT-partitioned VHD
         shell: pwsh
         run: |

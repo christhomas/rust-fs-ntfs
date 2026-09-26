@@ -142,6 +142,12 @@ host = "host"
 command = "{binary} touch {image_dir}/{run_id}/{scenario.image} {step.parent} {step.basename}"
 expect_exit = 0
 
+[ops.mac-touch-many]
+# Fill and repeatedly split a Mac-authored directory before Windows checks it.
+host = "host"
+command = "bash scripts/mac-touch-many.sh {binary} {image_dir}/{run_id}/{scenario.image} {step.parent} {step.prefix} {step.count}"
+expect_exit = 0
+
 [ops.mac-touch-index-allocation-rejected]
 # This is deliberately an expected failure: a Windows-created wide directory
 # has an `$INDEX_ALLOCATION` overflow, and the Mac-side writer must refuse the
@@ -256,6 +262,11 @@ expect_exit = 0
 #   diag        — vm-side directory for enumerate.txt + wrapper-create.txt
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-enumerate.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
+[ops.win-assert-routed-names]
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-assert-routed-names.ps1' -Diag '{vm.workdir}/diag/{scenario_name}' -Directory '{step.directory}' -Count '{step.count}'"
 expect_exit = 0
 
 [ops.win-write-content]

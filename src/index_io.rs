@@ -1209,14 +1209,14 @@ pub(crate) fn promote_index_root_to_first_indx(
     Ok(block)
 }
 
-/// Split a full, single leaf after including `entry_bytes`, returning the
-/// rewritten left leaf, a new right leaf, and the separator promoted to the
-/// resident root. This is the first B+ tree growth step (one leaf to two).
+/// Split a full leaf after including `entry_bytes`, returning the rewritten
+/// old leaf, a new right leaf, and the separator promoted to its parent.
 pub(crate) type SplitIndxLeaves = (Vec<u8>, Vec<u8>, Vec<u8>);
 
-pub(crate) fn split_first_indx_leaf(
+pub(crate) fn split_indx_leaf(
     block: &[u8],
     entry_bytes: &[u8],
+    left_vcn: u64,
     right_vcn: u64,
     upcase: Option<&crate::upcase::UpcaseTable>,
 ) -> Result<SplitIndxLeaves, String> {
@@ -1299,10 +1299,91 @@ pub(crate) fn split_first_indx_leaf(
     }
 
     Ok((
-        rewrite_leaf(block, left_entries, 0)?,
+        rewrite_leaf(block, left_entries, left_vcn)?,
         rewrite_leaf(block, right_entries, right_vcn)?,
         separator,
     ))
+}
+
+/// Insert a separator before the root entry that routes to `left_vcn`.
+/// That old entry then routes to `right_vcn`, preserving all other children.
+/// A deeper tree has no matching root child and is refused before mutation.
+pub(crate) fn route_add_split_in_index_root(
+    record: &mut [u8],
+    separator: &[u8],
+    left_vcn: u64,
+    right_vcn: u64,
+    upcase: Option<&crate::upcase::UpcaseTable>,
+) -> Result<(), String> {
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
+        .ok_or("$INDEX_ROOT:$I30 missing")?;
+    let value = ir.attr_offset + ir.resident_value_offset.ok_or("no value offset")? as usize;
+    let value_end = index_root_value_end(record, &ir)?;
+    let ih = value + IR_INDEX_HEADER_OFFSET;
+    if record.get(ih + IH_FLAGS_OFFSET).copied().unwrap_or(0) & IH_FLAG_HAS_SUBNODES == 0 {
+        return Err("split parent is not an interior $INDEX_ROOT".to_string());
+    }
+    let first = read_u32_le(record, ih + IH_FIRST_ENTRY_OFFSET).ok_or("short index root")? as usize;
+    let total =
+        read_u32_le(record, ih + IH_TOTAL_SIZE_OF_ENTRIES).ok_or("short index root")? as usize;
+    if first != INDEX_HEADER_SIZE || total < first || ih + total > value_end {
+        return Err("invalid root routing bounds".to_string());
+    }
+    let name = String::from_utf16(&entry_name(separator, 0, separator.len())?)
+        .map_err(|_| "separator name is invalid UTF-16")?;
+    if index_root_child_vcn(record, &name, upcase)? != left_vcn {
+        return Err("split separator does not route to the old leaf".to_string());
+    }
+    let mut entries = record[ih + first..ih + total].to_vec();
+    let mut at = 0usize;
+    while at < entries.len() {
+        if at + IE_KEY_START > entries.len() {
+            return Err("truncated root routing entry".to_string());
+        }
+        let len =
+            u16::from_le_bytes([entries[at + IE_LENGTH], entries[at + IE_LENGTH + 1]]) as usize;
+        if len < 24 || !len.is_multiple_of(8) || at + len > entries.len() {
+            return Err("invalid root routing entry length".to_string());
+        }
+        let child_at = at + len - 8;
+        if u64::from_le_bytes(entries[child_at..child_at + 8].try_into().unwrap()) == left_vcn {
+            entries[child_at..child_at + 8].copy_from_slice(&right_vcn.to_le_bytes());
+            let sep_len = separator
+                .len()
+                .checked_add(8)
+                .ok_or("separator size overflow")?;
+            let mut promoted = vec![0u8; sep_len];
+            promoted[..separator.len()].copy_from_slice(separator);
+            promoted[IE_LENGTH..IE_LENGTH + 2].copy_from_slice(
+                &u16::try_from(sep_len)
+                    .map_err(|_| "separator is too long")?
+                    .to_le_bytes(),
+            );
+            promoted[IE_FLAGS..IE_FLAGS + 2].copy_from_slice(&IE_FLAG_HAS_SUBNODE.to_le_bytes());
+            promoted[sep_len - 8..].copy_from_slice(&left_vcn.to_le_bytes());
+            entries.splice(at..at, promoted);
+            let new_total = INDEX_HEADER_SIZE + entries.len();
+            let new_value_len = IR_INDEX_HEADER_OFFSET + new_total;
+            crate::attr_resize::resize_resident_value(
+                record,
+                ir.attr_offset,
+                new_value_len as u32,
+            )?;
+            let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
+                .ok_or("$INDEX_ROOT vanished")?;
+            let value =
+                ir.attr_offset + ir.resident_value_offset.ok_or("no value offset")? as usize;
+            let ih = value + IR_INDEX_HEADER_OFFSET;
+            record[ih + INDEX_HEADER_SIZE..ih + new_total].copy_from_slice(&entries);
+            record[ih + IH_TOTAL_SIZE_OF_ENTRIES..ih + IH_TOTAL_SIZE_OF_ENTRIES + 4]
+                .copy_from_slice(&(new_total as u32).to_le_bytes());
+            record[ih + IH_ALLOCATED_SIZE_OF_ENTRIES..ih + IH_ALLOCATED_SIZE_OF_ENTRIES + 4]
+                .copy_from_slice(&(new_total as u32).to_le_bytes());
+            return Ok(());
+        }
+        at += len;
+    }
+    Err("split leaf has no direct $INDEX_ROOT parent".to_string())
 }
 
 /// Replace the one-child promoted root with a separator routing to `left_vcn`
