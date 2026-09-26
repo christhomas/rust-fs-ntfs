@@ -524,7 +524,11 @@ failing suite: the budgets are measured, they live in one table in
 The work is done by the canonical `scripts/output-budget.sh` supplied by
 `rust-fs-core`. `scripts/tier.sh` uses the sibling core checkout in a full
 development environment, or the packaged Cargo dependency in a standalone
-clone. `test:suite`
+clone. The design and its token-efficiency tradeoffs are documented in
+[`docs/output-budget-token-efficiency.md`](docs/output-budget-token-efficiency.md).
+The broader coordination and workflow benefits are summarised in
+[`docs/agent-workflow-benefits.md`](docs/agent-workflow-benefits.md).
+`test:suite`
 needs the `test-disks/ntfs-*.img` fixtures (built on Linux by
 `test-disks/build-ntfs-feature-images.sh`) and says so if they are
 missing.

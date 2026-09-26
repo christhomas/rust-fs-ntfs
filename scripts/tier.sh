@@ -8,9 +8,8 @@
 # exits with the suite's own status.
 #
 # The work is done by rust-fs-core's canonical scripts/output-budget.sh. This
-# file resolves that script from a coordinated sibling or the packaged Cargo
-# dependency, and owns only the part that is ours: which tiers exist and how
-# much each may print.
+# file asks cargo where core is, copies that script for the run, and owns only
+# the part that is ours: which tiers exist and how much each may print.
 #
 # WHY THE BUDGET IS PART OF THE TIER and not a CI-only check: the reader who
 # pays most for a noisy suite is the one running it -- a person scrolling, or
@@ -31,7 +30,6 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUDGET=""
 
 [ $# -ge 3 ] || { echo "tier.sh: usage: tier.sh TIER -- COMMAND [ARG...]" >&2; exit 2; }
 TIER="$1"; shift
@@ -54,7 +52,7 @@ shift
 #   mkfs        115 / 3,858 cold (Mac), 24 / 1,022 warm           160 / 5,200
 #   suite       2,143 / 108,930 (CI Linux, fixtures built)        2,900 / 150,000
 #   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
-#   scripts     56 / 1,180 (four shell tests)                      80 / 1,800
+#   scripts     72 / 1,809 (five shell tests)                     100 / 2,400
 #   matrix      633 / 35,311 green, 1,521 / 78,075 red (see below)  900 / 50,000
 #
 # THE CLIPPY ROW MOVED ON 2026-09-19, from 150/5,000 to 260/11,500. Adding
@@ -79,7 +77,7 @@ case "$TIER" in
     mkfs)       MAX_LINES=160;  MAX_BYTES=5200 ;;
     suite)      MAX_LINES=2900; MAX_BYTES=150000 ;;
     asan)       MAX_LINES=1100; MAX_BYTES=72000 ;;
-    scripts)    MAX_LINES=80;   MAX_BYTES=1800 ;;
+    scripts)    MAX_LINES=100;  MAX_BYTES=2400 ;;
     matrix)     MAX_LINES=900;  MAX_BYTES=50000 ;;
     *)
         echo "tier.sh: '$TIER' has no budget. Add a measured row to scripts/tier.sh." >&2
@@ -87,7 +85,50 @@ case "$TIER" in
         ;;
 esac
 
-BUDGET="$(bash "$REPO/scripts/resolve-output-budget.sh")"
+# THE WRAPPER IS COPIED FROM rust-fs-core FOR THIS RUN, AND DELETED AFTER IT.
+#
+# It belongs to core, and it is deliberately NOT committed here. A committed
+# copy is a copy that drifts: measured on 2026-09-22 the family had three of
+# them, reached four different ways, each repository internally consistent
+# and nothing comparing them.
+#
+# CARGO IS ASKED WHERE CORE IS, rather than this script guessing. Cargo has
+# already resolved the dependency, and its answer is right in both shapes
+# this family uses: with `path = "../rust-fs-core"` it reports the developer's
+# own checkout, so work in progress on the wrapper is exercised here on the
+# next run; with a plain version requirement it reports the registry copy of
+# the pinned release. There is no sibling-versus-crate decision to make,
+# because cargo made it.
+#
+# Compilation flags belong to the wrapped command, not this discovery probe.
+# In particular the ASan tier supplies nightly-only -Z flags while this plain
+# `cargo metadata` uses the default stable toolchain. Clearing them here keeps
+# discovery toolchain-neutral; the command below still inherits them intact.
+#
+# tmp/ is gitignored and is where the tier logs already live.
+set +e
+CORE_DIR="$(RUSTFLAGS= RUSTDOCFLAGS= \
+    cargo metadata --format-version 1 --locked --manifest-path "$REPO/Cargo.toml" \
+    2>/dev/null | python3 -c '
+import json, sys
+packages = json.load(sys.stdin)["packages"]
+print(next((p["manifest_path"].rsplit("/", 1)[0]
+            for p in packages if p["name"] == "am-fs-core"), ""))
+' 2>/dev/null)"
+metadata_status=$?
+set -e
+if [ "$metadata_status" -ne 0 ] || [ -z "$CORE_DIR" ] || [ ! -f "$CORE_DIR/scripts/output-budget.sh" ]; then
+    echo "tier.sh: cargo could not say where am-fs-core is, or its copy has no" >&2
+    echo "         scripts/output-budget.sh. The wrapper lives in rust-fs-core;" >&2
+    echo "         check the am-fs-core dependency resolves and is at a version" >&2
+    echo "         that ships it (v0.2.11 or later)." >&2
+    exit 1
+fi
+
+BUDGET="$REPO/tmp/output-budget.$$.sh"
+mkdir -p "$REPO/tmp"
+trap 'rm -f "$BUDGET"' EXIT
+cp "$CORE_DIR/scripts/output-budget.sh" "$BUDGET"
 
 # `chore test:unit -- --verbose` arrives as CLI_ARGS. output-budget.sh reads
 # OUTPUT_BUDGET_VERBOSE itself, so mapping the flag onto it is all that is
