@@ -53,30 +53,15 @@
 #      anyone deciding to. Pinning it costs nothing and makes the intent
 #      reviewable in a diff.
 #
-# WHY NOT AN AGGREGATE `ci-ok` JOB. That is the better end state — one always-run
-# job that `needs:` every gating job, so the matrix can be renamed or resharded
-# without ever touching this file. This repository does not have one yet, and
-# adding it is a separate change with its own failure mode to get right (it must
-# fail on failure/cancelled AND skipped, or it launders a skipped gate into a
-# green tick). The real job names are declared meanwhile.
+# `ci-ok` now needs every gating job and fails on a failed, cancelled, missing
+# or unexpectedly skipped dependency. ASan remains advisory. Keep the five
+# direct checks during rollout: a new required context must first report
+# success on main before protection can safely converge to `ci-ok` alone.
+# The Windows context is an always-run verdict job; only its expensive
+# execution job is skipped for non-format pull requests.
 #
-# `validate rust-ntfs format (Windows chkdsk)` IS DECLARED EVEN THOUGH IT DOES
-# NOT RUN ON PULL REQUESTS TODAY. Its job-level `if:` restricts it to tag
-# pushes and `workflow_dispatch` (ci.yml, job `validate-mkfs-windows`), so on a pull request it reports
-# with conclusion `skipped` — and a `skipped` conclusion SATISFIES branch
-# protection. Declaring it therefore neither blocks nor gates anything right
-# now. It stays in the list because chkdsk is the ONLY authoritative validator
-# of an NTFS volume we have, and #266 is the open issue to make it run on pull
-# requests; dropping it here would quietly delete the Windows gate at the
-# moment #266 lands, and nobody would notice the tick that stopped mattering.
-#
-# The distinction that makes this safe: a job SKIPPED by a job-level `if:` still
-# reports, so protection is satisfied. A WORKFLOW that never starts (an `on:`
-# with `paths:` filters that match nothing) reports nothing at all, GitHub reads
-# the absent required check as pending, and with enforce_admins on nobody can
-# merge and there is no failure to point at. Verified before declaring it: check
-# suite 95386854742 (a pull_request run) reports this context with conclusion
-# `skipped`. Never declare a check you have not seen report.
+# A workflow-level path filter would suppress every required context and leave
+# protection pending forever; keep the workflow itself running on all PRs.
 #
 # Names must match the check-run names GitHub reports, which are the jobs'
 # `name:` values, not their ids — `test-${{ matrix.os }}` renders one name per
@@ -87,3 +72,4 @@
 	required = test-macos-latest
 	required = full test suite (fixtures + integration)
 	required = validate rust-ntfs format (Windows chkdsk)
+	required = ci-ok
