@@ -273,35 +273,40 @@ decompress. The compression-unit exponent is left at `0` and the
 
 Companion summary record for `$EA`. Resident, fixed-size payload.
 
-The on-disk layout used by
-the writer (`src/ea_io.rs::build_ea_information_value`) is:
+The on-disk layout used by the writer
+(`src/ea_io.rs::build_ea_information_value`) is:
 
 ```
 Offset  Size  Field                  Description
 ------  ----  ---------------------  ---------------------------------------
-0x00    2     EaPackedLength         Total bytes in the $EA value (FEA list)
-0x02    2     EaQueryLength          Approximation of pack length (writer
-                                     emits same value as EaPackedLength)
-0x04    4     EaCount (NEED_EA)      Count of FEAs with FILE_NEED_EA flag
+0x00    2     EaPackedLength         Sum of compact FEA sizes, excluding each
+                                     NextEntryOffset and alignment padding
+0x02    2     NeedEaCount            Count of FEAs with FILE_NEED_EA flag
                                      set in their flags byte
+0x04    4     EaQueryLength          Bytes required for the aligned
+                                     FILE_FULL_EA_INFORMATION query result
 ```
 
-`[OBSERVED: src/ea_io.rs]`. The writer treats `EaQueryLength` as an
-approximation of `EaPackedLength` rather than a true upper bound on
-the response buffer required by `NtQueryEaFile`; the
-cross-validation rule only requires `EaPackedLength`
-and the NEED_EA count to be self-consistent with the `$EA` body —
-not a particular `EaQueryLength` value.
+The field widths and order are independently corroborated by
+[ntfs-3g's `EA_INFORMATION`](https://github.com/tuxera/ntfs-3g/blob/d327833ec1d5eb1358b6f2c37139f10a3460944d/include/ntfs-3g/layout.h#L2353-L2367)
+and [Linux ntfs3's `EA_INFO`](https://github.com/torvalds/linux/blob/fe2ec83746e501645709761605c2464a44fd2929/fs/ntfs3/ntfs.h#L1079-L1091).
+`[CORROBORATED: ntfs-3g layout.h, Linux ntfs3 ntfs.h]`. A raw
+Windows-authored `$EA_INFORMATION` observation is not yet in the fixture set.
+
+The writer calculates `EaPackedLength` as the sum of each entry's flags,
+name length, value length, NUL-terminated name, and value. `EaQueryLength`
+is the full `$EA` value length, including each `NextEntryOffset` and the
+four-byte alignment padding required by `FILE_FULL_EA_INFORMATION`.
 
 ### Cross-validation rules {#ea-info-validation}
 
 [UNVERIFIED]:
 
 - `EaPackedLength` MUST equal the sum of every FEA entry's encoded
-  size (header + name + null terminator + value, padded to the next
-  4-byte boundary).
+  compact size (flags + name length + value length + name + null
+  terminator + value), without `NextEntryOffset` or alignment padding.
 - The count of `$EA` entries with `FILE_NEED_EA` set MUST equal the
-  `EaCount (NEED_EA)` field.
+  `NeedEaCount` field.
 - A mismatch is flagged as stale-summary corruption. The repair
   policy is destructive (delete *both* `$EA` and `$EA_INFORMATION`)
   — the file's primary `$DATA` is preserved.
@@ -376,7 +381,7 @@ the file from a process that does not understand its EAs.
 `[OBSERVED: src/ea_io.rs::FLAG_NEED_EA]`.
 
 The writer's `count_need_ea` walker is what produces the
-`EaCount (NEED_EA)` field for `$EA_INFORMATION`.
+`NeedEaCount` field for `$EA_INFORMATION`.
 
 ### Corruption policy {#ea-corruption}
 

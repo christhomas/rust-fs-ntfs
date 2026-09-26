@@ -3,7 +3,7 @@
 mod common;
 
 use fs_ntfs::{ea_io, write};
-use ntfs::Ntfs;
+use ntfs::{Ntfs, NtfsAttributeType, NtfsReadSeek};
 use std::io::BufReader;
 use std::path::Path;
 
@@ -76,8 +76,40 @@ fn write_multiple_eas() {
     assert_eq!(by_name[b"A".as_slice()], b"aaa");
     assert_eq!(by_name[b"B".as_slice()], b"bbbb");
     assert_eq!(by_name[b"C".as_slice()], b"ccccc");
-    // NEED_EA count is visible via upstream-readable $EA_INFORMATION.
     assert_eq!(ea_io::count_need_ea(&eas), 1);
+
+    // Read the raw summary through the independent `ntfs` crate. With exactly
+    // one NEED_EA entry, this distinguishes the u16 count at 0x02 from both
+    // length fields.
+    let query_len = ea_io::encode(&eas).unwrap().len() as u32;
+    let packed_len = ea_io::packed_ea_length(&eas).unwrap();
+    let (ntfs, mut reader) = common::open(&img);
+    let file = common::navigate(&ntfs, &mut reader, "/Documents/readme.txt");
+    let mut attributes = file.attributes();
+    let mut information = None;
+    while let Some(item) = attributes.next(&mut reader) {
+        let item = item.expect("attribute item");
+        let attribute = item.to_attribute().expect("attribute");
+        if attribute.ty().expect("attribute type") == NtfsAttributeType::EAInformation {
+            assert_eq!(attribute.value_length(), 8);
+            let mut value = attribute.value(&mut reader).expect("$EA_INFORMATION value");
+            let mut bytes = [0u8; 8];
+            assert_eq!(value.read(&mut reader, &mut bytes).expect("read value"), 8);
+            information = Some(bytes);
+            break;
+        }
+    }
+    let information = information.expect("$EA_INFORMATION attribute");
+    assert_eq!(
+        u16::from_le_bytes(information[0..2].try_into().unwrap()),
+        packed_len
+    );
+    assert_eq!(u16::from_le_bytes(information[2..4].try_into().unwrap()), 1);
+    assert_eq!(
+        u32::from_le_bytes(information[4..8].try_into().unwrap()),
+        query_len
+    );
+    assert_ne!(u32::from(packed_len), query_len);
 }
 
 #[test]
