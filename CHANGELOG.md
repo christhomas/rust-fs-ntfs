@@ -40,6 +40,10 @@
   entries. Previously all six namespace bytes were stamped `WIN32_DOS` even
   though the formatter's own Windows byte measurement documented POSIX. (#182)
 
+- Sparse mkfs system streams carry valid extended non-resident headers.
+  `$BadClus:$Bad` and `$Secure:$SDS` now set the SPARSE flag, preserve their
+  names ahead of the mapping pairs, and report their real allocated bytes.
+
 - One file-reference encoder, not two. `encode_file_reference` was defined
   twice — public in `record_build`, private in `mkfs` — with its own tests
   on each copy, and mkfs used its own. Two copies of a packing rule is how

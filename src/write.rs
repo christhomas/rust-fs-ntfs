@@ -3933,6 +3933,7 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
     let last_vcn = clusters_covered as i64 - 1;
 
     let new_attr_bytes = crate::record_build::build_sparse_nonresident_data_attribute(
+        None,
         attr_id,
         data_size,
         full_allocated_length,

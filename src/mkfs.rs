@@ -18,8 +18,9 @@ use crate::block_io::BlockIo;
 use crate::data_runs::{encode_runs, DataRun};
 use crate::mft_io::apply_fixup_on_write;
 use crate::record_build::{
-    align8, build_nonresident_attribute, build_nonresident_data_attribute, encode_file_reference,
-    nt_time_now, FA_ARCHIVE, FA_HIDDEN, FA_NTFS_DIRECTORY, FA_NTFS_VIEW_INDEX, FA_SYSTEM,
+    align8, build_nonresident_attribute, build_nonresident_data_attribute,
+    build_sparse_nonresident_data_attribute, encode_file_reference, nt_time_now, FA_ARCHIVE,
+    FA_HIDDEN, FA_NTFS_DIRECTORY, FA_NTFS_VIEW_INDEX, FA_SYSTEM,
 };
 use crate::upcase;
 
@@ -929,12 +930,12 @@ pub fn format_filesystem(
             lcn: None,
         }];
         let bad_mp = encode_runs(&bad_runs)?;
-        let bad_attr = build_nonresident_attribute(
-            ATTR_DATA,
+        let bad_attr = build_sparse_nonresident_data_attribute(
             Some(stream::BAD),
             4,
             bad_clusters * cluster_size as u64,
             bad_clusters * cluster_size as u64,
+            0,
             0,
             (bad_clusters as i64) - 1,
             &bad_mp,
@@ -1051,12 +1052,12 @@ pub fn format_filesystem(
             + SD_SYSFILE_RW.len() as u64;
         let sds_alloc_len = (gap_vcn + 1) * cluster_size as u64;
         let sds_last_vcn = gap_vcn as i64;
-        let sds_data = build_nonresident_attribute(
-            ATTR_DATA,
+        let sds_data = build_sparse_nonresident_data_attribute(
             Some(stream::SDS),
             4,
             sds_data_len,
             sds_alloc_len,
+            sds_real_clusters * cluster_size as u64,
             sds_data_len,
             sds_last_vcn,
             &sds_mp,
@@ -1655,6 +1656,7 @@ fn build_system_record_with_parent(
         record_number,
         rec::SECURE | rec::REPARSE | rec::OBJID | rec::QUOTA
     );
+    let is_sparse = matches!(record_number, rec::BADCLUS | rec::SECURE);
     // VIEW_INDEX records need both 0x0004 (MFT_RECORD_HAS_VIEW_INDEX, indicating
     // a named non-$I30 index root is present) and 0x0008 (MFT_RECORD_IS_VIEW_INDEX).
     // Post-/f byte-diff (2026-05-24): slots 16/17 show 0x000D after /f fixes them.
@@ -1697,6 +1699,7 @@ fn build_system_record_with_parent(
         is_dir,
         true,
         is_view_index,
+        is_sparse,
         0x100,
     );
     let namespace = if parent_record == rec::EXTEND {
@@ -1714,6 +1717,7 @@ fn build_system_record_with_parent(
         is_dir,
         true,
         is_view_index,
+        is_sparse,
         fn_data_alloc,
         fn_data_real,
         namespace,
@@ -1794,6 +1798,7 @@ fn build_reserved_placeholder(layout: &MftLayout, record_number: u32) -> Result<
         false,
         true,
         false,
+        false,
         0x100,
     );
 
@@ -1831,6 +1836,7 @@ fn write_standard_information(
     is_dir: bool,
     is_system: bool,
     is_view_index: bool,
+    is_sparse: bool,
     security_id: u32,
 ) -> usize {
     // 72-byte NTFS 3.x $STANDARD_INFORMATION (MS-FSCC §2.4.2):
@@ -1885,6 +1891,9 @@ fn write_standard_information(
     if is_view_index {
         fa |= FA_NTFS_VIEW_INDEX;
     }
+    if is_sparse {
+        fa |= crate::sparse::FILE_ATTRIBUTE_SPARSE_FILE;
+    }
     rec[v + 32..v + 36].copy_from_slice(&fa.to_le_bytes());
     // SecurityId at value+0x34 (MS-FSCC §2.4.2). OwnerId (+0x30),
     // QuotaCharged (+0x38), USN (+0x40) stay zero (fresh-format defaults).
@@ -1902,6 +1911,7 @@ fn write_file_name(
     is_dir: bool,
     is_system: bool,
     is_view_index: bool,
+    is_sparse: bool,
     data_alloc: u64,
     data_real: u64,
     namespace: u8,
@@ -1964,6 +1974,9 @@ fn write_file_name(
     }
     if is_view_index {
         fa |= FA_NTFS_VIEW_INDEX;
+    }
+    if is_sparse {
+        fa |= crate::sparse::FILE_ATTRIBUTE_SPARSE_FILE;
     }
     rec[v + 56..v + 60].copy_from_slice(&fa.to_le_bytes());
     rec[v + 60..v + 64].copy_from_slice(&0u32.to_le_bytes());
