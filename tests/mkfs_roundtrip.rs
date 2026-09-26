@@ -524,6 +524,13 @@ fn sparse_system_streams_have_extended_headers_and_real_allocation_totals() {
     assert_eq!(sds_runs[1].lcn, None);
     assert_eq!(sds_runs[1].length, SDS_MIRROR_GAP / CLUSTER_SIZE - 1);
     assert!(sds_runs[2].lcn.is_some());
+}
+
+#[test]
+fn sparse_system_records_mark_file_metadata_sparse() {
+    let mut dev = MemDev::new(VOL_SIZE);
+    format_filesystem(&mut dev, VOL_SIZE, 4096, 4096, Some("TESTVOL"), None)
+        .expect("format_filesystem");
 
     for record_number in [rec::BADCLUS, rec::SECURE] {
         let standard_information = raw_attribute(&dev, record_number as u64, 0x10, "");
