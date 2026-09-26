@@ -15,6 +15,8 @@
 //! windows-validation CI job — these crate-internal tests just confirm
 //! the binary is plumbed through to the formatter at all.
 
+mod common;
+
 use ntfs::Ntfs;
 use std::process::Command;
 
@@ -23,20 +25,10 @@ const TEST_LABEL: &str = "BINSMOKE";
 const TEST_SERIAL_HEX: &str = "deadbeefcafe1234";
 const TEST_SERIAL: u64 = 0xdeadbeefcafe1234;
 
-fn unique_tmp_path(suffix: &str) -> std::path::PathBuf {
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!("fs-ntfs-mkfs-bin-{pid}-{nanos}-{suffix}"))
-}
-
 #[test]
 fn mkfs_bin_formats_a_pre_sized_file_and_parses_clean() {
     let bin = env!("CARGO_BIN_EXE_rust-ntfs");
-    let img = unique_tmp_path("img");
-    let img_str = img.to_string_lossy().into_owned();
+    let img = common::temp_image_path("mkfs_bin_img");
 
     // Pre-size with std (no `truncate` shell-out — keeps the test
     // platform-portable for when this runs on Windows CI later).
@@ -52,7 +44,7 @@ fn mkfs_bin_formats_a_pre_sized_file_and_parses_clean() {
             TEST_LABEL,
             "--serial",
             TEST_SERIAL_HEX,
-            &img_str,
+            &img,
         ])
         .output()
         .expect("spawn rust-ntfs format");
@@ -83,8 +75,6 @@ fn mkfs_bin_formats_a_pre_sized_file_and_parses_clean() {
         TEST_SERIAL,
         "--serial argument did not propagate to boot sector"
     );
-
-    let _ = std::fs::remove_file(&img);
 }
 
 #[test]
@@ -93,9 +83,7 @@ fn mkfs_bin_create_size_creates_then_formats() {
     // --create-size 64M, expect the binary to create + size + format.
     // No prior `truncate` step.
     let bin = env!("CARGO_BIN_EXE_rust-ntfs");
-    let img = unique_tmp_path("createsize");
-    let img_str = img.to_string_lossy().into_owned();
-    let _ = std::fs::remove_file(&img);
+    let img = common::temp_image_path("mkfs_bin_createsize");
 
     let out = Command::new(bin)
         .args([
@@ -104,7 +92,7 @@ fn mkfs_bin_create_size_creates_then_formats() {
             "64M",
             "--serial",
             TEST_SERIAL_HEX,
-            &img_str,
+            &img,
         ])
         .output()
         .expect("spawn rust-ntfs format --create-size");
@@ -125,21 +113,18 @@ fn mkfs_bin_create_size_creates_then_formats() {
     let mut cursor = std::io::Cursor::new(&bytes);
     let ntfs = Ntfs::new(&mut cursor).expect("Ntfs::new on --create-size output");
     assert_eq!(ntfs.serial_number(), TEST_SERIAL);
-
-    let _ = std::fs::remove_file(&img);
 }
 
 #[test]
 fn mkfs_bin_dry_run_does_not_modify_file() {
     let bin = env!("CARGO_BIN_EXE_rust-ntfs");
-    let img = unique_tmp_path("dryrun");
-    let img_str = img.to_string_lossy().into_owned();
+    let img = common::temp_image_path("mkfs_bin_dryrun");
 
     let pattern = vec![0xAAu8; SIZE_BYTES as usize];
     std::fs::write(&img, &pattern).expect("seed pattern");
 
     let out = Command::new(bin)
-        .args(["format", "-n", "-L", "DRYRUN", &img_str])
+        .args(["format", "-n", "-L", "DRYRUN", &img])
         .output()
         .expect("spawn rust-ntfs format -n");
     assert!(
@@ -155,17 +140,13 @@ fn mkfs_bin_dry_run_does_not_modify_file() {
         "dry-run must not change file size"
     );
     assert!(after == pattern, "dry-run must not modify file contents");
-
-    let _ = std::fs::remove_file(&img);
 }
 
 #[test]
 fn mkfs_bin_rejects_undersized_records_before_creating_the_target() {
     let bin = env!("CARGO_BIN_EXE_rust-ntfs");
     for (record_size, constraint) in [("512", "$Secure"), ("1024", "root directory")] {
-        let img = unique_tmp_path(&format!("record-{record_size}"));
-        let img_str = img.to_string_lossy().into_owned();
-        let _ = std::fs::remove_file(&img);
+        let img = common::temp_image_path(format!("mkfs_bin_record_{record_size}"));
 
         let out = Command::new(bin)
             .args([
@@ -174,7 +155,7 @@ fn mkfs_bin_rejects_undersized_records_before_creating_the_target() {
                 "64M",
                 "--mft-record-size",
                 record_size,
-                &img_str,
+                &img,
             ])
             .output()
             .expect("spawn rust-ntfs format with an undersized record");
@@ -197,7 +178,7 @@ fn mkfs_bin_rejects_undersized_records_before_creating_the_target() {
             "supported replacement is named: {stderr}"
         );
         assert!(
-            !img.exists(),
+            !std::path::Path::new(&img).exists(),
             "argument validation must run before --create-size creates the target"
         );
     }
@@ -206,9 +187,7 @@ fn mkfs_bin_rejects_undersized_records_before_creating_the_target() {
 #[test]
 fn mkfs_bin_accepts_the_smallest_supported_2048_byte_record() {
     let bin = env!("CARGO_BIN_EXE_rust-ntfs");
-    let img = unique_tmp_path("record-2048");
-    let img_str = img.to_string_lossy().into_owned();
-    let _ = std::fs::remove_file(&img);
+    let img = common::temp_image_path("mkfs_bin_record_2048");
 
     let out = Command::new(bin)
         .args([
@@ -217,7 +196,7 @@ fn mkfs_bin_accepts_the_smallest_supported_2048_byte_record() {
             "64M",
             "--mft-record-size",
             "2048",
-            &img_str,
+            &img,
         ])
         .output()
         .expect("spawn rust-ntfs format with 2048-byte records");
@@ -227,10 +206,9 @@ fn mkfs_bin_accepts_the_smallest_supported_2048_byte_record() {
         "2048-byte records must remain supported: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let params = fs_ntfs::mft_io::read_boot_params(&img).expect("read formatted boot geometry");
+    let params = fs_ntfs::mft_io::read_boot_params(std::path::Path::new(&img))
+        .expect("read formatted boot geometry");
     assert_eq!(params.file_record_size, 2048);
-
-    let _ = std::fs::remove_file(&img);
 }
 
 #[test]
