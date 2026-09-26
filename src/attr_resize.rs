@@ -12,6 +12,37 @@
 //! ch. "NTFS On-Disk Structure" and MS-FSCC.
 
 use crate::attr_io::attr_off;
+use std::fmt;
+
+/// Stable control-flow result for operations that need space in one MFT
+/// record. Callers may choose a non-resident representation only for
+/// [`ResidentResizeError::Capacity`]; malformed input and every other failure
+/// remain ordinary errors regardless of their wording.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResidentResizeError {
+    Capacity(String),
+    Other(String),
+}
+
+impl fmt::Display for ResidentResizeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Capacity(message) | Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+impl From<String> for ResidentResizeError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+impl From<&str> for ResidentResizeError {
+    fn from(message: &str) -> Self {
+        Self::Other(message.to_string())
+    }
+}
 
 /// File-record header offsets (subset).
 const REC_OFF_BYTES_USED: usize = 0x18;
@@ -36,8 +67,19 @@ pub fn resize_resident_value(
     attr_offset: usize,
     new_value_length: u32,
 ) -> Result<(), String> {
+    resize_resident_value_typed(record, attr_offset, new_value_length)
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn resize_resident_value_typed(
+    record: &mut [u8],
+    attr_offset: usize,
+    new_value_length: u32,
+) -> Result<(), ResidentResizeError> {
     if record[attr_offset + attr_off::NON_RESIDENT] != 0 {
-        return Err("attribute is non-resident".to_string());
+        return Err(ResidentResizeError::Other(
+            "attribute is non-resident".to_string(),
+        ));
     }
     let old_attr_length = u32::from_le_bytes([
         record[attr_offset + attr_off::LENGTH],
@@ -75,10 +117,10 @@ pub fn resize_resident_value(
     if new_attr_length > old_attr_length {
         let diff = new_attr_length - old_attr_length;
         if bytes_used + diff > bytes_allocated {
-            return Err(format!(
+            return Err(ResidentResizeError::Capacity(format!(
                 "growing attribute by {diff} bytes exceeds record capacity \
                  (bytes_used={bytes_used} + diff > bytes_allocated={bytes_allocated})"
-            ));
+            )));
         }
         // Shift [attr_offset + old_attr_length .. bytes_used) forward by `diff`.
         record.copy_within(
@@ -203,18 +245,25 @@ pub fn replace_attribute(
 /// fully-formed, 8-byte-aligned attribute blob — including its
 /// attribute-header `length` field set to the buffer's length.
 pub fn insert_attribute_sorted(record: &mut [u8], new_attr: &[u8]) -> Result<(), String> {
+    insert_attribute_sorted_typed(record, new_attr).map_err(|error| error.to_string())
+}
+
+pub(crate) fn insert_attribute_sorted_typed(
+    record: &mut [u8],
+    new_attr: &[u8],
+) -> Result<(), ResidentResizeError> {
     let new_len = new_attr.len();
     if new_len == 0 || !new_len.is_multiple_of(8) {
-        return Err(format!(
+        return Err(ResidentResizeError::Other(format!(
             "insert_attribute: length {new_len} not 8-aligned non-zero"
-        ));
+        )));
     }
     let header_len =
         u32::from_le_bytes([new_attr[4], new_attr[5], new_attr[6], new_attr[7]]) as usize;
     if header_len != new_len {
-        return Err(format!(
+        return Err(ResidentResizeError::Other(format!(
             "insert_attribute: header length {header_len} != buffer length {new_len}"
-        ));
+        )));
     }
 
     let bytes_used = u32::from_le_bytes([
@@ -230,10 +279,10 @@ pub fn insert_attribute_sorted(record: &mut [u8], new_attr: &[u8]) -> Result<(),
         record[REC_OFF_BYTES_ALLOCATED + 3],
     ]) as usize;
     if bytes_used + new_len > bytes_allocated {
-        return Err(format!(
+        return Err(ResidentResizeError::Capacity(format!(
             "no room for new attribute: need {new_len} more, have {}",
             bytes_allocated - bytes_used
-        ));
+        )));
     }
 
     // Find the sorted insertion offset. NTFS requires the attributes in a
@@ -319,7 +368,15 @@ pub fn set_resident_value(
     attr_offset: usize,
     new_value: &[u8],
 ) -> Result<(), String> {
-    resize_resident_value(record, attr_offset, new_value.len() as u32)?;
+    set_resident_value_typed(record, attr_offset, new_value).map_err(|error| error.to_string())
+}
+
+pub(crate) fn set_resident_value_typed(
+    record: &mut [u8],
+    attr_offset: usize,
+    new_value: &[u8],
+) -> Result<(), ResidentResizeError> {
+    resize_resident_value_typed(record, attr_offset, new_value.len() as u32)?;
     let value_offset = u16::from_le_bytes([
         record[attr_offset + attr_off::RESIDENT_VALUE_OFFSET],
         record[attr_offset + attr_off::RESIDENT_VALUE_OFFSET + 1],
@@ -461,6 +518,21 @@ mod tests {
         let (mut rec, attr_off) = one_attr_record(b"x");
         // Try to grow to more than bytes_allocated allows
         assert!(resize_resident_value(&mut rec, attr_off, ALLOC as u32).is_err());
+    }
+
+    #[test]
+    fn typed_resize_distinguishes_capacity_from_other_errors() {
+        let (mut rec, attr_off) = one_attr_record(b"x");
+        assert!(matches!(
+            resize_resident_value_typed(&mut rec, attr_off, ALLOC as u32),
+            Err(ResidentResizeError::Capacity(_))
+        ));
+
+        rec[attr_off + attr_off::NON_RESIDENT] = 1;
+        assert!(matches!(
+            resize_resident_value_typed(&mut rec, attr_off, 1),
+            Err(ResidentResizeError::Other(_))
+        ));
     }
 
     // --- set_resident_value ---
