@@ -48,7 +48,7 @@ vars:
   # family, and the bump lands here and in their pins together. That is
   # the cost of one shared copy, and it is the same property that makes
   # drift impossible rather than merely detectable.
-  FS_CORE_REF: v0.2.11
+  FS_CORE_REF: v0.2.13
 
   # The Windows-VM test harness. Not a cargo dependency — a tool this
   # repo's scripts invoke — so nothing but this pin governs which
