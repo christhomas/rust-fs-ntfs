@@ -1853,6 +1853,63 @@
       "image": "nfs-win-format-win-write-mac-write-win-verify.img",
       "_notes": "Filesystem::create_file is plumbed and exposed via the inspect_ntfs CLI on the c5fe branch. Matrix runner glue (drive a Mac-side touch in the orchestrator) is the only missing piece.\n\ndepends on Mac-side writer; first agent scaffolds it or marks blocked-on-writer"
     },
+    "win-format-win-write-many-mac-reject-index-allocation-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "I30REJ",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-many-size",
+          "count": "256",
+          "name_pattern": "/file_{N}.txt",
+          "size_bytes": "16",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "mac-touch-index-allocation-rejected",
+          "parent": "/",
+          "basename": "mac-rejected.txt"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-enumerate",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-win-format-win-write-many-mac-reject-index-allocation-win-chkdsk.img",
+      "_notes": "Windows first creates a wide root directory that uses $INDEX_ALLOCATION. The Mac-side touch is expected to fail with the W3.2 bounded refusal; the image is then sent back to Windows, where chkdsk must remain Clean and the existing files remain enumerable."
+    },
     "mac-format-mac-write-sparse-zeros-win-chkdsk": {
       "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
