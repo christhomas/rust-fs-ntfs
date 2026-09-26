@@ -44,6 +44,16 @@
   `$BadClus:$Bad` and `$Secure:$SDS` now set the SPARSE flag, preserve their
   names ahead of the mapping pairs, and report their real allocated bytes.
 
+- A variable-length rename distinguishes directory entries, not only the MFT
+  record they reference. Two hard links in one directory have the same record
+  number; treating both as the source entry allowed one name to be renamed
+  onto the other and wrote a duplicate `$I30` collation key. The
+  variable-length path now uses the entry offset, as the same-length path
+  already does.
+- A volume-label change refreshes `$MFTMirr`. The label writer committed
+  record 3 (`$Volume`) only in `$MFT`, leaving its recovery copy with the old
+  `$VOLUME_NAME` while reporting success. Label insertion and removal now
+  synchronize the mirrored record after the primary commit.
 - One file-reference encoder, not two. `encode_file_reference` was defined
   twice — public in `record_build`, private in `mkfs` — with its own tests
   on each copy, and mkfs used its own. Two copies of a packing rule is how

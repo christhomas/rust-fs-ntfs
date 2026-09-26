@@ -13,7 +13,7 @@ mod common;
 
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
-use fs_ntfs::{fsck, mft_io};
+use fs_ntfs::{fsck, mft_io, write};
 use std::path::Path;
 
 const VOL: u64 = 32 * 1024 * 1024;
@@ -90,5 +90,25 @@ fn setting_and_clearing_the_dirty_bit_keeps_the_mirror_in_step() {
         mirrored_record(&img, 3),
         live_record(&img, 3),
         "after clear_dirty too"
+    );
+}
+
+#[test]
+fn changing_the_volume_label_keeps_the_mirror_in_step() {
+    let img = volume("label");
+    let p = Path::new(&img);
+
+    write::set_volume_label(p, "NEW-LABEL").expect("set volume label");
+    assert_eq!(
+        mirrored_record(&img, 3),
+        live_record(&img, 3),
+        "the mirrored $Volume record must include the new $VOLUME_NAME"
+    );
+
+    write::set_volume_label(p, "").expect("remove volume label");
+    assert_eq!(
+        mirrored_record(&img, 3),
+        live_record(&img, 3),
+        "removing $VOLUME_NAME must refresh the mirror too"
     );
 }

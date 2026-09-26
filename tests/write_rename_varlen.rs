@@ -139,6 +139,34 @@ fn rename_rejects_existing_target() {
 }
 
 #[test]
+fn rename_variable_onto_other_hard_link_is_refused() {
+    let img = working_copy("hard_link_dup");
+    write::link(
+        Path::new(&img),
+        "/Documents/readme.txt",
+        "/Documents",
+        "x.txt",
+    )
+    .expect("create second name for readme.txt");
+
+    let err = write::rename(Path::new(&img), "/Documents/readme.txt", "x.txt")
+        .expect_err("the other hard link is an existing destination, not the source entry");
+    assert!(err.contains("already exists"), "{err:?}");
+
+    let names = list_dir(&img, "/Documents");
+    assert_eq!(
+        names.iter().filter(|name| *name == "readme.txt").count(),
+        1,
+        "the source name is untouched: {names:?}"
+    );
+    assert_eq!(
+        names.iter().filter(|name| *name == "x.txt").count(),
+        1,
+        "the destination remains a single hard link: {names:?}"
+    );
+}
+
+#[test]
 fn rename_rejects_invalid_basename() {
     let img = working_copy("invalid");
     for bad in [".", "..", "", "a/b"] {
