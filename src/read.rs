@@ -18,6 +18,7 @@ use crate::idx_block;
 use crate::index_io::{self, IH_FLAG_HAS_SUBNODES};
 use crate::mft_io::{read_mft_record_io, record_flags, MFT_FLAG_DIRECTORY};
 use crate::upcase::UpcaseTable;
+use std::collections::HashSet;
 
 /// Attribute data-flags (header +0x0C): the value is transformed and
 /// can't be returned as raw bytes by this reader yet. The names live in
@@ -82,20 +83,6 @@ pub fn resolve_path<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<u64, 
     Ok(record_number)
 }
 
-/// Case-insensitive (upcase-folded) match of `want` against a batch of index
-/// entries; returns the first matching entry's target record.
-fn match_name(
-    entries: &[index_io::DirEntryRaw],
-    want: &[u16],
-    upcase: &UpcaseTable,
-) -> Option<(u64, u16)> {
-    entries.iter().find_map(|e| {
-        let entry_name: Vec<u16> = e.name.encode_utf16().collect();
-        (upcase.cmp_names(&entry_name, want) == std::cmp::Ordering::Equal)
-            .then_some((e.file_record_number, e.sequence))
-    })
-}
-
 /// A NAME RESOLVES TO A RECORD ONLY IF THE RECORD IS STILL THAT FILE.
 ///
 /// An MFT slot is reused, and `write` bumps its sequence when it recycles
@@ -136,11 +123,8 @@ fn refuse_if_stale(
 /// (needed to load `$INDEX_ALLOCATION` if the index has spilled). Returns the
 /// target record number, or `None` if absent.
 ///
-/// Enumerates via the shared `index_io::collect_*` iterators and matches here
-/// (so the collation lives in the read layer, not the write path's dedup), but
-/// **short-circuits**: the resident `$INDEX_ROOT` is checked first, then INDX
-/// blocks one at a time, returning on the first hit instead of reading every
-/// block.
+/// Descends the sorted `$I30` B+tree by key comparison and child VCN, reading
+/// only the nodes on the search path.
 fn lookup_in_directory<T: BlockIo + ?Sized>(
     io: &mut T,
     dir_record: u64,
@@ -159,31 +143,40 @@ fn lookup_in_directory<T: BlockIo + ?Sized>(
         Ok(Some(rec))
     };
 
-    // Resident $INDEX_ROOT first — return on hit.
-    let mut root_entries = Vec::new();
-    index_io::collect_index_root_entries(dir_bytes, &mut root_entries)?;
-    if let Some((rec, seq)) = match_name(&root_entries, &want, upcase) {
-        return checked(io, rec, seq);
-    }
+    let mut node = index_io::lookup_index_root_node(dir_bytes, &want, upcase)?;
+    let ia = match node {
+        index_io::IndexNodeLookup::Found {
+            record_number,
+            sequence,
+        } => return checked(io, record_number, sequence),
+        index_io::IndexNodeLookup::NotFound => return Ok(None),
+        index_io::IndexNodeLookup::Descend(_) => idx_block::load_for_directory_io(io, dir_record)?,
+    };
+    let allocated_vcns = ia.allocated_block_vcns();
+    let mut visited = HashSet::new();
 
-    // Spilled into $INDEX_ALLOCATION? Scan blocks one at a time, returning on
-    // the first match rather than collecting every block.
-    let ir_flags = index_io::index_root_flags(dir_bytes)
-        .ok_or_else(|| format!("directory record {dir_record} has no $INDEX_ROOT"))?;
-    if ir_flags & IH_FLAG_HAS_SUBNODES != 0 {
-        let ia = idx_block::load_for_directory_io(io, dir_record)?;
-        let mut block_entries = Vec::new();
-        for vcn in ia.allocated_block_vcns() {
-            let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
-            block_entries.clear();
-            index_io::collect_indx_block_entries(&block, &mut block_entries)?;
-            if let Some((rec, seq)) = match_name(&block_entries, &want, upcase) {
-                return checked(io, rec, seq);
-            }
+    loop {
+        let vcn = match node {
+            index_io::IndexNodeLookup::Found {
+                record_number,
+                sequence,
+            } => return checked(io, record_number, sequence),
+            index_io::IndexNodeLookup::NotFound => return Ok(None),
+            index_io::IndexNodeLookup::Descend(vcn) => vcn,
+        };
+        if allocated_vcns.binary_search(&vcn).is_err() {
+            return Err(format!(
+                "directory record {dir_record} routes lookup for '{name}' to unallocated VCN {vcn}"
+            ));
         }
+        if !visited.insert(vcn) {
+            return Err(format!(
+                "directory record {dir_record} has a cycle at index VCN {vcn}"
+            ));
+        }
+        let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+        node = index_io::lookup_indx_node(&block, &want, upcase)?;
     }
-
-    Ok(None)
 }
 
 /// Read an attribute's full value bytes natively (no upstream `ntfs` crate).

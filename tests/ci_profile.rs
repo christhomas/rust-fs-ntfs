@@ -804,6 +804,74 @@ fn parse_workflow(text: &str) -> Workflow {
     Workflow { triggers, jobs }
 }
 
+#[test]
+fn ci_ok_covers_every_gating_job_and_preserves_windows_filter() {
+    let documents = Yaml::load_from_str(include_str!("../.github/workflows/ci.yml"))
+        .expect("CI workflow must parse");
+    let jobs = field(&documents[0], "jobs").expect("jobs mapping");
+    let job = |name| field(jobs, name).unwrap_or_else(|| panic!("missing {name} job"));
+    let needs = |body: &Yaml| -> Vec<String> {
+        field(body, "needs")
+            .and_then(Yaml::as_sequence)
+            .expect("needs list")
+            .iter()
+            .map(|item| item.as_str().expect("job id").to_string())
+            .collect()
+    };
+
+    assert!(
+        field(job("changes"), "if").is_none(),
+        "filter job must always report"
+    );
+    assert_eq!(
+        field(job("changes"), "outputs")
+            .and_then(|o| field(o, "mkfs"))
+            .and_then(Yaml::as_str),
+        Some("${{ steps.filter.outputs.mkfs || steps.unfiltered.outputs.mkfs }}")
+    );
+    assert_eq!(needs(job("validate-mkfs-windows-run")), ["changes"]);
+    assert!(field(job("validate-mkfs-windows-run"), "if")
+        .and_then(Yaml::as_str)
+        .is_some_and(|condition| condition.contains("needs.changes.outputs.mkfs == 'true'")));
+    assert_eq!(
+        needs(job("validate-mkfs-windows")),
+        ["changes", "validate-mkfs-windows-run"]
+    );
+    assert_eq!(
+        field(job("validate-mkfs-windows"), "if").and_then(Yaml::as_str),
+        Some("always()")
+    );
+    assert_eq!(
+        needs(job("ci-ok")),
+        ["test", "integration", "changes", "validate-mkfs-windows"]
+    );
+    assert_eq!(
+        field(job("ci-ok"), "if").and_then(Yaml::as_str),
+        Some("always()")
+    );
+    assert_eq!(
+        field(job("ci-ok"), "name").and_then(Yaml::as_str),
+        Some("ci-ok")
+    );
+    for gate in ["validate-mkfs-windows", "ci-ok"] {
+        let steps = field(job(gate), "steps")
+            .and_then(Yaml::as_sequence)
+            .expect("gate steps");
+        assert!(
+            steps.iter().any(|step| {
+                field(step, "run")
+                    .and_then(Yaml::as_str)
+                    .is_some_and(|run| run.contains("scripts/ci-verdict.sh"))
+                    && field(step, "env")
+                        .and_then(|env| field(env, "GATE_NEEDS_JSON"))
+                        .and_then(Yaml::as_str)
+                        == Some("${{ toJSON(needs) }}")
+            }),
+            "{gate} must evaluate the actual needs results"
+        );
+    }
+}
+
 /// Does this workflow still run on a pull request at all?
 ///
 /// A whole-name comparison against the parsed trigger keys. The version
