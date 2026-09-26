@@ -58,14 +58,100 @@ chkdsk_says() {
     esac
 }
 
+# Compare the structured chkdsk record with the verdict shape that produced
+# it. stdout is one of `match`, `mismatch: ...`, `not-scanned: ...`, or
+# `unknown: ...`; only `match` is quiet. The mode states are the contract from
+# fs-windows-test-harness#29. In particular, an offline fallback may make the
+# step pass, but it must not hide that the requested online scan did not run.
+verdict_says() {
+    python3 - "$1" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.is_file():
+    print("unknown: missing verdict.json")
+    raise SystemExit
+try:
+    verdict = json.loads(path.read_text(encoding="utf-8-sig"))
+except (OSError, UnicodeError, json.JSONDecodeError):
+    print("unknown: unreadable verdict.json")
+    raise SystemExit
+if not isinstance(verdict, dict):
+    print("unknown: verdict.json is not an object")
+    raise SystemExit
+
+shape = verdict.get("verdict_shape")
+modes = verdict.get("modes")
+if not isinstance(modes, dict) or not modes:
+    print("unknown: verdict.json has no per-mode states")
+    raise SystemExit
+
+states = {}
+for mode, result in modes.items():
+    if not isinstance(mode, str) or not mode:
+        print("unknown: verdict.json has an invalid mode name")
+        raise SystemExit
+    if not isinstance(result, dict) or result.get("state") not in {
+        "scanned", "not-scanned", "failed"
+    }:
+        print(f"unknown: {mode} has no recognised state")
+        raise SystemExit
+    if (not isinstance(result.get("exit"), int)
+            or isinstance(result.get("exit"), bool)
+            or not isinstance(result.get("reason"), str)
+            or not result.get("reason")):
+        print(f"unknown: {mode} has malformed exit or reason")
+        raise SystemExit
+    states[mode] = result["state"]
+
+not_scanned = [mode for mode, state in states.items() if state == "not-scanned"]
+if not_scanned:
+    print("not-scanned: " + ", ".join(sorted(not_scanned)))
+    raise SystemExit
+if verdict.get("passed") is not True:
+    print("mismatch: verdict did not pass")
+    raise SystemExit
+
+if shape == "clean":
+    wrong = [f"{mode}={state}" for mode, state in states.items() if state != "scanned"]
+elif shape == "repair-required":
+    required = {"/scan": "failed", "/F /X": "scanned", "/scan-post": "scanned"}
+    wrong = [
+        f"{mode}={states.get(mode, 'missing')} (expected {expected})"
+        for mode, expected in required.items()
+        if states.get(mode) != expected
+    ]
+    wrong += [
+        f"{mode}={state} (expected scanned)"
+        for mode, state in states.items()
+        if mode not in required and state != "scanned"
+    ]
+else:
+    print(f"unknown: unsupported verdict shape {shape!r}")
+    raise SystemExit
+
+print("mismatch: " + ", ".join(wrong) if wrong else "match")
+PY
+}
+
 # Is this summary line one a person needs to read? The count of them is the
 # run's headline, and they are the only lines printed -- so a verdict this
-# does not recognise as wrong is a verdict nobody sees. It errs towards
-# printing: anything that is not one of the two verdicts that mean "fine"
-# (a clean chkdsk, an observation with a line count) is worth a look.
+# does not recognise as right is a verdict nobody sees. Structured verdicts
+# decide whether PROBLEMS/REPAIRED are expected for this recipe; text parsing
+# remains the escape hatch for reports the structured record cannot explain.
 looks_wrong() {
-    case "$1" in
-        *PROBLEMS*|*REPAIRED*|*"NOT SCANNED"*|*unrecognised*|*"no VM diag"*|*"empty report"*) return 0 ;;
+    local line="$1" verdict="${2:-none}"
+    case "$line" in
+        *"NOT SCANNED"*|*unrecognised*|*"no VM diag"*|*"empty report"*) return 0 ;;
+    esac
+    case "$verdict" in
+        match) return 1 ;;
+        mismatch:*|not-scanned:*|unknown:*) return 0 ;;
+    esac
+    case "$line" in
+        *PROBLEMS*|*REPAIRED*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -93,7 +179,7 @@ main() {
     [ -d "$DIAG" ] || { echo "diag: no test-diagnostics/matrix/ -- no matrix run to collect"; exit 0; }
 
 
-    n=0; failed=0
+    n=0; failed=0; attention=()
     : > "$DIAG/summary.txt"
     for dir in "$DIAG"/*/; do
         name="$(basename "$dir")"
@@ -101,6 +187,7 @@ main() {
         n=$((n + 1))
         rm -rf "$dir/vm"
         mkdir -p "$dir/vm"
+        verdict_status=none
         # scp from Windows OpenSSH: a drive-letter path is addressed as /C:/...
         if ! scp -q -r "${ssh_opts[@]}" "$VM_HOST:/$VM_WORKDIR/diag/$name/." "$dir/vm/" 2>/dev/null; then
             # A MAC-ONLY SCENARIO HAS NOTHING THERE, and saying so as though
@@ -114,9 +201,11 @@ main() {
             fi
         else
             parts=()
+            has_chkdsk=0
             for f in "$dir"/vm/chkdsk-*.txt; do
                 [ -f "$f" ] || continue
                 case "$f" in *-exit.txt) continue ;; esac
+                has_chkdsk=1
                 mode="${f##*/chkdsk-}"; mode="${mode%.txt}"
                 parts+=("chkdsk $mode: $(chkdsk_says "$f")")
             done
@@ -127,8 +216,15 @@ main() {
             done
             [ "${#parts[@]}" -gt 0 ] || parts=("files: $(ls "$dir/vm" | tr '\n' ' ')")
             line="$name: $(IFS=';'; printf '%s' "${parts[*]}" | sed 's/;/; /g')"
+            if [ "$has_chkdsk" = 1 ]; then
+                verdict_status="$(verdict_says "$dir/vm/verdict.json")"
+                [ "$verdict_status" = match ] || line="$line; verdict: $verdict_status"
+            fi
         fi
-        looks_wrong "$line" && failed=$((failed + 1))
+        if looks_wrong "$line" "$verdict_status"; then
+            failed=$((failed + 1))
+            attention+=("$line")
+        fi
         printf '%s\n' "$line" >> "$DIAG/summary.txt"
     done
 
@@ -137,9 +233,7 @@ main() {
     # the reader who pays for that is the one who re-reads this transcript on
     # every later step. The lines worth reading are printed; summary.txt
     # holds all of them either way.
-    while IFS= read -r line; do
-        looks_wrong "$line" && printf '%s\n' "$line"
-    done < "$DIAG/summary.txt"
+    [ "${#attention[@]}" = 0 ] || printf '%s\n' "${attention[@]}"
     echo "diag: $n scenario(s), $failed with something to look at -- test-diagnostics/matrix/<scenario>/vm/, summary.txt"
 }
 
