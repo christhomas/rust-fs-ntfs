@@ -50,6 +50,10 @@
 //!   after the last page's last starts the new lap.
 //! * `DeallocateFileRecordSegment` clears the in-use flag and increments
 //!   the record's sequence number, skipping 0.
+//! * `SetIndexEntryVcnAllocation` writes the child VCN into the last 8
+//!   bytes of the entry it names inside an index block, as
+//!   `SetIndexEntryVcnRoot` does in an index root
+//!   (`test-disks/windows-interrupted-index-vcn`).
 //! * `DeleteIndexEntryAllocation` moves the entries after it down and
 //!   leaves the bytes past the block's new end as they were; the block's
 //!   update sequence array, which records the end of every sector, shows
@@ -104,6 +108,7 @@ const ADD_INDEX_ENTRY_ALLOCATION: u16 = 0x0E;
 const DELETE_INDEX_ENTRY_ALLOCATION: u16 = 0x0F;
 const WRITE_END_OF_INDEX_BUFFER: u16 = 0x10;
 const SET_INDEX_ENTRY_VCN_ROOT: u16 = 0x11;
+const SET_INDEX_ENTRY_VCN_ALLOCATION: u16 = 0x12;
 const UPDATE_FILE_NAME_ROOT: u16 = 0x13;
 const UPDATE_FILE_NAME_ALLOCATION: u16 = 0x14;
 const SET_BITS_IN_NONRESIDENT_BITMAP: u16 = 0x15;
@@ -137,6 +142,7 @@ const ON_INDEX_BLOCK: &[u16] = &[
     ADD_INDEX_ENTRY_ALLOCATION,
     DELETE_INDEX_ENTRY_ALLOCATION,
     WRITE_END_OF_INDEX_BUFFER,
+    SET_INDEX_ENTRY_VCN_ALLOCATION,
     UPDATE_FILE_NAME_ALLOCATION,
 ];
 
@@ -1092,6 +1098,17 @@ fn redo_index_block(b: &mut [u8], op: u16, pos: usize, data: &[u8]) -> Result<()
         WRITE_END_OF_INDEX_BUFFER => {
             put(b, pos, data)?;
             put_u32(b, HEADER + 4, (pos + data.len() - HEADER) as u32)?;
+        }
+        SET_INDEX_ENTRY_VCN_ALLOCATION => {
+            // The child VCN is the entry's last 8 bytes, as in the root.
+            let entry_len = u16_at(b, pos + 8)? as usize;
+            if entry_len < 0x18 || data.len() != 8 {
+                return Err(refuse(format!(
+                    "a child VCN of {} bytes for a {entry_len}-byte index entry",
+                    data.len()
+                )));
+            }
+            put(b, pos + entry_len - 8, data)?;
         }
         UPDATE_FILE_NAME_ALLOCATION => put(b, pos + 0x18, data)?,
         _ => unreachable!("only index-block operations reach here"),

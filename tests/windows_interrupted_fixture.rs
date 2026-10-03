@@ -27,6 +27,10 @@
 //!   files for three later captures whose `$LogFile` wrapped between the
 //!   last checkpoint and the snapshot. See [`WRAPPED_LOG_END`].
 //!
+//! * `windows-interrupted-index-vcn*`: the same three files for a capture
+//!   whose log holds `SetIndexEntryVcnAllocation` redo. See
+//!   [`INDEX_VCN_LOG_END`].
+//!
 //! Every partition's SHA-256 is in [`PARTITIONS`] and checked on unpacking.
 //!
 //! WHAT WINDOWS' REPLAY CHANGED, read by ntfs-3g without replaying: on
@@ -60,7 +64,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 /// The SHA-256 of each decompressed partition, as captured.
-const PARTITIONS: [(&str, &str); 10] = [
+const PARTITIONS: [(&str, &str); 12] = [
     (
         "windows-interrupted-1",
         "7236ffe64f5532b6f5cd976c1fa81c66e6be6cd31cfb8c22bc0bb588e8fad54f",
@@ -100,6 +104,14 @@ const PARTITIONS: [(&str, &str); 10] = [
     (
         "windows-interrupted-wrap-mft-grows.recovered",
         "4159123653da5b98eb16774db10b01626c2106a8ba54e5511ac99b3de0047a59",
+    ),
+    (
+        "windows-interrupted-index-vcn",
+        "4aca41ada0fe8b14cb582dd3f5e5f8b99e77cf526168a0e74bb50c3989c99262",
+    ),
+    (
+        "windows-interrupted-index-vcn.recovered",
+        "16e5e62ae6719c45eef010a3d3d5823fec1a1ab2e7f252b32dd125263cd77063",
     ),
 ];
 
@@ -248,6 +260,15 @@ const WRAPPED_LOG_END: [(&str, u64); 3] = [
     ("wrap-mft-grows", 0x52_13e3),
 ];
 
+/// A volume whose `$LogFile` holds `SetIndexEntryVcnAllocation` redo
+/// records -- an entry inside an index block pointed at another child
+/// block -- which replay refused before it performed them (#137). Made by
+/// the same capture, and recovered by Windows the same way, as the
+/// snapshots above (run 37077649836, one writer for 240 s, snapshot 14:
+/// refused at LSN `0xd26ed7`); its last LSN read by the same independent
+/// reader.
+const INDEX_VCN_LOG_END: [(&str, u64); 1] = [("index-vcn", 0xd3_21e9)];
+
 /// Where, in each pre-image, a `$LogFile` record page the replay needs
 /// sits: inside the walk from the oldest dirty page to the log's end, and
 /// in no tail copy.
@@ -327,50 +348,68 @@ fn a_log_that_wrapped_is_replayed_across_its_end_to_what_windows_recovered() {
     // restart follows it there; so must fsck, and so must a read-write
     // mount, or the newest committed work is lost (#137).
     for (k, log_end) in WRAPPED_LOG_END {
-        let pre_img = unpack(&format!("windows-interrupted-{k}"));
-        let mut io = fs_ntfs::block_io::PathIo::open_ro(std::path::Path::new(&pre_img)).unwrap();
-        let state = fsck::logfile_state_io(&mut io).expect("read $LogFile");
-        assert!(state.needs_replay(), "{k}: {state:?}");
-        drop(io);
-        let pre = Image::read(&pre_img);
-        let win = Image::read(&unpack(&format!("windows-interrupted-{k}.recovered")));
-        let want = manifest(k);
-        assert!(want.len() > 500, "{k}: the manifest lost its lines");
+        fsck_and_mount_rw_replay_to_what_windows_recovered(k, log_end);
+    }
+}
 
-        let replay: [(&str, Mount); 2] = [
-            ("fsck", |img| {
-                fsck::fsck(img).map(|_| ()).map_err(|e| e.to_string())
-            }),
-            ("Filesystem::mount_rw", RW_MOUNTS[0].1),
-        ];
-        for (how, run) in replay {
-            let img = unpack(&format!("windows-interrupted-{k}"));
-            run(&img).unwrap_or_else(|e| panic!("{k}: {how}: {e}"));
-            let got = walk(&img);
-            let missing: Vec<_> = want
-                .keys()
-                .filter(|p| !got.contains_key(*p))
-                .take(5)
-                .collect();
-            let differ: Vec<_> = want
-                .iter()
-                .filter(|(p, v)| got.get(*p).is_some_and(|g| g != *v))
-                .take(5)
-                .collect();
-            assert!(
-                got == want,
-                "{k}: {how}: {} files after replay, {} in Windows' manifest; missing \
-                 {missing:?}, differing {differ:?}",
-                got.len(),
-                want.len()
-            );
-            let mut io = fs_ntfs::block_io::PathIo::open_ro(std::path::Path::new(&img)).unwrap();
-            let state = fsck::logfile_state_io(&mut io).expect("read $LogFile");
-            assert!(!state.needs_replay(), "{k}: {how} left {state:?}");
-            drop(io);
-            oracle::same_metadata_as_windows(k, &pre, &Image::read(&img), &win, log_end);
-            std::fs::remove_file(&img).unwrap();
-        }
+#[test]
+fn an_index_entry_vcn_set_in_an_index_block_is_replayed_to_what_windows_recovered() {
+    // SetIndexEntryVcnAllocation points an entry inside an index block at
+    // another child block. Windows' restart redoes it; a replay that
+    // refuses it sends the volume back to Windows, and one that skips it
+    // leaves a directory whose index reaches the wrong block (#137).
+    for (k, log_end) in INDEX_VCN_LOG_END {
+        fsck_and_mount_rw_replay_to_what_windows_recovered(k, log_end);
+    }
+}
+
+/// `fsck` and `Filesystem::mount_rw` must each bring the pre-image `k` to
+/// the files, MFT records, index blocks and bitmaps Windows' own restart
+/// produced from it.
+fn fsck_and_mount_rw_replay_to_what_windows_recovered(k: &str, log_end: u64) {
+    let pre_img = unpack(&format!("windows-interrupted-{k}"));
+    let mut io = fs_ntfs::block_io::PathIo::open_ro(std::path::Path::new(&pre_img)).unwrap();
+    let state = fsck::logfile_state_io(&mut io).expect("read $LogFile");
+    assert!(state.needs_replay(), "{k}: {state:?}");
+    drop(io);
+    let pre = Image::read(&pre_img);
+    let win = Image::read(&unpack(&format!("windows-interrupted-{k}.recovered")));
+    let want = manifest(k);
+    assert!(want.len() > 500, "{k}: the manifest lost its lines");
+
+    let replay: [(&str, Mount); 2] = [
+        ("fsck", |img| {
+            fsck::fsck(img).map(|_| ()).map_err(|e| e.to_string())
+        }),
+        ("Filesystem::mount_rw", RW_MOUNTS[0].1),
+    ];
+    for (how, run) in replay {
+        let img = unpack(&format!("windows-interrupted-{k}"));
+        run(&img).unwrap_or_else(|e| panic!("{k}: {how}: {e}"));
+        let got = walk(&img);
+        let missing: Vec<_> = want
+            .keys()
+            .filter(|p| !got.contains_key(*p))
+            .take(5)
+            .collect();
+        let differ: Vec<_> = want
+            .iter()
+            .filter(|(p, v)| got.get(*p).is_some_and(|g| g != *v))
+            .take(5)
+            .collect();
+        assert!(
+            got == want,
+            "{k}: {how}: {} files after replay, {} in Windows' manifest; missing \
+             {missing:?}, differing {differ:?}",
+            got.len(),
+            want.len()
+        );
+        let mut io = fs_ntfs::block_io::PathIo::open_ro(std::path::Path::new(&img)).unwrap();
+        let state = fsck::logfile_state_io(&mut io).expect("read $LogFile");
+        assert!(!state.needs_replay(), "{k}: {how} left {state:?}");
+        drop(io);
+        oracle::same_metadata_as_windows(k, &pre, &Image::read(&img), &win, log_end);
+        std::fs::remove_file(&img).unwrap();
     }
 }
 
@@ -579,7 +618,8 @@ fn last_error() -> String {
 #[test]
 fn what_windows_recovered_reads_here_as_windows_lists_it() {
     let wrapped = WRAPPED_LOG_END.map(|(k, _)| k);
-    for k in ["1", "6"].into_iter().chain(wrapped) {
+    let index_vcn = INDEX_VCN_LOG_END.map(|(k, _)| k);
+    for k in ["1", "6"].into_iter().chain(wrapped).chain(index_vcn) {
         let img = unpack(&format!("windows-interrupted-{k}.recovered"));
         let want = manifest(k);
         assert!(
@@ -663,12 +703,19 @@ fn windows_replay_changed_what_the_volumes_hold() {
 /// | wrap-span      | 210     | 67     | 954   |
 /// | wrap-boundary  | 147     | 131    | 439   |
 /// | wrap-mft-grows | 516     | 212    | 1,493 |
+/// | index-vcn      | 134     | 418    | <= 99 |
+///
+/// `index-vcn`'s records and blocks were measured from the pre-image and
+/// Windows' recovered copy alone; its bits are at most the 99 `$Bitmap`
+/// differs in between them, before discounting clusters Windows allocated
+/// after its restart.
 fn floors(k: &str) -> (usize, usize, usize) {
     match k {
         "1" | "6" => (150, 3, 1000),
         "wrap-span" => (150, 50, 800),
         "wrap-boundary" => (100, 100, 350),
         "wrap-mft-grows" => (400, 150, 1200),
+        "index-vcn" => (100, 300, 40),
         other => panic!("no floors measured for fixture {other}"),
     }
 }

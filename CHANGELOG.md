@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **A `$LogFile` holding `SetIndexEntryVcnAllocation` redo is replayed**
+  (#137). The operation points an entry inside an index block at another
+  child block; replay refused any log holding one, which was the first
+  refusal on most snapshots the logfile oracle captured once directories
+  grew past a few index blocks. It now writes the child VCN into the
+  entry's last 8 bytes, as `SetIndexEntryVcnRoot` does in the root. A
+  volume Windows left mid-write with such a log, new in `test-disks/`,
+  replays to exactly what Windows' own restart produced from it.
+
 - **A `$LogFile` that wrapped is replayed** (#137). When the log's writer
   passed its last page and went on at the first page of its record area
   between the last checkpoint and the stop, the replay refused the log;

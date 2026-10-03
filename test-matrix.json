@@ -2523,6 +2523,47 @@
       ],
       "image": "nfs-cli-windows-interrupted-wrap-mft-grows-replay.img",
       "_notes": "A volume Windows was writing to when it was captured (test-disks/windows-interrupted-wrap-mft-grows), whose $LogFile wrapped between its last checkpoint and the capture: a record runs across the end of the log, and the log grows $MFT and fills the records it adds. fsck.ntfs -y replays the log across its end; then Windows grades the result: fsutil dirty query says Clean, every file Windows itself listed after its own recovery of the same image reads back at Windows' size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean."
+    },
+    "cli-windows-interrupted-index-vcn-fsck-replay-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 127,
+        "label": "ORACLE366",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-replay",
+          "snapshot": "index-vcn"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        {
+          "op": "win-dirty-query",
+          "expect": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-cli-verify",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-windows-interrupted-index-vcn-replay.img",
+      "_notes": "A volume Windows was writing to when it was captured (test-disks/windows-interrupted-index-vcn), whose $LogFile holds SetIndexEntryVcnAllocation redo records: an entry inside an index block is pointed at another child block. fsck.ntfs -y replays the log; then Windows grades the result: fsutil dirty query says Clean, every file Windows itself listed after its own recovery of the same image reads back at Windows' size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean."
     }
   },
   "_consolidated_by": "chore matrix (fs-windows-test-harness runner)",

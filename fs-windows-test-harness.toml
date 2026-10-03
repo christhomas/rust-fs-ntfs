@@ -60,6 +60,7 @@ cli = [
   "cli-windows-interrupted-wrap-span-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-wrap-boundary-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-wrap-mft-grows-fsck-replay-win-verify-chkdsk",
+  "cli-windows-interrupted-index-vcn-fsck-replay-win-verify-chkdsk",
 ]
 
 [project]
