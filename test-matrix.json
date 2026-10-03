@@ -2401,6 +2401,42 @@
       "image": "nfs-cli-windows-interrupted-6-mount-replay.img",
       "_notes": "A volume Windows was writing to when it was captured (test-disks/windows-interrupted-6, after 1982 workload operations), its log holding work Windows had not checkpointed. No fsck.ntfs -y: fs.ntfs mkdir and write open it read-write, which replays $LogFile at mount as Windows does, then make a directory, two new files and a replacement of a file the log created. Windows grades the result: fsutil dirty query says Clean, every file Windows itself listed after its own recovery of the same image, and every file fs.ntfs wrote, reads back at the expected size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean."
     },
+    "cli-windows-6-grow-mft-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 127,
+        "label": "ORACLE366",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-grow-mft",
+          "snapshot": "6"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        {
+          "op": "win-cli-verify",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-windows-6-grow-mft.img",
+      "_notes": "What Windows recovered from test-disks/windows-interrupted-6, whose $MFT:$Bitmap describes 32,832 records while $MFT holds 1,280: Windows sizes the bitmap ahead of $MFT. fs.ntfs writes files into /grown until every record $MFT holds is used and $MFT has grown twice, extending $DATA and leaving the bitmap's length alone, as Windows does (rust-fs-ntfs#415). Windows grades the result: every file Windows listed and every file fs.ntfs wrote reads back at the expected size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean."
+    },
     "cli-windows-interrupted-wrap-span-fsck-replay-win-verify-chkdsk": {
       "status": "pending",
       "volume_params": {
