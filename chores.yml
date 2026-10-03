@@ -48,7 +48,13 @@ vars:
   # family, and the bump lands here and in their pins together. That is
   # the cost of one shared copy, and it is the same property that makes
   # drift impossible rather than merely detectable.
-  FS_CORE_REF: v0.2.18
+  #
+  # v0.2.23 is the first core carrying release-cli.yml and the package-cli
+  # family script (#428). release.yml's `cli` job passes this same tag as
+  # its core-ref, and tests/scripts/release-cli-from-core.sh holds the two
+  # equal. Cargo.lock still records the registry am-fs-core 0.2.18: no build
+  # here path-depends on this checkout, which supplies the family scripts.
+  FS_CORE_REF: v0.2.23
 
   # The Windows-VM test harness. Not a cargo dependency — a tool this
   # repo's scripts invoke — so nothing but this pin governs which

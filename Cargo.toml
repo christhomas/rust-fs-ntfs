@@ -52,6 +52,16 @@ name = "rust-fs-ntfs"
 path = "src/cli/main.rs"
 required-features = ["cli"]
 
+# WHAT THE RELEASE TARBALL SHIPS, read by rust-fs-core's package-cli
+# (`scripts/core.sh package-cli`, run by core's release-cli workflow and by
+# the pull-request `cli` job). Every dotted name the binary answers to, with
+# its man section, and the licence files at the root. CAVEATS is the default,
+# packaging/CAVEATS. Core checks the names against `rust-fs-ntfs generate
+# names`, so a tool added to the binary and not here fails the package step.
+[package.metadata.package-cli]
+names = { "fs.ntfs" = 1, "fsck.ntfs" = 8, "mkfs.ntfs" = 8 }
+licenses = ["LICENSE-APACHE", "LICENSE-MIT"]
+
 [features]
 # The command-line tools and nothing else. The plumbing they share --
 # dispatch, --version, doctor, the output contract, man pages and

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **The release tarball is packaged by rust-fs-core's `release-cli`
+  workflow** (#428), the family's one copy, in place of this repository's
+  `scripts/package-cli.sh` and its own package and attach jobs. The
+  tarballs keep their names and layout. Their build-provenance attestation
+  is now signed by core's workflow, so a download is checked with
+  `gh attestation verify <tarball> --repo christhomas/rust-fs-ntfs
+  --signer-workflow antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml`.
+
 ### Fixed
 
 - **A `$LogFile` that wrapped is replayed** (#137). When the log's writer

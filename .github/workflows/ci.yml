@@ -1098,11 +1098,13 @@ jobs:
   # user would run, not a cargo target. A change that breaks a tool fails the
   # pull request, not the release.
   #
-  # The same job builds the release tarball with scripts/package-cli.sh and
-  # lets it check its own layout (the binary, a relative symlink per dotted
-  # name, the CAVEATS and the licences, every name answering --version as
-  # this crate), so a release is never the first time the tarball is put
-  # together.
+  # The same job builds the release tarball with rust-fs-core's package-cli,
+  # run through scripts/core.sh as core's release-cli workflow runs it at a
+  # release, and lets it check its own layout (the binary, a relative
+  # symlink per dotted name, the man pages and completions, the CAVEATS and
+  # the licences, every name answering --version as this crate), so a
+  # release is never the first time the tarball is put together. What ships
+  # is Cargo.toml's [package.metadata.package-cli].
   #
   # `test:cli:oracle` then holds the tools to something that is not us:
   # volumes Windows wrote, with the SHA-256 and link targets Windows itself
@@ -1169,7 +1171,7 @@ jobs:
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
           mkdir -p tmp/package
           cd tmp/package
-          tarball="$(../../scripts/package-cli.sh "$version" linux-x86_64 ../../target/release)"
+          tarball="$(bash ../../scripts/core.sh package-cli "$version" linux-x86_64 ../../target/release | tail -n 1)"
           tar -tvzf "$tarball"
       - name: Keep the tier log
         # Not before the tier ran: there is no log then, and this step's red
