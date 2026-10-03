@@ -32,6 +32,15 @@ const MFT_RECORD_NUMBER: u64 = 0;
 pub struct MftBitmap {
     pub params: BootParams,
     pub layout: MftBitmapLayout,
+    /// How many records `$MFT` itself holds: its unnamed `$DATA`'s
+    /// initialized size over the record size. Records past this have no
+    /// storage, whatever the bitmap says about them.
+    ///
+    /// Windows sizes `$MFT:$Bitmap` well ahead of `$MFT` -- 32,832 bits
+    /// for 1,280 records on a 127 MiB volume it formatted -- and grows
+    /// `$MFT` by extending `$DATA` alone, leaving the bitmap's length as
+    /// it was. A clear bit past this count is not a free record (#415).
+    pub records: u64,
 }
 
 pub enum MftBitmapLayout {
@@ -77,6 +86,48 @@ impl MftBitmap {
         }
         declared.min(capacity)
     }
+
+    /// The records an allocation may hand out: those the bitmap describes
+    /// AND `$MFT` holds. Everything that searches or counts free records
+    /// stops here, so what is reported free is what can be allocated.
+    pub fn record_limit(&self) -> u64 {
+        self.total_bits().min(self.records)
+    }
+
+    /// The bit count `$MFT:$Bitmap` declares, unbounded by the volume.
+    fn declared_bits(&self) -> u64 {
+        match &self.layout {
+            MftBitmapLayout::Resident { total_bits, .. } => *total_bits,
+            MftBitmapLayout::NonResident { total_bits, .. } => *total_bits,
+        }
+    }
+}
+
+/// `$MFT`'s unnamed `$DATA` as record zero holds it: its run list and its
+/// initialized size in bytes.
+fn mft_data(record: &[u8]) -> Result<(Vec<DataRun>, u64), Error> {
+    let data = attr_io::find_attribute(record, AttrType::Data, None)
+        .ok_or(Error::io("$MFT has no unnamed $DATA"))?;
+    if data.is_resident {
+        return Err(Error::io("$MFT's unnamed $DATA is resident"));
+    }
+    let mpo = data
+        .non_resident_mapping_pairs_offset
+        .ok_or(Error::io("$MFT:$DATA has no mapping-pairs offset"))? as usize;
+    let end = data.attr_offset + data.attr_length;
+    if data.attr_offset + 0x40 > end || data.attr_offset + mpo > end || end > record.len() {
+        return Err(Error::io("$MFT:$DATA header is truncated"));
+    }
+    let runs = data_runs::decode_runs(&record[data.attr_offset + mpo..end])?;
+    let size = |off: usize| {
+        u64::from_le_bytes(
+            record[data.attr_offset + off..data.attr_offset + off + 8]
+                .try_into()
+                .expect("eight bytes"),
+        )
+    };
+    // A record past the initialized size reads as zeros, not as a record.
+    Ok((runs, size(0x30).min(size(0x38))))
 }
 
 pub fn locate(image: &Path) -> Result<MftBitmap, Error> {
@@ -86,6 +137,8 @@ pub fn locate(image: &Path) -> Result<MftBitmap, Error> {
 
 pub fn locate_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<MftBitmap, Error> {
     let (params, record) = read_mft_record_io(io, MFT_RECORD_NUMBER)?;
+    let (_, mft_bytes) = mft_data(&record)?;
+    let records = mft_bytes / params.file_record_size.max(1);
 
     // $MFT's unnamed $Bitmap (attribute type 0xB0, name "").
     let bm = attr_io::find_attribute(&record, AttrType::Bitmap, None)
@@ -127,7 +180,11 @@ pub fn locate_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<MftBitmap, Error> {
         }
     };
 
-    Ok(MftBitmap { params, layout })
+    Ok(MftBitmap {
+        params,
+        layout,
+        records,
+    })
 }
 
 /// Is MFT record `n` marked in-use in `$MFT:$Bitmap`?
@@ -147,9 +204,10 @@ pub fn is_allocated_io<T: BlockIo + ?Sized>(
     Ok((byte >> bit) & 1 != 0)
 }
 
-/// Find the first free MFT record number at or after `hint`. Returns
-/// `None` if the bitmap is fully allocated. (Growing `$MFT` itself is
-/// a separate concern — future W2.6 work.)
+/// Find the first free MFT record number at or after `hint`, wrapping
+/// round to the start. Returns `None` when every record `$MFT` holds is
+/// in use -- see [`MftBitmap::record_limit`]; growing `$MFT` is
+/// [`find_or_grow_free_record_io`]'s job.
 pub fn find_free_record(image: &Path, bm: &MftBitmap, hint: u64) -> Result<Option<u64>, Error> {
     let mut io = PathIo::open_ro(image)?;
     find_free_record_io(&mut io, bm, hint)
@@ -160,7 +218,7 @@ pub fn find_free_record_io<T: BlockIo + ?Sized>(
     bm: &MftBitmap,
     hint: u64,
 ) -> Result<Option<u64>, Error> {
-    let total = bm.total_bits();
+    let total = bm.record_limit();
     // Two passes: [hint..total), then [0..hint).
     for (begin, finish) in [(hint, total), (0, hint.min(total))] {
         let mut n = begin;
@@ -188,12 +246,18 @@ pub fn find_or_grow_free_record_io<T: BlockIo + ?Sized>(
     }
     grow_io(io, &current)?;
     let grown = locate_io(io)?;
-    let record = find_free_record_io(io, &grown, current.total_bits())?
+    let record = find_free_record_io(io, &grown, current.record_limit())?
         .ok_or(Error::io("$MFT growth exposed no free records"))?;
     Ok((grown, record))
 }
 
-/// Append storage for 64 records and extend `$MFT:$Bitmap` to describe them.
+/// Append storage for 64 records to `$MFT`, and extend `$MFT:$Bitmap` to
+/// describe them when it does not already.
+///
+/// The bitmap is extended only when it is shorter than `$MFT` will be.
+/// Windows allocates it well ahead of `$MFT`, and when Windows grew `$MFT`
+/// on a volume it was writing it extended `$DATA` and left the bitmap's
+/// length alone; this does the same.
 fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), Error> {
     const RECORDS_PER_GROWTH: u64 = 64;
     let params = old.params;
@@ -202,6 +266,20 @@ fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), Error
         .checked_mul(RECORDS_PER_GROWTH)
         .ok_or(Error::io("$MFT growth size overflows"))?;
     let clusters = bytes.div_ceil(params.cluster_size);
+    // `$MFT`'s end, from its run list: the new extent is appended there,
+    // and every record from the old end to the new one becomes usable.
+    let (_, record0) = read_mft_record_io(io, MFT_RECORD_NUMBER)?;
+    let (mft_runs, _) = mft_data(&record0)?;
+    let end_vcn = mft_runs
+        .iter()
+        .map(|r| r.starting_vcn + r.length)
+        .max()
+        .unwrap_or(0);
+    let new_records = end_vcn
+        .checked_add(clusters)
+        .and_then(|n| n.checked_mul(params.cluster_size))
+        .ok_or(Error::io("grown $MFT length overflows"))?
+        / params.file_record_size.max(1);
     let volume_bitmap = crate::bitmap::locate_bitmap_io(io)?;
     let lcn = crate::bitmap::find_free_run_io(io, &volume_bitmap, clusters, params.mft_lcn)?
         .ok_or_else(|| {
@@ -219,12 +297,28 @@ fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), Error
         io.write_all_at(at, &vec![0u8; span as usize])?;
         io.sync()?;
 
-        let old_bitmap_bytes = old.total_bits().div_ceil(8);
-        let new_bitmap_bytes = (old.total_bits() + RECORDS_PER_GROWTH).div_ceil(8);
+        // Every record the growth makes usable starts free. Bytes past
+        // the bitmap's declared length hold nothing yet and are written
+        // whole; inside it only those records' bits are cleared, so a
+        // bit Windows set for a record below them is left alone.
+        let declared_bits = old.declared_bits();
+        let declared_bytes = declared_bits.div_ceil(8);
+        let first = old.records.min(declared_bits);
+        let new_bitmap_bytes = new_records.div_ceil(8);
         match &old.layout {
             MftBitmapLayout::NonResident { .. } => {
-                for byte in old_bitmap_bytes..new_bitmap_bytes {
-                    write_bitmap_byte_io(io, old, byte, 0)?;
+                for byte in first / 8..new_bitmap_bytes {
+                    if byte >= declared_bytes {
+                        write_bitmap_byte_io(io, old, byte, 0)?;
+                        continue;
+                    }
+                    let lo = (byte * 8).max(first) - byte * 8;
+                    let hi = (byte * 8 + 8).min(new_records) - byte * 8;
+                    let mask = (lo..hi).fold(0u8, |m, bit| m | (1 << bit));
+                    let value = read_bitmap_byte_io(io, old, byte)?;
+                    if value & mask != 0 {
+                        write_bitmap_byte_io(io, old, byte, value & !mask)?;
+                    }
                 }
             }
             MftBitmapLayout::Resident { .. } => {
@@ -318,9 +412,13 @@ fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), Error
             if new_bitmap_bytes > allocated {
                 return Err(Error::no_space("$MFT:$Bitmap backing allocation is full"));
             }
+            // Lengthened only, never shortened: a bitmap that already
+            // describes the new records keeps the length it had.
             for off in [0x30usize, 0x38] {
-                record[bitmap.attr_offset + off..bitmap.attr_offset + off + 8]
-                    .copy_from_slice(&new_bitmap_bytes.to_le_bytes());
+                let field = bitmap.attr_offset + off..bitmap.attr_offset + off + 8;
+                let current =
+                    u64::from_le_bytes(record[field.clone()].try_into().expect("eight bytes"));
+                record[field].copy_from_slice(&current.max(new_bitmap_bytes).to_le_bytes());
             }
             Ok(())
         })
@@ -347,13 +445,20 @@ pub fn count_free(image: &Path, bm: &MftBitmap) -> Result<u64, Error> {
 
 pub fn count_free_io<T: BlockIo + ?Sized>(io: &mut T, bm: &MftBitmap) -> Result<u64, Error> {
     // One loop for both layouts: `read_bitmap_byte_io` is the only reader
-    // of either, so this cannot drift away from what the allocator sees.
-    let total_bits = bm.total_bits();
+    // of either, and the limit is the allocator's, so this cannot drift
+    // away from what the allocator sees.
+    let limit = bm.record_limit();
     let mut set: u64 = 0;
-    for i in 0..total_bits.div_ceil(8) {
-        set += read_bitmap_byte_io(io, bm, i)?.count_ones() as u64;
+    for i in 0..limit.div_ceil(8) {
+        let mut byte = read_bitmap_byte_io(io, bm, i)?;
+        // Bits past the limit in the last byte name no record.
+        let bits_here = (limit - i * 8).min(8);
+        if bits_here < 8 {
+            byte &= (1u8 << bits_here) - 1;
+        }
+        set += byte.count_ones() as u64;
     }
-    Ok(total_bits.saturating_sub(set))
+    Ok(limit.saturating_sub(set))
 }
 
 /// Mark MFT record `n` as allocated (set bit = 1).
@@ -543,6 +648,7 @@ mod tests {
                 runs: Vec::new(),
                 total_bits: u64::MAX / 8,
             },
+            records: u64::MAX,
         };
         assert_eq!(hostile.total_bits(), capacity);
 
@@ -554,6 +660,7 @@ mod tests {
                 value_length: 8,
                 total_bits: 64,
             },
+            records: u64::MAX,
         };
         assert_eq!(ordinary.total_bits(), 64);
 
@@ -566,6 +673,7 @@ mod tests {
                 runs: Vec::new(),
                 total_bits: 1_000_000,
             },
+            records: u64::MAX,
         };
         assert_eq!(unknown.total_bits(), 1_000_000);
     }
@@ -594,6 +702,7 @@ mod tests {
                 value_length: 0,
                 total_bits: 0,
             },
+            records: 0,
         }
     }
 
@@ -772,6 +881,7 @@ mod tests {
                 }],
                 total_bits: n_bitmap_bytes * 8,
             },
+            records: n_bitmap_bytes * 8,
         };
         (dev, bm_val)
     }

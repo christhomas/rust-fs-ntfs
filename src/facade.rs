@@ -206,10 +206,9 @@ impl Filesystem {
         let bm = crate::bitmap::locate_bitmap(&self.image).map_err(Error::from)?;
         let free_clusters = crate::bitmap::count_free(&self.image, &bm).map_err(Error::from)?;
         let mft_bm = crate::mft_bitmap::locate(&self.image).map_err(Error::from)?;
-        let mft_total_records = match &mft_bm.layout {
-            crate::mft_bitmap::MftBitmapLayout::Resident { total_bits, .. } => *total_bits,
-            crate::mft_bitmap::MftBitmapLayout::NonResident { total_bits, .. } => *total_bits,
-        };
+        // The records `$MFT` holds and the bitmap describes, not the
+        // bitmap's capacity: Windows sizes the bitmap far ahead of `$MFT`.
+        let mft_total_records = mft_bm.record_limit();
         let mft_free_records =
             crate::mft_bitmap::count_free(&self.image, &mft_bm).map_err(Error::from)?;
         let dirty = fsck::is_dirty(&self.image).map_err(Error::from)?;

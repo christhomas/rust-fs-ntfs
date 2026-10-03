@@ -60,6 +60,7 @@ cli = [
   "cli-windows-interrupted-wrap-span-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-wrap-boundary-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-wrap-mft-grows-fsck-replay-win-verify-chkdsk",
+  "cli-windows-6-grow-mft-win-verify-chkdsk",
 ]
 
 [project]
@@ -301,6 +302,15 @@ expect_exit = 0
 # the same image, plus every file fs.ntfs wrote, for win-cli-verify.
 host = "host"
 command = "bash scripts/cli-oracle.sh mount-replay {image_dir}/{run_id}/{scenario.image} {step.snapshot}"
+expect_exit = 0
+
+[ops.cli-grow-mft]
+# What Windows recovered from the same capture, whose $MFT:$Bitmap
+# describes far more records than $MFT holds: fs.ntfs writes files until
+# $MFT has grown twice (#415). Writes <image>.manifest: Windows' listing
+# plus every file fs.ntfs wrote, for win-cli-verify.
+host = "host"
+command = "bash scripts/cli-oracle.sh grow-mft {image_dir}/{run_id}/{scenario.image} {step.snapshot}"
 expect_exit = 0
 
 [ops.cli-fsck-finds]

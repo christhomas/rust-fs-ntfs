@@ -997,3 +997,89 @@ mod oracle {
         );
     }
 }
+
+/// How many records `$MFT` itself holds on what Windows recovered from
+/// snapshot 6, read from `$MFT`'s own `$DATA` run list.
+const SNAPSHOT_6_MFT_RECORDS: u64 = 1280;
+
+/// Windows sizes `$MFT:$Bitmap` well ahead of `$MFT`: on snapshot 6 it
+/// describes 32,832 records while `$MFT`'s `$DATA` holds 1,280, and when
+/// Windows itself grew `$MFT` on the `wrap-mft-grows` capture it extended
+/// `$DATA` and left the bitmap's length alone. A clear bit past the last
+/// record names a record with no storage, so creating files here must grow
+/// `$MFT` once its own records are used up, not hand out a record past its
+/// end ("MFT record 1280 is not mapped", #415).
+///
+/// Windows grades the same workload: the `cli-windows-6-grow-mft` scenario.
+#[test]
+fn creating_files_on_a_volume_windows_wrote_grows_its_mft_once_its_records_run_out() {
+    let img = unpack("windows-interrupted-6.recovered");
+    let before = Image::read(&img);
+    assert_eq!(before.records(), SNAPSHOT_6_MFT_RECORDS);
+    let bitmap = before.stream(0, 0xB0);
+    let bit = |b: &[u8], n: u64| (b[(n / 8) as usize] >> (n % 8)) & 1 != 0;
+    assert!(
+        bitmap.len() as u64 * 8 > SNAPSHOT_6_MFT_RECORDS,
+        "the bitmap no longer outruns $MFT, so this volume no longer shows #415"
+    );
+    let free_before = (0..SNAPSHOT_6_MFT_RECORDS)
+        .filter(|&n| !bit(&bitmap, n))
+        .count();
+
+    // Enough files to use every free record, and then two growths of 64.
+    let files = free_before + 70;
+    let fs = Filesystem::mount_rw(&img).unwrap();
+    fs.mkdir("/", "grown").expect("mkdir /grown");
+    let mut want = BTreeMap::new();
+    for i in 0..files {
+        let name = format!("f{i:04}.bin");
+        let path = format!("/grown/{name}");
+        let record = fs
+            .create_file("/grown", &name)
+            .unwrap_or_else(|e| panic!("create {path} (file {i} of {files}): {e:?}"));
+        let data: Vec<u8> = (0..300 + i).map(|b| (b * 31 + i) as u8).collect();
+        fs.write_file_contents(&path, &data)
+            .unwrap_or_else(|e| panic!("write {path} (record {record}): {e:?}"));
+        want.insert(path, data);
+    }
+
+    let after = Image::read(&img);
+    assert!(
+        after.records() > SNAPSHOT_6_MFT_RECORDS,
+        "{files} files created and $MFT still holds {} records",
+        after.records()
+    );
+    // No record past `$MFT`'s storage is marked in use.
+    let bitmap = after.stream(0, 0xB0);
+    let past_end: Vec<u64> = (after.records()..bitmap.len() as u64 * 8)
+        .filter(|&n| bit(&bitmap, n))
+        .take(5)
+        .collect();
+    assert!(
+        past_end.is_empty(),
+        "records past $MFT marked in use: {past_end:?}"
+    );
+    // The volume's record count is `$MFT`'s, not the bitmap's capacity.
+    let stats = fs.volume_stats().unwrap();
+    assert_eq!(stats.mft_total_records, after.records());
+
+    let fs = Filesystem::mount(&img).unwrap();
+    for (path, data) in &want {
+        let mut buf = vec![0u8; data.len() + 1];
+        let n = fs
+            .read_file(path, 0, &mut buf)
+            .unwrap_or_else(|e| panic!("read {path}: {e:?}"));
+        assert_eq!(&buf[..n], &data[..], "{path} reads back as written");
+    }
+    // What Windows wrote before is untouched.
+    let windows = manifest("6");
+    let got = walk(&img);
+    assert!(
+        windows.iter().all(|(p, v)| got.get(p) == Some(v)),
+        "a file Windows wrote no longer reads as Windows listed it"
+    );
+    let mut io = fs_ntfs::block_io::PathIo::open_ro(std::path::Path::new(&img)).unwrap();
+    let report = fsck::check_io(&mut io).expect("check");
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    std::fs::remove_file(&img).unwrap();
+}

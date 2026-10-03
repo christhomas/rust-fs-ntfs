@@ -32,6 +32,12 @@
 #                                    does, and fsck.ntfs after finds nothing.
 #                                    IMAGE.manifest is Windows' listing of its own
 #                                    recovery plus what fs.ntfs wrote
+#   grow-mft IMAGE SNAPSHOT          IMAGE is what Windows recovered from
+#                                    test-disks/windows-interrupted-SNAPSHOT, whose
+#                                    $MFT:$Bitmap outruns $MFT; fs.ntfs writes files
+#                                    until $MFT has grown twice, and fsck.ntfs after
+#                                    finds nothing. IMAGE.manifest is Windows' listing
+#                                    plus every file fs.ntfs wrote
 #
 # The binary is target/release/rust-fs-ntfs (built with `--features cli`),
 # or RUST_FS_NTFS. JSON is read with grep, not jq: the Windows runner's Git
@@ -196,8 +202,8 @@ case "$step" in
         # No fsck.ntfs -y: the first write's mount replays the log, as
         # Windows does when it mounts the volume. Then a directory, a
         # non-resident file in it, a resident file in a directory the log
-        # changed, and a file the log created, replaced. Three new records:
-        # $MFT has no more on snapshot 6 until rust-fs-ntfs#415 grows it.
+        # changed, and a file the log created, replaced. Growing $MFT on
+        # the same volume is the grow-mft step's.
         replaced="$(awk -F '\t' '$2 ~ /^\/d000\// { print $2; exit }' "$image.manifest")"
         [ -n "$replaced" ] || die "Windows' listing has no file under /d000"
         run fs "$image" mkdir /after-replay
@@ -219,6 +225,49 @@ case "$step" in
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the writes exited $status: $out"
         has '"logfile": "empty"' || die "the mount did not leave the log empty: $out"
+        ;;
+    grow-mft)
+        [ $# -eq 1 ] || die "grow-mft IMAGE SNAPSHOT"
+        mkdir -p "$(dirname "$image")"
+        gzip -dc "$REPO/test-disks/windows-interrupted-$1.recovered.img.gz" >"$image" ||
+            die "no test-disks/windows-interrupted-$1.recovered.img.gz"
+        windows_listing "$1"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        # How many records $MFT holds, as fs.ntfs info reports it. Only a
+        # loop bound: Windows grades what was written, and the crate's own
+        # test reads the count from $MFT's run list.
+        records() {
+            run fs "$image" info
+            [ "$status" -eq 0 ] || die "fs.ntfs info exited $status: $(cat "$image.cli-err")"
+            sed -n 's/.*"mft_total_records": \([0-9]*\).*/\1/p' <<<"$out"
+        }
+        start="$(records)"
+        [ -n "$start" ] || die "fs.ntfs info reported no mft_total_records: $out"
+        run fs "$image" mkdir /grown
+        [ "$status" -eq 0 ] || die "fs.ntfs mkdir /grown exited $status: $(cat "$image.cli-err")"
+        printf 'dir\t/grown\n' >>"$image.manifest"
+        # Every record $MFT holds is used, then two growths of 64 more.
+        # Each 32-file batch checks how far $MFT has come; the cap is far
+        # past what that needs, so a $MFT that never grows fails here.
+        i=0
+        while [ "$(records)" -le $((start + 64)) ]; do
+            [ "$i" -lt 2048 ] || die "$i files written and \$MFT still holds $(records) records, $start at the start"
+            for _ in $(seq 32); do
+                path="$(printf '/grown/f%04d.bin' "$i")"
+                size=$((300 + i))
+                random "$work/data" "$size"
+                set +e
+                "$BIN" fs "$image" write "$path" <"$work/data" >/dev/null 2>"$image.cli-err"
+                status=$?
+                set -e
+                [ "$status" -eq 0 ] || die "fs.ntfs write $path ($size bytes, file $i) exited $status: $(cat "$image.cli-err")"
+                printf 'file\t%s\t%s\t%s\n' "$path" "$size" "$(sha "$work/data")" >>"$image.manifest"
+                i=$((i + 1))
+            done
+        done
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the writes exited $status: $out"
         ;;
     *)
         die "unknown step '$step'"
